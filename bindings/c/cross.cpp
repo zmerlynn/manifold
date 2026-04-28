@@ -31,13 +31,12 @@ ManifoldCrossSection* manifold_cross_section_copy(
 }
 
 ManifoldCrossSection* manifold_cross_section_of_simple_polygon(
-    void* mem, ManifoldSimplePolygon* p, ManifoldFillRule fr) {
+    void* mem, const ManifoldSimplePolygon* p, ManifoldFillRule fr) {
   return to_c(new (mem) CrossSection(*from_c(p), from_c(fr)));
 }
 
-ManifoldCrossSection* manifold_cross_section_of_polygons(void* mem,
-                                                         ManifoldPolygons* p,
-                                                         ManifoldFillRule fr) {
+ManifoldCrossSection* manifold_cross_section_of_polygons(
+    void* mem, const ManifoldPolygons* p, ManifoldFillRule fr) {
   return to_c(new (mem) CrossSection(*from_c(p), from_c(fr)));
 }
 
@@ -130,13 +129,13 @@ ManifoldCrossSection* manifold_cross_section_batch_hull(
 }
 
 ManifoldCrossSection* manifold_cross_section_hull_simple_polygon(
-    void* mem, ManifoldSimplePolygon* ps) {
+    void* mem, const ManifoldSimplePolygon* ps) {
   auto hulled = CrossSection::Hull(*from_c(ps));
   return to_c(new (mem) CrossSection(hulled));
 }
 
 ManifoldCrossSection* manifold_cross_section_hull_polygons(
-    void* mem, ManifoldPolygons* ps) {
+    void* mem, const ManifoldPolygons* ps) {
   auto hulled = CrossSection::Hull(*from_c(ps));
   return to_c(new (mem) CrossSection(hulled));
 }

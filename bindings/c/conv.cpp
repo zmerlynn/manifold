@@ -181,6 +181,10 @@ RayHitVec* from_c(ManifoldRayHitVec* v) {
   return reinterpret_cast<RayHitVec*>(v);
 }
 
+const RayHitVec* from_c(const ManifoldRayHitVec* v) {
+  return reinterpret_cast<const RayHitVec*>(v);
+}
+
 ExecutionContext* from_c(ManifoldExecutionContext* ctx) {
   return reinterpret_cast<ExecutionContext*>(ctx);
 }
@@ -193,16 +197,32 @@ manifold::SimplePolygon* from_c(ManifoldSimplePolygon* m) {
   return reinterpret_cast<manifold::SimplePolygon*>(m);
 }
 
+const manifold::SimplePolygon* from_c(const ManifoldSimplePolygon* m) {
+  return reinterpret_cast<const manifold::SimplePolygon*>(m);
+}
+
 manifold::Polygons* from_c(ManifoldPolygons* m) {
   return reinterpret_cast<manifold::Polygons*>(m);
+}
+
+const manifold::Polygons* from_c(const ManifoldPolygons* m) {
+  return reinterpret_cast<const manifold::Polygons*>(m);
 }
 
 manifold::MeshGL* from_c(ManifoldMeshGL* m) {
   return reinterpret_cast<manifold::MeshGL*>(m);
 }
 
+const manifold::MeshGL* from_c(const ManifoldMeshGL* m) {
+  return reinterpret_cast<const manifold::MeshGL*>(m);
+}
+
 manifold::MeshGL64* from_c(ManifoldMeshGL64* m) {
   return reinterpret_cast<manifold::MeshGL64*>(m);
+}
+
+const manifold::MeshGL64* from_c(const ManifoldMeshGL64* m) {
+  return reinterpret_cast<const manifold::MeshGL64*>(m);
 }
 
 OpType from_c(ManifoldOpType optype) {
@@ -282,6 +302,10 @@ vec4 from_c(ManifoldVec4 v) { return vec4(v.x, v.y, v.z, v.w); }
 
 std::vector<ivec3>* from_c(ManifoldTriangulation* m) {
   return reinterpret_cast<std::vector<ivec3>*>(m);
+}
+
+const std::vector<ivec3>* from_c(const ManifoldTriangulation* m) {
+  return reinterpret_cast<const std::vector<ivec3>*>(m);
 }
 
 std::vector<vec3> vector_of_vec_array(ManifoldVec3* vs, size_t length) {
