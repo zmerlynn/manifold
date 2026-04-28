@@ -165,8 +165,16 @@ manifold::CrossSection* from_c(ManifoldCrossSection* cs) {
   return reinterpret_cast<manifold::CrossSection*>(cs);
 }
 
+const manifold::CrossSection* from_c(const ManifoldCrossSection* cs) {
+  return reinterpret_cast<const manifold::CrossSection*>(cs);
+}
+
 CrossSectionVec* from_c(ManifoldCrossSectionVec* csv) {
   return reinterpret_cast<CrossSectionVec*>(csv);
+}
+
+const CrossSectionVec* from_c(const ManifoldCrossSectionVec* csv) {
+  return reinterpret_cast<const CrossSectionVec*>(csv);
 }
 
 RayHitVec* from_c(ManifoldRayHitVec* v) {

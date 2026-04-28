@@ -278,8 +278,8 @@ double manifold_execution_context_progress(const ManifoldExecutionContext* ctx);
 
 // CrossSection Shapes/Constructors
 ManifoldCrossSection* manifold_cross_section_empty(void* mem);
-ManifoldCrossSection* manifold_cross_section_copy(void* mem,
-                                                  ManifoldCrossSection* cs);
+ManifoldCrossSection* manifold_cross_section_copy(
+    void* mem, const ManifoldCrossSection* cs);
 ManifoldCrossSection* manifold_cross_section_of_simple_polygon(
     void* mem, ManifoldSimplePolygon* p, ManifoldFillRule fr);
 ManifoldCrossSection* manifold_cross_section_of_polygons(void* mem,
@@ -290,9 +290,9 @@ ManifoldCrossSection* manifold_cross_section_square(void* mem, double x,
 ManifoldCrossSection* manifold_cross_section_circle(void* mem, double radius,
                                                     int circular_segments);
 ManifoldCrossSection* manifold_cross_section_compose(
-    void* mem, ManifoldCrossSectionVec* csv);
+    void* mem, const ManifoldCrossSectionVec* csv);
 ManifoldCrossSectionVec* manifold_cross_section_decompose(
-    void* mem, ManifoldCrossSection* cs);
+    void* mem, const ManifoldCrossSection* cs);
 
 // CrossSection Vectors
 
@@ -300,9 +300,9 @@ ManifoldCrossSectionVec* manifold_cross_section_empty_vec(void* mem);
 ManifoldCrossSectionVec* manifold_cross_section_vec(void* mem, size_t sz);
 void manifold_cross_section_vec_reserve(ManifoldCrossSectionVec* csv,
                                         size_t sz);
-size_t manifold_cross_section_vec_length(ManifoldCrossSectionVec* csv);
+size_t manifold_cross_section_vec_length(const ManifoldCrossSectionVec* csv);
 ManifoldCrossSection* manifold_cross_section_vec_get(
-    void* mem, ManifoldCrossSectionVec* csv, size_t idx);
+    void* mem, const ManifoldCrossSectionVec* csv, size_t idx);
 void manifold_cross_section_vec_set(ManifoldCrossSectionVec* csv, size_t idx,
                                     ManifoldCrossSection* cs);
 void manifold_cross_section_vec_push_back(ManifoldCrossSectionVec* csv,
@@ -310,26 +310,24 @@ void manifold_cross_section_vec_push_back(ManifoldCrossSectionVec* csv,
 
 // CrossSection Booleans
 
-ManifoldCrossSection* manifold_cross_section_boolean(void* mem,
-                                                     ManifoldCrossSection* a,
-                                                     ManifoldCrossSection* b,
-                                                     ManifoldOpType op);
+ManifoldCrossSection* manifold_cross_section_boolean(
+    void* mem, const ManifoldCrossSection* a, const ManifoldCrossSection* b,
+    ManifoldOpType op);
 ManifoldCrossSection* manifold_cross_section_batch_boolean(
-    void* mem, ManifoldCrossSectionVec* csv, ManifoldOpType op);
-ManifoldCrossSection* manifold_cross_section_union(void* mem,
-                                                   ManifoldCrossSection* a,
-                                                   ManifoldCrossSection* b);
+    void* mem, const ManifoldCrossSectionVec* csv, ManifoldOpType op);
+ManifoldCrossSection* manifold_cross_section_union(
+    void* mem, const ManifoldCrossSection* a, const ManifoldCrossSection* b);
 ManifoldCrossSection* manifold_cross_section_difference(
-    void* mem, ManifoldCrossSection* a, ManifoldCrossSection* b);
+    void* mem, const ManifoldCrossSection* a, const ManifoldCrossSection* b);
 ManifoldCrossSection* manifold_cross_section_intersection(
-    void* mem, ManifoldCrossSection* a, ManifoldCrossSection* b);
+    void* mem, const ManifoldCrossSection* a, const ManifoldCrossSection* b);
 
 // CrossSection Convex Hulls
 
-ManifoldCrossSection* manifold_cross_section_hull(void* mem,
-                                                  ManifoldCrossSection* cs);
+ManifoldCrossSection* manifold_cross_section_hull(
+    void* mem, const ManifoldCrossSection* cs);
 ManifoldCrossSection* manifold_cross_section_batch_hull(
-    void* mem, ManifoldCrossSectionVec* css);
+    void* mem, const ManifoldCrossSectionVec* css);
 ManifoldCrossSection* manifold_cross_section_hull_simple_polygon(
     void* mem, ManifoldSimplePolygon* ps);
 ManifoldCrossSection* manifold_cross_section_hull_polygons(
@@ -337,43 +335,36 @@ ManifoldCrossSection* manifold_cross_section_hull_polygons(
 
 // CrossSection Transformation
 
-ManifoldCrossSection* manifold_cross_section_translate(void* mem,
-                                                       ManifoldCrossSection* cs,
-                                                       double x, double y);
-ManifoldCrossSection* manifold_cross_section_rotate(void* mem,
-                                                    ManifoldCrossSection* cs,
-                                                    double deg);
-ManifoldCrossSection* manifold_cross_section_scale(void* mem,
-                                                   ManifoldCrossSection* cs,
-                                                   double x, double y);
-ManifoldCrossSection* manifold_cross_section_mirror(void* mem,
-                                                    ManifoldCrossSection* cs,
-                                                    double ax_x, double ax_y);
-ManifoldCrossSection* manifold_cross_section_transform(void* mem,
-                                                       ManifoldCrossSection* cs,
-                                                       double x1, double y1,
-                                                       double x2, double y2,
-                                                       double x3, double y3);
+ManifoldCrossSection* manifold_cross_section_translate(
+    void* mem, const ManifoldCrossSection* cs, double x, double y);
+ManifoldCrossSection* manifold_cross_section_rotate(
+    void* mem, const ManifoldCrossSection* cs, double deg);
+ManifoldCrossSection* manifold_cross_section_scale(
+    void* mem, const ManifoldCrossSection* cs, double x, double y);
+ManifoldCrossSection* manifold_cross_section_mirror(
+    void* mem, const ManifoldCrossSection* cs, double ax_x, double ax_y);
+ManifoldCrossSection* manifold_cross_section_transform(
+    void* mem, const ManifoldCrossSection* cs, double x1, double y1, double x2,
+    double y2, double x3, double y3);
 ManifoldCrossSection* manifold_cross_section_warp_context(
-    void* mem, ManifoldCrossSection* cs,
+    void* mem, const ManifoldCrossSection* cs,
     ManifoldVec2 (*fun)(double, double, void*), void* ctx);
-ManifoldCrossSection* manifold_cross_section_simplify(void* mem,
-                                                      ManifoldCrossSection* cs,
-                                                      double epsilon);
+ManifoldCrossSection* manifold_cross_section_simplify(
+    void* mem, const ManifoldCrossSection* cs, double epsilon);
 ManifoldCrossSection* manifold_cross_section_offset(
-    void* mem, ManifoldCrossSection* cs, double delta, ManifoldJoinType jt,
-    double miter_limit, int circular_segments);
+    void* mem, const ManifoldCrossSection* cs, double delta,
+    ManifoldJoinType jt, double miter_limit, int circular_segments);
 
 // CrossSection Info
 
-double manifold_cross_section_area(ManifoldCrossSection* cs);
-size_t manifold_cross_section_num_vert(ManifoldCrossSection* cs);
-size_t manifold_cross_section_num_contour(ManifoldCrossSection* cs);
-int manifold_cross_section_is_empty(ManifoldCrossSection* cs);
+double manifold_cross_section_area(const ManifoldCrossSection* cs);
+size_t manifold_cross_section_num_vert(const ManifoldCrossSection* cs);
+size_t manifold_cross_section_num_contour(const ManifoldCrossSection* cs);
+int manifold_cross_section_is_empty(const ManifoldCrossSection* cs);
 ManifoldRect* manifold_cross_section_bounds(void* mem,
-                                            ManifoldCrossSection* cs);
-ManifoldPolygons* manifold_cross_section_to_polygons(void* mem,
-                                                     ManifoldCrossSection* cs);
+                                            const ManifoldCrossSection* cs);
+ManifoldPolygons* manifold_cross_section_to_polygons(
+    void* mem, const ManifoldCrossSection* cs);
 
 // Rectangle
 
