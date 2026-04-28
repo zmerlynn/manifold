@@ -169,6 +169,10 @@ ExecutionContext* from_c(ManifoldExecutionContext* ctx) {
   return reinterpret_cast<ExecutionContext*>(ctx);
 }
 
+const ExecutionContext* from_c(const ManifoldExecutionContext* ctx) {
+  return reinterpret_cast<const ExecutionContext*>(ctx);
+}
+
 manifold::SimplePolygon* from_c(ManifoldSimplePolygon* m) {
   return reinterpret_cast<manifold::SimplePolygon*>(m);
 }

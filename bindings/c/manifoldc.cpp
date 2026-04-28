@@ -881,11 +881,12 @@ void manifold_execution_context_cancel(ManifoldExecutionContext* ctx) {
   from_c(ctx)->Cancel();
 }
 
-int manifold_execution_context_cancelled(ManifoldExecutionContext* ctx) {
+int manifold_execution_context_cancelled(const ManifoldExecutionContext* ctx) {
   return from_c(ctx)->Cancelled() ? 1 : 0;
 }
 
-double manifold_execution_context_progress(ManifoldExecutionContext* ctx) {
+double manifold_execution_context_progress(
+    const ManifoldExecutionContext* ctx) {
   return from_c(ctx)->Progress();
 }
 

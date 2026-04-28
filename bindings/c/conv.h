@@ -64,6 +64,7 @@ vec4 from_c(ManifoldVec4 v);
 std::vector<ivec3>* from_c(ManifoldTriangulation* m);
 RayHitVec* from_c(ManifoldRayHitVec* v);
 ExecutionContext* from_c(ManifoldExecutionContext* ctx);
+const ExecutionContext* from_c(const ManifoldExecutionContext* ctx);
 
 std::vector<vec3> vector_of_vec_array(ManifoldVec3* vs, size_t length);
 std::vector<ivec3> vector_of_vec_array(ManifoldIVec3* vs, size_t length);

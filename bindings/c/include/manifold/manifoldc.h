@@ -259,8 +259,8 @@ ManifoldRayHit manifold_ray_hit_vec_get(ManifoldRayHitVec* v, size_t idx);
 // common.h for full semantics (sticky cancel, per-boolean granularity).
 ManifoldExecutionContext* manifold_execution_context(void* mem);
 void manifold_execution_context_cancel(ManifoldExecutionContext* ctx);
-int manifold_execution_context_cancelled(ManifoldExecutionContext* ctx);
-double manifold_execution_context_progress(ManifoldExecutionContext* ctx);
+int manifold_execution_context_cancelled(const ManifoldExecutionContext* ctx);
+double manifold_execution_context_progress(const ManifoldExecutionContext* ctx);
 
 // CrossSection Shapes/Constructors
 ManifoldCrossSection* manifold_cross_section_empty(void* mem);
