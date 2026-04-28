@@ -53,8 +53,9 @@ ManifoldMeshGL* manifold_meshgl_w_options(void* mem, float* vert_props,
                                           size_t n_verts, size_t n_props,
                                           uint32_t* tri_verts, size_t n_tris,
                                           ManifoldMeshGLOptions* options);
-ManifoldMeshGL* manifold_get_meshgl(void* mem, ManifoldManifold* m);
-ManifoldMeshGL* manifold_get_meshgl_w_normals(void* mem, ManifoldManifold* m,
+ManifoldMeshGL* manifold_get_meshgl(void* mem, const ManifoldManifold* m);
+ManifoldMeshGL* manifold_get_meshgl_w_normals(void* mem,
+                                              const ManifoldManifold* m,
                                               int32_t normalIdx);
 ManifoldMeshGL* manifold_meshgl_copy(void* mem, ManifoldMeshGL* m);
 ManifoldMeshGL* manifold_meshgl_merge(void* mem, ManifoldMeshGL* m);
@@ -73,9 +74,9 @@ ManifoldMeshGL64* manifold_meshgl64_w_options(void* mem, double* vert_props,
                                               uint64_t* tri_verts,
                                               size_t n_tris,
                                               ManifoldMeshGL64Options* options);
-ManifoldMeshGL64* manifold_get_meshgl64(void* mem, ManifoldManifold* m);
+ManifoldMeshGL64* manifold_get_meshgl64(void* mem, const ManifoldManifold* m);
 ManifoldMeshGL64* manifold_get_meshgl64_w_normals(void* mem,
-                                                  ManifoldManifold* m,
+                                                  const ManifoldManifold* m,
                                                   int32_t normalIdx);
 ManifoldMeshGL64* manifold_meshgl64_copy(void* mem, ManifoldMeshGL64* m);
 ManifoldMeshGL64* manifold_meshgl64_merge(void* mem, ManifoldMeshGL64* m);
@@ -100,8 +101,9 @@ ManifoldManifold* manifold_level_set_seq(void* mem, ManifoldSdf sdf,
 ManifoldManifoldVec* manifold_manifold_empty_vec(void* mem);
 ManifoldManifoldVec* manifold_manifold_vec(void* mem, size_t sz);
 void manifold_manifold_vec_reserve(ManifoldManifoldVec* ms, size_t sz);
-size_t manifold_manifold_vec_length(ManifoldManifoldVec* ms);
-ManifoldManifold* manifold_manifold_vec_get(void* mem, ManifoldManifoldVec* ms,
+size_t manifold_manifold_vec_length(const ManifoldManifoldVec* ms);
+ManifoldManifold* manifold_manifold_vec_get(void* mem,
+                                            const ManifoldManifoldVec* ms,
                                             size_t idx);
 void manifold_manifold_vec_set(ManifoldManifoldVec* ms, size_t idx,
                                ManifoldManifold* m);
@@ -212,25 +214,25 @@ ManifoldManifold* manifold_as_original(void* mem, ManifoldManifold* m);
 
 // Manifold Info
 
-int manifold_is_empty(ManifoldManifold* m);
-ManifoldError manifold_status(ManifoldManifold* m);
+int manifold_is_empty(const ManifoldManifold* m);
+ManifoldError manifold_status(const ManifoldManifold* m);
 // Variant of manifold_status that observes progress and allows cancellation
 // via the ExecutionContext. See manifold_execution_context.
-ManifoldError manifold_status_with_context(ManifoldManifold* m,
+ManifoldError manifold_status_with_context(const ManifoldManifold* m,
                                            ManifoldExecutionContext* ctx);
-size_t manifold_num_vert(ManifoldManifold* m);
-size_t manifold_num_edge(ManifoldManifold* m);
-size_t manifold_num_tri(ManifoldManifold* m);
-size_t manifold_num_prop(ManifoldManifold* m);
-ManifoldBox* manifold_bounding_box(void* mem, ManifoldManifold* m);
-double manifold_epsilon(ManifoldManifold* m);
-double manifold_get_tolerance(ManifoldManifold* m);
-size_t manifold_num_prop_vert(ManifoldManifold* m);
-int manifold_genus(ManifoldManifold* m);
-double manifold_surface_area(ManifoldManifold* m);
-double manifold_volume(ManifoldManifold* m);
+size_t manifold_num_vert(const ManifoldManifold* m);
+size_t manifold_num_edge(const ManifoldManifold* m);
+size_t manifold_num_tri(const ManifoldManifold* m);
+size_t manifold_num_prop(const ManifoldManifold* m);
+ManifoldBox* manifold_bounding_box(void* mem, const ManifoldManifold* m);
+double manifold_epsilon(const ManifoldManifold* m);
+double manifold_get_tolerance(const ManifoldManifold* m);
+size_t manifold_num_prop_vert(const ManifoldManifold* m);
+int manifold_genus(const ManifoldManifold* m);
+double manifold_surface_area(const ManifoldManifold* m);
+double manifold_volume(const ManifoldManifold* m);
 int manifold_get_circular_segments(double radius);
-int manifold_original_id(ManifoldManifold* m);
+int manifold_original_id(const ManifoldManifold* m);
 uint32_t manifold_reserve_ids(uint32_t n);
 ManifoldManifold* manifold_set_properties(
     void* mem, ManifoldManifold* m, int num_prop,
@@ -239,14 +241,14 @@ ManifoldManifold* manifold_set_properties(
     void* ctx);
 ManifoldManifold* manifold_calculate_curvature(void* mem, ManifoldManifold* m,
                                                int gaussian_idx, int mean_idx);
-double manifold_min_gap(ManifoldManifold* m, ManifoldManifold* other,
-                        double searchLength);
+double manifold_min_gap(const ManifoldManifold* m,
+                        const ManifoldManifold* other, double searchLength);
 ManifoldManifold* manifold_calculate_normals(void* mem, ManifoldManifold* m,
                                              int normal_idx,
                                              double min_sharp_angle);
 
 // Ray Casting
-ManifoldRayHitVec* manifold_ray_cast(void* mem, ManifoldManifold* m,
+ManifoldRayHitVec* manifold_ray_cast(void* mem, const ManifoldManifold* m,
                                      double origin_x, double origin_y,
                                      double origin_z, double end_x,
                                      double end_y, double end_z);
@@ -559,7 +561,7 @@ ManifoldMeshGL64* manifold_meshgl64_read_obj(void* mem, char* obj_file);
 //    callback.
 // 2. An arg value (the third parameter in the manifold_write_obj function), for
 //    passing additional data into the callback.
-void manifold_write_obj(ManifoldManifold* manifold,
+void manifold_write_obj(const ManifoldManifold* manifold,
                         void (*callback)(char*, void*), void* args);
 // Export a MeshGL64 to a Wavefront obj file.
 // The callback accepts two parameters:

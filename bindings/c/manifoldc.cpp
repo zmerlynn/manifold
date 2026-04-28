@@ -119,11 +119,12 @@ void manifold_manifold_vec_reserve(ManifoldManifoldVec* ms, size_t sz) {
   from_c(ms)->reserve(sz);
 }
 
-size_t manifold_manifold_vec_length(ManifoldManifoldVec* ms) {
+size_t manifold_manifold_vec_length(const ManifoldManifoldVec* ms) {
   return from_c(ms)->size();
 }
 
-ManifoldManifold* manifold_manifold_vec_get(void* mem, ManifoldManifoldVec* ms,
+ManifoldManifold* manifold_manifold_vec_get(void* mem,
+                                            const ManifoldManifoldVec* ms,
                                             size_t idx) {
   auto m = (*from_c(ms))[idx];
   return to_c(new (mem) Manifold(m));
@@ -555,12 +556,13 @@ ManifoldManifoldVec* manifold_decompose(void* mem, ManifoldManifold* m) {
   return to_c(new (mem) std::vector<Manifold>(comps));
 }
 
-ManifoldMeshGL* manifold_get_meshgl(void* mem, ManifoldManifold* m) {
+ManifoldMeshGL* manifold_get_meshgl(void* mem, const ManifoldManifold* m) {
   auto mesh = from_c(m)->GetMeshGL();
   return to_c(new (mem) MeshGL(mesh));
 }
 
-ManifoldMeshGL* manifold_get_meshgl_w_normals(void* mem, ManifoldManifold* m,
+ManifoldMeshGL* manifold_get_meshgl_w_normals(void* mem,
+                                              const ManifoldManifold* m,
                                               int32_t normalIdx) {
   auto mesh = from_c(m)->GetMeshGL(normalIdx);
   return to_c(new (mem) MeshGL(mesh));
@@ -576,13 +578,13 @@ ManifoldMeshGL* manifold_meshgl_merge(void* mem, ManifoldMeshGL* m) {
   return to_c(duplicate);
 }
 
-ManifoldMeshGL64* manifold_get_meshgl64(void* mem, ManifoldManifold* m) {
+ManifoldMeshGL64* manifold_get_meshgl64(void* mem, const ManifoldManifold* m) {
   auto mesh = from_c(m)->GetMeshGL64();
   return to_c(new (mem) MeshGL64(mesh));
 }
 
 ManifoldMeshGL64* manifold_get_meshgl64_w_normals(void* mem,
-                                                  ManifoldManifold* m,
+                                                  const ManifoldManifold* m,
                                                   int32_t normalIdx) {
   auto mesh = from_c(m)->GetMeshGL64(normalIdx);
   return to_c(new (mem) MeshGL64(mesh));
@@ -782,46 +784,60 @@ ManifoldManifold* manifold_as_original(void* mem, ManifoldManifold* m) {
   return to_c(new (mem) Manifold(orig));
 }
 
-int manifold_original_id(ManifoldManifold* m) {
+int manifold_original_id(const ManifoldManifold* m) {
   return from_c(m)->OriginalID();
 }
 
-int manifold_is_empty(ManifoldManifold* m) { return from_c(m)->IsEmpty(); }
+int manifold_is_empty(const ManifoldManifold* m) {
+  return from_c(m)->IsEmpty();
+}
 
-ManifoldError manifold_status(ManifoldManifold* m) {
+ManifoldError manifold_status(const ManifoldManifold* m) {
   auto error = from_c(m)->Status();
   return to_c(error);
 }
 
-ManifoldError manifold_status_with_context(ManifoldManifold* m,
+ManifoldError manifold_status_with_context(const ManifoldManifold* m,
                                            ManifoldExecutionContext* ctx) {
   auto error = from_c(m)->Status(*from_c(ctx));
   return to_c(error);
 }
 
-size_t manifold_num_vert(ManifoldManifold* m) { return from_c(m)->NumVert(); }
-size_t manifold_num_edge(ManifoldManifold* m) { return from_c(m)->NumEdge(); }
-size_t manifold_num_tri(ManifoldManifold* m) { return from_c(m)->NumTri(); }
-size_t manifold_num_prop(ManifoldManifold* m) { return from_c(m)->NumProp(); };
-int manifold_genus(ManifoldManifold* m) { return from_c(m)->Genus(); }
+size_t manifold_num_vert(const ManifoldManifold* m) {
+  return from_c(m)->NumVert();
+}
+size_t manifold_num_edge(const ManifoldManifold* m) {
+  return from_c(m)->NumEdge();
+}
+size_t manifold_num_tri(const ManifoldManifold* m) {
+  return from_c(m)->NumTri();
+}
+size_t manifold_num_prop(const ManifoldManifold* m) {
+  return from_c(m)->NumProp();
+};
+int manifold_genus(const ManifoldManifold* m) { return from_c(m)->Genus(); }
 
-double manifold_surface_area(ManifoldManifold* m) {
+double manifold_surface_area(const ManifoldManifold* m) {
   return from_c(m)->SurfaceArea();
 }
-double manifold_volume(ManifoldManifold* m) { return from_c(m)->Volume(); }
+double manifold_volume(const ManifoldManifold* m) {
+  return from_c(m)->Volume();
+}
 
-ManifoldBox* manifold_bounding_box(void* mem, ManifoldManifold* m) {
+ManifoldBox* manifold_bounding_box(void* mem, const ManifoldManifold* m) {
   auto box = from_c(m)->BoundingBox();
   return to_c(new (mem) Box(box));
 }
 
-double manifold_epsilon(ManifoldManifold* m) { return from_c(m)->GetEpsilon(); }
+double manifold_epsilon(const ManifoldManifold* m) {
+  return from_c(m)->GetEpsilon();
+}
 
-double manifold_get_tolerance(ManifoldManifold* m) {
+double manifold_get_tolerance(const ManifoldManifold* m) {
   return from_c(m)->GetTolerance();
 }
 
-size_t manifold_num_prop_vert(ManifoldManifold* m) {
+size_t manifold_num_prop_vert(const ManifoldManifold* m) {
   return from_c(m)->NumPropVert();
 }
 
@@ -850,12 +866,12 @@ ManifoldManifold* manifold_calculate_curvature(void* mem, ManifoldManifold* m,
   return to_c(new (mem) Manifold(man));
 }
 
-double manifold_min_gap(ManifoldManifold* m, ManifoldManifold* other,
-                        double searchLength) {
+double manifold_min_gap(const ManifoldManifold* m,
+                        const ManifoldManifold* other, double searchLength) {
   return from_c(m)->MinGap(*from_c(other), searchLength);
 }
 
-ManifoldRayHitVec* manifold_ray_cast(void* mem, ManifoldManifold* m,
+ManifoldRayHitVec* manifold_ray_cast(void* mem, const ManifoldManifold* m,
                                      double origin_x, double origin_y,
                                      double origin_z, double end_x,
                                      double end_y, double end_z) {
@@ -1061,7 +1077,7 @@ ManifoldMeshGL64* manifold_meshgl64_read_obj(void* mem, char* obj_file) {
   return to_c(new (mem) MeshGL64(std::move(m)));
 }
 
-void manifold_write_obj(ManifoldManifold* manifold,
+void manifold_write_obj(const ManifoldManifold* manifold,
                         void (*callback)(char*, void*), void* args) {
   std::stringstream ss;
   const Manifold* m = from_c(manifold);

@@ -149,8 +149,16 @@ manifold::Manifold* from_c(ManifoldManifold* m) {
   return reinterpret_cast<manifold::Manifold*>(m);
 }
 
+const manifold::Manifold* from_c(const ManifoldManifold* m) {
+  return reinterpret_cast<const manifold::Manifold*>(m);
+}
+
 ManifoldVec* from_c(ManifoldManifoldVec* ms) {
   return reinterpret_cast<ManifoldVec*>(ms);
+}
+
+const ManifoldVec* from_c(const ManifoldManifoldVec* ms) {
+  return reinterpret_cast<const ManifoldVec*>(ms);
 }
 
 manifold::CrossSection* from_c(ManifoldCrossSection* cs) {

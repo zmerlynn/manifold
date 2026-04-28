@@ -45,7 +45,9 @@ ManifoldRayHitVec* to_c(RayHitVec* v);
 ManifoldExecutionContext* to_c(ExecutionContext* ctx);
 
 manifold::Manifold* from_c(ManifoldManifold* m);
+const manifold::Manifold* from_c(const ManifoldManifold* m);
 ManifoldVec* from_c(ManifoldManifoldVec* ms);
+const ManifoldVec* from_c(const ManifoldManifoldVec* ms);
 manifold::CrossSection* from_c(ManifoldCrossSection* cs);
 CrossSectionVec* from_c(ManifoldCrossSectionVec* csv);
 manifold::SimplePolygon* from_c(ManifoldSimplePolygon* m);
