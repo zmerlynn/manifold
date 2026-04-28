@@ -131,12 +131,12 @@ ManifoldManifold* manifold_manifold_vec_get(void* mem,
 }
 
 void manifold_manifold_vec_set(ManifoldManifoldVec* ms, size_t idx,
-                               ManifoldManifold* m) {
+                               const ManifoldManifold* m) {
   (*from_c(ms))[idx] = *from_c(m);
 }
 
 void manifold_manifold_vec_push_back(ManifoldManifoldVec* ms,
-                                     ManifoldManifold* m) {
+                                     const ManifoldManifold* m) {
   return from_c(ms)->push_back(*from_c(m));
 }
 

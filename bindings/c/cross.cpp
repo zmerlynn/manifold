@@ -64,12 +64,12 @@ ManifoldCrossSection* manifold_cross_section_vec_get(
 }
 
 void manifold_cross_section_vec_set(ManifoldCrossSectionVec* csv, size_t idx,
-                                    ManifoldCrossSection* cs) {
+                                    const ManifoldCrossSection* cs) {
   (*from_c(csv))[idx] = *from_c(cs);
 }
 
 void manifold_cross_section_vec_push_back(ManifoldCrossSectionVec* csv,
-                                          ManifoldCrossSection* cs) {
+                                          const ManifoldCrossSection* cs) {
   return from_c(csv)->push_back(*from_c(cs));
 }
 

@@ -107,9 +107,9 @@ ManifoldManifold* manifold_manifold_vec_get(void* mem,
                                             const ManifoldManifoldVec* ms,
                                             size_t idx);
 void manifold_manifold_vec_set(ManifoldManifoldVec* ms, size_t idx,
-                               ManifoldManifold* m);
+                               const ManifoldManifold* m);
 void manifold_manifold_vec_push_back(ManifoldManifoldVec* ms,
-                                     ManifoldManifold* m);
+                                     const ManifoldManifold* m);
 
 // Manifold Booleans
 
@@ -304,9 +304,9 @@ size_t manifold_cross_section_vec_length(const ManifoldCrossSectionVec* csv);
 ManifoldCrossSection* manifold_cross_section_vec_get(
     void* mem, const ManifoldCrossSectionVec* csv, size_t idx);
 void manifold_cross_section_vec_set(ManifoldCrossSectionVec* csv, size_t idx,
-                                    ManifoldCrossSection* cs);
+                                    const ManifoldCrossSection* cs);
 void manifold_cross_section_vec_push_back(ManifoldCrossSectionVec* csv,
-                                          ManifoldCrossSection* cs);
+                                          const ManifoldCrossSection* cs);
 
 // CrossSection Booleans
 
