@@ -29,8 +29,8 @@ using namespace manifold;
 namespace {
 ManifoldManifold* level_set(
     void* mem, double (*sdf_context)(double, double, double, void*),
-    ManifoldBox* bounds, double edge_length, double level, double tolerance,
-    bool seq, void* ctx) {
+    const ManifoldBox* bounds, double edge_length, double level,
+    double tolerance, bool seq, void* ctx) {
   // Bind function with context argument to one without
   using namespace std::placeholders;
   std::function<double(double, double, double)> sdf =
@@ -298,15 +298,15 @@ ManifoldManifold* manifold_warp(void* mem, const ManifoldManifold* m,
 
 ManifoldManifold* manifold_level_set(
     void* mem, double (*sdf)(double, double, double, void*),
-    ManifoldBox* bounds, double edge_length, double level, double tolerance,
-    void* ctx) {
+    const ManifoldBox* bounds, double edge_length, double level,
+    double tolerance, void* ctx) {
   return level_set(mem, sdf, bounds, edge_length, level, tolerance, false, ctx);
 }
 
 ManifoldManifold* manifold_level_set_seq(
     void* mem, double (*sdf)(double, double, double, void*),
-    ManifoldBox* bounds, double edge_length, double level, double tolerance,
-    void* ctx) {
+    const ManifoldBox* bounds, double edge_length, double level,
+    double tolerance, void* ctx) {
   return level_set(mem, sdf, bounds, edge_length, level, tolerance, true, ctx);
 }
 

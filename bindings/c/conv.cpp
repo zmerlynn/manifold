@@ -260,8 +260,16 @@ manifold::Box* from_c(ManifoldBox* m) {
   return reinterpret_cast<manifold::Box*>(m);
 }
 
+const manifold::Box* from_c(const ManifoldBox* m) {
+  return reinterpret_cast<const manifold::Box*>(m);
+}
+
 manifold::Rect* from_c(ManifoldRect* m) {
   return reinterpret_cast<manifold::Rect*>(m);
+}
+
+const manifold::Rect* from_c(const ManifoldRect* r) {
+  return reinterpret_cast<const manifold::Rect*>(r);
 }
 
 vec2 from_c(ManifoldVec2 v) { return vec2(v.x, v.y); }

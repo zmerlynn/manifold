@@ -89,10 +89,11 @@ ManifoldMeshGL64* manifold_meshgl64_merge(void* mem, ManifoldMeshGL64* m);
 // parallel execution of closures, then you should use manifold_level_set_seq to
 // force sequential execution.
 ManifoldManifold* manifold_level_set(void* mem, ManifoldSdf sdf,
-                                     ManifoldBox* bounds, double edge_length,
-                                     double level, double tolerance, void* ctx);
+                                     const ManifoldBox* bounds,
+                                     double edge_length, double level,
+                                     double tolerance, void* ctx);
 ManifoldManifold* manifold_level_set_seq(void* mem, ManifoldSdf sdf,
-                                         ManifoldBox* bounds,
+                                         const ManifoldBox* bounds,
                                          double edge_length, double level,
                                          double tolerance, void* ctx);
 
@@ -370,49 +371,55 @@ ManifoldPolygons* manifold_cross_section_to_polygons(
 
 ManifoldRect* manifold_rect(void* mem, double x1, double y1, double x2,
                             double y2);
-ManifoldVec2 manifold_rect_min(ManifoldRect* r);
-ManifoldVec2 manifold_rect_max(ManifoldRect* r);
-ManifoldVec2 manifold_rect_dimensions(ManifoldRect* r);
-ManifoldVec2 manifold_rect_center(ManifoldRect* r);
-double manifold_rect_scale(ManifoldRect* r);
-int manifold_rect_contains_pt(ManifoldRect* r, double x, double y);
-int manifold_rect_contains_rect(ManifoldRect* a, ManifoldRect* b);
+ManifoldVec2 manifold_rect_min(const ManifoldRect* r);
+ManifoldVec2 manifold_rect_max(const ManifoldRect* r);
+ManifoldVec2 manifold_rect_dimensions(const ManifoldRect* r);
+ManifoldVec2 manifold_rect_center(const ManifoldRect* r);
+double manifold_rect_scale(const ManifoldRect* r);
+int manifold_rect_contains_pt(const ManifoldRect* r, double x, double y);
+int manifold_rect_contains_rect(const ManifoldRect* a, const ManifoldRect* b);
 void manifold_rect_include_pt(ManifoldRect* r, double x, double y);
-ManifoldRect* manifold_rect_union(void* mem, ManifoldRect* a, ManifoldRect* b);
-ManifoldRect* manifold_rect_transform(void* mem, ManifoldRect* r, double x1,
-                                      double y1, double x2, double y2,
-                                      double x3, double y3);
-ManifoldRect* manifold_rect_translate(void* mem, ManifoldRect* r, double x,
-                                      double y);
-ManifoldRect* manifold_rect_mul(void* mem, ManifoldRect* r, double x, double y);
-int manifold_rect_does_overlap_rect(ManifoldRect* a, ManifoldRect* r);
-int manifold_rect_is_empty(ManifoldRect* r);
-int manifold_rect_is_finite(ManifoldRect* r);
+ManifoldRect* manifold_rect_union(void* mem, const ManifoldRect* a,
+                                  const ManifoldRect* b);
+ManifoldRect* manifold_rect_transform(void* mem, const ManifoldRect* r,
+                                      double x1, double y1, double x2,
+                                      double y2, double x3, double y3);
+ManifoldRect* manifold_rect_translate(void* mem, const ManifoldRect* r,
+                                      double x, double y);
+ManifoldRect* manifold_rect_mul(void* mem, const ManifoldRect* r, double x,
+                                double y);
+int manifold_rect_does_overlap_rect(const ManifoldRect* a,
+                                    const ManifoldRect* r);
+int manifold_rect_is_empty(const ManifoldRect* r);
+int manifold_rect_is_finite(const ManifoldRect* r);
 
 // Bounding Box
 
 ManifoldBox* manifold_box(void* mem, double x1, double y1, double z1, double x2,
                           double y2, double z2);
-ManifoldVec3 manifold_box_min(ManifoldBox* b);
-ManifoldVec3 manifold_box_max(ManifoldBox* b);
-ManifoldVec3 manifold_box_dimensions(ManifoldBox* b);
-ManifoldVec3 manifold_box_center(ManifoldBox* b);
-double manifold_box_scale(ManifoldBox* b);
-int manifold_box_contains_pt(ManifoldBox* b, double x, double y, double z);
-int manifold_box_contains_box(ManifoldBox* a, ManifoldBox* b);
+ManifoldVec3 manifold_box_min(const ManifoldBox* b);
+ManifoldVec3 manifold_box_max(const ManifoldBox* b);
+ManifoldVec3 manifold_box_dimensions(const ManifoldBox* b);
+ManifoldVec3 manifold_box_center(const ManifoldBox* b);
+double manifold_box_scale(const ManifoldBox* b);
+int manifold_box_contains_pt(const ManifoldBox* b, double x, double y,
+                             double z);
+int manifold_box_contains_box(const ManifoldBox* a, const ManifoldBox* b);
 void manifold_box_include_pt(ManifoldBox* b, double x, double y, double z);
-ManifoldBox* manifold_box_union(void* mem, ManifoldBox* a, ManifoldBox* b);
-ManifoldBox* manifold_box_transform(void* mem, ManifoldBox* b, double x1,
+ManifoldBox* manifold_box_union(void* mem, const ManifoldBox* a,
+                                const ManifoldBox* b);
+ManifoldBox* manifold_box_transform(void* mem, const ManifoldBox* b, double x1,
                                     double y1, double z1, double x2, double y2,
                                     double z2, double x3, double y3, double z3,
                                     double x4, double y4, double z4);
-ManifoldBox* manifold_box_translate(void* mem, ManifoldBox* b, double x,
+ManifoldBox* manifold_box_translate(void* mem, const ManifoldBox* b, double x,
                                     double y, double z);
-ManifoldBox* manifold_box_mul(void* mem, ManifoldBox* b, double x, double y,
-                              double z);
-int manifold_box_does_overlap_pt(ManifoldBox* b, double x, double y, double z);
-int manifold_box_does_overlap_box(ManifoldBox* a, ManifoldBox* b);
-int manifold_box_is_finite(ManifoldBox* b);
+ManifoldBox* manifold_box_mul(void* mem, const ManifoldBox* b, double x,
+                              double y, double z);
+int manifold_box_does_overlap_pt(const ManifoldBox* b, double x, double y,
+                                 double z);
+int manifold_box_does_overlap_box(const ManifoldBox* a, const ManifoldBox* b);
+int manifold_box_is_finite(const ManifoldBox* b);
 
 // Static Quality Globals
 
