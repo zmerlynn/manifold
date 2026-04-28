@@ -140,38 +140,41 @@ void manifold_manifold_vec_push_back(ManifoldManifoldVec* ms,
   return from_c(ms)->push_back(*from_c(m));
 }
 
-ManifoldManifold* manifold_boolean(void* mem, ManifoldManifold* a,
-                                   ManifoldManifold* b, ManifoldOpType op) {
+ManifoldManifold* manifold_boolean(void* mem, const ManifoldManifold* a,
+                                   const ManifoldManifold* b,
+                                   ManifoldOpType op) {
   auto m = from_c(a)->Boolean(*from_c(b), from_c(op));
   return to_c(new (mem) Manifold(m));
 }
 
-ManifoldManifold* manifold_batch_boolean(void* mem, ManifoldManifoldVec* ms,
+ManifoldManifold* manifold_batch_boolean(void* mem,
+                                         const ManifoldManifoldVec* ms,
                                          ManifoldOpType op) {
   auto m = Manifold::BatchBoolean(*from_c(ms), from_c(op));
   return to_c(new (mem) Manifold(m));
 }
 
-ManifoldManifold* manifold_union(void* mem, ManifoldManifold* a,
-                                 ManifoldManifold* b) {
+ManifoldManifold* manifold_union(void* mem, const ManifoldManifold* a,
+                                 const ManifoldManifold* b) {
   auto m = (*from_c(a)) + (*from_c(b));
   return to_c(new (mem) Manifold(m));
 }
 
-ManifoldManifold* manifold_difference(void* mem, ManifoldManifold* a,
-                                      ManifoldManifold* b) {
+ManifoldManifold* manifold_difference(void* mem, const ManifoldManifold* a,
+                                      const ManifoldManifold* b) {
   auto m = (*from_c(a)) - (*from_c(b));
   return to_c(new (mem) Manifold(m));
 }
 
-ManifoldManifold* manifold_intersection(void* mem, ManifoldManifold* a,
-                                        ManifoldManifold* b) {
+ManifoldManifold* manifold_intersection(void* mem, const ManifoldManifold* a,
+                                        const ManifoldManifold* b) {
   auto m = (*from_c(a)) ^ (*from_c(b));
   return to_c(new (mem) Manifold(m));
 }
 
 ManifoldManifoldPair manifold_split(void* mem_first, void* mem_second,
-                                    ManifoldManifold* a, ManifoldManifold* b) {
+                                    const ManifoldManifold* a,
+                                    const ManifoldManifold* b) {
   auto pair = from_c(a)->Split(*from_c(b));
   auto first = new (mem_first) Manifold(pair.first);
   auto second = new (mem_second) Manifold(pair.second);
@@ -179,7 +182,7 @@ ManifoldManifoldPair manifold_split(void* mem_first, void* mem_second,
 }
 
 ManifoldManifoldPair manifold_split_by_plane(void* mem_first, void* mem_second,
-                                             ManifoldManifold* m,
+                                             const ManifoldManifold* m,
                                              double normal_x, double normal_y,
                                              double normal_z, double offset) {
   auto normal = vec3(normal_x, normal_y, normal_z);
@@ -189,7 +192,7 @@ ManifoldManifoldPair manifold_split_by_plane(void* mem_first, void* mem_second,
   return {to_c(first), to_c(second)};
 }
 
-ManifoldManifold* manifold_trim_by_plane(void* mem, ManifoldManifold* m,
+ManifoldManifold* manifold_trim_by_plane(void* mem, const ManifoldManifold* m,
                                          double normal_x, double normal_y,
                                          double normal_z, double offset) {
   auto normal = vec3(normal_x, normal_y, normal_z);
@@ -197,35 +200,37 @@ ManifoldManifold* manifold_trim_by_plane(void* mem, ManifoldManifold* m,
   return to_c(new (mem) Manifold(trimmed));
 }
 
-ManifoldManifold* manifold_minkowski_sum(void* mem, ManifoldManifold* a,
-                                         ManifoldManifold* b) {
+ManifoldManifold* manifold_minkowski_sum(void* mem, const ManifoldManifold* a,
+                                         const ManifoldManifold* b) {
   auto m = (*from_c(a)).MinkowskiSum(*from_c(b));
   return to_c(new (mem) Manifold(m));
 }
 
-ManifoldManifold* manifold_minkowski_difference(void* mem, ManifoldManifold* a,
-                                                ManifoldManifold* b) {
+ManifoldManifold* manifold_minkowski_difference(void* mem,
+                                                const ManifoldManifold* a,
+                                                const ManifoldManifold* b) {
   auto m = (*from_c(a)).MinkowskiDifference(*from_c(b));
   return to_c(new (mem) Manifold(m));
 }
 
-ManifoldPolygons* manifold_slice(void* mem, ManifoldManifold* m,
+ManifoldPolygons* manifold_slice(void* mem, const ManifoldManifold* m,
                                  double height) {
   auto poly = from_c(m)->Slice(height);
   return to_c(new (mem) Polygons(poly));
 }
 
-ManifoldPolygons* manifold_project(void* mem, ManifoldManifold* m) {
+ManifoldPolygons* manifold_project(void* mem, const ManifoldManifold* m) {
   auto poly = from_c(m)->Project();
   return to_c(new (mem) Polygons(poly));
 }
 
-ManifoldManifold* manifold_hull(void* mem, ManifoldManifold* m) {
+ManifoldManifold* manifold_hull(void* mem, const ManifoldManifold* m) {
   auto hulled = from_c(m)->Hull();
   return to_c(new (mem) Manifold(hulled));
 }
 
-ManifoldManifold* manifold_batch_hull(void* mem, ManifoldManifoldVec* ms) {
+ManifoldManifold* manifold_batch_hull(void* mem,
+                                      const ManifoldManifoldVec* ms) {
   auto hulled = Manifold::Hull(*from_c(ms));
   return to_c(new (mem) Manifold(hulled));
 }
@@ -240,42 +245,43 @@ ManifoldManifold* manifold_hull_pts(void* mem, ManifoldVec3* ps,
   return to_c(new (mem) Manifold(hulled));
 }
 
-ManifoldManifold* manifold_translate(void* mem, ManifoldManifold* m, double x,
-                                     double y, double z) {
+ManifoldManifold* manifold_translate(void* mem, const ManifoldManifold* m,
+                                     double x, double y, double z) {
   auto v = vec3(x, y, z);
   auto translated = from_c(m)->Translate(v);
   return to_c(new (mem) Manifold(translated));
 }
 
-ManifoldManifold* manifold_rotate(void* mem, ManifoldManifold* m, double x,
-                                  double y, double z) {
+ManifoldManifold* manifold_rotate(void* mem, const ManifoldManifold* m,
+                                  double x, double y, double z) {
   auto rotated = from_c(m)->Rotate(x, y, z);
   return to_c(new (mem) Manifold(rotated));
 }
 
-ManifoldManifold* manifold_scale(void* mem, ManifoldManifold* m, double x,
+ManifoldManifold* manifold_scale(void* mem, const ManifoldManifold* m, double x,
                                  double y, double z) {
   auto s = vec3(x, y, z);
   auto scaled = from_c(m)->Scale(s);
   return to_c(new (mem) Manifold(scaled));
 }
 
-ManifoldManifold* manifold_transform(void* mem, ManifoldManifold* m, double x1,
-                                     double y1, double z1, double x2, double y2,
-                                     double z2, double x3, double y3, double z3,
-                                     double x4, double y4, double z4) {
+ManifoldManifold* manifold_transform(void* mem, const ManifoldManifold* m,
+                                     double x1, double y1, double z1, double x2,
+                                     double y2, double z2, double x3, double y3,
+                                     double z3, double x4, double y4,
+                                     double z4) {
   auto mat = mat3x4({x1, y1, z1}, {x2, y2, z2}, {x3, y3, z3}, {x4, y4, z4});
   auto transformed = from_c(m)->Transform(mat);
   return to_c(new (mem) Manifold(transformed));
 }
 
-ManifoldManifold* manifold_mirror(void* mem, ManifoldManifold* m, double nx,
-                                  double ny, double nz) {
+ManifoldManifold* manifold_mirror(void* mem, const ManifoldManifold* m,
+                                  double nx, double ny, double nz) {
   auto mirrored = from_c(m)->Mirror({nx, ny, nz});
   return to_c(new (mem) Manifold(mirrored));
 }
 
-ManifoldManifold* manifold_warp(void* mem, ManifoldManifold* m,
+ManifoldManifold* manifold_warp(void* mem, const ManifoldManifold* m,
                                 ManifoldVec3 (*fun)(double, double, double,
                                                     void*),
                                 void* ctx) {
@@ -304,43 +310,47 @@ ManifoldManifold* manifold_level_set_seq(
   return level_set(mem, sdf, bounds, edge_length, level, tolerance, true, ctx);
 }
 
-ManifoldManifold* manifold_smooth_by_normals(void* mem, ManifoldManifold* m,
+ManifoldManifold* manifold_smooth_by_normals(void* mem,
+                                             const ManifoldManifold* m,
                                              int normalIdx) {
   auto smoothed = from_c(m)->SmoothByNormals(normalIdx);
   return to_c(new (mem) Manifold(smoothed));
 }
 
-ManifoldManifold* manifold_smooth_out(void* mem, ManifoldManifold* m,
+ManifoldManifold* manifold_smooth_out(void* mem, const ManifoldManifold* m,
                                       double minSharpAngle,
                                       double minSmoothness) {
   auto smoothed = from_c(m)->SmoothOut(minSharpAngle, minSmoothness);
   return to_c(new (mem) Manifold(smoothed));
 }
 
-ManifoldManifold* manifold_refine(void* mem, ManifoldManifold* m, int refine) {
+ManifoldManifold* manifold_refine(void* mem, const ManifoldManifold* m,
+                                  int refine) {
   auto refined = from_c(m)->Refine(refine);
   return to_c(new (mem) Manifold(refined));
 }
 
-ManifoldManifold* manifold_refine_to_length(void* mem, ManifoldManifold* m,
+ManifoldManifold* manifold_refine_to_length(void* mem,
+                                            const ManifoldManifold* m,
                                             double length) {
   auto refined = from_c(m)->RefineToLength(length);
   return to_c(new (mem) Manifold(refined));
 }
 
-ManifoldManifold* manifold_refine_to_tolerance(void* mem, ManifoldManifold* m,
+ManifoldManifold* manifold_refine_to_tolerance(void* mem,
+                                               const ManifoldManifold* m,
                                                double tolerance) {
   auto refined = from_c(m)->RefineToTolerance(tolerance);
   return to_c(new (mem) Manifold(refined));
 }
 
-ManifoldManifold* manifold_set_tolerance(void* mem, ManifoldManifold* m,
+ManifoldManifold* manifold_set_tolerance(void* mem, const ManifoldManifold* m,
                                          double tolerance) {
   auto result = from_c(m)->SetTolerance(tolerance);
   return to_c(new (mem) Manifold(result));
 }
 
-ManifoldManifold* manifold_simplify(void* mem, ManifoldManifold* m,
+ManifoldManifold* manifold_simplify(void* mem, const ManifoldManifold* m,
                                     double tolerance) {
   auto simplified = from_c(m)->Simplify(tolerance);
   return to_c(new (mem) Manifold(simplified));
@@ -350,7 +360,7 @@ ManifoldManifold* manifold_empty(void* mem) {
   return to_c(new (mem) Manifold());
 }
 
-ManifoldManifold* manifold_copy(void* mem, ManifoldManifold* m) {
+ManifoldManifold* manifold_copy(void* mem, const ManifoldManifold* m) {
   return to_c(new (mem) Manifold(*from_c(m)));
 }
 
@@ -546,12 +556,12 @@ ManifoldManifold* manifold_revolve(void* mem, ManifoldPolygons* cs,
   return to_c(new (mem) Manifold(m));
 }
 
-ManifoldManifold* manifold_compose(void* mem, ManifoldManifoldVec* ms) {
+ManifoldManifold* manifold_compose(void* mem, const ManifoldManifoldVec* ms) {
   auto composed = Manifold::BatchBoolean(*from_c(ms), OpType::Add);
   return to_c(new (mem) Manifold(composed));
 }
 
-ManifoldManifoldVec* manifold_decompose(void* mem, ManifoldManifold* m) {
+ManifoldManifoldVec* manifold_decompose(void* mem, const ManifoldManifold* m) {
   auto comps = from_c(m)->Decompose();
   return to_c(new (mem) std::vector<Manifold>(comps));
 }
@@ -779,7 +789,7 @@ void manifold_meshgl64_update_normals(ManifoldMeshGL64* m, int normal_idx) {
   from_c(m)->UpdateNormals(normal_idx);
 }
 
-ManifoldManifold* manifold_as_original(void* mem, ManifoldManifold* m) {
+ManifoldManifold* manifold_as_original(void* mem, const ManifoldManifold* m) {
   auto orig = from_c(m)->AsOriginal();
   return to_c(new (mem) Manifold(orig));
 }
@@ -844,7 +854,7 @@ size_t manifold_num_prop_vert(const ManifoldManifold* m) {
 uint32_t manifold_reserve_ids(uint32_t n) { return Manifold::ReserveIDs(n); }
 
 ManifoldManifold* manifold_set_properties(
-    void* mem, ManifoldManifold* m, int num_prop,
+    void* mem, const ManifoldManifold* m, int num_prop,
     void (*fun)(double* new_prop, ManifoldVec3 position, const double* old_prop,
                 void* ctx),
     void* ctx) {
@@ -860,7 +870,8 @@ ManifoldManifold* manifold_set_properties(
   return to_c(new (mem) Manifold(man));
 };
 
-ManifoldManifold* manifold_calculate_curvature(void* mem, ManifoldManifold* m,
+ManifoldManifold* manifold_calculate_curvature(void* mem,
+                                               const ManifoldManifold* m,
                                                int gaussian_idx, int mean_idx) {
   auto man = from_c(m)->CalculateCurvature(gaussian_idx, mean_idx);
   return to_c(new (mem) Manifold(man));
@@ -906,7 +917,8 @@ double manifold_execution_context_progress(
   return from_c(ctx)->Progress();
 }
 
-ManifoldManifold* manifold_calculate_normals(void* mem, ManifoldManifold* m,
+ManifoldManifold* manifold_calculate_normals(void* mem,
+                                             const ManifoldManifold* m,
                                              int normal_idx,
                                              double min_sharp_angle) {
   auto man = from_c(m)->CalculateNormals(normal_idx, min_sharp_angle);
