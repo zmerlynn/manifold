@@ -13,12 +13,24 @@
 //     UCAM-CL-TR-766 (2009), Chapter 7.
 //   - elalish's BVH-adapted sketch in github.com/elalish/manifold/issues/289.
 //
+// Build:  g++ -std=c++17 -O2 overlap2d_proto.cpp -o overlap2d_proto
+// Run:    ./overlap2d_proto              # full test battery
+//         ./overlap2d_proto diagnose 0   # diagnostic dump for one case
+//
 // Standalone (no manifold dependencies). Single-threaded. Brute-force
 // spatial queries. Goal: validate the algorithm end-to-end on Smith's
 // adversarial test patterns before committing to BVH/parallelization.
 //
-// Sections of this file mirror the algorithm steps in
-// .claude/plans/issue-289-2d-overlap-removal.md.
+// Intentional simplifications vs a production implementation:
+//   - Segment intersection uses Cramer's rule (parametric), not Smith's
+//     symbolic-perturbation `Interpolate`/`Shadows` formulation. Correct
+//     for non-degenerate inputs; would be replaced for production.
+//   - Winding ray-cast at edge midpoints is a plain horizontal ray with
+//     half-open vertex handling, no symbolic perturbation. Adequate for
+//     the test patterns here; production would use the symbolic form.
+//   - All spatial queries are brute-force O(N^2). The plan to swap for
+//     manifold's Collider lives in
+//     .claude/plans/issue-289-2d-overlap-removal.md.
 
 #include <algorithm>
 #include <cassert>
@@ -51,9 +63,6 @@ inline Vec2 operator-(Vec2 a, Vec2 b) { return {a.x - b.x, a.y - b.y}; }
 inline Vec2 operator*(Vec2 a, double s) { return {a.x * s, a.y * s}; }
 inline double Dot(Vec2 a, Vec2 b) { return a.x * b.x + a.y * b.y; }
 inline double Length(Vec2 a) { return std::sqrt(Dot(a, a)); }
-inline bool LexLess(Vec2 a, Vec2 b) {
-  return a.x < b.x || (a.x == b.x && a.y < b.y);
-}
 
 // Edge with signed multiplicity. v0/v1 index into the vertex vector.
 struct EdgeM {
@@ -75,9 +84,9 @@ struct OutEdge {
 inline double EpsilonFromScale(double L, int k_budget = 1000) {
   // Round L up to power of 2 (Smith's analysis assumes this).
   if (L <= 0) return 0;
-  int exp;
-  std::frexp(L, &exp);
-  const double L_pow2 = std::ldexp(1.0, exp);
+  int expBits;
+  std::frexp(L, &expBits);
+  const double L_pow2 = std::ldexp(1.0, expBits);
   return (k_budget + 1) * kAlphaCoeff * kU * L_pow2;
 }
 
@@ -100,14 +109,14 @@ inline double YAtX(double xP, double xL, double yL, double xR, double yR) {
   return yS;
 }
 
-// Parametric (Cramer-style) intersection — symmetric, handles vertical
+// Parametric (Cramer-style) intersection. Symmetric, handles vertical
 // segments cleanly. Less accurate than Smith's YAtX two-stage formulation
 // (no slope-swap canonicalization) but correct for arbitrary orientations.
 //
 // Returns true if segments intersect strictly in their interiors (open
 // 0 < t < 1 and 0 < s < 1). Endpoint/collinear touches return false.
 //
-// For the prototype this is "good enough"; the eventual real implementation
+// For the prototype this is "good enough". The eventual real implementation
 // would use Smith's YAtX form with explicit vertical-segment branching for
 // the tighter error bounds (§8.2).
 inline bool IntersectSegments(Vec2 a0, Vec2 a1, Vec2 b0, Vec2 b1, Vec2* out) {
@@ -161,7 +170,7 @@ VertexMerge MergeVerts(const std::vector<Vec2>& in, double eps) {
   const int n = static_cast<int>(in.size());
   UnionFind uf;
   uf.Init(n);
-  // Brute force O(n^2) — phase 3 will replace with BVH.
+  // Brute force O(n^2); phase 3 will replace with BVH.
   const double eps2 = eps * eps;
   for (int i = 0; i < n; ++i) {
     for (int j = i + 1; j < n; ++j) {
@@ -370,7 +379,7 @@ CanonicalSubEdges Canonicalize(const std::vector<EdgeM>& edges,
 // canonical (vMin, vMax) form, "upward" = vMin's y < vMax's y when
 // crossed from below), -m if downward.
 //
-// This is a simple non-symbolic-perturbation cast — known limitations
+// This is a simple non-symbolic-perturbation cast with known limitations
 // when the ray hits a vertex exactly. For the prototype we offset the
 // midpoint by tiny random epsilon if needed (TODO).
 int CastWindingRay(Vec2 origin, const CanonicalSubEdges& canon,
@@ -389,7 +398,7 @@ int CastWindingRay(Vec2 origin, const CanonicalSubEdges& canon,
     double xCross = p0.x + t * (p1.x - p0.x);
     if (xCross < origin.x) continue;
     // Crossing direction: original direction was upward iff key.first <
-    // key.second and positions matched — already encoded in `mult`'s sign. We
+    // key.second and positions matched -- already encoded in `mult`'s sign. We
     // need the signed contribution to the winding number when crossing
     // left-to-right. For a positive-multiplicity edge oriented (vMin -> vMax)
     // in canonical form, an upward crossing (with origin to the left of the
@@ -413,7 +422,7 @@ int CastWindingRay(Vec2 origin, const CanonicalSubEdges& canon,
 //
 // Caveat: for very tight `eps_snap` (~ u*L), no such gap exists and the
 // approach degrades. The algorithmically-correct fix is planar face
-// traversal — see `.claude/plans/issue-289-2d-overlap-removal.md`.
+// traversal; see `.claude/plans/issue-289-2d-overlap-removal.md`.
 std::vector<OutEdge> FilterByWinding(const CanonicalSubEdges& canon,
                                      const std::vector<Vec2>& verts,
                                      double eps_snap) {
@@ -480,13 +489,12 @@ OverlapResult RemoveOverlaps2D(const std::vector<Vec2>& vertsIn,
   // Step 4b: re-merge ALL verts (originals + intersection-created) using a
   // slightly looser threshold (1.5 * eps). Intersection insertion in step 4
   // only snaps to verts already near at insertion time; under high density,
-  // two distinct intersection verts can end up just over eps apart but
-  // geometrically representing the same point (one wasn't there when the
-  // other was inserted, so neither snapped to the other; both fell on the
-  // far side of the eps disc from the other). The looser threshold
-  // canonicalizes these. 1.5x stays well inside Smith's safe range
-  // (alpha + 2*alpha for an intersection at the boundary of 2 edges'
-  // discs).
+  // two intersection points can land just over eps apart from each other
+  // because neither was present when the other was inserted, so neither
+  // snapped to the other and both fell on the far side of the eps disc.
+  // 1.5 is empirical here, not derived: eps is parameterized at 1000*alpha
+  // (k_budget), so 1.5*eps is well inside the safe range either way; a
+  // production version should derive the constant from Smith's alpha bound.
   auto remerge = MergeVerts(merge.verts, 1.5 * eps);
   if (remerge.verts.size() < merge.verts.size()) {
     // Remap edges and per-edge vert lists through the second merge.
@@ -516,14 +524,15 @@ OverlapResult RemoveOverlaps2D(const std::vector<Vec2>& vertsIn,
 // =============================================================================
 // Iterate-to-fixed-point.
 //
-// Smith §7.7 / figure 7.16: residual ε-scale edge intersections from rounded
-// arithmetic in the first pass are resolved by re-applying the algorithm.
-// We iterate up to maxIter times. Termination:
+// Smith §7.7 / figure 7.16: residual eps-scale edge intersections from
+// rounded arithmetic in the first pass are resolved by re-applying the
+// algorithm. We iterate up to maxIter additional times beyond the initial
+// pass. Termination:
 //   - Converged: new fingerprint == previous fingerprint (no change).
 //   - Cycle: new fingerprint == any earlier (non-immediate) fingerprint.
 //     Pick the iteration with the lex-smallest fingerprint as canonical
 //     (deterministic choice among the cycle's equivalent outputs).
-//   - Hit maxIter without convergence/cycle: return current.
+//   - MaxedOut: hit maxIter without convergence/cycle; return current.
 //
 // Fingerprint quantizes vert positions to multiples of eps/100 so that
 // cross-iteration vert renumbering doesn't break comparison.
@@ -555,15 +564,20 @@ inline std::string Fingerprint(const OverlapResult& r, double eps) {
   return oss.str();
 }
 
+enum class IterStatus {
+  Converged,
+  Cycled,
+  MaxedOut,
+};
+
 OverlapResult IterateToFixedPoint(const std::vector<Vec2>& vIn,
                                   const std::vector<EdgeM>& eIn, double eps,
-                                  int maxIter = 5, int* outIters = nullptr,
-                                  bool* outCycled = nullptr) {
+                                  int maxIter = 8, int* outIters = nullptr,
+                                  IterStatus* outStatus = nullptr) {
   std::vector<OverlapResult> history;
   std::vector<std::string> fps;
   history.push_back(RemoveOverlaps2D(vIn, eIn, eps));
   fps.push_back(Fingerprint(history.back(), eps));
-  if (outCycled) *outCycled = false;
   for (int iter = 1; iter <= maxIter; ++iter) {
     std::vector<EdgeM> nextEdges;
     nextEdges.reserve(history.back().edges.size());
@@ -572,15 +586,15 @@ OverlapResult IterateToFixedPoint(const std::vector<Vec2>& vIn,
     auto next = RemoveOverlaps2D(history.back().verts, nextEdges, eps);
     auto nextFp = Fingerprint(next, eps);
     if (nextFp == fps.back()) {
-      // Converged.
       if (outIters) *outIters = iter;
+      if (outStatus) *outStatus = IterStatus::Converged;
       return next;
     }
     // Cycle detection: same fingerprint seen earlier (not just last).
     for (size_t k = 0; k + 1 < fps.size(); ++k) {
       if (fps[k] == nextFp) {
         if (outIters) *outIters = iter;
-        if (outCycled) *outCycled = true;
+        if (outStatus) *outStatus = IterStatus::Cycled;
         // Lex-smallest fingerprint wins.
         size_t minIdx = 0;
         for (size_t j = 1; j < fps.size(); ++j) {
@@ -594,6 +608,7 @@ OverlapResult IterateToFixedPoint(const std::vector<Vec2>& vIn,
     fps.push_back(std::move(nextFp));
   }
   if (outIters) *outIters = maxIter;
+  if (outStatus) *outStatus = IterStatus::MaxedOut;
   return std::move(history.back());
 }
 
@@ -650,23 +665,12 @@ bool CheckTopologicalValidity(const OverlapResult& r,
   return ok;
 }
 
-// AABB invariant from Smith ch.8 eq 8.18-19: any computed intersection
-// point lies inside the intersection of the two segments' AABBs.
-bool CheckAABBInvariant(Vec2 ip, Vec2 a0, Vec2 a1, Vec2 b0, Vec2 b1,
-                        double eps) {
-  double minX = std::max(std::min(a0.x, a1.x), std::min(b0.x, b1.x)) - eps;
-  double maxX = std::min(std::max(a0.x, a1.x), std::max(b0.x, b1.x)) + eps;
-  double minY = std::max(std::min(a0.y, a1.y), std::min(b0.y, b1.y)) - eps;
-  double maxY = std::min(std::max(a0.y, a1.y), std::max(b0.y, b1.y)) + eps;
-  return ip.x >= minX && ip.x <= maxX && ip.y >= minY && ip.y <= maxY;
-}
-
 // =============================================================================
 // Test patterns from Smith §7.7.
 // =============================================================================
 
 // Random topological polygon: N points on unit circle in random angular
-// order — produces a self-intersecting closed curve.
+// order. Produces a self-intersecting closed curve.
 std::pair<std::vector<Vec2>, std::vector<EdgeM>> RandomTopologicalPolygon(
     int n, uint64_t seed) {
   std::mt19937_64 rng(seed);
@@ -705,9 +709,9 @@ std::pair<std::vector<Vec2>, std::vector<EdgeM>> PolygonalStar(int n,
   return {std::move(verts), std::move(edges)};
 }
 
-// Apply a translation that brings the bounding box near a power of 2 — Smith
-// §7.7's "displacement attack" makes representable grid spacing comparable
-// to feature sizes.
+// Apply a translation that brings the bounding box near a power of 2.
+// Smith §7.7's "displacement attack" makes representable grid spacing
+// comparable to feature sizes.
 void Displace(std::vector<Vec2>* verts, double offset) {
   for (auto& v : *verts) {
     v.x += offset;
@@ -786,28 +790,16 @@ OverlapResult RunCase(const TestCase& tc, bool* allPass) {
 }
 
 // Idempotence: feeding the output back through RemoveOverlaps2D should
-// produce the same result (modulo trivial reordering).
+// produce the same result. Uses Fingerprint (position-based, eps/100
+// quantized) for cross-iteration vert-renumbering tolerance, matching
+// the displacement fuzz's check.
 bool CheckIdempotence(const OverlapResult& first, double eps) {
   std::vector<EdgeM> asEdgeM;
   for (const auto& e : first.edges) {
     asEdgeM.push_back({e.v0, e.v1, e.mult});
   }
   auto second = RemoveOverlaps2D(first.verts, asEdgeM, eps);
-  // Compare canonically: build sets of (vMin, vMax, abs(mult), direction)
-  // for both runs.
-  auto canonicalize = [](const std::vector<OutEdge>& edges) {
-    std::set<std::tuple<int, int, int, int>> s;
-    for (const auto& e : edges) {
-      int vMin = std::min(e.v0, e.v1);
-      int vMax = std::max(e.v0, e.v1);
-      int dir = (e.v0 < e.v1) ? 1 : -1;
-      s.insert({vMin, vMax, e.mult, dir});
-    }
-    return s;
-  };
-  auto s1 = canonicalize(first.edges);
-  auto s2 = canonicalize(second.edges);
-  bool ok = (s1 == s2);
+  bool ok = (Fingerprint(first, eps) == Fingerprint(second, eps));
   std::cout << "  Idempotence: " << (ok ? "PASS" : "FAIL") << std::endl;
   return ok;
 }
@@ -851,8 +843,9 @@ void Diagnose(uint64_t seed) {
   std::cerr << "After step 4 (intersections): " << merge.verts.size()
             << " verts (added " << (afterStep4 - beforeStep4) << ")\n";
 
-  // Re-merge ALL verts (originals + intersection-created) under same eps.
-  auto remerge = MergeVerts(merge.verts, eps);
+  // Re-merge ALL verts (originals + intersection-created) under 1.5 * eps,
+  // matching production RemoveOverlaps2D.
+  auto remerge = MergeVerts(merge.verts, 1.5 * eps);
   if (remerge.verts.size() < merge.verts.size()) {
     std::cerr << "After step 4b (re-merge): " << remerge.verts.size()
               << " verts (re-merged "
@@ -1190,18 +1183,27 @@ int main(int argc, char** argv) {
         if (Fingerprint(r, eps) == Fingerprint(r2, eps)) ++singlePassIdem;
         // Iterate-to-fixed-point.
         int iters = 0;
-        bool cycled = false;
+        IterStatus status = IterStatus::Converged;
         auto rIter =
-            IterateToFixedPoint(v, e, eps, /*maxIter=*/8, &iters, &cycled);
+            IterateToFixedPoint(v, e, eps, /*maxIter=*/8, &iters, &status);
         ++iterDistribution[iters];
-        if (cycled) {
-          ++iterCycled;
-        } else if (iters < 8) {
-          ++iterConverged;
-        } else {
-          ++iterMaxedOut;
+        switch (status) {
+          case IterStatus::Converged:
+            ++iterConverged;
+            break;
+          case IterStatus::Cycled:
+            ++iterCycled;
+            break;
+          case IterStatus::MaxedOut:
+            ++iterMaxedOut;
+            break;
         }
-        // Topological validity must still hold on the iterated result.
+        // Topological validity on the iterated result. NOTE: rIter.inputRemap
+        // is the LAST iteration's input->output remap, not the composed
+        // original->final. Works for the random-topology displaced inputs
+        // here because step 1 produces an identity remap when no input verts
+        // merge (true for these inputs); a production version of
+        // IterateToFixedPoint should compose remaps across iterations.
         if (!CheckTopologicalValidity(rIter, e, rIter.inputRemap,
                                       rIter.numMergedVerts)) {
           std::cout << "  ITER FAIL: kPow=" << kPow << " n=" << n
