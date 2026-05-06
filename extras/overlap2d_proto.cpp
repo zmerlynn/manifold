@@ -28,6 +28,7 @@
 #include <map>
 #include <random>
 #include <set>
+#include <sstream>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -510,6 +511,90 @@ OverlapResult RemoveOverlaps2D(const std::vector<Vec2>& vertsIn,
   auto out = FilterByWinding(canon, merge.verts, eps);
   return {std::move(merge.verts), std::move(out), std::move(merge.remap),
           numMerged};
+}
+
+// =============================================================================
+// Iterate-to-fixed-point.
+//
+// Smith §7.7 / figure 7.16: residual ε-scale edge intersections from rounded
+// arithmetic in the first pass are resolved by re-applying the algorithm.
+// We iterate up to maxIter times. Termination:
+//   - Converged: new fingerprint == previous fingerprint (no change).
+//   - Cycle: new fingerprint == any earlier (non-immediate) fingerprint.
+//     Pick the iteration with the lex-smallest fingerprint as canonical
+//     (deterministic choice among the cycle's equivalent outputs).
+//   - Hit maxIter without convergence/cycle: return current.
+//
+// Fingerprint quantizes vert positions to multiples of eps/100 so that
+// cross-iteration vert renumbering doesn't break comparison.
+// =============================================================================
+inline std::string Fingerprint(const OverlapResult& r, double eps) {
+  const double quantum = eps * 0.01;
+  auto q = [quantum](double x) {
+    return static_cast<int64_t>(std::round(x / quantum));
+  };
+  std::vector<std::tuple<int64_t, int64_t, int64_t, int64_t, int>> subs;
+  subs.reserve(r.edges.size());
+  for (const auto& oe : r.edges) {
+    Vec2 p0 = r.verts[oe.v0];
+    Vec2 p1 = r.verts[oe.v1];
+    auto ka = std::make_pair(q(p0.x), q(p0.y));
+    auto kb = std::make_pair(q(p1.x), q(p1.y));
+    int mult = oe.mult;
+    if (kb < ka) {
+      std::swap(ka, kb);
+      mult = -mult;
+    }
+    subs.emplace_back(ka.first, ka.second, kb.first, kb.second, mult);
+  }
+  std::sort(subs.begin(), subs.end());
+  std::ostringstream oss;
+  for (const auto& [ax, ay, bx, by, m] : subs) {
+    oss << ax << "," << ay << "," << bx << "," << by << ":" << m << ";";
+  }
+  return oss.str();
+}
+
+OverlapResult IterateToFixedPoint(const std::vector<Vec2>& vIn,
+                                  const std::vector<EdgeM>& eIn, double eps,
+                                  int maxIter = 5, int* outIters = nullptr,
+                                  bool* outCycled = nullptr) {
+  std::vector<OverlapResult> history;
+  std::vector<std::string> fps;
+  history.push_back(RemoveOverlaps2D(vIn, eIn, eps));
+  fps.push_back(Fingerprint(history.back(), eps));
+  if (outCycled) *outCycled = false;
+  for (int iter = 1; iter <= maxIter; ++iter) {
+    std::vector<EdgeM> nextEdges;
+    nextEdges.reserve(history.back().edges.size());
+    for (const auto& oe : history.back().edges)
+      nextEdges.push_back({oe.v0, oe.v1, oe.mult});
+    auto next = RemoveOverlaps2D(history.back().verts, nextEdges, eps);
+    auto nextFp = Fingerprint(next, eps);
+    if (nextFp == fps.back()) {
+      // Converged.
+      if (outIters) *outIters = iter;
+      return next;
+    }
+    // Cycle detection: same fingerprint seen earlier (not just last).
+    for (size_t k = 0; k + 1 < fps.size(); ++k) {
+      if (fps[k] == nextFp) {
+        if (outIters) *outIters = iter;
+        if (outCycled) *outCycled = true;
+        // Lex-smallest fingerprint wins.
+        size_t minIdx = 0;
+        for (size_t j = 1; j < fps.size(); ++j) {
+          if (fps[j] < fps[minIdx]) minIdx = j;
+        }
+        if (nextFp < fps[minIdx]) return next;
+        return std::move(history[minIdx]);
+      }
+    }
+    history.push_back(std::move(next));
+    fps.push_back(std::move(nextFp));
+  }
+  if (outIters) *outIters = maxIter;
+  return std::move(history.back());
 }
 
 // =============================================================================
@@ -1077,7 +1162,8 @@ int main(int argc, char** argv) {
   std::cout << "=== Fuzz: random polygons displaced near 2^k boundaries ==="
             << std::endl;
   int dispPass = 0, dispFail = 0;
-  int dispIdemPass = 0, dispIdemFail = 0;
+  int singlePassIdem = 0, iterConverged = 0, iterCycled = 0, iterMaxedOut = 0;
+  std::map<int, int> iterDistribution;  // iter count -> count
   for (int kPow : {10, 20, 30, 40, 49}) {
     const double offset = std::ldexp(1.5, kPow);
     const double eps = EpsilonFromScale(offset);
@@ -1085,6 +1171,7 @@ int main(int argc, char** argv) {
       for (uint64_t seed = 0; seed < 30; ++seed) {
         auto [v, e] = RandomTopologicalPolygon(n, seed + 1000 * kPow);
         Displace(&v, offset);
+        // Single-pass: topological validity only.
         auto r = RemoveOverlaps2D(v, e, eps);
         bool ok =
             CheckTopologicalValidity(r, e, r.inputRemap, r.numMergedVerts);
@@ -1095,35 +1182,44 @@ int main(int argc, char** argv) {
           std::cout << "  FAIL: kPow=" << kPow << " n=" << n << " seed=" << seed
                     << std::endl;
         }
-        // Idempotence: feed output back through. Output is OutEdge; convert
-        // to EdgeM with same multiplicities.
+        // Single-pass idempotence: re-run and compare fingerprint.
         std::vector<EdgeM> rEdges;
         for (const auto& oe : r.edges)
           rEdges.push_back({oe.v0, oe.v1, oe.mult});
         auto r2 = RemoveOverlaps2D(r.verts, rEdges, eps);
-        // Same output? Compare canonical sub-edge sets.
-        std::set<std::tuple<int, int, int>> set1, set2;
-        for (const auto& oe : r.edges)
-          set1.insert(
-              {std::min(oe.v0, oe.v1), std::max(oe.v0, oe.v1), oe.mult});
-        for (const auto& oe : r2.edges)
-          set2.insert(
-              {std::min(oe.v0, oe.v1), std::max(oe.v0, oe.v1), oe.mult});
-        if (set1 == set2) {
-          ++dispIdemPass;
+        if (Fingerprint(r, eps) == Fingerprint(r2, eps)) ++singlePassIdem;
+        // Iterate-to-fixed-point.
+        int iters = 0;
+        bool cycled = false;
+        auto rIter =
+            IterateToFixedPoint(v, e, eps, /*maxIter=*/8, &iters, &cycled);
+        ++iterDistribution[iters];
+        if (cycled) {
+          ++iterCycled;
+        } else if (iters < 8) {
+          ++iterConverged;
         } else {
-          ++dispIdemFail;
+          ++iterMaxedOut;
+        }
+        // Topological validity must still hold on the iterated result.
+        if (!CheckTopologicalValidity(rIter, e, rIter.inputRemap,
+                                      rIter.numMergedVerts)) {
+          std::cout << "  ITER FAIL: kPow=" << kPow << " n=" << n
+                    << " seed=" << seed << std::endl;
         }
       }
     }
   }
-  // Idempotence is best-effort; topological validity is the hard
-  // invariant. Failures here mean re-running produces a slightly different
-  // (still valid) canonical sub-edge set due to snap re-canonicalization,
-  // not a wrong output. Don't fail the build, just report.
-  std::cout << "  Idempotence: " << dispIdemPass << " pass, " << dispIdemFail
-            << " fail (best-effort; failures cluster at kPow=30 dense"
-            << " regime; topology still valid above)" << std::endl;
+  std::cout << "  Single-pass idempotence: " << singlePassIdem << "/450"
+            << std::endl;
+  std::cout << "  Iterate-to-fixed-point: " << iterConverged << " converged, "
+            << iterCycled << " cycled, " << iterMaxedOut << " hit max-iter (8)"
+            << std::endl;
+  std::cout << "  Iter distribution: ";
+  for (const auto& [k, v] : iterDistribution) {
+    std::cout << k << ":" << v << " ";
+  }
+  std::cout << std::endl;
   std::cout << "  Displacement invariant: " << dispPass << " pass, " << dispFail
             << " fail (5 scales × 3 sizes × 30 seeds = 450 cases)" << std::endl;
   if (dispFail > 0) allPass = false;
