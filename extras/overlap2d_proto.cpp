@@ -119,19 +119,50 @@ inline double YAtX(double xP, double xL, double yL, double xR, double yR) {
 // Cross-detection via manifold's `CCW` (orientation predicate with
 // tolerance). Two segments AB and CD strictly cross iff CCW(A, B, C) and
 // CCW(A, B, D) have opposite signs AND CCW(C, D, A) and CCW(C, D, B)
-// have opposite signs. CCW returns 0 within `tol` of collinear, so any
-// near-touching configuration is rejected as "doesn't strictly cross".
-// Once we know they cross, the position is computed by Cramer (FP noise
-// in the position is fine because the cross-or-not decision was already
-// resolved symbolically by CCW).
-inline bool IntersectSegments(vec2 a0, vec2 a1, vec2 b0, vec2 b1, double eps,
+// have opposite signs. CCW returns 0 within `tol` of collinear; one
+// non-zero zero means a single endpoint lies on the other segment
+// ("touch but don't cross"), which we reject. All four zero means the
+// segments are mutually collinear — that case is resolved by the
+// Edelsbrunner-Mücke SoS perturbation in `IntersectSegments` below;
+// permutation parity of the four ranks decides whether the perturbed
+// segments cross. Once we know they cross, position is computed by
+// Cramer (FP noise in the position is fine because the cross-or-not
+// decision was already resolved symbolically).
+inline int CCWPerturbed(vec2 a, vec2 b, vec2 c, int rA, int rB, int rC,
+                       double tol) {
+  const int s = CCW(a, b, c, tol);
+  if (s != 0) return s;
+  // Sort (rA, rB, rC), counting transpositions. Even parity → +1.
+  int sw = 0;
+  if (rA > rB) { std::swap(rA, rB); ++sw; }
+  if (rB > rC) { std::swap(rB, rC); ++sw; }
+  if (rA > rB) { std::swap(rA, rB); ++sw; }
+  return (sw & 1) ? -1 : 1;
+}
+
+inline bool IntersectSegments(vec2 a0, vec2 a1, vec2 b0, vec2 b1, int rA0,
+                              int rA1, int rB0, int rB1, double eps,
                               vec2* out) {
   const int s1 = CCW(a0, a1, b0, eps);
   const int s2 = CCW(a0, a1, b1, eps);
-  if (s1 == 0 || s2 == 0 || s1 == s2) return false;
   const int s3 = CCW(b0, b1, a0, eps);
   const int s4 = CCW(b0, b1, a1, eps);
-  if (s3 == 0 || s4 == 0 || s3 == s4) return false;
+  // Strictly-touching case: one endpoint is on the other line but the
+  // segments aren't fully collinear. Conservatively NOT a cross.
+  const int zeros = (s1 == 0) + (s2 == 0) + (s3 == 0) + (s4 == 0);
+  if (zeros > 0 && zeros < 4) return false;
+  // Fully-collinear case: SoS resolves the degeneracy with rank parity.
+  if (zeros == 4) {
+    const int p1 = CCWPerturbed(a0, a1, b0, rA0, rA1, rB0, eps);
+    const int p2 = CCWPerturbed(a0, a1, b1, rA0, rA1, rB1, eps);
+    if (p1 == p2) return false;
+    const int p3 = CCWPerturbed(b0, b1, a0, rB0, rB1, rA0, eps);
+    const int p4 = CCWPerturbed(b0, b1, a1, rB0, rB1, rA1, eps);
+    if (p3 == p4) return false;
+  } else {
+    if (s1 == s2) return false;
+    if (s3 == s4) return false;
+  }
   const double dax = a1.x - a0.x;
   const double day = a1.y - a0.y;
   const double dbx = b1.x - b0.x;
@@ -377,7 +408,9 @@ void FindAndInsertIntersections(const std::vector<EdgeM>& edges,
       vec2 b0 = (*verts)[edges[j].v0];
       vec2 b1 = (*verts)[edges[j].v1];
       vec2 p;
-      if (!IntersectSegments(a0, a1, b0, b1, eps, &p)) continue;
+      if (!IntersectSegments(a0, a1, b0, b1, edges[i].v0, edges[i].v1,
+                             edges[j].v0, edges[j].v1, eps, &p))
+        continue;
       // Snap: is p within eps of any existing vert? Search the union of
       // (i,j)'s endpoints and existing list members of i and j.
       auto nearVert = [&](int candidate) -> bool {
