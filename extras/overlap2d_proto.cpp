@@ -31,6 +31,13 @@
 //   - All spatial queries are brute-force O(N^2). The plan to swap for
 //     manifold's Collider lives in
 //     .claude/plans/issue-289-2d-overlap-removal.md.
+//
+// Naming follows manifold conventions (`vec2`, `dot`, `length`,
+// `DisjointSets` with `find`/`unite`/`same`) so this prototype reads in
+// the same vocabulary as the eventual real implementation. The local
+// definitions here are the "would be replaced by manifold's <X>"
+// versions of those types -- the algorithm itself is identical to what
+// would ship.
 
 #include <algorithm>
 #include <cassert>
@@ -53,16 +60,18 @@ constexpr double kU = 1.110223024625156540423631668e-16;
 // ~= 12.37.
 constexpr double kAlphaCoeff = 12.37;
 
-struct Vec2 {
+// Local stand-in for `manifold::vec2` (la::vec<double, 2>); production code
+// would use the real type from manifold/common.h.
+struct vec2 {
   double x;
   double y;
 };
 
-inline Vec2 operator+(Vec2 a, Vec2 b) { return {a.x + b.x, a.y + b.y}; }
-inline Vec2 operator-(Vec2 a, Vec2 b) { return {a.x - b.x, a.y - b.y}; }
-inline Vec2 operator*(Vec2 a, double s) { return {a.x * s, a.y * s}; }
-inline double Dot(Vec2 a, Vec2 b) { return a.x * b.x + a.y * b.y; }
-inline double Length(Vec2 a) { return std::sqrt(Dot(a, a)); }
+inline vec2 operator+(vec2 a, vec2 b) { return {a.x + b.x, a.y + b.y}; }
+inline vec2 operator-(vec2 a, vec2 b) { return {a.x - b.x, a.y - b.y}; }
+inline vec2 operator*(vec2 a, double s) { return {a.x * s, a.y * s}; }
+inline double dot(vec2 a, vec2 b) { return a.x * b.x + a.y * b.y; }
+inline double length(vec2 a) { return std::sqrt(dot(a, a)); }
 
 // Edge with signed multiplicity. v0/v1 index into the vertex vector.
 struct EdgeM {
@@ -119,7 +128,7 @@ inline double YAtX(double xP, double xL, double yL, double xR, double yR) {
 // For the prototype this is "good enough". The eventual real implementation
 // would use Smith's YAtX form with explicit vertical-segment branching for
 // the tighter error bounds (§8.2).
-inline bool IntersectSegments(Vec2 a0, Vec2 a1, Vec2 b0, Vec2 b1, Vec2* out) {
+inline bool IntersectSegments(vec2 a0, vec2 a1, vec2 b0, vec2 b1, vec2* out) {
   const double dax = a1.x - a0.x;
   const double day = a1.y - a0.y;
   const double dbx = b1.x - b0.x;
@@ -143,58 +152,63 @@ inline bool IntersectSegments(Vec2 a0, Vec2 a1, Vec2 b0, Vec2 b1, Vec2* out) {
 // =============================================================================
 struct VertexMerge {
   std::vector<int> remap;
-  std::vector<Vec2> verts;
+  std::vector<vec2> verts;
 };
 
-// Simple union-find.
-struct UnionFind {
-  std::vector<int> parent;
-  void Init(int n) {
-    parent.resize(n);
-    for (int i = 0; i < n; ++i) parent[i] = i;
+// Local stand-in for `manifold::DisjointSets` (src/disjoint_sets.h);
+// production would use the real one (atomic, lock-free, rank-balanced,
+// with `connectedComponents`). This is a textbook half-path-compression
+// version with the same public surface (`find` / `unite` / `same`).
+class DisjointSets {
+ public:
+  explicit DisjointSets(int n) : parent_(n) {
+    for (int i = 0; i < n; ++i) parent_[i] = i;
   }
-  int Find(int x) {
-    while (parent[x] != x) {
-      parent[x] = parent[parent[x]];
-      x = parent[x];
+  int find(int x) {
+    while (parent_[x] != x) {
+      parent_[x] = parent_[parent_[x]];
+      x = parent_[x];
     }
     return x;
   }
-  void Union(int a, int b) {
-    int ra = Find(a), rb = Find(b);
-    if (ra != rb) parent[ra] = rb;
+  void unite(int a, int b) {
+    int ra = find(a), rb = find(b);
+    if (ra != rb) parent_[ra] = rb;
   }
+  bool same(int a, int b) { return find(a) == find(b); }
+
+ private:
+  std::vector<int> parent_;
 };
 
-VertexMerge MergeVerts(const std::vector<Vec2>& in, double eps) {
+VertexMerge MergeVerts(const std::vector<vec2>& in, double eps) {
   const int n = static_cast<int>(in.size());
-  UnionFind uf;
-  uf.Init(n);
+  DisjointSets uf(n);
   // Brute force O(n^2); phase 3 will replace with BVH.
   const double eps2 = eps * eps;
   for (int i = 0; i < n; ++i) {
     for (int j = i + 1; j < n; ++j) {
-      Vec2 d = in[i] - in[j];
-      if (Dot(d, d) <= eps2) uf.Union(i, j);
+      vec2 d = in[i] - in[j];
+      if (dot(d, d) <= eps2) uf.unite(i, j);
     }
   }
   // Compute centroid per cluster.
-  std::map<int, std::pair<Vec2, int>> sums;  // root -> (sum, count)
+  std::map<int, std::pair<vec2, int>> sums;  // root -> (sum, count)
   for (int i = 0; i < n; ++i) {
-    int r = uf.Find(i);
+    int r = uf.find(i);
     auto& s = sums[r];
     s.first = s.first + in[i];
     s.second += 1;
   }
   // Assign new indices.
   std::map<int, int> rootToNew;
-  std::vector<Vec2> verts;
+  std::vector<vec2> verts;
   for (const auto& [root, sumCount] : sums) {
     rootToNew[root] = static_cast<int>(verts.size());
     verts.push_back(sumCount.first * (1.0 / sumCount.second));
   }
   std::vector<int> remap(n);
-  for (int i = 0; i < n; ++i) remap[i] = rootToNew[uf.Find(i)];
+  for (int i = 0; i < n; ++i) remap[i] = rootToNew[uf.find(i)];
   return {std::move(remap), std::move(verts)};
 }
 
@@ -218,29 +232,29 @@ std::vector<EdgeM> RemapAndCollapse(const std::vector<EdgeM>& edges,
 // Returns vertList[edgeIdx] = sorted list of vert indices along the edge.
 // =============================================================================
 std::vector<std::vector<int>> BuildEdgeVertLists(
-    const std::vector<EdgeM>& edges, const std::vector<Vec2>& verts,
+    const std::vector<EdgeM>& edges, const std::vector<vec2>& verts,
     double eps) {
   const int nE = static_cast<int>(edges.size());
   const int nV = static_cast<int>(verts.size());
   const double eps2 = eps * eps;
   std::vector<std::vector<int>> lists(nE);
   for (int e = 0; e < nE; ++e) {
-    const Vec2 a = verts[edges[e].v0];
-    const Vec2 b = verts[edges[e].v1];
-    const Vec2 ab = b - a;
-    const double abLen2 = Dot(ab, ab);
+    const vec2 a = verts[edges[e].v0];
+    const vec2 b = verts[edges[e].v1];
+    const vec2 ab = b - a;
+    const double abLen2 = dot(ab, ab);
     if (abLen2 == 0) continue;
     // Track parametric position t in [0, 1] for sort.
     std::vector<std::pair<double, int>> hits;
     for (int v = 0; v < nV; ++v) {
       if (v == edges[e].v0 || v == edges[e].v1) continue;
-      const Vec2 ap = verts[v] - a;
-      const double t = Dot(ap, ab) / abLen2;
+      const vec2 ap = verts[v] - a;
+      const double t = dot(ap, ab) / abLen2;
       if (t <= 0 || t >= 1) continue;  // outside open interval
       // Perpendicular distance squared.
-      const Vec2 closest = a + ab * t;
-      const Vec2 d = verts[v] - closest;
-      if (Dot(d, d) <= eps2) hits.emplace_back(t, v);
+      const vec2 closest = a + ab * t;
+      const vec2 d = verts[v] - closest;
+      if (dot(d, d) <= eps2) hits.emplace_back(t, v);
     }
     std::sort(hits.begin(), hits.end());
     lists[e].reserve(hits.size());
@@ -254,7 +268,7 @@ std::vector<std::vector<int>> BuildEdgeVertLists(
 // existing nearby verts) into per-edge lists.
 // =============================================================================
 void FindAndInsertIntersections(const std::vector<EdgeM>& edges,
-                                std::vector<Vec2>* verts,
+                                std::vector<vec2>* verts,
                                 std::vector<std::vector<int>>* lists,
                                 double eps) {
   const int nE = static_cast<int>(edges.size());
@@ -266,17 +280,17 @@ void FindAndInsertIntersections(const std::vector<EdgeM>& edges,
       if (edges[i].v0 == edges[j].v0 || edges[i].v0 == edges[j].v1 ||
           edges[i].v1 == edges[j].v0 || edges[i].v1 == edges[j].v1)
         continue;
-      Vec2 a0 = (*verts)[edges[i].v0];
-      Vec2 a1 = (*verts)[edges[i].v1];
-      Vec2 b0 = (*verts)[edges[j].v0];
-      Vec2 b1 = (*verts)[edges[j].v1];
-      Vec2 p;
+      vec2 a0 = (*verts)[edges[i].v0];
+      vec2 a1 = (*verts)[edges[i].v1];
+      vec2 b0 = (*verts)[edges[j].v0];
+      vec2 b1 = (*verts)[edges[j].v1];
+      vec2 p;
       if (!IntersectSegments(a0, a1, b0, b1, &p)) continue;
       // Snap: is p within eps of any existing vert? Search the union of
       // (i,j)'s endpoints and existing list members of i and j.
       auto nearVert = [&](int candidate) -> bool {
-        Vec2 d = p - (*verts)[candidate];
-        return Dot(d, d) <= eps2;
+        vec2 d = p - (*verts)[candidate];
+        return dot(d, d) <= eps2;
       };
       int snapTo = -1;
       for (int v : {edges[i].v0, edges[i].v1, edges[j].v0, edges[j].v1}) {
@@ -311,16 +325,16 @@ void FindAndInsertIntersections(const std::vector<EdgeM>& edges,
       // Insert into both edges' lists, sorted by parametric position.
       auto insertSorted = [&](int eIdx) {
         if (vNew == edges[eIdx].v0 || vNew == edges[eIdx].v1) return;
-        Vec2 a = (*verts)[edges[eIdx].v0];
-        Vec2 b = (*verts)[edges[eIdx].v1];
-        Vec2 ab = b - a;
-        double abLen2 = Dot(ab, ab);
+        vec2 a = (*verts)[edges[eIdx].v0];
+        vec2 b = (*verts)[edges[eIdx].v1];
+        vec2 ab = b - a;
+        double abLen2 = dot(ab, ab);
         if (abLen2 == 0) return;
-        double tNew = Dot(p - a, ab) / abLen2;
+        double tNew = dot(p - a, ab) / abLen2;
         auto& lst = (*lists)[eIdx];
         auto pos = std::lower_bound(
             lst.begin(), lst.end(), tNew, [&](int v, double t) {
-              double tv = Dot((*verts)[v] - a, ab) / abLen2;
+              double tv = dot((*verts)[v] - a, ab) / abLen2;
               return tv < t;
             });
         if (pos == lst.end() || *pos != vNew) lst.insert(pos, vNew);
@@ -382,12 +396,12 @@ CanonicalSubEdges Canonicalize(const std::vector<EdgeM>& edges,
 // This is a simple non-symbolic-perturbation cast with known limitations
 // when the ray hits a vertex exactly. For the prototype we offset the
 // midpoint by tiny random epsilon if needed (TODO).
-int CastWindingRay(Vec2 origin, const CanonicalSubEdges& canon,
-                   const std::vector<Vec2>& verts) {
+int CastWindingRay(vec2 origin, const CanonicalSubEdges& canon,
+                   const std::vector<vec2>& verts) {
   int winding = 0;
   for (const auto& [key, mult] : canon.map) {
-    Vec2 p0 = verts[key.first];
-    Vec2 p1 = verts[key.second];
+    vec2 p0 = verts[key.first];
+    vec2 p1 = verts[key.second];
     // Order so p0.y <= p1.y for crossing test.
     bool upward = p0.y < p1.y;
     if (!upward) std::swap(p0, p1);
@@ -424,7 +438,7 @@ int CastWindingRay(Vec2 origin, const CanonicalSubEdges& canon,
 // approach degrades. The algorithmically-correct fix is planar face
 // traversal; see `.claude/plans/issue-289-2d-overlap-removal.md`.
 std::vector<OutEdge> FilterByWinding(const CanonicalSubEdges& canon,
-                                     const std::vector<Vec2>& verts,
+                                     const std::vector<vec2>& verts,
                                      double eps_snap) {
   std::vector<OutEdge> out;
   // Offset must be (a) > FP noise so ray-cast comparisons are reliable, and
@@ -435,15 +449,15 @@ std::vector<OutEdge> FilterByWinding(const CanonicalSubEdges& canon,
   // the local face).
   const double ofs = eps_snap * 1e-1;
   for (const auto& [key, mult] : canon.map) {
-    Vec2 p0 = verts[key.first];
-    Vec2 p1 = verts[key.second];
-    Vec2 mid = (p0 + p1) * 0.5;
-    Vec2 d = p1 - p0;
-    double len = Length(d);
+    vec2 p0 = verts[key.first];
+    vec2 p1 = verts[key.second];
+    vec2 mid = (p0 + p1) * 0.5;
+    vec2 d = p1 - p0;
+    double len = length(d);
     if (len == 0) continue;
-    Vec2 perp = {-d.y / len, d.x / len};  // 90° CCW
-    Vec2 leftPt = mid + perp * ofs;
-    Vec2 rightPt = mid + perp * -ofs;
+    vec2 perp = {-d.y / len, d.x / len};  // 90° CCW
+    vec2 leftPt = mid + perp * ofs;
+    vec2 rightPt = mid + perp * -ofs;
     int wL = CastWindingRay(leftPt, canon, verts);
     int wR = CastWindingRay(rightPt, canon, verts);
     bool leftIn = wL > 0;
@@ -468,13 +482,13 @@ std::vector<OutEdge> FilterByWinding(const CanonicalSubEdges& canon,
 // End-to-end driver.
 // =============================================================================
 struct OverlapResult {
-  std::vector<Vec2> verts;
+  std::vector<vec2> verts;
   std::vector<OutEdge> edges;
   std::vector<int> inputRemap;  // input vert idx -> output vert idx
   int numMergedVerts;           // count of verts before step-4 intersections
 };
 
-OverlapResult RemoveOverlaps2D(const std::vector<Vec2>& vertsIn,
+OverlapResult RemoveOverlaps2D(const std::vector<vec2>& vertsIn,
                                const std::vector<EdgeM>& edgesIn, double eps) {
   // Step 1: vertex merge.
   auto merge = MergeVerts(vertsIn, eps);
@@ -545,8 +559,8 @@ inline std::string Fingerprint(const OverlapResult& r, double eps) {
   std::vector<std::tuple<int64_t, int64_t, int64_t, int64_t, int>> subs;
   subs.reserve(r.edges.size());
   for (const auto& oe : r.edges) {
-    Vec2 p0 = r.verts[oe.v0];
-    Vec2 p1 = r.verts[oe.v1];
+    vec2 p0 = r.verts[oe.v0];
+    vec2 p1 = r.verts[oe.v1];
     auto ka = std::make_pair(q(p0.x), q(p0.y));
     auto kb = std::make_pair(q(p1.x), q(p1.y));
     int mult = oe.mult;
@@ -570,7 +584,7 @@ enum class IterStatus {
   MaxedOut,
 };
 
-OverlapResult IterateToFixedPoint(const std::vector<Vec2>& vIn,
+OverlapResult IterateToFixedPoint(const std::vector<vec2>& vIn,
                                   const std::vector<EdgeM>& eIn, double eps,
                                   int maxIter = 8, int* outIters = nullptr,
                                   IterStatus* outStatus = nullptr) {
@@ -671,11 +685,11 @@ bool CheckTopologicalValidity(const OverlapResult& r,
 
 // Random topological polygon: N points on unit circle in random angular
 // order. Produces a self-intersecting closed curve.
-std::pair<std::vector<Vec2>, std::vector<EdgeM>> RandomTopologicalPolygon(
+std::pair<std::vector<vec2>, std::vector<EdgeM>> RandomTopologicalPolygon(
     int n, uint64_t seed) {
   std::mt19937_64 rng(seed);
   std::uniform_real_distribution<double> u01(0, 1);
-  std::vector<Vec2> verts(n);
+  std::vector<vec2> verts(n);
   for (int i = 0; i < n; ++i) {
     double theta = 2 * 3.14159265358979 * u01(rng);
     verts[i] = {std::cos(theta), std::sin(theta)};
@@ -694,9 +708,9 @@ std::pair<std::vector<Vec2>, std::vector<EdgeM>> RandomTopologicalPolygon(
 
 // Polygonal star: n equispaced points on unit circle, connected by skipping
 // k vertices. Highly self-intersecting and symmetric.
-std::pair<std::vector<Vec2>, std::vector<EdgeM>> PolygonalStar(int n,
+std::pair<std::vector<vec2>, std::vector<EdgeM>> PolygonalStar(int n,
                                                                int skip) {
-  std::vector<Vec2> verts(n);
+  std::vector<vec2> verts(n);
   for (int i = 0; i < n; ++i) {
     double theta = 2 * 3.14159265358979 * i / n;
     verts[i] = {std::cos(theta), std::sin(theta)};
@@ -712,7 +726,7 @@ std::pair<std::vector<Vec2>, std::vector<EdgeM>> PolygonalStar(int n,
 // Apply a translation that brings the bounding box near a power of 2.
 // Smith §7.7's "displacement attack" makes representable grid spacing
 // comparable to feature sizes.
-void Displace(std::vector<Vec2>* verts, double offset) {
+void Displace(std::vector<vec2>* verts, double offset) {
   for (auto& v : *verts) {
     v.x += offset;
     v.y += offset;
@@ -720,8 +734,8 @@ void Displace(std::vector<Vec2>* verts, double offset) {
 }
 
 // L-shaped concave polygon (CCW). 6 verts, no self-intersection.
-std::pair<std::vector<Vec2>, std::vector<EdgeM>> LShape() {
-  std::vector<Vec2> v = {
+std::pair<std::vector<vec2>, std::vector<EdgeM>> LShape() {
+  std::vector<vec2> v = {
       {0, 0}, {2, 0}, {2, 1}, {1, 1}, {1, 2}, {0, 2},
   };
   std::vector<EdgeM> e = {{0, 1, 1}, {1, 2, 1}, {2, 3, 1},
@@ -730,8 +744,8 @@ std::pair<std::vector<Vec2>, std::vector<EdgeM>> LShape() {
 }
 
 // Square (CCW) with a square hole (CW). Two disjoint loops.
-std::pair<std::vector<Vec2>, std::vector<EdgeM>> SquareWithHole() {
-  std::vector<Vec2> v = {
+std::pair<std::vector<vec2>, std::vector<EdgeM>> SquareWithHole() {
+  std::vector<vec2> v = {
       // Outer CCW square
       {0, 0},
       {4, 0},
@@ -751,8 +765,8 @@ std::pair<std::vector<Vec2>, std::vector<EdgeM>> SquareWithHole() {
 }
 
 // Two disjoint CCW squares.
-std::pair<std::vector<Vec2>, std::vector<EdgeM>> TwoSquares() {
-  std::vector<Vec2> v = {
+std::pair<std::vector<vec2>, std::vector<EdgeM>> TwoSquares() {
+  std::vector<vec2> v = {
       {0, 0}, {1, 0}, {1, 1}, {0, 1}, {2, 0}, {3, 0}, {3, 1}, {2, 1},
   };
   std::vector<EdgeM> e = {
@@ -767,7 +781,7 @@ std::pair<std::vector<Vec2>, std::vector<EdgeM>> TwoSquares() {
 // =============================================================================
 struct TestCase {
   std::string name;
-  std::vector<Vec2> verts;
+  std::vector<vec2> verts;
   std::vector<EdgeM> edges;
   double eps;
 };
@@ -973,8 +987,8 @@ void Diagnose(uint64_t seed) {
     const double thresh2 = (10 * eps) * (10 * eps);
     for (int v = 0; v < static_cast<int>(merge.verts.size()); ++v) {
       if (v == targetV) continue;
-      Vec2 d = merge.verts[v] - merge.verts[targetV];
-      double dist2 = Dot(d, d);
+      vec2 d = merge.verts[v] - merge.verts[targetV];
+      double dist2 = dot(d, d);
       if (dist2 <= thresh2) {
         std::cerr << "    v" << v << " dist=" << std::sqrt(dist2) << " ("
                   << (std::sqrt(dist2) / eps) << "*eps)\n";
@@ -983,14 +997,14 @@ void Diagnose(uint64_t seed) {
     const double ofs = eps * 1e-1;  // matches FilterByWinding
     for (const auto& [k, m] : canon.map) {
       if (k.first != targetV && k.second != targetV) continue;
-      Vec2 p0 = merge.verts[k.first];
-      Vec2 p1 = merge.verts[k.second];
-      Vec2 mid = (p0 + p1) * 0.5;
-      Vec2 d = p1 - p0;
-      double len = Length(d);
-      Vec2 perp = {-d.y / len, d.x / len};
-      Vec2 leftPt = mid + perp * ofs;
-      Vec2 rightPt = mid + perp * -ofs;
+      vec2 p0 = merge.verts[k.first];
+      vec2 p1 = merge.verts[k.second];
+      vec2 mid = (p0 + p1) * 0.5;
+      vec2 d = p1 - p0;
+      double len = length(d);
+      vec2 perp = {-d.y / len, d.x / len};
+      vec2 leftPt = mid + perp * ofs;
+      vec2 rightPt = mid + perp * -ofs;
       int wL = CastWindingRay(leftPt, canon, merge.verts);
       int wR = CastWindingRay(rightPt, canon, merge.verts);
       std::cerr << "  sub-edge (" << k.first << "," << k.second
@@ -1007,8 +1021,8 @@ void Diagnose(uint64_t seed) {
   const double eps2 = eps * eps;
   for (int i = 0; i < static_cast<int>(merge.verts.size()); ++i) {
     for (int j = i + 1; j < static_cast<int>(merge.verts.size()); ++j) {
-      Vec2 d = merge.verts[i] - merge.verts[j];
-      if (Dot(d, d) <= eps2) ++closeCount;
+      vec2 d = merge.verts[i] - merge.verts[j];
+      if (dot(d, d) <= eps2) ++closeCount;
     }
   }
   std::cerr << "After step 4b: " << closeCount
@@ -1027,7 +1041,7 @@ int main(int argc, char** argv) {
 
   // ---- Simple sanity ----
   {
-    std::vector<Vec2> v = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
+    std::vector<vec2> v = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
     std::vector<EdgeM> e = {{0, 1, 1}, {1, 2, 1}, {2, 3, 1}, {3, 0, 1}};
     auto r = RunCase({"CCW square (no overlap)", v, e, EpsilonFromScale(1.0)},
                      &allPass);
@@ -1062,7 +1076,7 @@ int main(int argc, char** argv) {
 
   // ---- Self-intersecting cases ----
   {
-    std::vector<Vec2> v = {{0, 0}, {2, 0}, {0, 2}, {2, 2}};
+    std::vector<vec2> v = {{0, 0}, {2, 0}, {0, 2}, {2, 2}};
     std::vector<EdgeM> e = {{0, 3, 1}, {3, 1, 1}, {1, 2, 1}, {2, 0, 1}};
     auto r = RunCase(
         {"Bowtie (one interior intersection)", v, e, EpsilonFromScale(2.0)},
@@ -1102,7 +1116,7 @@ int main(int argc, char** argv) {
   // ordering failure: {AF, BG, CE} and {AG, BF, CE}. Both embedded in
   // closed self-intersecting hexagons.
   const double u = std::ldexp(1.0, -53);
-  std::vector<Vec2> smithVerts = {
+  std::vector<vec2> smithVerts = {
       {0.5 + 9 * u, 0.5 + 23 * u},   // A=0
       {0.5 + 23 * u, 0.5 + 25 * u},  // B=1
       {9.0, 0.5},                    // C=2
