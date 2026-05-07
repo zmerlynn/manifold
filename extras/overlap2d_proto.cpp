@@ -32,9 +32,8 @@
 //   - Winding ray-cast at edge midpoints is a plain horizontal ray with
 //     half-open vertex handling, no symbolic perturbation. Adequate for
 //     the test patterns here; production would use the symbolic form.
-//   - All spatial queries are brute-force O(N^2). The plan to swap for
-//     manifold's Collider lives in
-//     .claude/plans/issue-289-2d-overlap-removal.md.
+//   - All spatial queries are brute-force O(N^2); a production version
+//     would use manifold's Collider for broad-phase BVH queries.
 
 #include <algorithm>
 #include <cassert>
@@ -50,10 +49,12 @@
 #include <vector>
 
 #include "../src/disjoint_sets.h"
+#include "../src/utils.h"
 #include "manifold/common.h"
 
 namespace overlap2d {
 
+using manifold::CCW;
 using manifold::vec2;
 using manifold::la::dot;
 using manifold::la::length;
@@ -109,29 +110,31 @@ inline double YAtX(double xP, double xL, double yL, double xR, double yR) {
   return yS;
 }
 
-// Parametric (Cramer-style) intersection. Symmetric, handles vertical
-// segments cleanly. Less accurate than Smith's YAtX two-stage formulation
-// (no slope-swap canonicalization) but correct for arbitrary orientations.
-//
-// Returns true if segments intersect strictly in their interiors (open
-// 0 < t < 1 and 0 < s < 1). Endpoint/collinear touches return false.
-//
-// For the prototype this is "good enough". The eventual real implementation
-// would use Smith's YAtX form with explicit vertical-segment branching for
-// the tighter error bounds (§8.2).
-inline bool IntersectSegments(vec2 a0, vec2 a1, vec2 b0, vec2 b1, vec2* out) {
+// Cross-detection via manifold's `CCW` (orientation predicate with
+// tolerance). Two segments AB and CD strictly cross iff CCW(A, B, C) and
+// CCW(A, B, D) have opposite signs AND CCW(C, D, A) and CCW(C, D, B)
+// have opposite signs. CCW returns 0 within `tol` of collinear, so any
+// near-touching configuration is rejected as "doesn't strictly cross".
+// Once we know they cross, the position is computed by Cramer (FP noise
+// in the position is fine because the cross-or-not decision was already
+// resolved symbolically by CCW).
+inline bool IntersectSegments(vec2 a0, vec2 a1, vec2 b0, vec2 b1, double eps,
+                              vec2* out) {
+  const int s1 = CCW(a0, a1, b0, eps);
+  const int s2 = CCW(a0, a1, b1, eps);
+  if (s1 == 0 || s2 == 0 || s1 == s2) return false;
+  const int s3 = CCW(b0, b1, a0, eps);
+  const int s4 = CCW(b0, b1, a1, eps);
+  if (s3 == 0 || s4 == 0 || s3 == s4) return false;
   const double dax = a1.x - a0.x;
   const double day = a1.y - a0.y;
   const double dbx = b1.x - b0.x;
   const double dby = b1.y - b0.y;
-  // det of [da | -db]
   const double det = dbx * day - dax * dby;
-  if (det == 0) return false;  // parallel (collinear handled separately)
+  if (det == 0) return false;
   const double ex = b0.x - a0.x;
   const double ey = b0.y - a0.y;
   const double t = (dbx * ey - dby * ex) / det;
-  const double s = (dax * ey - day * ex) / det;
-  if (t <= 0 || t >= 1 || s <= 0 || s >= 1) return false;
   out->x = a0.x + t * dax;
   out->y = a0.y + t * day;
   return true;
@@ -149,7 +152,7 @@ struct VertexMerge {
 VertexMerge MergeVerts(const std::vector<vec2>& in, double eps) {
   const int n = static_cast<int>(in.size());
   DisjointSets uf(n);
-  // Brute force O(n^2); phase 3 will replace with BVH.
+  // Brute force O(n^2); a production version would use a BVH.
   const double eps2 = eps * eps;
   for (int i = 0; i < n; ++i) {
     for (int j = i + 1; j < n; ++j) {
@@ -235,9 +238,11 @@ std::vector<std::vector<int>> BuildEdgeVertLists(
 void FindAndInsertIntersections(const std::vector<EdgeM>& edges,
                                 std::vector<vec2>* verts,
                                 std::vector<std::vector<int>>* lists,
+                                std::vector<std::set<int>>* vertEdges,
                                 double eps) {
   const int nE = static_cast<int>(edges.size());
   const double eps2 = eps * eps;
+  vertEdges->resize(verts->size());
   // Brute force O(n^2).
   for (int i = 0; i < nE; ++i) {
     for (int j = i + 1; j < nE; ++j) {
@@ -250,7 +255,7 @@ void FindAndInsertIntersections(const std::vector<EdgeM>& edges,
       vec2 b0 = (*verts)[edges[j].v0];
       vec2 b1 = (*verts)[edges[j].v1];
       vec2 p;
-      if (!IntersectSegments(a0, a1, b0, b1, &p)) continue;
+      if (!IntersectSegments(a0, a1, b0, b1, eps, &p)) continue;
       // Snap: is p within eps of any existing vert? Search the union of
       // (i,j)'s endpoints and existing list members of i and j.
       auto nearVert = [&](int candidate) -> bool {
@@ -286,7 +291,11 @@ void FindAndInsertIntersections(const std::vector<EdgeM>& edges,
       } else {
         vNew = static_cast<int>(verts->size());
         verts->push_back(p);
+        vertEdges->emplace_back();
       }
+      // Record edge incidence: this vert is now known to lie on edges i and j.
+      (*vertEdges)[vNew].insert(i);
+      (*vertEdges)[vNew].insert(j);
       // Insert into both edges' lists, sorted by parametric position.
       auto insertSorted = [&](int eIdx) {
         if (vNew == edges[eIdx].v0 || vNew == edges[eIdx].v1) return;
@@ -401,7 +410,7 @@ int CastWindingRay(vec2 origin, const CanonicalSubEdges& canon,
 //
 // Caveat: for very tight `eps_snap` (~ u*L), no such gap exists and the
 // approach degrades. The algorithmically-correct fix is planar face
-// traversal; see `.claude/plans/issue-289-2d-overlap-removal.md`.
+// traversal.
 std::vector<OutEdge> FilterByWinding(const CanonicalSubEdges& canon,
                                      const std::vector<vec2>& verts,
                                      double eps_snap) {
@@ -463,33 +472,92 @@ OverlapResult RemoveOverlaps2D(const std::vector<vec2>& vertsIn,
   // Step 3: per-edge vert list.
   auto lists = BuildEdgeVertLists(edges, merge.verts, eps);
   // Step 4: intersection discovery.
-  FindAndInsertIntersections(edges, &merge.verts, &lists, eps);
+  std::vector<std::set<int>> vertEdges;
+  FindAndInsertIntersections(edges, &merge.verts, &lists, &vertEdges, eps);
 
-  // Step 4b: re-merge ALL verts (originals + intersection-created) using a
-  // slightly looser threshold (1.5 * eps). Intersection insertion in step 4
-  // only snaps to verts already near at insertion time; under high density,
-  // two intersection points can land just over eps apart from each other
-  // because neither was present when the other was inserted, so neither
-  // snapped to the other and both fell on the far side of the eps disc.
-  // 1.5 is empirical here, not derived: eps is parameterized at 1000*alpha
-  // (k_budget), so 1.5*eps is well inside the safe range either way; a
-  // production version should derive the constant from Smith's alpha bound.
-  auto remerge = MergeVerts(merge.verts, 1.5 * eps);
-  if (remerge.verts.size() < merge.verts.size()) {
-    // Remap edges and per-edge vert lists through the second merge.
-    for (auto& e : edges) {
-      e.v0 = remerge.remap[e.v0];
-      e.v1 = remerge.remap[e.v1];
+  // Step 4b: structural re-merge of intersection verts. Step 4 inserts each
+  // intersection at the time its parent edge pair is processed; if pairs
+  // (A, B) and (A, C) both produce intersections at the same true point P*
+  // (i.e. three edges meet there) they may land FP-close but not snap to
+  // each other because neither saw the other yet at insertion time.
+  //
+  // Two intersections that should be the same true point share at least one
+  // common edge in their incidence list (any two of {AB, AC, BC} share an
+  // edge). Two intersections from disjoint edge sets cannot be the same
+  // true point, regardless of geometric distance. So we union-find verts
+  // that share an edge AND fall within eps; this avoids the angle-dependent
+  // threshold of a pure-geometric merge (a fixed factor like 1.5*eps fails
+  // for shallow crossings; large factors over-merge legitimately-distinct
+  // intersections from unrelated edge pairs).
+  //
+  // Caveat: 4+ edges concurrent at one point produces some intersection
+  // pairs (e.g. AB vs CD) that share no edge. Such configurations are
+  // adversarial and not covered here; iterate-to-fixed-point catches some
+  // but not all cases.
+  {
+    DisjointSets uf(static_cast<int>(merge.verts.size()));
+    // The geometric upper bound for "same true point" is eps/sin(theta)
+    // where theta is the crossing angle. For shallow crossings this can
+    // be large; we use a generous 10*eps cutoff which covers theta down
+    // to ~6 degrees. The structural gate prevents over-merging
+    // legitimately-distinct intersections (e.g. edge A crosses B at one
+    // point and C at a different point along A: vAB and vAC share edge A
+    // but are at different true points and shouldn't merge unless they
+    // ALSO geometrically coincide). A sweep across the displacement fuzz
+    // showed 10*eps gives the best iteration count (1:444  2:6) without
+    // over-merging; tightening below 3*eps causes single-pass failures,
+    // loosening to 100*eps causes new over-merge failures.
+    const double mergeThresh2 = (10.0 * eps) * (10.0 * eps);
+    for (size_t a = 0; a < merge.verts.size(); ++a) {
+      if (a >= vertEdges.size() || vertEdges[a].empty()) continue;
+      for (size_t b = a + 1; b < merge.verts.size(); ++b) {
+        if (b >= vertEdges.size() || vertEdges[b].empty()) continue;
+        // Structural gate: do they share an edge?
+        bool shared = false;
+        for (int e : vertEdges[a]) {
+          if (vertEdges[b].count(e)) {
+            shared = true;
+            break;
+          }
+        }
+        if (!shared) continue;
+        // Geometric gate: within mergeThresh?
+        vec2 d = merge.verts[b] - merge.verts[a];
+        if (dot(d, d) > mergeThresh2) continue;
+        uf.unite(static_cast<int>(a), static_cast<int>(b));
+      }
     }
-    for (auto& list : lists) {
-      for (auto& v : list) v = remerge.remap[v];
-      // Drop list members equal to either endpoint of their edge.
-      // Drop adjacent duplicates from re-merge collisions.
-      list.erase(std::unique(list.begin(), list.end()), list.end());
+    // Build remap from union-find clusters; cluster position is centroid.
+    std::map<int, std::pair<vec2, int>> sums;
+    for (size_t i = 0; i < merge.verts.size(); ++i) {
+      int r = uf.find(static_cast<int>(i));
+      auto& s = sums[r];
+      s.first = s.first + merge.verts[i];
+      s.second += 1;
     }
-    // Compose the remap: input -> first-merge -> second-merge.
-    for (auto& r : merge.remap) r = remerge.remap[r];
-    merge.verts = std::move(remerge.verts);
+    if (sums.size() < merge.verts.size()) {
+      std::map<int, int> rootToNew;
+      std::vector<vec2> newVerts;
+      for (const auto& [root, sumCount] : sums) {
+        rootToNew[root] = static_cast<int>(newVerts.size());
+        newVerts.push_back(sumCount.first * (1.0 / sumCount.second));
+      }
+      std::vector<int> remap(merge.verts.size());
+      for (size_t i = 0; i < merge.verts.size(); ++i) {
+        remap[i] = rootToNew[uf.find(static_cast<int>(i))];
+      }
+      // Apply remap to edges + lists + composed input remap.
+      for (auto& e : edges) {
+        e.v0 = remap[e.v0];
+        e.v1 = remap[e.v1];
+      }
+      for (auto& list : lists) {
+        for (auto& v : list) v = remap[v];
+        list.erase(std::unique(list.begin(), list.end()), list.end());
+      }
+      for (auto& r : merge.remap) r = remap[r];
+      merge.verts = std::move(newVerts);
+    }
   }
 
   // Step 5: sub-edge canonicalization.
@@ -817,13 +885,15 @@ void Diagnose(uint64_t seed) {
             << " total list entries across " << edges.size() << " edges\n";
 
   const int beforeStep4 = static_cast<int>(merge.verts.size());
-  FindAndInsertIntersections(edges, &merge.verts, &lists, eps);
+  std::vector<std::set<int>> vertEdges;
+  FindAndInsertIntersections(edges, &merge.verts, &lists, &vertEdges, eps);
   const int afterStep4 = static_cast<int>(merge.verts.size());
   std::cerr << "After step 4 (intersections): " << merge.verts.size()
             << " verts (added " << (afterStep4 - beforeStep4) << ")\n";
 
-  // Re-merge ALL verts (originals + intersection-created) under 1.5 * eps,
-  // matching production RemoveOverlaps2D.
+  // Diagnostic uses the pre-structural geometric merge so we can surface
+  // any remaining "near-coincident" cases. Production RemoveOverlaps2D
+  // uses structural merge instead (see step 4b there).
   auto remerge = MergeVerts(merge.verts, 1.5 * eps);
   if (remerge.verts.size() < merge.verts.size()) {
     std::cerr << "After step 4b (re-merge): " << remerge.verts.size()
