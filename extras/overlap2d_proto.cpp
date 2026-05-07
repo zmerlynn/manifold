@@ -13,13 +13,17 @@
 //     UCAM-CL-TR-766 (2009), Chapter 7.
 //   - elalish's BVH-adapted sketch in github.com/elalish/manifold/issues/289.
 //
-// Build:  g++ -std=c++17 -O2 overlap2d_proto.cpp -o overlap2d_proto
-// Run:    ./overlap2d_proto              # full test battery
-//         ./overlap2d_proto diagnose 0   # diagnostic dump for one case
+// Build (from the manifold repo root):
+//   g++ -std=c++17 -O2 -I include -I src -DMANIFOLD_PAR=-1 \
+//     extras/overlap2d_proto.cpp -o overlap2d_proto
+// Run:
+//   ./overlap2d_proto              # full test battery
+//   ./overlap2d_proto diagnose 0   # diagnostic dump for one case
 //
-// Standalone (no manifold dependencies). Single-threaded. Brute-force
-// spatial queries. Goal: validate the algorithm end-to-end on Smith's
-// adversarial test patterns before committing to BVH/parallelization.
+// Single translation unit, header-only manifold dependency (no link
+// step, no TBB). Single-threaded. Brute-force spatial queries.
+// Goal: validate the algorithm end-to-end on Smith's adversarial test
+// patterns before committing to BVH/parallelization.
 //
 // Intentional simplifications vs a production implementation:
 //   - Segment intersection uses Cramer's rule (parametric), not Smith's
@@ -31,13 +35,6 @@
 //   - All spatial queries are brute-force O(N^2). The plan to swap for
 //     manifold's Collider lives in
 //     .claude/plans/issue-289-2d-overlap-removal.md.
-//
-// Naming follows manifold conventions (`vec2`, `dot`, `length`,
-// `DisjointSets` with `find`/`unite`/`same`) so this prototype reads in
-// the same vocabulary as the eventual real implementation. The local
-// definitions here are the "would be replaced by manifold's <X>"
-// versions of those types -- the algorithm itself is identical to what
-// would ship.
 
 #include <algorithm>
 #include <cassert>
@@ -52,26 +49,20 @@
 #include <utility>
 #include <vector>
 
+#include "../src/disjoint_sets.h"
+#include "manifold/common.h"
+
 namespace overlap2d {
+
+using manifold::vec2;
+using manifold::la::dot;
+using manifold::la::length;
 
 // Per chapter 8: u = 2^-53 for double-precision IEEE 754.
 constexpr double kU = 1.110223024625156540423631668e-16;
 // Smith's per-intersection bound: alpha = sqrt(153) * u * L; sqrt(153)
 // ~= 12.37.
 constexpr double kAlphaCoeff = 12.37;
-
-// Local stand-in for `manifold::vec2` (la::vec<double, 2>); production code
-// would use the real type from manifold/common.h.
-struct vec2 {
-  double x;
-  double y;
-};
-
-inline vec2 operator+(vec2 a, vec2 b) { return {a.x + b.x, a.y + b.y}; }
-inline vec2 operator-(vec2 a, vec2 b) { return {a.x - b.x, a.y - b.y}; }
-inline vec2 operator*(vec2 a, double s) { return {a.x * s, a.y * s}; }
-inline double dot(vec2 a, vec2 b) { return a.x * b.x + a.y * b.y; }
-inline double length(vec2 a) { return std::sqrt(dot(a, a)); }
 
 // Edge with signed multiplicity. v0/v1 index into the vertex vector.
 struct EdgeM {
@@ -153,32 +144,6 @@ inline bool IntersectSegments(vec2 a0, vec2 a1, vec2 b0, vec2 b1, vec2* out) {
 struct VertexMerge {
   std::vector<int> remap;
   std::vector<vec2> verts;
-};
-
-// Local stand-in for `manifold::DisjointSets` (src/disjoint_sets.h);
-// production would use the real one (atomic, lock-free, rank-balanced,
-// with `connectedComponents`). This is a textbook half-path-compression
-// version with the same public surface (`find` / `unite` / `same`).
-class DisjointSets {
- public:
-  explicit DisjointSets(int n) : parent_(n) {
-    for (int i = 0; i < n; ++i) parent_[i] = i;
-  }
-  int find(int x) {
-    while (parent_[x] != x) {
-      parent_[x] = parent_[parent_[x]];
-      x = parent_[x];
-    }
-    return x;
-  }
-  void unite(int a, int b) {
-    int ra = find(a), rb = find(b);
-    if (ra != rb) parent_[ra] = rb;
-  }
-  bool same(int a, int b) { return find(a) == find(b); }
-
- private:
-  std::vector<int> parent_;
 };
 
 VertexMerge MergeVerts(const std::vector<vec2>& in, double eps) {
