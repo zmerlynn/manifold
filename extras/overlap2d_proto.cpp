@@ -48,14 +48,20 @@
 #include <utility>
 #include <vector>
 
+#include "../src/collider.h"
 #include "../src/disjoint_sets.h"
 #include "../src/utils.h"
 #include "manifold/common.h"
 
 namespace overlap2d {
 
+using manifold::Box;
 using manifold::CCW;
+using manifold::Collider;
+using manifold::MakeSimpleRecorder;
 using manifold::vec2;
+using manifold::vec3;
+using manifold::VecView;
 using manifold::la::dot;
 using manifold::la::length;
 
@@ -141,6 +147,79 @@ inline bool IntersectSegments(vec2 a0, vec2 a1, vec2 b0, vec2 b1, double eps,
 }
 
 // =============================================================================
+// Tier 1: BVH wrappers.
+//
+// Mechanical adapters around manifold's `Collider` (src/collider.h). The
+// collider operates on 3D AABBs; we embed 2D inputs at z=0. These helpers
+// are the only place where manifold::Box / manifold::Collider show up; the
+// algorithm steps below use them as a black-box "give me overlapping pairs"
+// service.
+// =============================================================================
+
+// 2D point as eps-padded 3D AABB (z=0 plane).
+inline Box BoxOf2DPoint(vec2 p, double eps) {
+  vec3 p3(p.x, p.y, 0);
+  vec3 pad(eps, eps, 0);
+  return Box(p3 - pad, p3 + pad);
+}
+
+// 2D segment as eps-padded 3D AABB (z=0 plane).
+inline Box BoxOf2DEdge(vec2 p0, vec2 p1, double eps) {
+  Box b(vec3(p0.x, p0.y, 0), vec3(p1.x, p1.y, 0));
+  vec3 pad(eps, eps, 0);
+  return Box(b.min - pad, b.max + pad);
+}
+
+// BVH built from a flat list of leaf boxes. The Collider expects leaves in
+// Morton-sorted order, so we sort internally and remember the permutation
+// so callers can keep using their original indices throughout.
+struct BVH {
+  Collider collider;
+  std::vector<int> leafToOrig;  // sortedLeafIdx -> caller's input index
+};
+
+inline BVH BVHBuildFromBoxes(const std::vector<Box>& boxes) {
+  const int n = static_cast<int>(boxes.size());
+  BVH out;
+  out.leafToOrig.resize(n);
+  for (int i = 0; i < n; ++i) out.leafToOrig[i] = i;
+  if (n == 0) return out;
+  Box bbox;
+  for (const auto& b : boxes) bbox = bbox.Union(b);
+  std::vector<uint32_t> morton(n);
+  for (int i = 0; i < n; ++i)
+    morton[i] = Collider::MortonCode(boxes[i].Center(), bbox);
+  std::stable_sort(out.leafToOrig.begin(), out.leafToOrig.end(),
+                   [&](int a, int b) { return morton[a] < morton[b]; });
+  std::vector<Box> sortedBB(n);
+  std::vector<uint32_t> sortedMorton(n);
+  for (int i = 0; i < n; ++i) {
+    sortedBB[i] = boxes[out.leafToOrig[i]];
+    sortedMorton[i] = morton[out.leafToOrig[i]];
+  }
+  out.collider =
+      Collider(VecView<const Box>(sortedBB.data(), sortedBB.size()),
+               VecView<const uint32_t>(sortedMorton.data(), sortedMorton.size()));
+  return out;
+}
+
+// Collide every query box in `queries` against the BVH and call
+// `f(queryIdx, origLeafIdx)` once per overlap. `origLeafIdx` is in the
+// caller's input space (we undo the Morton permutation here). Always
+// sequential — the prototype runs with MANIFOLD_PAR=-1 anyway.
+template <typename F>
+inline void CollidePairs(const BVH& bvh, const std::vector<Box>& queries,
+                         F&& f) {
+  if (bvh.leafToOrig.empty() || queries.empty()) return;
+  auto adapter = [&](int qi, int leafIdx) { f(qi, bvh.leafToOrig[leafIdx]); };
+  auto recorder = MakeSimpleRecorder(adapter);
+  auto qf = [&](int i) { return queries[i]; };
+  bvh.collider.Collisions<false>(recorder, qf,
+                                 static_cast<int>(queries.size()),
+                                 /*parallel=*/false);
+}
+
+// =============================================================================
 // Step 1: vertex merge (brute-force union-find).
 // Returns: remap[oldIdx] = newIdx, and merged vert positions.
 // =============================================================================
@@ -152,13 +231,26 @@ struct VertexMerge {
 VertexMerge MergeVerts(const std::vector<vec2>& in, double eps) {
   const int n = static_cast<int>(in.size());
   DisjointSets uf(n);
-  // Brute force O(n^2); a production version would use a BVH.
+  // BVH broad phase: each vert's eps-padded box queried against all eps-
+  // padded vert boxes. A pair (i, j) overlapping in box space gets a precise
+  // distance check; pairs within eps unite. We collect candidates first,
+  // sort by (min(i,j), max(i,j)), then unite — sorting matches the order of
+  // the original O(n^2) loop so DisjointSets's union-by-rank tie-break
+  // produces the same cluster roots and the centroid map iterates the same
+  // way (which controls assigned new-vertex indices).
   const double eps2 = eps * eps;
-  for (int i = 0; i < n; ++i) {
-    for (int j = i + 1; j < n; ++j) {
-      vec2 d = in[i] - in[j];
-      if (dot(d, d) <= eps2) uf.unite(i, j);
-    }
+  std::vector<Box> boxes(n);
+  for (int i = 0; i < n; ++i) boxes[i] = BoxOf2DPoint(in[i], eps);
+  BVH bvh = BVHBuildFromBoxes(boxes);
+  std::vector<std::pair<int, int>> pairs;
+  CollidePairs(bvh, boxes, [&](int qi, int li) {
+    if (qi >= li) return;  // dedupe + skip self
+    pairs.emplace_back(qi, li);
+  });
+  std::sort(pairs.begin(), pairs.end());
+  for (auto [i, j] : pairs) {
+    vec2 d = in[i] - in[j];
+    if (dot(d, d) <= eps2) uf.unite(i, j);
   }
   // Compute centroid per cluster.
   std::map<int, std::pair<vec2, int>> sums;  // root -> (sum, count)
@@ -206,24 +298,36 @@ std::vector<std::vector<int>> BuildEdgeVertLists(
   const int nV = static_cast<int>(verts.size());
   const double eps2 = eps * eps;
   std::vector<std::vector<int>> lists(nE);
+  // BVH broad phase: edges as eps-padded segment AABBs, queried by vert
+  // points (eps-padded boxes). Each candidate (edge, vert) pair runs the
+  // existing exact projection test. Per-edge `hits` are sorted at the end
+  // exactly as in the brute-force version.
+  std::vector<Box> edgeBoxes(nE);
   for (int e = 0; e < nE; ++e) {
+    edgeBoxes[e] =
+        BoxOf2DEdge(verts[edges[e].v0], verts[edges[e].v1], eps);
+  }
+  BVH bvh = BVHBuildFromBoxes(edgeBoxes);
+  std::vector<Box> vertBoxes(nV);
+  for (int v = 0; v < nV; ++v) vertBoxes[v] = BoxOf2DPoint(verts[v], eps);
+  // Collect (edge, vert) candidate pairs first; then process per edge.
+  std::vector<std::vector<std::pair<double, int>>> hitsPerEdge(nE);
+  CollidePairs(bvh, vertBoxes, [&](int v, int e) {
+    if (v == edges[e].v0 || v == edges[e].v1) return;
     const vec2 a = verts[edges[e].v0];
     const vec2 b = verts[edges[e].v1];
     const vec2 ab = b - a;
     const double abLen2 = dot(ab, ab);
-    if (abLen2 == 0) continue;
-    // Track parametric position t in [0, 1] for sort.
-    std::vector<std::pair<double, int>> hits;
-    for (int v = 0; v < nV; ++v) {
-      if (v == edges[e].v0 || v == edges[e].v1) continue;
-      const vec2 ap = verts[v] - a;
-      const double t = dot(ap, ab) / abLen2;
-      if (t <= 0 || t >= 1) continue;  // outside open interval
-      // Perpendicular distance squared.
-      const vec2 closest = a + ab * t;
-      const vec2 d = verts[v] - closest;
-      if (dot(d, d) <= eps2) hits.emplace_back(t, v);
-    }
+    if (abLen2 == 0) return;
+    const vec2 ap = verts[v] - a;
+    const double t = dot(ap, ab) / abLen2;
+    if (t <= 0 || t >= 1) return;
+    const vec2 closest = a + ab * t;
+    const vec2 d = verts[v] - closest;
+    if (dot(d, d) <= eps2) hitsPerEdge[e].emplace_back(t, v);
+  });
+  for (int e = 0; e < nE; ++e) {
+    auto& hits = hitsPerEdge[e];
     std::sort(hits.begin(), hits.end());
     lists[e].reserve(hits.size());
     for (const auto& [t, v] : hits) lists[e].push_back(v);
@@ -243,9 +347,27 @@ void FindAndInsertIntersections(const std::vector<EdgeM>& edges,
   const int nE = static_cast<int>(edges.size());
   const double eps2 = eps * eps;
   vertEdges->resize(verts->size());
-  // Brute force O(n^2).
+  // BVH broad phase: each edge as eps-padded segment AABB, queried against
+  // all edge AABBs. Self-collision is filtered by `qi < li`. Pairs are
+  // sorted to (i, j) with i<j, then iterated in lex order — this matches
+  // the brute O(n^2) loop's iteration order, which matters because the
+  // snap-and-insert below depends on `lists[*]` accumulating verts as
+  // earlier pairs are processed. Sort key uses int pair so duplicate Morton
+  // codes can't perturb the ordering.
+  std::vector<Box> edgeBoxes(nE);
   for (int i = 0; i < nE; ++i) {
-    for (int j = i + 1; j < nE; ++j) {
+    edgeBoxes[i] =
+        BoxOf2DEdge((*verts)[edges[i].v0], (*verts)[edges[i].v1], eps);
+  }
+  BVH bvh = BVHBuildFromBoxes(edgeBoxes);
+  std::vector<std::pair<int, int>> pairs;
+  CollidePairs(bvh, edgeBoxes, [&](int qi, int li) {
+    if (qi >= li) return;
+    pairs.emplace_back(qi, li);
+  });
+  std::sort(pairs.begin(), pairs.end());
+  for (auto [i, j] : pairs) {
+    {
       // Skip if shares an endpoint.
       if (edges[i].v0 == edges[j].v0 || edges[i].v0 == edges[j].v1 ||
           edges[i].v1 == edges[j].v0 || edges[i].v1 == edges[j].v1)
