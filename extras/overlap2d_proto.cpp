@@ -1063,6 +1063,120 @@ OverlapResult RemoveOverlaps2D(const std::vector<vec2>& vertsIn,
 }
 
 // =============================================================================
+// Polygons API wrapper — the public-facing shape that matches manifold's
+// `CrossSection` / `Polygons` typedef (`std::vector<std::vector<vec2>>`).
+// Each `SimplePolygon` is a closed loop of vertices: CCW outer, CW holes.
+// Internally we flatten to a vert/edge list, run the overlap-removal
+// pipeline, then walk the directed output edges back into closed loops.
+// =============================================================================
+
+// Flatten manifold::Polygons into the lower-level (verts, edges) input.
+// Each loop becomes a sequence of edges (v0→v1, v1→v2, …, v_{n-1}→v_0)
+// with mult=+1 each. Smith's wind = ±1 convention then assigns the right
+// sign for CCW outer (interior wind=+1) vs CW hole (hole-interior wind=0,
+// surrounding-polygon-interior wind=+1).
+inline std::pair<std::vector<vec2>, std::vector<EdgeM>>
+PolygonsToInput(const manifold::Polygons& polys) {
+  std::vector<vec2> verts;
+  std::vector<EdgeM> edges;
+  for (const auto& loop : polys) {
+    if (loop.size() < 3) continue;  // degenerate; drop
+    const int base = static_cast<int>(verts.size());
+    const int n = static_cast<int>(loop.size());
+    for (const auto& v : loop) verts.push_back(v);
+    for (int i = 0; i < n; ++i) {
+      edges.push_back({base + i, base + ((i + 1) % n), 1});
+    }
+  }
+  return {std::move(verts), std::move(edges)};
+}
+
+// Walk the directed sub-edges of an OverlapResult into closed loops.
+// At a vertex of degree ≥4 (e.g., an X-cross between two triangles in a
+// figure-8 boundary), arbitrarily picking "any unvisited outgoing edge"
+// would jump between distinct loops. Same DCEL convention as step 6:
+// the next outgoing edge that continues the same loop is the one
+// **immediately CW from the incoming half-edge's reverse direction** in
+// the vertex's CCW-sorted angular order — i.e., "smallest left turn"
+// from the incoming direction.
+inline manifold::Polygons OutEdgesToPolygons(
+    const std::vector<vec2>& verts, const std::vector<OutEdge>& edges) {
+  const int nE = static_cast<int>(edges.size());
+  // Per-vertex outgoing edges, sorted CCW by direction angle.
+  std::map<int, std::vector<int>> outgoing;
+  for (int i = 0; i < nE; ++i) outgoing[edges[i].v0].push_back(i);
+  for (auto& [v, lst] : outgoing) {
+    const vec2 vp = verts[v];
+    std::sort(lst.begin(), lst.end(), [&](int a, int b) {
+      const vec2 da = verts[edges[a].v1] - vp;
+      const vec2 db = verts[edges[b].v1] - vp;
+      return std::atan2(da.y, da.x) < std::atan2(db.y, db.x);
+    });
+  }
+  std::vector<bool> visited(nE, false);
+  manifold::Polygons polys;
+  for (int start = 0; start < nE; ++start) {
+    if (visited[start]) continue;
+    manifold::SimplePolygon loop;
+    int cur = start;
+    while (cur >= 0 && !visited[cur]) {
+      visited[cur] = true;
+      loop.push_back(verts[edges[cur].v0]);
+      const int destV = edges[cur].v1;
+      auto it = outgoing.find(destV);
+      if (it == outgoing.end()) {
+        cur = -1;
+        break;
+      }
+      // To continue the same loop at destV, pick the outgoing edge
+      // that's "smallest left turn" from cur's incoming direction.
+      // The incoming direction is `verts[edges[cur].v0] → verts[destV]`,
+      // i.e., angle = atan2(verts[destV].y - verts[edges[cur].v0].y,
+      //                     verts[destV].x - verts[edges[cur].v0].x).
+      // The next outgoing edge whose direction is just past this
+      // (going CCW) is the one we want — that's the entry one step CW
+      // from the position where the reverse-incoming direction would
+      // sit in the sorted list. Implemented by binary-search on the
+      // reverse direction.
+      const vec2 vp = verts[destV];
+      const vec2 inDir = vp - verts[edges[cur].v0];
+      const double inAngle = std::atan2(inDir.y, inDir.x);
+      // Reverse direction in (-π, π].
+      double rev = inAngle + M_PI;
+      if (rev > M_PI) rev -= 2 * M_PI;
+      const auto& lst = it->second;
+      // Find the unvisited entry with the smallest CCW angle past `rev`.
+      int next = -1;
+      double bestDelta = 1e300;
+      for (int e : lst) {
+        if (visited[e]) continue;
+        const vec2 d = verts[edges[e].v1] - vp;
+        double ang = std::atan2(d.y, d.x);
+        // CCW delta from rev to ang in [0, 2π).
+        double delta = ang - rev;
+        if (delta <= 0) delta += 2 * M_PI;
+        if (delta < bestDelta) {
+          bestDelta = delta;
+          next = e;
+        }
+      }
+      cur = next;
+    }
+    if (loop.size() >= 3) polys.push_back(std::move(loop));
+  }
+  return polys;
+}
+
+// Public-facing API. Mirrors what `CrossSection` would call into.
+inline manifold::Polygons OverlapRemovePolygons(const manifold::Polygons& in,
+                                                double eps) {
+  auto [verts, edges] = PolygonsToInput(in);
+  if (verts.empty()) return {};
+  auto r = RemoveOverlaps2D(verts, edges, eps);
+  return OutEdgesToPolygons(r.verts, r.edges);
+}
+
+// =============================================================================
 // Iterate-to-fixed-point.
 //
 // Smith §7.7 / figure 7.16: residual eps-scale edge intersections from
@@ -1146,9 +1260,16 @@ enum class IterStatus {
   MaxedOut,
 };
 
+// Smith §7.7 / fig 7.16 proves convergence in ≤2 iterations under
+// his α-budget framework when intersection positions are tracked
+// symbolically. With FP-rounded positions (Cramer or `Cross2DSymbolic`
+// — both produce FP-rounded outputs) ~3% of cases need iter=2 for
+// fingerprint convergence; topology is correct from pass 1. The
+// production default is 2 (Smith's bound). Tests and the deepfuzz
+// pass higher maxIter explicitly to measure tail behavior.
 OverlapResult IterateToFixedPoint(const std::vector<vec2>& vIn,
                                   const std::vector<EdgeM>& eIn, double eps,
-                                  int maxIter = 8, int* outIters = nullptr,
+                                  int maxIter = 2, int* outIters = nullptr,
                                   IterStatus* outStatus = nullptr) {
   std::vector<OverlapResult> history;
   std::vector<std::string> fps;
@@ -2145,6 +2266,68 @@ int main(int argc, char** argv) {
     auto r = RunCase({"Two disjoint CCW squares", v, e, EpsilonFromScale(3.0)},
                      &allPass);
     if (!CheckIdempotence(r, EpsilonFromScale(3.0))) allPass = false;
+    std::cout << std::endl;
+  }
+
+  // ---- Polygons-API smoke tests ----
+  // Verify the public OverlapRemovePolygons wrapper round-trips simple
+  // closed loops through the manifold::Polygons type.
+  {
+    std::cout << "=== Polygons API: square ===" << std::endl;
+    manifold::Polygons in = {{{0, 0}, {1, 0}, {1, 1}, {0, 1}}};
+    auto out = OverlapRemovePolygons(in, EpsilonFromScale(1.0));
+    bool ok = (out.size() == 1 && out[0].size() == 4);
+    std::cout << "  Output: " << out.size() << " loop(s)";
+    if (!out.empty()) std::cout << ", " << out[0].size() << " verts in loop 0";
+    std::cout << " — " << (ok ? "PASS" : "FAIL") << std::endl;
+    if (!ok) allPass = false;
+    std::cout << std::endl;
+  }
+  {
+    std::cout << "=== Polygons API: square with hole ===" << std::endl;
+    manifold::Polygons in = {
+        {{0, 0}, {4, 0}, {4, 4}, {0, 4}},          // outer CCW
+        {{1, 1}, {1, 3}, {3, 3}, {3, 1}},          // inner CW (hole)
+    };
+    auto out = OverlapRemovePolygons(in, EpsilonFromScale(4.0));
+    // Expect two loops (outer + hole) with 4 verts each.
+    bool ok = (out.size() == 2 && out[0].size() == 4 && out[1].size() == 4);
+    std::cout << "  Output: " << out.size() << " loop(s)";
+    for (size_t i = 0; i < out.size(); ++i)
+      std::cout << " [loop " << i << ": " << out[i].size() << " verts]";
+    std::cout << " — " << (ok ? "PASS" : "FAIL") << std::endl;
+    if (!ok) allPass = false;
+    std::cout << std::endl;
+  }
+  {
+    std::cout << "=== Polygons API: bowtie keeps the wind>0 lobe ==="
+              << std::endl;
+    // Self-intersecting bowtie input: under Smith's `wind > 0`
+    // convention, only the CCW lobe is in the boolean union; the
+    // other lobe has wind = −1. So output = 1 triangle.
+    manifold::Polygons in = {{{0, 0}, {2, 2}, {2, 0}, {0, 2}}};
+    auto out = OverlapRemovePolygons(in, EpsilonFromScale(2.0));
+    bool ok = (out.size() == 1 && out[0].size() == 3);
+    std::cout << "  Output: " << out.size() << " loop(s)";
+    for (size_t i = 0; i < out.size(); ++i)
+      std::cout << " [loop " << i << ": " << out[i].size() << " verts]";
+    std::cout << " — " << (ok ? "PASS" : "FAIL") << std::endl;
+    if (!ok) allPass = false;
+    std::cout << std::endl;
+  }
+  {
+    std::cout << "=== Polygons API: two disjoint squares ===" << std::endl;
+    manifold::Polygons in = {
+        {{0, 0}, {1, 0}, {1, 1}, {0, 1}},          // square A (CCW)
+        {{2, 0}, {3, 0}, {3, 1}, {2, 1}},          // square B (CCW)
+    };
+    auto out = OverlapRemovePolygons(in, EpsilonFromScale(3.0));
+    bool ok = (out.size() == 2 && out[0].size() == 4 && out[1].size() == 4);
+    std::cout << "  Output: " << out.size() << " loop(s)";
+    for (size_t i = 0; i < out.size(); ++i)
+      std::cout << " [loop " << i << ": " << out[i].size() << " verts]";
+    std::cout << " — " << (ok ? "PASS" : "FAIL") << std::endl;
+    if (!ok) allPass = false;
     std::cout << std::endl;
   }
 
