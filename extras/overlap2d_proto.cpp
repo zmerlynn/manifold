@@ -219,6 +219,28 @@ inline bool IntersectSegments(vec2 a0, vec2 a1, vec2 b0, vec2 b1, int rA0,
   const double bSpreadY = std::fabs(b1.y - b0.y);
   const double xUsable = std::min(aSpreadX, bSpreadX);
   const double yUsable = std::min(aSpreadY, bSpreadY);
+
+  // Special case: both segments are axis-aligned to opposite axes (one
+  // horizontal, one vertical, exactly), so neither axis has both
+  // segments contributing spread. Trim-and-Interpolate would degenerate
+  // (zero-width overlap interval). Compute the intersection directly:
+  // it's the cross of the vertical segment's constant x and the
+  // horizontal segment's constant y. Common in real CAD/SVG inputs
+  // (axis-aligned rectangles overlapping each other).
+  if (xUsable == 0 && yUsable == 0) {
+    const bool aHoriz = aSpreadX > 0 && aSpreadY == 0;
+    const bool aVert = aSpreadY > 0 && aSpreadX == 0;
+    const bool bHoriz = bSpreadX > 0 && bSpreadY == 0;
+    const bool bVert = bSpreadY > 0 && bSpreadX == 0;
+    if ((aHoriz && bVert) || (aVert && bHoriz)) {
+      const double ix = aVert ? a0.x : b0.x;
+      const double iy = aHoriz ? a0.y : b0.y;
+      *out = vec2(ix, iy);
+      return std::isfinite(out->x) && std::isfinite(out->y);
+    }
+    return false;  // both points, or other degenerate config
+  }
+
   const int axis = xUsable >= yUsable ? 0 : 1;
 
   // Step 3: sort each segment along the chosen axis.
@@ -2352,6 +2374,41 @@ int main(int argc, char** argv) {
               edgeCount(isec) >= 4;
     std::cout << "  Smoke: " << (ok ? "PASS" : "FAIL") << "\n";
     if (!ok) allPass = false;
+    std::cout << std::endl;
+  }
+
+  // Two axis-aligned CCW squares overlapping at an L-corner. Their
+  // boundaries cross at TWO perpendicular axis-aligned edge pairs
+  // (A's right edge × B's bottom edge at (2,1); A's top edge × B's
+  // left edge at (1,2)). The Boolean2D smoke test above offsets the
+  // squares horizontally so their crossing edges are *collinear*
+  // (both top edges at y=1), not perpendicular — it doesn't exercise
+  // axis-aligned perpendicular intersection at all. This test does.
+  {
+    std::vector<vec2> v = {{0, 0}, {2, 0}, {2, 2}, {0, 2},   // square A CCW
+                           {1, 1}, {3, 1}, {3, 3}, {1, 3}};  // square B CCW
+    std::vector<EdgeM> e = {
+        {0, 1, 1}, {1, 2, 1}, {2, 3, 1}, {3, 0, 1},  // A
+        {4, 5, 1}, {5, 6, 1}, {6, 7, 1}, {7, 4, 1},  // B
+    };
+    auto r = RunCase(
+        {"Two axis-aligned squares overlapping (L-shape union)", v, e,
+         EpsilonFromScale(3.0)},
+        &allPass);
+    if (!CheckIdempotence(r, EpsilonFromScale(3.0))) allPass = false;
+    // Expected union: single L-shaped loop with 8 boundary verts and
+    // total area 4 + 4 − 1 = 7. Step 4 must detect the two
+    // perpendicular axis-aligned intersections.
+    manifold::Polygons in = {{{0, 0}, {2, 0}, {2, 2}, {0, 2}},
+                             {{1, 1}, {3, 1}, {3, 3}, {1, 3}}};
+    auto out = OverlapRemovePolygons(in, EpsilonFromScale(3.0));
+    size_t totalEdges = 0;
+    for (const auto& l : out) totalEdges += l.size();
+    bool shapeOk = (out.size() == 1 && totalEdges == 8);
+    std::cout << "  Polygons union: " << out.size() << " loop(s), "
+              << totalEdges << " edges — "
+              << (shapeOk ? "PASS" : "FAIL") << "\n";
+    if (!shapeOk) allPass = false;
     std::cout << std::endl;
   }
 
