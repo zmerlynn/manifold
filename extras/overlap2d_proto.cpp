@@ -50,6 +50,7 @@
 
 #include "../src/collider.h"
 #include "../src/disjoint_sets.h"
+#include "../src/shared.h"
 #include "../src/utils.h"
 #include "manifold/common.h"
 
@@ -140,9 +141,130 @@ inline int CCWPerturbed(vec2 a, vec2 b, vec2 c, int rA, int rB, int rC,
   return (sw & 1) ? -1 : 1;
 }
 
+// =============================================================================
+// 2D edge-edge symbolic intersection (Cramer-structured, BVH-friendly).
+//
+// The classical Kernel11 from boolean3.cpp can't be used in BVH-pair-query
+// context: it requires "one endpoint inside, one outside" the other
+// segment's projection, which sweep-line guarantees but BVH pair queries
+// don't (most pairs have one segment fully nested in the other's
+// projection — see HANDOFF.md experiment #6).
+//
+// This kernel works for any pair by **trimming both segments to their
+// projection-axis overlap before applying Intersect**. Steps:
+//   1. CCW + SoS for cross-or-not (existing predicate, untouched).
+//   2. Pick the axis (x or y) with larger combined endpoint spread.
+//   3. Sort each segment's endpoints L→R along that axis.
+//   4. Compute axis-overlap interval [overlapL, overlapR] = intersection
+//      of a's and b's axis spans.
+//   5. Use `Interpolate` (from shared.h) to evaluate each segment's
+//      orthogonal coord at overlapL and overlapR. This produces four
+//      (axis, ortho) points all spanning the same axis interval — the
+//      precondition Intersect's closed-form expects.
+//   6. Apply boolean3 Intersect's closed-form (smaller |dy| endpoint
+//      picked for FP stability) to compute the intersection position.
+//
+// Compared to plain Cramer this gives more stable positions because:
+//   - Each Interpolate call uses one-axis arithmetic (the larger-spread
+//     axis), avoiding the multiplied small-determinant blowup Cramer can
+//     hit when segments are near-parallel.
+//   - The smaller |dy| selection in Intersect biases toward whichever
+//     trimmed-endpoint pair has a tighter ortho gap.
+//
+// Compared to the failed Kernel11 port (#6) this works for nested-axis
+// cases because trimming makes both segments span the same axis interval
+// by construction — there is no "inside/outside endpoint" precondition.
+// =============================================================================
+inline double Coord(vec2 p, int axis) { return axis == 0 ? p.x : p.y; }
+
+inline bool IntersectSymbolic(vec2 a0, vec2 a1, vec2 b0, vec2 b1, int rA0,
+                              int rA1, int rB0, int rB1, double eps,
+                              vec2* out) {
+  // Step 1: SoS-aware cross-detection (same as the non-symbolic path).
+  const int s1 = CCW(a0, a1, b0, eps);
+  const int s2 = CCW(a0, a1, b1, eps);
+  const int s3 = CCW(b0, b1, a0, eps);
+  const int s4 = CCW(b0, b1, a1, eps);
+  const int zeros = (s1 == 0) + (s2 == 0) + (s3 == 0) + (s4 == 0);
+  if (zeros > 0 && zeros < 4) return false;
+  if (zeros == 4) {
+    const int p1 = CCWPerturbed(a0, a1, b0, rA0, rA1, rB0, eps);
+    const int p2 = CCWPerturbed(a0, a1, b1, rA0, rA1, rB1, eps);
+    if (p1 == p2) return false;
+    const int p3 = CCWPerturbed(b0, b1, a0, rB0, rB1, rA0, eps);
+    const int p4 = CCWPerturbed(b0, b1, a1, rB0, rB1, rA1, eps);
+    if (p3 == p4) return false;
+  } else {
+    if (s1 == s2 || s3 == s4) return false;
+  }
+
+  // Step 2: pick the axis where BOTH segments have non-zero spread, with
+  // the larger spread of the two preferring stability (smaller |dy| works
+  // better in Intersect when the trimmed segments are well-separated).
+  // The min-spread per axis is what matters: a vertical segment has zero
+  // x-spread, so x is unusable; we'd pick y. Without this check (just
+  // bbox spread), the Smith hexagon's vertical CE segment causes
+  // degenerate axis-overlap (overlapL == overlapR) and the kernel falsely
+  // reports no intersection.
+  const double aSpreadX = std::fabs(a1.x - a0.x);
+  const double aSpreadY = std::fabs(a1.y - a0.y);
+  const double bSpreadX = std::fabs(b1.x - b0.x);
+  const double bSpreadY = std::fabs(b1.y - b0.y);
+  const double xUsable = std::min(aSpreadX, bSpreadX);
+  const double yUsable = std::min(aSpreadY, bSpreadY);
+  const int axis = xUsable >= yUsable ? 0 : 1;
+
+  // Step 3: sort each segment along the chosen axis.
+  vec2 aL = a0, aR = a1, bL = b0, bR = b1;
+  if (Coord(aR, axis) < Coord(aL, axis)) std::swap(aL, aR);
+  if (Coord(bR, axis) < Coord(bL, axis)) std::swap(bL, bR);
+
+  // Step 4: axis-overlap interval. CCW already confirmed crossing, so the
+  // overlap is non-empty (modulo FP noise; clamp on hairline).
+  const double overlapL = std::max(Coord(aL, axis), Coord(bL, axis));
+  const double overlapR = std::min(Coord(aR, axis), Coord(bR, axis));
+  if (overlapR <= overlapL) return false;
+
+  // Step 5: trim each segment to the overlap. Interpolate(aL, aR, x) wants
+  // a vec3 with the projection axis as its x-component, so we permute when
+  // axis == 1 (y becomes x in the call frame, x becomes the orthogonal
+  // coord). The returned vec2's first component is the orthogonal coord
+  // at the requested projection value.
+  auto embed = [&](vec2 p) {
+    return axis == 0 ? vec3(p.x, p.y, 0.0) : vec3(p.y, p.x, 0.0);
+  };
+  const vec3 aL3 = embed(aL), aR3 = embed(aR);
+  const vec3 bL3 = embed(bL), bR3 = embed(bR);
+  const double aOL = manifold::Interpolate(aL3, aR3, overlapL).x;
+  const double aOR = manifold::Interpolate(aL3, aR3, overlapR).x;
+  const double bOL = manifold::Interpolate(bL3, bR3, overlapL).x;
+  const double bOR = manifold::Interpolate(bL3, bR3, overlapR).x;
+
+  // Step 6: Intersect closed-form. dyL/dyR are the ortho gaps at the two
+  // overlap boundaries; pick whichever has smaller |dy| as the lambda
+  // basepoint for FP stability (port from boolean3.cpp:36-54).
+  const double dyL = bOL - aOL;
+  const double dyR = bOR - aOR;
+  const bool useL = std::fabs(dyL) < std::fabs(dyR);
+  const double dProj = overlapR - overlapL;
+  double lambda = (useL ? dyL : dyR) / (dyL - dyR);
+  if (!std::isfinite(lambda)) return false;
+  const double outProj = lambda * dProj + (useL ? overlapL : overlapR);
+  const double aDy = aOR - aOL;
+  const double bDy = bOR - bOL;
+  const bool useA = std::fabs(aDy) < std::fabs(bDy);
+  const double outOrtho = lambda * (useA ? aDy : bDy) +
+                          (useL ? (useA ? aOL : bOL) : (useA ? aOR : bOR));
+  *out = axis == 0 ? vec2(outProj, outOrtho) : vec2(outOrtho, outProj);
+  return std::isfinite(out->x) && std::isfinite(out->y);
+}
+
 inline bool IntersectSegments(vec2 a0, vec2 a1, vec2 b0, vec2 b1, int rA0,
                               int rA1, int rB0, int rB1, double eps,
                               vec2* out) {
+#ifdef OVERLAP2D_USE_SYMBOLIC
+  return IntersectSymbolic(a0, a1, b0, b1, rA0, rA1, rB0, rB1, eps, out);
+#endif
   const int s1 = CCW(a0, a1, b0, eps);
   const int s2 = CCW(a0, a1, b1, eps);
   const int s3 = CCW(b0, b1, a0, eps);
