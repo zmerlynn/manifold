@@ -849,11 +849,26 @@ std::vector<OutEdge> FilterByWindingDCEL(const CanonicalSubEdges& canon,
   }
 
   // 5. Compute signed area per face. Outer face has the most negative area.
+  //    CRITICAL: at displaced coords (e.g. 1.5e9), the raw shoelace
+  //    `a.x * b.y - b.x * a.y` has each product on order 2.25e18 with
+  //    ULP ~2000, so summation precision swamps a typical face area of
+  //    O(1). The sign becomes random and outer-face detection breaks.
+  //    Fix: center each face's coordinates relative to its first vertex
+  //    before summing. With centered coords O(edge length), products
+  //    are O((edge length)²) and the sum is precise.
   std::vector<double> faceArea(nFaces, 0.0);
+  std::vector<int> faceStartHEEarly(nFaces, -1);
+  for (int i = 0; i < (int)halfedges.size(); ++i) {
+    if (halfedges[i].face >= 0 && faceStartHEEarly[halfedges[i].face] == -1)
+      faceStartHEEarly[halfedges[i].face] = i;
+  }
   for (int i = 0; i < (int)halfedges.size(); ++i) {
     if (halfedges[i].face < 0) continue;
-    const vec2 a = verts[halfedges[i].origin];
-    const vec2 b = verts[halfedges[halfedges[i].twin].origin];
+    const int faceRefHE = faceStartHEEarly[halfedges[i].face];
+    if (faceRefHE < 0) continue;
+    const vec2 ref = verts[halfedges[faceRefHE].origin];
+    const vec2 a = verts[halfedges[i].origin] - ref;
+    const vec2 b = verts[halfedges[halfedges[i].twin].origin] - ref;
     faceArea[halfedges[i].face] += (a.x * b.y - b.x * a.y) * 0.5;
   }
   int outerFace = 0;
@@ -904,10 +919,12 @@ std::vector<OutEdge> FilterByWindingDCEL(const CanonicalSubEdges& canon,
     if (halfedges[i].face >= 0 && faceStartHE[halfedges[i].face] == -1)
       faceStartHE[halfedges[i].face] = i;
   }
-  // Ray-cast offset: must be small enough that (a) the offset point lies
-  // within the face whose boundary we're sampling, and (b) it doesn't
-  // accidentally land in a different face. We use a fraction of the
-  // edge's length, which scales with the local feature size.
+  // Ray-cast point per face: perpendicular-offset from a half-edge of
+  // the face's boundary, into the face (LEFT side). This works because
+  // the face is on the LEFT of every half-edge in its cycle, so a
+  // perpendicular-CCW offset from any boundary edge lands inside the
+  // face. Centroids would seem more robust, but for non-convex faces
+  // (common after step 4) the centroid can lie outside the face.
   for (int f = 0; f < nFaces; ++f) {
     if (f == outerFace) {
       faceWind[f] = 0;
