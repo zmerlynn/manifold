@@ -773,6 +773,10 @@ inline bool& DCELDebug() {
 std::vector<OutEdge> FilterByWindingDCEL(const CanonicalSubEdges& canon,
                                          const std::vector<vec2>& verts) {
   using dcel_internal::HalfEdge;
+  if (DCELDebug()) {
+    std::cerr << "[FilterByWindingDCEL] canon.map.size()="
+              << canon.map.size() << " verts.size()=" << verts.size() << "\n";
+  }
   // 1. Build half-edges. Each canonical (vMin, vMax) with mult m becomes:
   //    - hA: vMin → vMax, mult = m
   //    - hB: vMax → vMin, mult = -m
@@ -1874,6 +1878,7 @@ void DeepFuzz(int seedsPerCell) {
   std::vector<std::tuple<int, int, uint64_t, int>> convergedInvalidList;
   std::vector<std::tuple<int, int, uint64_t, int>> degradedList;
   // (kPow, n, seed, iters) for both
+  std::vector<std::tuple<int, int, uint64_t>> geomCollapseList;
 
   for (int kPow : kPows) {
     const double offset = std::ldexp(1.5, kPow);
@@ -1935,7 +1940,11 @@ void DeepFuzz(int seedsPerCell) {
             p2edges.push_back({oe.v0, oe.v1, oe.mult});
           auto pass2 = RemoveOverlaps2D(pass1.verts, p2edges, eps);
           if (!pass1.edges.empty()) ++pass1_nonempty;
-          if (!pass1.edges.empty() && pass2.edges.empty()) ++pass2_collapsed;
+          if (!pass1.edges.empty() && pass2.edges.empty()) {
+            ++pass2_collapsed;
+            geomCollapseList.emplace_back(kPow, n,
+                                          static_cast<uint64_t>(seed));
+          }
           const std::string fp1_fine = FingerprintAt(pass1, eps * 0.01);
           const std::string fp2_fine = FingerprintAt(pass2, eps * 0.01);
           const std::string fp1_topo = CoarseFingerprint(pass1, eps);
@@ -1988,6 +1997,18 @@ void DeepFuzz(int seedsPerCell) {
     std::cout << "\n  First 5 iter≥2 cases (for idempotence probe):\n";
     for (size_t i = 0; i < topoMismatch.size() && i < 5; ++i) {
       auto [kp, nn, sd] = topoMismatch[i];
+      std::cout << "    kPow=" << kp << " n=" << nn << " seed=" << sd << "\n";
+    }
+  }
+  // Geometric collapse cases — pass 1 nonempty, pass 2 empty. These are
+  // the genuine bugs where iteration is changing the algorithm output.
+  // Track them by re-running and checking. (Slow: requires re-running
+  // pass 2 for each case. Done only for first 30 cases.)
+  if (!geomCollapseList.empty()) {
+    std::cout << "\n  Geometric COLLAPSE cases (pass 2 empty when pass 1 "
+                 "nonempty):\n";
+    for (size_t i = 0; i < geomCollapseList.size() && i < 20; ++i) {
+      auto [kp, nn, sd] = geomCollapseList[i];
       std::cout << "    kPow=" << kp << " n=" << nn << " seed=" << sd << "\n";
     }
   }
@@ -2072,7 +2093,26 @@ int main(int argc, char** argv) {
     std::vector<EdgeM> p2in;
     for (const auto& oe : pass1.edges)
       p2in.push_back({oe.v0, oe.v1, oe.mult});
-    std::cerr << "--- pass 2 ---\n";
+    std::cerr << "--- pass 2 (input: " << pass1.verts.size() << " verts, "
+              << p2in.size() << " edges) ---\n";
+    // Manually run pass 2's pipeline to see where edges disappear.
+    auto p2_mrg = MergeVerts(pass1.verts, eps);
+    std::cerr << "  step 1 mergeverts: " << pass1.verts.size() << "→"
+              << p2_mrg.verts.size() << "\n";
+    auto p2_e = RemapAndCollapse(p2in, p2_mrg.remap);
+    std::cerr << "  step 2 remap: " << p2in.size() << "→" << p2_e.size()
+              << " edges\n";
+    auto p2_l = BuildEdgeVertLists(p2_e, p2_mrg.verts, eps);
+    int p2_totalList = 0;
+    for (auto& l : p2_l) p2_totalList += l.size();
+    std::cerr << "  step 3 lists: " << p2_totalList << " total entries\n";
+    std::vector<std::set<int>> p2_ve;
+    FindAndInsertIntersections(p2_e, &p2_mrg.verts, &p2_l, &p2_ve, eps);
+    std::cerr << "  step 4 intersections: " << p2_mrg.verts.size()
+              << " verts after\n";
+    auto p2_canon = Canonicalize(p2_e, p2_l);
+    std::cerr << "  step 5 canon: " << p2_canon.map.size() << " sub-edges\n";
+
     auto pass2 = RemoveOverlaps2D(pass1.verts, p2in, eps);
     DCELDebug() = false;
     std::cerr << "pass1: " << pass1.verts.size() << " verts, "
