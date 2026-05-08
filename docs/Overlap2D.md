@@ -1,4 +1,4 @@
-# 2D overlap removal — design
+# 2D overlap removal: design
 
 Status: design proposal accompanying the prototype at
 `extras/overlap2d_proto.cpp`.
@@ -11,13 +11,8 @@ Emmett Lalish's algorithm sketch in
 
 Explore whether a manifold-native 2D implementation could eventually
 take over the **boolean and self-overlap-removal** parts of
-`CrossSection`'s current Clipper2 use — i.e. `Boolean(Add/Subtract/
-Intersect)` and `Simplify`. Clipper2's polygon-offset path
-(`ClipperOffset`, used by `CrossSection::Offset`) is a Minkowski sum
-with a disk under various join styles; it's a different problem and
-stays on Clipper2 (or becomes its own project later). Even if this
-prototype were fully productionized, `CrossSection` would still link
-Clipper2 for offset.
+`CrossSection`'s current Clipper2 use, specifically
+`Boolean(Add/Subtract/Intersect)` and `Simplify`.
 
 The prototype validates the approach end-to-end; this doc proposes
 landing it in `extras/` as reference and gathering feedback before
@@ -38,7 +33,7 @@ Design constraints the prototype satisfies:
 
 ## Approach
 
-**Algorithmic spine — Emmett's #289 sketch.** BVH pair queries
+**Algorithmic spine: Emmett's #289 sketch.** BVH pair queries
 instead of sweep-line; a 6-step pipeline (vert merge → edge collapse
 → on-edge verts → edge-edge intersection → sub-edge canonicalization
 → winding filter); reuse manifold's 3D building blocks
@@ -46,7 +41,7 @@ instead of sweep-line; a 6-step pipeline (vert merge → edge collapse
 `src/shared.h`) so the 2D code lives in the same arithmetic and
 spatial-query world as `Manifold::Impl::Boolean3`.
 
-**Correctness framework — Smith (UCAM-CL-TR-766, §7).** Provides
+**Correctness framework: Smith (UCAM-CL-TR-766, §7).** Provides
 the part Emmett's sketch doesn't: a concrete ε formula and a proof
 of convergence in ≤2 iterations under bounded FP error
 (§7.7, fig 7.16):
@@ -68,8 +63,8 @@ development:
 - **Step 6: DCEL face traversal instead of Smith's per-edge
   ray-cast.** Per-edge ray-casts produce inconsistent verdicts at
   shared vertices (270 first-pass topology FAILs in DeepFuzz 14000).
-  We build a doubly-connected edge list — the same structure
-  `Manifold::Impl::halfedge_` uses for 3D — assign one winding per
+  We build a doubly-connected edge list (the same structure
+  `Manifold::Impl::halfedge_` uses for 3D), assign one winding per
   planar face via a single ray-cast from inside, and keep an edge
   iff its left and right faces disagree on the inside/outside
   predicate. Structurally consistent at shared vertices by
@@ -169,9 +164,8 @@ entire adversarial range, in every size and seed tested.
 ## Open questions
 
 1. **Landing site in `src/`.** New `src/overlap2d/`, or wired into
-   `cross_section.cpp` directly as the boolean/`Simplify` backend
-   (Clipper2 stays linked for `Offset` either way). Driven by how
-   much shared code with 3D booleans we expose.
+   `cross_section.cpp` directly as the boolean/`Simplify` backend.
+   Driven by how much shared code with 3D booleans we expose.
 2. **eps policy.** `Boolean2D` accepts explicit eps or auto-infers
    when ≤0. `CrossSection`'s existing API doesn't expose eps; add it
    as an optional parameter, or always auto-infer? Smith's α-budget
@@ -209,8 +203,7 @@ feedback from this discussion.
    and `Simplify` paths. Whether it lives next to or inside
    `CrossSection`, and whether it sits alongside Clipper2-for-
    booleans during a transition or replaces it outright, depends on
-   what comes out of step 2. `CrossSection::Offset` continues to
-   use Clipper2's `ClipperOffset` regardless.
+   what comes out of step 2.
 
 ## Alternatives considered
 
@@ -222,7 +215,7 @@ we don't relitigate.
   segment); cleaner to share the kernels (`Shadows`, `Interpolate`,
   `Collider`, `DisjointSets`) than the whole boolean3 pipeline.
 - **`Kernel11` from `boolean3.cpp` directly for step 4.** Requires
-  "one endpoint inside, one outside" the other segment's projection —
+  "one endpoint inside, one outside" the other segment's projection,
   a sweep-line invariant. BVH pair queries don't guarantee this; most
   pairs are nested-axis. **Replaced** with trim-and-`Interpolate`:
   trim both segments to their axis-projection overlap first, then
