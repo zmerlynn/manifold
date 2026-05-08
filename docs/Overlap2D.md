@@ -95,12 +95,24 @@ development:
   iff its left and right faces disagree on the inside/outside
   predicate. Structurally consistent at shared vertices by
   construction.
-- **Step 4b: structural re-merge of intersection verts.** When 3+
-  edges meet at one true point, step 4 inserts an intersection vert
-  per pair (so up to 3 distinct verts where there should be 1).
-  Union-find with a structural gate (verts share an input edge) plus
-  a geometric gate (within 10ε) collapses them. Not in either source
-  algorithm; it's a fix for a problem step 4 introduces.
+- **Step 4 has an eager-propagation phase + step 4b is a residual
+  cleanup.** When k≥3 input edges are concurrent at one true point,
+  pair-by-pair processing (one BVH-pair-query at a time) produces
+  per-pair intersection verts that should geometrically be one. Step
+  4 addresses this in two phases: (a) the standard pair-by-pair
+  insertion with snap-to-existing on the current pair's edges, and
+  (b) eager propagation of each freshly-allocated intersection vert
+  to *all* other edges within ε via a BVH range query. Step 4b is a
+  union-find pass on the residue: near-duplicate intersection verts
+  whose FP-rounded positions disagree by more than ε (typical at
+  displaced coords with shallow crossings) get merged via a
+  structural gate (verts share an input edge) plus a geometric gate
+  (within 10ε). The two-phase step 4 + cleanup-pass step 4b mirror
+  manifold's 3D pipeline exactly: step 4's propagation is the 2D
+  analog of `boolean_result.cpp::AddNewEdgeVerts` (which adds an
+  edge×face intersection vert to three lists, not just the source
+  pair); step 4b is the 2D analog of `edge_op.cpp::CollapseShortEdges`
+  inside `SimplifyTopology`.
 - **Centered shoelace area.** At 2<sup>49</sup> displacement, raw
   shoelace `a.x·b.y − b.x·a.y` produces ULP ~2000 on a unit-area
   face, randomizing the sign. Centering each face's coordinates on
@@ -114,8 +126,8 @@ development:
 | 1 | Vertex merge | BVH broad phase over ε-padded vert AABBs; `DisjointSets` union-find within ε. |
 | 2 | Edge collapse | Drop edges whose endpoints map to the same merged vertex. |
 | 3 | Edge → on-edge vert list | BVH broad phase over ε-padded edge AABBs queried by vert AABBs; exact projection-distance gate. Skips "thin-triangle apex" verts (apex of a degenerate triangle whose base is the candidate edge). |
-| 4 | Edge-edge intersections | BVH broad phase over edge AABBs; trim-and-`Interpolate` symbolic kernel atop `CCW`/SoS. New verts snap to nearby existing verts before insertion. |
-| 4b | Re-merge intersection verts | When 3 edges meet at one true point, step 4 inserts up to 3 distinct intersection verts; union-find with structural (verts share an input edge) + geometric (within 10ε) gates collapses them. |
+| 4 | Edge-edge intersections | BVH broad phase over edge AABBs; trim-and-`Interpolate` symbolic kernel atop `CCW`/SoS. Two sub-phases: (a) pair-by-pair intersection insertion with snap-to-existing on the current pair's edges; (b) eager propagation: for each freshly-allocated intersection vert, query the edge BVH for *all* other edges within ε and add the vert to their on-edge vert lists. The propagation pass mirrors `boolean_result.cpp::AddNewEdgeVerts` from manifold's 3D boolean (where an edge × face intersection is added to three lists, not just the source pair). |
+| 4b | Residual cleanup of near-duplicate intersection verts | When pair-by-pair processing produces near-duplicate intersection verts whose FP-rounded positions disagree by *more than ε* (typical at displaced coords with shallow crossings), step 4's eager propagation can't snap them. Union-find with structural (verts share an input edge) + geometric (within 10ε) gates collapses them. Mirrors `edge_op.cpp::CollapseShortEdges` in manifold's 3D `SimplifyTopology` cleanup. |
 | 5 | Sub-edge canonicalization | `map<lex(v0,v1), signed_mult>`; collinear sub-edges with opposing multiplicity cancel. |
 | 6 | Winding filter | DCEL face traversal; one winding per face via ray-cast from a perpendicular-LEFT offset of any boundary half-edge. Edge retained iff `isInside(leftFace) != isInside(rightFace)`. |
 
@@ -129,16 +141,19 @@ it across the entire battery.
 What pass 1 is *not* is idempotent in all cases. Feeding pass-1
 output back as pass-2 input occasionally produces a different
 result, which is what the prototype's `IterateToFixedPoint` path
-(default `maxIter=2`, Smith's bound) studies. ~2.4% of fuzz cases
-differ between pass 1 and pass 2 at sub-ε position quanta but
-match at the ε quantum (topology-identical, geometry shifted by a
-few ULPs). One in 336,000 cases hits a more pathological mode:
-pass 1 produces a topologically-valid but geometrically *thin*
-output polygon (all interior dimensions within 2ε), and pass 2
-correctly notices that the thin polygon's "long way around"
-coincides to within ε with its "short way around" and collapses
-it to empty. Consistent behavior under the algorithm's own rules,
-but means pass-1 output is not always a stable fixed point.
+(default `maxIter=2`, Smith's bound) studies. ~2.3% of fuzz cases
+differ between pass 1 and pass 2 at sub-ε position quanta but match
+at the ε quantum (topology-identical, geometry shifted by a few
+ULPs). A small fraction hit a more pathological mode: pass 1
+produces a topologically-valid but geometrically *thin* output
+polygon (all interior dimensions within 2ε), and pass 2 correctly
+notices that the thin polygon's "long way around" coincides to
+within ε with its "short way around" and collapses it to empty.
+Consistent behavior under the algorithm's own rules, but means
+pass-1 output is not always a stable fixed point. This is a *step
+3* artifact (edge → on-edge vert detection): step 4's eager
+propagation does not address it because the relevant edges have no
+new intersection verts to propagate.
 
 **The right `maxIter` default for production is operation-dependent,
 not a single number.** Manifold's 3D analog of `Simplify` was
@@ -205,14 +220,15 @@ per input). Xor combines inputs with mult=+1 each and applies
 
 | Test | Pass rate | Notes |
 |------|-----------|-------|
-| Standard battery | 350/350 | 13 named cases + 350 random topological polygons. Topology-balance: every vertex's input edge contribution = output. |
+| Standard battery | 350/350 | 13 named cases + 350 random topological polygons. Topology-balance: every vertex's input edge contribution = output. Iter dist: 1:449 2:1. |
 | Displacement fuzz | 450/450 | 5 scales (2<sup>10</sup>...2<sup>49</sup>) × 3 sizes × 30 seeds. |
-| DeepFuzz (12,000 seeds) | **336,000 / 336,000 first-pass topology valid** | 12,000 seeds × 4 sizes × 7 displacement scales (2<sup>10</sup> to 2<sup>49</sup>). 0 first-pass FAILs across the entire battery. Iter distribution after fixed-point: 1:327,903; 2:7,937; 3:152; 4:7; 5:1. 0 iteration-DEGRADED (pass-1 valid → broken by iteration). 1 geometric collapse (thin-polygon idempotence quirk; see Pipeline section). |
-| Polygons round-trip | 335,440 / 336,000 | 0.17% mismatch rate (`OutEdgesToPolygons` drops <3-vert loops the lower-level pipeline counts as edges; documented gap). Mismatch rate stable across the 100-seed and 12,000-seed runs. |
-| Boolean2D area regression | 3/3 | Two CCW unit squares offset diagonally; Add area=7, Subtract=3, Intersect=1 (exact). Drives the wind > 1 predicate against perpendicular axis-aligned crossings. |
+| DeepFuzz (100 seeds, post-propagation) | **2800/2800 first-pass topology valid** | Iter dist: 1:2735 2:64 3:1. 0 iteration-DEGRADED (pass-1 valid → broken by iteration). **0 geometric collapses** (a 1-of-2800 collapse case in the pre-propagation run was eliminated by step 4's eager propagation). |
+| DeepFuzz (12,000 seeds, pre-propagation) | **336,000 / 336,000 first-pass topology valid** | Iter dist: 1:327,903; 2:7,937; 3:152; 4:7; 5:1. 0 valid→invalid degradations. 1 geometric collapse (the thin-polygon idempotence quirk at `kPow=35 n=20 seed=8993`). Numbers are from before step 4's eager propagation pass; the 100-seed re-run shows the propagation reduces iter≥2 cases by ~9% and eliminates collapse cases caused by k-fold concurrence. |
+| Polygons round-trip (100 seeds) | 2793 / 2800 | 0.25% mismatch rate. `OutEdgesToPolygons` drops <3-vert loops that the lower-level pipeline counts as boundary edges. Eager propagation slightly increased the rate (was 0.14% pre-propagation) because more sub-edges around concurrent crossings produce more short loops at the loop-walker stage. Underlying topology unchanged. |
+| Boolean2D area regression | 4/4 | Two CCW unit squares offset diagonally; Add area=7, Subtract=3, Intersect=1, **Xor=6** (all exact). Drives the wind > 1 predicate against perpendicular axis-aligned crossings, plus EvenOdd via Xor. |
 | Axis-aligned perpendicular | 1/1 | Two CCW unit squares offset diagonally; produces L-shape union with 8 boundary verts. Regression test for the kernel bug surfaced during OQ #3 / #4 investigation. |
-| `polygon_corpus.txt` (100 entries) | 100/100 topology valid | Manifold's existing curated corpus, run via `./overlap2d_proto corpus`. Area-preservation breakdown: 87/100 < 1% drift, 1/100 mid-drift (`Precision4` at 2.6%), 7/100 collapsed by name (`Degenerate4`, `DegenerateRing`, `NearlyLinear`, `Looping1/2`, `Precision`, `Sweep` - cases the algorithm correctly identifies as eps-thin). 5/100 had zero-area input. The `Precision4` 2.6% drift is correct behavior: the input is a sliver polygon with an eps-thin tail, and the algorithm trims sub-eps features as eps says it should. |
-| DeepFuzz area drift (100-seed) | 8 cases > 1% (0.29%) | Quantitative oracle on top of the topology check. All 8 cases at kPow=35 (where ULP precision is weakest); max drift 43.9%. Topology balance alone showed 1 geometric-collapse case at the same fuzz size; area oracle revealed 8x more cases of meaningful iteration drift, all in the thin-polygon class. |
+| `polygon_corpus.txt` (100 entries) | 100/100 topology valid | Manifold's existing curated corpus, run via `./overlap2d_proto corpus`. Area breakdown: 87/100 < 1% drift, 1/100 mid-drift (`Precision4` at 2.6%, correct behavior on a sliver-with-eps-thin-tail), 7/100 collapsed by name (`Degenerate4`, `DegenerateRing`, `NearlyLinear`, `Looping1/2`, `Precision`, `Sweep`), 5/100 had zero-area input. |
+| DeepFuzz area drift (100-seed) | 6 cases > 1% (0.21%), 5 > 10% | Quantitative oracle on top of topology. Pre-propagation showed 8 cases > 1% with max 43.9%; post-propagation shows 6 cases > 1% with max 32.1%. All cases at kPow=35 (where ULP precision is weakest). |
 
 Displacement fuzz is the load-bearing test: traditional FP boolean
 libraries fail catastrophically at 2<sup>k</sup> displacement, which

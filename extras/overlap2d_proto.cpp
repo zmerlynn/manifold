@@ -557,6 +557,7 @@ void FindAndInsertIntersections(const std::vector<EdgeM>& edges,
   const int nE = static_cast<int>(edges.size());
   const double eps2 = eps * eps;
   vertEdges->resize(verts->size());
+  const int origNumVerts = static_cast<int>(verts->size());
   // BVH broad phase: each edge as eps-padded segment AABB, queried against
   // all edge AABBs. Self-collision is filtered by `qi < li`. Pairs are
   // sorted lexicographically; the snap-and-insert below depends on
@@ -648,6 +649,54 @@ void FindAndInsertIntersections(const std::vector<EdgeM>& edges,
     insertSorted(i);
     insertSorted(j);
   }
+
+  // Eager propagation pass (2D analog of boolean_result.cpp::AddNewEdgeVerts).
+  // The pair-by-pair loop above only adds each new intersection vert to the
+  // two edges in its source pair. But k>=3 input edges can be concurrent at
+  // one true point: e.g., edges A, B, C all crossing at P generates three
+  // pair-intersections (A,B), (A,C), (B,C); the snap-to-existing logic
+  // catches duplicates within eps when they share an edge in the iteration
+  // order, but misses the "no shared edge" case (A,B vs E,F both at P).
+  // Without propagation, edge C ends up with no on-edge vert at P even though
+  // P geometrically lies on C; step 5 then emits C as one un-split sub-edge
+  // and the resulting DCEL has the wrong incidence at P.
+  //
+  // For each freshly-allocated intersection vert, query the edge BVH for all
+  // edges within eps and add the vert to their on-edge lists. The query box
+  // is eps-padded; the per-candidate exact projection-distance gate matches
+  // step 3's. Step 4b's structural+geometric merge stays as a fallback for
+  // FP noise that exceeds eps between near-duplicate intersections (which
+  // this propagation does not address).
+  std::vector<Box> queryBoxes;
+  std::vector<int> queryVerts;
+  for (int v = origNumVerts; v < (int)verts->size(); ++v) {
+    queryBoxes.push_back(BoxOf2DPoint((*verts)[v], eps));
+    queryVerts.push_back(v);
+  }
+  CollidePairs(bvh, queryBoxes, [&](int qi, int eIdx) {
+    const int v = queryVerts[qi];
+    if (v == edges[eIdx].v0 || v == edges[eIdx].v1) return;
+    if ((*vertEdges)[v].count(eIdx)) return;  // already incident
+    const vec2 a = (*verts)[edges[eIdx].v0];
+    const vec2 b = (*verts)[edges[eIdx].v1];
+    const vec2 ab = b - a;
+    const double abLen2 = dot(ab, ab);
+    if (abLen2 == 0) return;
+    const vec2 p = (*verts)[v];
+    const double t = dot(p - a, ab) / abLen2;
+    if (t <= 0 || t >= 1) return;
+    const vec2 closest = a + ab * t;
+    const vec2 d = p - closest;
+    if (dot(d, d) > eps2) return;
+    auto& lst = (*lists)[eIdx];
+    auto pos = std::lower_bound(
+        lst.begin(), lst.end(), t, [&](int vv, double tQ) {
+          double tv = dot((*verts)[vv] - a, ab) / abLen2;
+          return tv < tQ;
+        });
+    if (pos == lst.end() || *pos != v) lst.insert(pos, v);
+    (*vertEdges)[v].insert(eIdx);
+  });
 }
 
 // =============================================================================
