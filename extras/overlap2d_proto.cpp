@@ -465,10 +465,26 @@ std::vector<std::vector<int>> BuildEdgeVertLists(
   BVH bvh = BVHBuildFromBoxes(edgeBoxes);
   std::vector<Box> vertBoxes(nV);
   for (int v = 0; v < nV; ++v) vertBoxes[v] = BoxOf2DPoint(verts[v], eps);
+  // Build vert→neighbors adjacency from the input edges. Used below to
+  // detect "thin triangle apex" cases — see comment in CollidePairs.
+  std::vector<std::set<int>> adj(nV);
+  for (const auto& e : edges) {
+    adj[e.v0].insert(e.v1);
+    adj[e.v1].insert(e.v0);
+  }
   // Collect (edge, vert) candidate pairs first; then process per edge.
   std::vector<std::vector<std::pair<double, int>>> hitsPerEdge(nE);
   CollidePairs(bvh, vertBoxes, [&](int v, int e) {
     if (v == edges[e].v0 || v == edges[e].v1) return;
+    // Thin-triangle-apex skip: when V is connected to BOTH edge endpoints
+    // by other edges, V is the apex of a triangle (V, e.v0, e.v1) whose
+    // base is this edge. With non-tiny eps (large displacement), the apex
+    // can fall within eps of its base; without the skip, step 5
+    // canonicalization cancels the apex-split sub-edges against the
+    // triangle's other two sides, producing empty output. Only-one-
+    // endpoint adjacency is normal polygon-neighbor configuration, so
+    // we require BOTH to be conservative.
+    if (adj[v].count(edges[e].v0) && adj[v].count(edges[e].v1)) return;
     const vec2 a = verts[edges[e].v0];
     const vec2 b = verts[edges[e].v1];
     const vec2 ab = b - a;
