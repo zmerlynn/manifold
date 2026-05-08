@@ -165,8 +165,10 @@ predicate then carves A − B.
 | Displacement fuzz | 450/450 | 5 scales (2<sup>10</sup>...2<sup>49</sup>) × 3 sizes × 30 seeds. |
 | DeepFuzz (12,000 seeds) | **336,000 / 336,000 first-pass topology valid** | 12,000 seeds × 4 sizes × 7 displacement scales (2<sup>10</sup> to 2<sup>49</sup>). 0 first-pass FAILs across the entire battery. Iter distribution after fixed-point: 1:327,903; 2:7,937; 3:152; 4:7; 5:1. 0 iteration-DEGRADED (pass-1 valid → broken by iteration). 1 geometric collapse (thin-polygon idempotence quirk; see Pipeline section). |
 | Polygons round-trip | 335,440 / 336,000 | 0.17% mismatch rate (`OutEdgesToPolygons` drops <3-vert loops the lower-level pipeline counts as edges; documented gap). Mismatch rate stable across the 100-seed and 12,000-seed runs. |
-| Boolean2D smoke | 3/3 | Two overlapping unit squares → Add 8 edges, Subtract 4, Intersect 4. |
+| Boolean2D area regression | 3/3 | Two CCW unit squares offset diagonally; Add area=7, Subtract=3, Intersect=1 (exact). Drives the wind > 1 predicate against perpendicular axis-aligned crossings. |
 | Axis-aligned perpendicular | 1/1 | Two CCW unit squares offset diagonally; produces L-shape union with 8 boundary verts. Regression test for the kernel bug surfaced during OQ #3 / #4 investigation. |
+| `polygon_corpus.txt` (100 entries) | 100/100 topology valid | Manifold's existing curated corpus, run via `./overlap2d_proto corpus`. Area-preservation breakdown: 87/100 < 1% drift, 1/100 mid-drift (`Precision4` at 2.6%), 7/100 collapsed by name (`Degenerate4`, `DegenerateRing`, `NearlyLinear`, `Looping1/2`, `Precision`, `Sweep` - cases the algorithm correctly identifies as eps-thin). 5/100 had zero-area input. The `Precision4` 2.6% drift is correct behavior: the input is a sliver polygon with an eps-thin tail, and the algorithm trims sub-eps features as eps says it should. |
+| DeepFuzz area drift (100-seed) | 8 cases > 1% (0.29%) | Quantitative oracle on top of the topology check. All 8 cases at kPow=35 (where ULP precision is weakest); max drift 43.9%. Topology balance alone showed 1 geometric-collapse case at the same fuzz size; area oracle revealed 8x more cases of meaningful iteration drift, all in the thin-polygon class. |
 
 Displacement fuzz is the load-bearing test: traditional FP boolean
 libraries fail catastrophically at 2<sup>k</sup> displacement, which
@@ -187,20 +189,14 @@ entire adversarial range, in every size and seed tested.
 3. **Multi-threading.** `manifold::Collider` is parallel-ready; the
    prototype is `MANIFOLD_PAR=-1` only. Step 1 union-find and step 6
    per-face ray-cast are the natural parallelism candidates.
-4. **Quantitative correctness oracle.** Every test in the prototype's
-   battery checks topology balance only; no test compares the
-   algorithm's output area against an independent reference. Smith's
-   α-budget bounds *position drift*, not area, so the topology check
-   misses an entire class of "balanced but wrong" failures (the
-   thin-polygon collapse above is one example; a hole filled in or a
-   region orientation-flipped would be others). The repo has
-   `test/polygons/polygon_corpus.txt` (~100 named adversarial
-   polygons with expected triangle counts, including `Eberly`,
-   `Sliver`, `Comb`, `KissingZigzag`, `BarelyValid`, `Tricky`,
-   `Sponge4a`) sitting unused by this prototype; Clipper2's
-   `Polygons.txt` adds 195 cases with `SOL_AREA` references.
-   Production landing should adopt one or both as quantitative
-   oracles in addition to the topology fuzz.
+4. **Additional quantitative oracles.** The prototype now has area
+   preservation and area-drift tracking on top of the topology check
+   (see Validation), and consumes `polygon_corpus.txt` directly. The
+   remaining easy add is Clipper2's `Polygons.txt` (195 numbered
+   cases with `SOL_AREA` references), which gives an independent
+   third-party oracle on a wider input distribution than
+   `polygon_corpus.txt`. Worth doing for production landing; not
+   strictly required for the design discussion.
 
 ## Deferred (graduation patch)
 
