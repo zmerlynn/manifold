@@ -179,7 +179,7 @@ inline int CCWPerturbed(vec2 a, vec2 b, vec2 c, int rA, int rB, int rC,
 // =============================================================================
 inline double Coord(vec2 p, int axis) { return axis == 0 ? p.x : p.y; }
 
-inline bool IntersectSymbolic(vec2 a0, vec2 a1, vec2 b0, vec2 b1, int rA0,
+inline bool IntersectSegments(vec2 a0, vec2 a1, vec2 b0, vec2 b1, int rA0,
                               int rA1, int rB0, int rB1, double eps,
                               vec2* out) {
   // Step 1: SoS-aware cross-detection (same as the non-symbolic path).
@@ -261,45 +261,6 @@ inline bool IntersectSymbolic(vec2 a0, vec2 a1, vec2 b0, vec2 b1, int rA0,
   return std::isfinite(out->x) && std::isfinite(out->y);
 }
 
-inline bool IntersectSegments(vec2 a0, vec2 a1, vec2 b0, vec2 b1, int rA0,
-                              int rA1, int rB0, int rB1, double eps,
-                              vec2* out) {
-#ifdef OVERLAP2D_USE_SYMBOLIC
-  return IntersectSymbolic(a0, a1, b0, b1, rA0, rA1, rB0, rB1, eps, out);
-#endif
-  const int s1 = CCW(a0, a1, b0, eps);
-  const int s2 = CCW(a0, a1, b1, eps);
-  const int s3 = CCW(b0, b1, a0, eps);
-  const int s4 = CCW(b0, b1, a1, eps);
-  // Strictly-touching case: one endpoint is on the other line but the
-  // segments aren't fully collinear. Conservatively NOT a cross.
-  const int zeros = (s1 == 0) + (s2 == 0) + (s3 == 0) + (s4 == 0);
-  if (zeros > 0 && zeros < 4) return false;
-  // Fully-collinear case: SoS resolves the degeneracy with rank parity.
-  if (zeros == 4) {
-    const int p1 = CCWPerturbed(a0, a1, b0, rA0, rA1, rB0, eps);
-    const int p2 = CCWPerturbed(a0, a1, b1, rA0, rA1, rB1, eps);
-    if (p1 == p2) return false;
-    const int p3 = CCWPerturbed(b0, b1, a0, rB0, rB1, rA0, eps);
-    const int p4 = CCWPerturbed(b0, b1, a1, rB0, rB1, rA1, eps);
-    if (p3 == p4) return false;
-  } else {
-    if (s1 == s2) return false;
-    if (s3 == s4) return false;
-  }
-  const double dax = a1.x - a0.x;
-  const double day = a1.y - a0.y;
-  const double dbx = b1.x - b0.x;
-  const double dby = b1.y - b0.y;
-  const double det = dbx * day - dax * dby;
-  if (det == 0) return false;
-  const double ex = b0.x - a0.x;
-  const double ey = b0.y - a0.y;
-  const double t = (dbx * ey - dby * ex) / det;
-  out->x = a0.x + t * dax;
-  out->y = a0.y + t * day;
-  return true;
-}
 
 // =============================================================================
 // Tier 1: BVH wrappers.
