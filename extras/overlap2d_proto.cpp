@@ -694,79 +694,23 @@ int CastWindingRay(vec2 origin, const CanonicalSubEdges& canon,
   return winding;
 }
 
-// Output edges where (left winding > 0) != (right winding > 0).
-//
-// For each canonical sub-edge, compute winding numbers on its left and
-// right sides via ray-casts from points perpendicular-offset from the
-// edge midpoint. Offset choice: must be larger than FP noise (so
-// ray-cast comparisons are reliable) but smaller than the snap radius
-// `eps_snap` (so any vertex it could hit was already snapped). We pick
-// `eps_snap / 1000`, which lives in that gap when `eps_snap >> u*L`.
-//
-// Caveat: for very tight `eps_snap` (~ u*L), no such gap exists and the
-// approach degrades. The algorithmically-correct fix is planar face
-// traversal.
-std::vector<OutEdge> FilterByWinding(const CanonicalSubEdges& canon,
-                                     const std::vector<vec2>& verts,
-                                     double eps_snap) {
-  std::vector<OutEdge> out;
-  // Offset must be (a) > FP noise so ray-cast comparisons are reliable, and
-  // (b) < snap radius so any vert it could hit was already snapped. The
-  // original 1e-3 factor underflows at large coords (eps=3e-3 * 1e-3 = 3e-6
-  // is only ~8 ULPs at coord 1.6e9, where ray-cast comparisons compound FP
-  // error). Use 1e-1 for headroom (still well below eps so we stay inside
-  // the local face).
-  const double ofs = eps_snap * 1e-1;
-  for (const auto& [key, mult] : canon.map) {
-    vec2 p0 = verts[key.first];
-    vec2 p1 = verts[key.second];
-    vec2 mid = (p0 + p1) * 0.5;
-    vec2 d = p1 - p0;
-    double len = length(d);
-    if (len == 0) continue;
-    vec2 perp = {-d.y / len, d.x / len};  // 90° CCW
-    vec2 leftPt = mid + perp * ofs;
-    vec2 rightPt = mid + perp * -ofs;
-    int wL = CastWindingRay(leftPt, canon, verts);
-    int wR = CastWindingRay(rightPt, canon, verts);
-    bool leftIn = wL > 0;
-    bool rightIn = wR > 0;
-    if (leftIn == rightIn) continue;
-    // Output multiplicity is 1, not abs(canonical mult). The canonical mult
-    // counts how many input sub-edges fused into this segment; the output
-    // is the boundary of the {winding > 0} region, which crosses any given
-    // segment exactly once regardless of how many input edges overlapped
-    // there. Outputting abs(mult) breaks the per-vertex balance invariant
-    // when |mult| > 1 (kPow=30 × n=50 dense-intersection regime).
-    if (leftIn) {
-      out.push_back({key.first, key.second, 1});
-    } else {
-      out.push_back({key.second, key.first, 1});
-    }
-  }
-  return out;
-}
-
 // =============================================================================
-// Step 6 alternative: planar face traversal (DCEL).
+// Step 6: planar face traversal (DCEL).
 //
-// `FilterByWinding` above evaluates winding numbers per-edge via a
-// perpendicular-offset ray-cast. The deepfuzz finding (HANDOFF) is that
-// in dense regimes the per-edge ray-casts are FP-noisy and produce
-// inconsistent verdicts at shared vertices, breaking topological
-// validity in ~2% of cases.
+// Builds a DCEL (doubly-connected edge list, the same structure
+// manifold's 3D mesh `Manifold::Impl::halfedge_` uses) from the
+// canonical sub-edges, walks face cycles to identify each planar face,
+// and assigns ONE winding number per face by ray-casting from a point
+// in each face's interior. An edge is kept iff its left-face and
+// right-face windings disagree on the >0 predicate. Per-vertex
+// consistency is structural: all edges incident to a vertex see the
+// same face windings on each side, so no per-edge ray-cast can disagree
+// with its neighbors.
 //
-// This alternative builds a DCEL from the canonical sub-edges, walks
-// face cycles to identify each planar face, and assigns ONE winding
-// number per face (propagated by BFS from the outer face, where each
-// edge crossing changes winding by ±mult). An edge is kept iff its
-// left-face and right-face windings disagree on the >0 predicate. By
-// construction, all edges incident to a vertex see consistent face
-// windings on each side of that vertex.
-//
-// Complexity: O(E log E) for the per-vertex angular sort + O(E) for
-// face walks and BFS. No ray-casts; no perpendicular-offset hack; no
-// dependency on `eps`.
+// Complexity: O(E log E) for the per-vertex angular sort + O(F · E)
+// for the per-face winding ray-casts (F = face count). On the deepfuzz
+// 14000 cases, this is 0 first-pass topology FAILs vs 270 for the
+// per-edge ray-cast approach this replaces.
 // =============================================================================
 
 namespace dcel_internal {
@@ -1112,17 +1056,8 @@ OverlapResult RemoveOverlaps2D(const std::vector<vec2>& vertsIn,
 
   // Step 5: sub-edge canonicalization.
   auto canon = Canonicalize(edges, lists);
-  // Step 6: winding filter. DCEL face-traversal is the canonical step 6:
-  // per-vertex consistent by construction (no per-edge ray-cast
-  // inconsistencies). Verified against `FilterByWinding` (per-edge ray-
-  // cast) on a 14000-case deepfuzz: 0 first-pass topology FAILs vs 270
-  // for the old per-edge approach. Use `-DOVERLAP2D_LEGACY_WINDING` to
-  // opt back into the legacy implementation for A/B comparisons.
-#ifdef OVERLAP2D_LEGACY_WINDING
-  auto out = FilterByWinding(canon, merge.verts, eps);
-#else
+  // Step 6: DCEL face-traversal winding filter.
   auto out = FilterByWindingDCEL(canon, merge.verts);
-#endif
   return {std::move(merge.verts), std::move(out), std::move(merge.remap),
           numMerged};
 }
@@ -1578,7 +1513,7 @@ void Diagnose(uint64_t seed, int kPow = 30, int n = 50) {
   std::cerr << "Total imbalanced vertices at step 5: " << badCount << "\n";
 
   // Now also run step 6 (winding filter) and check balance again.
-  auto out = FilterByWinding(canon, merge.verts, eps);
+  auto out = FilterByWindingDCEL(canon, merge.verts);
   std::cerr << "\nAfter step 6 (winding filter): " << out.size()
             << " output edges (from " << canon.map.size()
             << " canonical sub-edges)\n";
@@ -1641,7 +1576,9 @@ void Diagnose(uint64_t seed, int kPow = 30, int n = 50) {
                   << (std::sqrt(dist2) / eps) << "*eps)\n";
       }
     }
-    const double ofs = eps * 1e-1;  // matches FilterByWinding
+    // Per-edge perpendicular-offset ray-cast for diagnostic visualization
+    // only (the actual step 6 uses DCEL face traversal).
+    const double ofs = eps * 1e-1;
     for (const auto& [k, m] : canon.map) {
       if (k.first != targetV && k.second != targetV) continue;
       vec2 p0 = merge.verts[k.first];
