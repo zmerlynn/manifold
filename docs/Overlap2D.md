@@ -2,10 +2,36 @@
 
 Status: design proposal accompanying the prototype at
 `extras/overlap2d_proto.cpp`.
-References: [`RobustBoolean.pdf`](RobustBoolean.pdf) (Julian Smith,
-*Towards robust inexact geometric computation*, UCAM-CL-TR-766, 2009);
-Emmett Lalish's algorithm sketch in
-[issue #289](https://github.com/elalish/manifold/issues/289).
+
+References:
+
+- [`RobustBoolean.pdf`](RobustBoolean.pdf): Julian Smith, *Towards
+  robust inexact geometric computation*, UCAM-CL-TR-766, 2009. The
+  α-budget framework, symbolic-perturbation predicates, and ≤2-iter
+  convergence proof come from §7.
+- [Emmett Lalish's algorithm sketch in issue #289](https://github.com/elalish/manifold/issues/289#issuecomment-2111069955).
+  The 6-step BVH-on-Smith pipeline and the choice not to use a
+  sweep-line.
+- Edelsbrunner & Mücke, *Simulation of Simplicity*, ACM TOG 9(1), 1990.
+  The permutation-parity SoS perturbation used by `CCWPerturbed`.
+- Shewchuk, *Adaptive Precision Floating-Point Arithmetic and Fast
+  Robust Geometric Predicates*, Discrete & Computational Geometry
+  18(3), 1997. The standard reference for `orient2d`-style
+  predicates; the prototype's `CCW`+SoS approach is in this lineage.
+- de Berg, Cheong, van Kreveld & Overmars, *Computational Geometry:
+  Algorithms and Applications* (3rd ed.), Springer 2008. Chapter 2
+  introduces the DCEL specifically for boolean operations on
+  subdivisions; chapter 8 covers the arrangement-and-classify
+  template the prototype follows.
+- Margalit & Knott, *An algorithm for computing the union, intersection
+  or difference of two polygons*, Computers & Graphics 13(2), 1989.
+  Pioneers the winding-rule classification (NonZero / EvenOdd) that
+  Clipper2 directly inherits.
+
+The shape is the canonical "build a planar arrangement, classify
+faces by fill rule, reconstruct the boundary" template (de Berg ch.8),
+implemented with the same DCEL data structure CGAL's `Arrangement_2`
+uses.
 
 ## Goal
 
@@ -141,21 +167,39 @@ its kin slip past topology-only checks.
 ```cpp
 namespace overlap2d {
 
-enum class BoolOp { Add, Subtract, Intersect };
+// Standard CSG fill rules: SVG/PostScript/Clipper2/CGAL convention.
+enum class FillRule { Positive, Negative, EvenOdd, NonZero };
 
-manifold::Polygons OverlapRemovePolygons(const manifold::Polygons& in,
-                                         double eps);
+// Single-input regularization. Same name as `CrossSection::Simplify`
+// (the eventual landing target).
+manifold::Polygons Simplify(const manifold::Polygons& in, double eps,
+                            FillRule fill = FillRule::Positive);
 
+// Binary boolean. Uses manifold's existing OpType enum from
+// `include/manifold/common.h` (the same one Manifold::Boolean and
+// CrossSection::Boolean accept), so callers can pass the same value
+// through 3D and 2D codepaths.
 manifold::Polygons Boolean2D(const manifold::Polygons& a,
                              const manifold::Polygons& b,
-                             BoolOp op, double eps = 0.0);  // <=0 auto-infers
+                             manifold::OpType op,
+                             double eps = 0.0);  // <=0 auto-infers
+
+// Symmetric difference. Standard 4th binary boolean alongside
+// Add/Subtract/Intersect. `manifold::OpType` doesn't include Xor, so
+// it's a separate entry point.
+manifold::Polygons Xor(const manifold::Polygons& a,
+                       const manifold::Polygons& b, double eps = 0.0);
 }
 ```
 
-Step 6's winding test is parameterized via a `WindPredicate` functor
-(default `w > 0` for Add/Subtract, `w > 1` for Intersect). Subtract
-flips B's edge multiplicities to −1 before joining; the same `w > 0`
-predicate then carves A − B.
+Step 6's classification is internally a `WindPredicate` functor that
+maps a face's winding number to inside/outside. The public `FillRule`
+enum is the user-facing wrapper. Subtract flips B's edge
+multiplicities to −1 before joining, so the same `Positive` rule
+carves A − B. Intersect uses an internal "w > 1" predicate (not a
+public fill rule, since it depends on Boolean2D maintaining mult=+1
+per input). Xor combines inputs with mult=+1 each and applies
+`EvenOdd`.
 
 ## Validation
 
