@@ -802,20 +802,32 @@ std::vector<OutEdge> FilterByWindingDCEL(const CanonicalSubEdges& canon,
   }
 
   // 3. Compute next pointers. For half-edge h arriving at vertex v
-  //    (= h.twin.origin), h.next is the half-edge in v's CCW-sorted
-  //    outgoing list immediately AFTER h.twin (with wraparound).
-  //    Equivalent: at v, the next outgoing half-edge encountered as you
-  //    sweep CCW from h.twin's direction. Keeps h.face on the LEFT
-  //    throughout the cycle.
+  //    (= h.twin.origin), h.next must be the outgoing edge that makes
+  //    the SMALLEST LEFT TURN from h's incoming direction. h.incoming
+  //    direction is opposite of h.twin's outgoing direction; the smallest
+  //    CCW rotation from h.incoming visits half-edges starting from
+  //    "h.incoming + small CCW" and finds the first entry. In the sorted
+  //    CCW outgoing list, this corresponds to **one step CW** from
+  //    h.twin (with wraparound).
+  //
+  //    Equivalent: starting at angle (h.twin + π) = h.incoming, sweep CCW
+  //    by ε, look up the first sorted entry. That entry is at sorted-list
+  //    position one before h.twin (= it - 1, with wraparound).
+  //
+  //    Using "it+1" instead of "it-1" picks the half-edge ALMOST A FULL
+  //    REVOLUTION CCW from h.twin = a RIGHT turn at v. For degree-2
+  //    vertices (chains, simple polygon corners), N=2 symmetry makes
+  //    "it+1" and "it-1" equivalent and both work. For degree-≥3
+  //    vertices (intersection points after step 4), they differ and
+  //    only "it-1" produces correctly-oriented face cycles.
   for (int i = 0; i < (int)halfedges.size(); ++i) {
     const int twinIdx = halfedges[i].twin;
     const int destV = halfedges[twinIdx].origin;
     auto& sorted = outgoing[destV];
     auto it = std::find(sorted.begin(), sorted.end(), twinIdx);
     if (it == sorted.end()) continue;
-    auto nextIt = it + 1;
-    if (nextIt == sorted.end()) nextIt = sorted.begin();
-    halfedges[i].next = *nextIt;
+    auto prevIt = (it == sorted.begin()) ? (sorted.end() - 1) : (it - 1);
+    halfedges[i].next = *prevIt;
   }
 
   // 4. Walk face cycles, assign face IDs. Each unmarked half-edge starts a
@@ -862,42 +874,56 @@ std::vector<OutEdge> FilterByWindingDCEL(const CanonicalSubEdges& canon,
                 << " bounded face(s) have negative signed area; cycle "
                    "convention may be inverted\n";
     }
+    // Group half-edges by face, count mults.
+    std::map<int, std::map<int, int>> faceMults;
+    for (int i = 0; i < (int)halfedges.size(); ++i) {
+      faceMults[halfedges[i].face][halfedges[i].mult]++;
+    }
+    for (auto& [f, m] : faceMults) {
+      std::cerr << "  face " << f << " mults:";
+      for (auto& [mu, c] : m) std::cerr << " " << mu << "x" << c;
+      std::cerr << "\n";
+    }
   }
 
-  // 6. BFS to propagate winding numbers. Convention: half-edge h has its
-  //    LEFT face on one side and its twin's LEFT face (= h's RIGHT face)
-  //    on the other. Crossing from h's LEFT to h's RIGHT decreases winding
-  //    by h.mult — so wind(h.right) = wind(h.left) - h.mult.
-  std::vector<int> faceWind(nFaces, INT_MIN);
-  faceWind[outerFace] = 0;
-  std::queue<int> bfs;
-  bfs.push(outerFace);
-  // Index half-edges by face for fast cycle walks during BFS.
+  // 6. Compute winding per face by ray-cast. We do this PER FACE rather
+  //    than per-edge (the old `FilterByWinding`) because per-edge produces
+  //    inconsistent verdicts at shared vertices, AND we do it per-face
+  //    rather than via BFS-from-outer because BFS doesn't propagate
+  //    between disconnected face-graph components (real for self-
+  //    intersecting polygons whose union has multiple disjoint regions).
+  //    Ray-cast errors don't compound since each face decision is
+  //    independent.
+  //
+  //    For each face, find a half-edge on its boundary, perp-offset its
+  //    midpoint into the face (the LEFT side, by DCEL convention), cast
+  //    a horizontal ray, sum signed mult contributions of edges crossed.
+  std::vector<int> faceWind(nFaces, 0);
   std::vector<int> faceStartHE(nFaces, -1);
   for (int i = 0; i < (int)halfedges.size(); ++i) {
     if (halfedges[i].face >= 0 && faceStartHE[halfedges[i].face] == -1)
       faceStartHE[halfedges[i].face] = i;
   }
-  while (!bfs.empty()) {
-    const int f = bfs.front();
-    bfs.pop();
-    int startHE = faceStartHE[f];
-    if (startHE == -1) continue;
-    int h = startHE;
-    int safety = 0;
-    do {
-      const int twin = halfedges[h].twin;
-      const int otherFace = halfedges[twin].face;
-      if (otherFace >= 0 && faceWind[otherFace] == INT_MIN) {
-        // h is on face f (LEFT of h); twin is on otherFace (LEFT of twin
-        // = RIGHT of h). Crossing from f to otherFace via h means going
-        // from LEFT to RIGHT of h: wind decreases by h.mult.
-        faceWind[otherFace] = faceWind[f] - halfedges[h].mult;
-        bfs.push(otherFace);
-      }
-      if (halfedges[h].next == -1 || safety++ > (int)halfedges.size()) break;
-      h = halfedges[h].next;
-    } while (h != startHE);
+  // Ray-cast offset: must be small enough that (a) the offset point lies
+  // within the face whose boundary we're sampling, and (b) it doesn't
+  // accidentally land in a different face. We use a fraction of the
+  // edge's length, which scales with the local feature size.
+  for (int f = 0; f < nFaces; ++f) {
+    if (f == outerFace) {
+      faceWind[f] = 0;
+      continue;
+    }
+    int h = faceStartHE[f];
+    if (h < 0) continue;
+    const vec2 a = verts[halfedges[h].origin];
+    const vec2 b = verts[halfedges[halfedges[h].twin].origin];
+    const vec2 mid = (a + b) * 0.5;
+    const vec2 d = b - a;
+    const double len = length(d);
+    if (len == 0) continue;
+    const vec2 perp(-d.y / len, d.x / len);  // 90° CCW = LEFT of h's direction
+    const vec2 pInF = mid + perp * (len * 1e-3);
+    faceWind[f] = CastWindingRay(pInF, canon, verts);
   }
 
   if (DCELDebug()) {
@@ -927,7 +953,6 @@ std::vector<OutEdge> FilterByWindingDCEL(const CanonicalSubEdges& canon,
     if (leftFace < 0 || rightFace < 0) continue;
     const int wL = faceWind[leftFace];
     const int wR = faceWind[rightFace];
-    if (wL == INT_MIN || wR == INT_MIN) continue;
     const bool leftIn = wL > 0;
     const bool rightIn = wR > 0;
     if (leftIn == rightIn) continue;
