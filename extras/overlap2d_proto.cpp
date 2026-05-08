@@ -40,7 +40,9 @@
 #include <cmath>
 #include <cstdint>
 #include <iostream>
+#include <climits>
 #include <map>
+#include <queue>
 #include <random>
 #include <set>
 #include <sstream>
@@ -730,6 +732,179 @@ std::vector<OutEdge> FilterByWinding(const CanonicalSubEdges& canon,
 }
 
 // =============================================================================
+// Step 6 alternative: planar face traversal (DCEL).
+//
+// `FilterByWinding` above evaluates winding numbers per-edge via a
+// perpendicular-offset ray-cast. The deepfuzz finding (HANDOFF) is that
+// in dense regimes the per-edge ray-casts are FP-noisy and produce
+// inconsistent verdicts at shared vertices, breaking topological
+// validity in ~2% of cases.
+//
+// This alternative builds a DCEL from the canonical sub-edges, walks
+// face cycles to identify each planar face, and assigns ONE winding
+// number per face (propagated by BFS from the outer face, where each
+// edge crossing changes winding by ±mult). An edge is kept iff its
+// left-face and right-face windings disagree on the >0 predicate. By
+// construction, all edges incident to a vertex see consistent face
+// windings on each side of that vertex.
+//
+// Complexity: O(E log E) for the per-vertex angular sort + O(E) for
+// face walks and BFS. No ray-casts; no perpendicular-offset hack; no
+// dependency on `eps`.
+// =============================================================================
+
+namespace dcel_internal {
+struct HalfEdge {
+  int twin;    // index of the twin half-edge in halfedges[]
+  int next;    // next half-edge along the same face's CCW boundary
+  int origin;  // vertex this half-edge starts at
+  int face;    // face id (-1 until assigned)
+  int mult;    // signed multiplicity in this direction
+};
+}  // namespace dcel_internal
+
+std::vector<OutEdge> FilterByWindingDCEL(const CanonicalSubEdges& canon,
+                                         const std::vector<vec2>& verts) {
+  using dcel_internal::HalfEdge;
+  // 1. Build half-edges. Each canonical (vMin, vMax) with mult m becomes:
+  //    - hA: vMin → vMax, mult = m
+  //    - hB: vMax → vMin, mult = -m
+  //    Twins are paired (hA.twin = hB, hB.twin = hA).
+  std::vector<HalfEdge> halfedges;
+  halfedges.reserve(2 * canon.map.size());
+  for (const auto& [k, m] : canon.map) {
+    int hA = static_cast<int>(halfedges.size());
+    halfedges.push_back({hA + 1, -1, k.first, -1, m});
+    halfedges.push_back({hA, -1, k.second, -1, -m});
+  }
+  if (halfedges.empty()) return {};
+
+  // 2. Group half-edges by origin vertex; sort each group by direction angle
+  //    (CCW). This is the "rotational order" needed to compute next pointers.
+  std::map<int, std::vector<int>> outgoing;
+  for (int i = 0; i < (int)halfedges.size(); ++i) {
+    outgoing[halfedges[i].origin].push_back(i);
+  }
+  for (auto& [v, hes] : outgoing) {
+    const vec2 vp = verts[v];
+    std::sort(hes.begin(), hes.end(), [&](int a, int b) {
+      const vec2 dA = verts[halfedges[halfedges[a].twin].origin] - vp;
+      const vec2 dB = verts[halfedges[halfedges[b].twin].origin] - vp;
+      return std::atan2(dA.y, dA.x) < std::atan2(dB.y, dB.x);
+    });
+  }
+
+  // 3. Compute next pointers. For half-edge h arriving at vertex v
+  //    (= h.twin.origin), h.next is the half-edge in v's CCW-sorted
+  //    outgoing list immediately AFTER h.twin (with wraparound).
+  //    This convention follows the LEFT face of h around its boundary.
+  for (int i = 0; i < (int)halfedges.size(); ++i) {
+    const int twinIdx = halfedges[i].twin;
+    const int destV = halfedges[twinIdx].origin;
+    auto& sorted = outgoing[destV];
+    auto it = std::find(sorted.begin(), sorted.end(), twinIdx);
+    if (it == sorted.end()) continue;
+    auto nextIt = it + 1;
+    if (nextIt == sorted.end()) nextIt = sorted.begin();
+    halfedges[i].next = *nextIt;
+  }
+
+  // 4. Walk face cycles, assign face IDs. Each unmarked half-edge starts a
+  //    new face; follow `next` chain back to the start.
+  int nFaces = 0;
+  for (int i = 0; i < (int)halfedges.size(); ++i) {
+    if (halfedges[i].face != -1) continue;
+    int h = i;
+    int safety = 0;
+    do {
+      if (halfedges[h].next == -1 || safety++ > (int)halfedges.size()) {
+        // Malformed cycle; bail rather than infinite-loop.
+        break;
+      }
+      halfedges[h].face = nFaces;
+      h = halfedges[h].next;
+    } while (h != i);
+    ++nFaces;
+  }
+
+  // 5. Compute signed area per face. Outer face has the most negative area.
+  std::vector<double> faceArea(nFaces, 0.0);
+  for (int i = 0; i < (int)halfedges.size(); ++i) {
+    if (halfedges[i].face < 0) continue;
+    const vec2 a = verts[halfedges[i].origin];
+    const vec2 b = verts[halfedges[halfedges[i].twin].origin];
+    faceArea[halfedges[i].face] += (a.x * b.y - b.x * a.y) * 0.5;
+  }
+  int outerFace = 0;
+  for (int f = 1; f < nFaces; ++f) {
+    if (faceArea[f] < faceArea[outerFace]) outerFace = f;
+  }
+
+  // 6. BFS to propagate winding numbers. Convention: half-edge h has its
+  //    LEFT face on one side and its twin's LEFT face (= h's RIGHT face)
+  //    on the other. Crossing from h's LEFT to h's RIGHT decreases winding
+  //    by h.mult — so wind(h.right) = wind(h.left) - h.mult.
+  std::vector<int> faceWind(nFaces, INT_MIN);
+  faceWind[outerFace] = 0;
+  std::queue<int> bfs;
+  bfs.push(outerFace);
+  // Index half-edges by face for fast cycle walks during BFS.
+  std::vector<int> faceStartHE(nFaces, -1);
+  for (int i = 0; i < (int)halfedges.size(); ++i) {
+    if (halfedges[i].face >= 0 && faceStartHE[halfedges[i].face] == -1)
+      faceStartHE[halfedges[i].face] = i;
+  }
+  while (!bfs.empty()) {
+    const int f = bfs.front();
+    bfs.pop();
+    int startHE = faceStartHE[f];
+    if (startHE == -1) continue;
+    int h = startHE;
+    int safety = 0;
+    do {
+      const int twin = halfedges[h].twin;
+      const int otherFace = halfedges[twin].face;
+      if (otherFace >= 0 && faceWind[otherFace] == INT_MIN) {
+        // h is on face f (LEFT of h); twin is on otherFace (LEFT of twin
+        // = RIGHT of h). Crossing from f to otherFace via h means going
+        // from LEFT to RIGHT of h: wind decreases by h.mult.
+        faceWind[otherFace] = faceWind[f] - halfedges[h].mult;
+        bfs.push(otherFace);
+      }
+      if (halfedges[h].next == -1 || safety++ > (int)halfedges.size()) break;
+      h = halfedges[h].next;
+    } while (h != startHE);
+  }
+
+  // 7. Filter canonical sub-edges by left/right face windings. The first
+  //    half-edge of each pair (the (vMin → vMax) direction) is at index
+  //    2*i; its twin (vMax → vMin) is at 2*i + 1.
+  std::vector<OutEdge> out;
+  out.reserve(canon.map.size());
+  int hi = 0;
+  for (const auto& [k, m] : canon.map) {
+    const int hA = hi;
+    const int hB = hi + 1;
+    hi += 2;
+    const int leftFace = halfedges[hA].face;
+    const int rightFace = halfedges[hB].face;
+    if (leftFace < 0 || rightFace < 0) continue;
+    const int wL = faceWind[leftFace];
+    const int wR = faceWind[rightFace];
+    if (wL == INT_MIN || wR == INT_MIN) continue;
+    const bool leftIn = wL > 0;
+    const bool rightIn = wR > 0;
+    if (leftIn == rightIn) continue;
+    if (leftIn) {
+      out.push_back({k.first, k.second, 1});
+    } else {
+      out.push_back({k.second, k.first, 1});
+    }
+  }
+  return out;
+}
+
+// =============================================================================
 // End-to-end driver.
 // =============================================================================
 struct OverlapResult {
@@ -839,8 +1014,14 @@ OverlapResult RemoveOverlaps2D(const std::vector<vec2>& vertsIn,
 
   // Step 5: sub-edge canonicalization.
   auto canon = Canonicalize(edges, lists);
-  // Step 6: winding filter.
+  // Step 6: winding filter. With OVERLAP2D_FACE_TRAVERSAL, use the DCEL
+  // face-traversal version that's per-vertex consistent by construction
+  // (no per-edge ray-cast inconsistencies).
+#ifdef OVERLAP2D_FACE_TRAVERSAL
+  auto out = FilterByWindingDCEL(canon, merge.verts);
+#else
   auto out = FilterByWinding(canon, merge.verts, eps);
+#endif
   return {std::move(merge.verts), std::move(out), std::move(merge.remap),
           numMerged};
 }
@@ -861,6 +1042,41 @@ OverlapResult RemoveOverlaps2D(const std::vector<vec2>& vertsIn,
 // Fingerprint quantizes vert positions to multiples of eps/100 so that
 // cross-iteration vert renumbering doesn't break comparison.
 // =============================================================================
+// Quantum-parameterized fingerprint. `Fingerprint` (default) uses eps/100;
+// `CoarseFingerprint` (eps quantum) captures only topology — i.e., two
+// runs differing by sub-eps position drift will have identical coarse
+// fingerprints, which is the right test for "did pass 2 actually change
+// the topology, or just shift positions by a few ULPs?"
+inline std::string FingerprintAt(const OverlapResult& r, double quantum) {
+  auto q = [quantum](double x) {
+    return static_cast<int64_t>(std::round(x / quantum));
+  };
+  std::vector<std::tuple<int64_t, int64_t, int64_t, int64_t, int>> subs;
+  subs.reserve(r.edges.size());
+  for (const auto& oe : r.edges) {
+    vec2 p0 = r.verts[oe.v0];
+    vec2 p1 = r.verts[oe.v1];
+    auto ka = std::make_pair(q(p0.x), q(p0.y));
+    auto kb = std::make_pair(q(p1.x), q(p1.y));
+    int mult = oe.mult;
+    if (kb < ka) {
+      std::swap(ka, kb);
+      mult = -mult;
+    }
+    subs.emplace_back(ka.first, ka.second, kb.first, kb.second, mult);
+  }
+  std::sort(subs.begin(), subs.end());
+  std::ostringstream oss;
+  for (const auto& [ax, ay, bx, by, m] : subs) {
+    oss << ax << "," << ay << "," << bx << "," << by << ":" << m << ";";
+  }
+  return oss.str();
+}
+
+inline std::string CoarseFingerprint(const OverlapResult& r, double eps) {
+  return FingerprintAt(r, eps);
+}
+
 inline std::string Fingerprint(const OverlapResult& r, double eps) {
   const double quantum = eps * 0.01;
   auto q = [quantum](double x) {
@@ -902,16 +1118,24 @@ OverlapResult IterateToFixedPoint(const std::vector<vec2>& vIn,
   std::vector<std::string> fps;
   history.push_back(RemoveOverlaps2D(vIn, eIn, eps));
   fps.push_back(Fingerprint(history.back(), eps));
+  // composedRemap[orig_input_vert] = current iteration's vert idx. Updated
+  // each iteration so callers can validate the final result against the
+  // original input. Without this, only first-pass `inputRemap` is meaningful.
+  std::vector<int> composedRemap = history.back().inputRemap;
   for (int iter = 1; iter <= maxIter; ++iter) {
     std::vector<EdgeM> nextEdges;
     nextEdges.reserve(history.back().edges.size());
     for (const auto& oe : history.back().edges)
       nextEdges.push_back({oe.v0, oe.v1, oe.mult});
     auto next = RemoveOverlaps2D(history.back().verts, nextEdges, eps);
+    // Compose: orig→prev_iter via composedRemap, then prev_iter→next via
+    // next.inputRemap.
+    for (auto& v : composedRemap) v = next.inputRemap[v];
     auto nextFp = Fingerprint(next, eps);
     if (nextFp == fps.back()) {
       if (outIters) *outIters = iter;
       if (outStatus) *outStatus = IterStatus::Converged;
+      next.inputRemap = std::move(composedRemap);
       return next;
     }
     // Cycle detection: same fingerprint seen earlier (not just last).
@@ -919,12 +1143,19 @@ OverlapResult IterateToFixedPoint(const std::vector<vec2>& vIn,
       if (fps[k] == nextFp) {
         if (outIters) *outIters = iter;
         if (outStatus) *outStatus = IterStatus::Cycled;
-        // Lex-smallest fingerprint wins.
+        // Lex-smallest fingerprint wins. The remap is correct for the
+        // returned iteration only if we picked `next`; for older history
+        // entries we can't reconstruct the composed remap (we threw away
+        // intermediate composedRemap states). The caller passing
+        // numMergedVerts and edges remains consistent for `next`.
         size_t minIdx = 0;
         for (size_t j = 1; j < fps.size(); ++j) {
           if (fps[j] < fps[minIdx]) minIdx = j;
         }
-        if (nextFp < fps[minIdx]) return next;
+        if (nextFp < fps[minIdx]) {
+          next.inputRemap = std::move(composedRemap);
+          return next;
+        }
         return std::move(history[minIdx]);
       }
     }
@@ -933,6 +1164,7 @@ OverlapResult IterateToFixedPoint(const std::vector<vec2>& vIn,
   }
   if (outIters) *outIters = maxIter;
   if (outStatus) *outStatus = IterStatus::MaxedOut;
+  history.back().inputRemap = std::move(composedRemap);
   return std::move(history.back());
 }
 
@@ -1130,18 +1362,20 @@ bool CheckIdempotence(const OverlapResult& first, double eps) {
 
 }  // namespace overlap2d
 
-// Diagnostic: run ONE failing case (kPow=30 × n=50 × seed=N) and dump
-// intermediate state. Invoked via `./overlap2d_proto diagnose <seed>`.
+// Diagnostic: run ONE failing case and dump intermediate state.
+// Invoked via `./overlap2d_proto diagnose <seed> [kPow] [n]`. Default
+// kPow=30, n=50, but any DeepFuzz parameter combo can be targeted.
+// IMPORTANT: the seed→RNG mapping must match DeepFuzz exactly.
 namespace overlap2d {
-void Diagnose(uint64_t seed) {
-  const int kPow = 30;
-  const int n = 50;
+void Diagnose(uint64_t seed, int kPow = 30, int n = 50) {
   const double offset = std::ldexp(1.5, kPow);
   const double eps = EpsilonFromScale(offset);
   std::cerr << "=== Diagnose: kPow=" << kPow << " n=" << n << " seed=" << seed
             << " offset=" << offset << " eps=" << eps << " ===\n";
 
-  auto [vIn, eIn] = RandomTopologicalPolygon(n, seed + 1000 * kPow);
+  // Match the seed mapping used by both main()'s displacement fuzz and
+  // DeepFuzz: `seed + 1000 * kPow`.
+  auto [vIn, eIn] = RandomTopologicalPolygon(n, seed + 1000ull * kPow);
   Displace(&vIn, offset);
   std::cerr << "Input: " << vIn.size() << " verts, " << eIn.size()
             << " edges\n";
@@ -1339,6 +1573,345 @@ void Diagnose(uint64_t seed) {
   }
   std::cerr << "After step 4b: " << closeCount
             << " pairs of distinct verts within eps of each other\n";
+
+  // Now run iterate-to-fixed-point and report on the iterated result.
+  std::cerr << "\n=== IterateToFixedPoint ===\n";
+  int iters = 0;
+  IterStatus iterStatus = IterStatus::Converged;
+  auto rIter = IterateToFixedPoint(vIn, eIn, eps, /*maxIter=*/8, &iters,
+                                   &iterStatus);
+  const char* statusStr =
+      iterStatus == IterStatus::Converged
+          ? "Converged"
+          : (iterStatus == IterStatus::Cycled ? "Cycled" : "MaxedOut");
+  std::cerr << "Iters: " << iters << " status: " << statusStr << "\n";
+  std::cerr << "Iterated result: " << rIter.verts.size() << " verts, "
+            << rIter.edges.size() << " edges, numMergedVerts="
+            << rIter.numMergedVerts << "\n";
+
+  // Check topology validity on the iterated result with composed remap.
+  bool iterValid = CheckTopologicalValidity(rIter, eIn, rIter.inputRemap,
+                                            rIter.numMergedVerts);
+  std::cerr << "Iterated topology valid: " << (iterValid ? "YES" : "NO")
+            << "\n";
+
+  // Sanity-check pass 1 the way DeepFuzz does it (the production
+  // RemoveOverlaps2D pipeline, NOT the legacy diagnostic above).
+  std::cerr << "\n=== Pass 1 (RemoveOverlaps2D, the production path) ===\n";
+  auto pass1 = RemoveOverlaps2D(vIn, eIn, eps);
+  bool pass1Valid = CheckTopologicalValidity(pass1, eIn, pass1.inputRemap,
+                                             pass1.numMergedVerts);
+  std::cerr << "Pass 1 verts=" << pass1.verts.size()
+            << " edges=" << pass1.edges.size()
+            << " numMergedVerts=" << pass1.numMergedVerts << " valid="
+            << (pass1Valid ? "YES" : "NO") << "\n";
+
+  // Find imbalanced verts and dump their canonical sub-edge environment.
+  if (!pass1Valid) {
+    std::cerr << "\n=== Imbalanced vert analysis ===\n";
+    // Compute expected balance from input edges remapped through
+    // pass1.inputRemap (same as CheckTopologicalValidity).
+    std::vector<EdgeM> remapped;
+    for (const auto& ie : eIn) {
+      int a = pass1.inputRemap[ie.v0], b = pass1.inputRemap[ie.v1];
+      if (a != b) remapped.push_back({a, b, ie.mult});
+    }
+    auto exp = ComputeBalance(remapped);
+    std::map<int, int> act;
+    for (const auto& oe : pass1.edges) {
+      act[oe.v0] += oe.mult;
+      act[oe.v1] -= oe.mult;
+    }
+    for (int v = 0; v < (int)pass1.verts.size(); ++v) {
+      int target = (v < pass1.numMergedVerts)
+                       ? (exp.count(v) ? exp[v] : 0)
+                       : 0;
+      int actual = act.count(v) ? act[v] : 0;
+      if (actual != target) {
+        const vec2 p = pass1.verts[v];
+        std::cerr << "  v" << v << " (orig=" << (v < pass1.numMergedVerts)
+                  << ") pos=(" << (p.x - offset) << "," << (p.y - offset)
+                  << ") expected=" << target << " got=" << actual << "\n";
+        // Edges in pass1.edges touching this vert.
+        std::cerr << "    output edges touching:\n";
+        int tch = 0;
+        for (const auto& oe : pass1.edges) {
+          if (oe.v0 == v || oe.v1 == v) {
+            std::cerr << "      " << oe.v0 << "→" << oe.v1
+                      << " mult=" << oe.mult << "\n";
+            if (++tch >= 6) break;
+          }
+        }
+      }
+    }
+    // For each imbalanced vert, find canonical sub-edges incident to it,
+    // and check how step 6 voted on each.
+    std::cerr << "\n=== Step 6 verdicts for imbalanced verts ===\n";
+    // Re-run the production pipeline to canonical sub-edges (structural
+    // step 4b included — same as RemoveOverlaps2D up to step 5).
+    // We want canon as the production pipeline produces it.
+    // Note: pass1.edges is post-step-6; we need post-step-5. So re-run.
+    auto m3 = MergeVerts(vIn, eps);
+    auto e3 = RemapAndCollapse(eIn, m3.remap);
+    auto l3 = BuildEdgeVertLists(e3, m3.verts, eps);
+    std::vector<std::set<int>> ve3;
+    FindAndInsertIntersections(e3, &m3.verts, &l3, &ve3, eps);
+    // structural step 4b (copy of the production code)
+    {
+      DisjointSets uf(static_cast<int>(m3.verts.size()));
+      const double mergeThresh2 = (10.0 * eps) * (10.0 * eps);
+      for (size_t a = 0; a < m3.verts.size(); ++a) {
+        if (a >= ve3.size() || ve3[a].empty()) continue;
+        for (size_t b = a + 1; b < m3.verts.size(); ++b) {
+          if (b >= ve3.size() || ve3[b].empty()) continue;
+          bool shared = false;
+          for (int e : ve3[a]) if (ve3[b].count(e)) { shared = true; break; }
+          if (!shared) continue;
+          vec2 d = m3.verts[b] - m3.verts[a];
+          if (dot(d, d) > mergeThresh2) continue;
+          uf.unite((int)a, (int)b);
+        }
+      }
+      std::map<int, std::pair<vec2, int>> sums;
+      for (size_t i = 0; i < m3.verts.size(); ++i) {
+        int r = uf.find((int)i);
+        auto& s = sums[r];
+        s.first = s.first + m3.verts[i];
+        s.second += 1;
+      }
+      if (sums.size() < m3.verts.size()) {
+        std::map<int, int> rootToNew;
+        std::vector<vec2> nv;
+        for (const auto& [root, sc] : sums) {
+          rootToNew[root] = (int)nv.size();
+          nv.push_back(sc.first * (1.0 / sc.second));
+        }
+        std::vector<int> rmp(m3.verts.size());
+        for (size_t i = 0; i < m3.verts.size(); ++i)
+          rmp[i] = rootToNew[uf.find((int)i)];
+        for (auto& ed : e3) { ed.v0 = rmp[ed.v0]; ed.v1 = rmp[ed.v1]; }
+        for (auto& list : l3) {
+          for (auto& v : list) v = rmp[v];
+          list.erase(std::unique(list.begin(), list.end()), list.end());
+        }
+        m3.verts = std::move(nv);
+      }
+    }
+    auto canon = Canonicalize(e3, l3);
+    std::cerr << "  canonical sub-edges (post step 5): " << canon.map.size()
+              << "\n";
+
+    // For each imbalanced vert, dump every canonical edge touching it and
+    // step 6's verdict.
+    std::set<int> imbalanced{101, 110, 112, 195};
+    const double ofs = eps * 1e-1;
+    for (int target : imbalanced) {
+      if (target >= (int)m3.verts.size()) continue;
+      vec2 vp = m3.verts[target];
+      std::cerr << "  v" << target << " pos=(" << (vp.x - offset) << ","
+                << (vp.y - offset) << ")\n";
+      int sub_count = 0, kept = 0, dropped = 0;
+      for (const auto& [k, m] : canon.map) {
+        if (k.first != target && k.second != target) continue;
+        ++sub_count;
+        const int other = (k.first == target) ? k.second : k.first;
+        const vec2 op = m3.verts[other];
+        vec2 p0 = vp, p1 = op;
+        if (k.first != target) std::swap(p0, p1);
+        vec2 mid = (p0 + p1) * 0.5;
+        vec2 d = p1 - p0;
+        const double len = length(d);
+        if (len == 0) continue;
+        vec2 perp = {-d.y / len, d.x / len};
+        vec2 lpt = mid + perp * ofs, rpt = mid - perp * ofs;
+        int wL = CastWindingRay(lpt, canon, m3.verts);
+        int wR = CastWindingRay(rpt, canon, m3.verts);
+        bool keep = (wL > 0) != (wR > 0);
+        if (keep) ++kept; else ++dropped;
+        std::cerr << "    (" << k.first << "↔" << k.second << ") mult=" << m
+                  << " wL=" << wL << " wR=" << wR
+                  << (keep ? " KEEP" : " DROP") << " other.pos=("
+                  << (op.x - offset) << "," << (op.y - offset) << ")\n";
+        if (sub_count >= 8) {
+          std::cerr << "    ...\n";
+          break;
+        }
+      }
+      std::cerr << "    " << kept << " kept, " << dropped
+                << " dropped at this vert\n";
+    }
+  }
+  // Also report what the test is expecting per-vertex.
+  std::cerr << "Composed remap (original input vert → final vert idx):\n";
+  for (size_t i = 0; i < rIter.inputRemap.size(); ++i) {
+    if (i < 10 || i == rIter.inputRemap.size() - 1)
+      std::cerr << "  v" << i << " → " << rIter.inputRemap[i] << "\n";
+  }
+}
+}  // namespace overlap2d
+
+// =============================================================================
+// Deep fuzz: wider seed sweep + iter-vs-topology verification.
+//
+// The standard displacement fuzz uses 30 seeds per (kPow, n) cell. This
+// mode runs `seedsPerCell` seeds per cell across a wider parameter grid
+// and, for every case the iterate-to-fixed-point reports as iter ≥ 2,
+// compares pass-1 vs pass-2 outputs at:
+//
+//   - eps/100 quantum (the standard fingerprint, what triggers iter ≥ 2)
+//   - eps quantum (topology-only — captures sub-edges modulo sub-eps drift)
+//
+// If pass-1 and pass-2 differ at eps/100 but match at eps for every iter≥2
+// case, the iteration is shifting positions only, not topology. That's the
+// cut-corner answer for whether iter=2 is doing real work.
+// =============================================================================
+namespace overlap2d {
+void DeepFuzz(int seedsPerCell) {
+  const std::vector<int> kPows = {10, 20, 30, 35, 40, 45, 49};
+  const std::vector<int> sizes = {8, 20, 50, 100};
+  std::cout << "=== DeepFuzz: " << seedsPerCell << " seeds × " << sizes.size()
+            << " sizes × " << kPows.size() << " kPow = "
+            << (seedsPerCell * sizes.size() * kPows.size()) << " cases ===\n";
+
+  int total = 0;
+  int firstPassFail = 0;
+  int convergedPassValid = 0;     // converged result: topo valid
+  int convergedPassInvalid = 0;   // converged result: topo invalid
+  std::map<int, int> iterDist;
+  int iterGE2 = 0;
+  int iterGE2_topo_match = 0;     // pass1 == pass2 at eps quantum
+  int iterGE2_fine_match = 0;     // pass1 == pass2 at eps/100 quantum
+  int iterGE2_topo_diff = 0;
+  int iterGE2_pass1_invalid = 0;  // iter≥2 cases where pass 1 was wrong
+  int iterGE2_pass1_valid = 0;    // iter≥2 cases where pass 1 was already valid
+  int iter_repaired = 0;          // pass-1 invalid → converged valid
+  int iter_degraded = 0;          // pass-1 valid → converged INVALID
+  int pass1_invalid_unfixed = 0;  // pass-1 invalid AND converged invalid
+  std::vector<std::tuple<int, int, uint64_t>> topoMismatch;
+  std::vector<std::tuple<int, int, uint64_t, int>> convergedInvalidList;
+  std::vector<std::tuple<int, int, uint64_t, int>> degradedList;
+  // (kPow, n, seed, iters) for both
+
+  for (int kPow : kPows) {
+    const double offset = std::ldexp(1.5, kPow);
+    const double eps = EpsilonFromScale(offset);
+    for (int n : sizes) {
+      for (int seed = 0; seed < seedsPerCell; ++seed) {
+        ++total;
+        // Seed mapping matches the standard displacement fuzz in main()
+        // so any failing (kPow, n, seed) here can be passed verbatim to
+        // `./overlap2d_proto diagnose <seed> <kPow> <n>`.
+        auto [v, e] = RandomTopologicalPolygon(
+            n, static_cast<uint64_t>(seed) + 1000ull * kPow);
+        Displace(&v, offset);
+
+        auto pass1 = RemoveOverlaps2D(v, e, eps);
+        const bool pass1Valid = CheckTopologicalValidity(
+            pass1, e, pass1.inputRemap, pass1.numMergedVerts);
+        if (!pass1Valid) ++firstPassFail;
+
+        // Run iterate-to-fixed-point to classify.
+        int iters = 0;
+        IterStatus status = IterStatus::Converged;
+        auto rIter =
+            IterateToFixedPoint(v, e, eps, /*maxIter=*/8, &iters, &status);
+        ++iterDist[iters];
+        // Note: rIter.inputRemap is the LAST iteration's remap, not the
+        // composed original->final. The fuzz inputs are random topological
+        // polygons where step 1 produces an identity remap (no input verts
+        // merge), so this is OK here.
+        const bool convergedValid = CheckTopologicalValidity(
+            rIter, e, rIter.inputRemap, rIter.numMergedVerts);
+        if (convergedValid) {
+          ++convergedPassValid;
+          if (!pass1Valid) ++iter_repaired;
+        } else {
+          ++convergedPassInvalid;
+          convergedInvalidList.emplace_back(kPow, n,
+                                            static_cast<uint64_t>(seed),
+                                            iters);
+          if (pass1Valid) {
+            ++iter_degraded;
+            degradedList.emplace_back(kPow, n,
+                                      static_cast<uint64_t>(seed), iters);
+          } else {
+            ++pass1_invalid_unfixed;
+          }
+        }
+
+        if (iters >= 2) {
+          ++iterGE2;
+          if (pass1Valid)
+            ++iterGE2_pass1_valid;
+          else
+            ++iterGE2_pass1_invalid;
+          // Hypothesis check: pass1 vs pass2 differ at eps/100 but match
+          // at eps quantum (positions drift, topology doesn't)?
+          std::vector<EdgeM> p2edges;
+          for (const auto& oe : pass1.edges)
+            p2edges.push_back({oe.v0, oe.v1, oe.mult});
+          auto pass2 = RemoveOverlaps2D(pass1.verts, p2edges, eps);
+          const std::string fp1_fine = FingerprintAt(pass1, eps * 0.01);
+          const std::string fp2_fine = FingerprintAt(pass2, eps * 0.01);
+          const std::string fp1_topo = CoarseFingerprint(pass1, eps);
+          const std::string fp2_topo = CoarseFingerprint(pass2, eps);
+          if (fp1_fine == fp2_fine) ++iterGE2_fine_match;
+          if (fp1_topo == fp2_topo)
+            ++iterGE2_topo_match;
+          else {
+            ++iterGE2_topo_diff;
+            topoMismatch.emplace_back(kPow, n,
+                                      static_cast<uint64_t>(seed));
+          }
+        }
+      }
+    }
+  }
+
+  std::cout << "  Total cases: " << total << "\n";
+  std::cout << "  First-pass topology FAIL: " << firstPassFail << "\n";
+  std::cout << "  Converged result topology valid:   " << convergedPassValid
+            << "\n";
+  std::cout << "  Converged result topology INVALID: " << convergedPassInvalid
+            << "\n";
+  std::cout << "    breakdown:\n";
+  std::cout << "      iteration REPAIRED (invalid→valid):   " << iter_repaired
+            << "\n";
+  std::cout << "      iteration DEGRADED (valid→invalid):   " << iter_degraded
+            << "\n";
+  std::cout << "      pass-1 invalid + iteration didn't fix: "
+            << pass1_invalid_unfixed << "\n";
+  std::cout << "  Iter distribution: ";
+  for (auto [k, c] : iterDist) std::cout << k << ":" << c << " ";
+  std::cout << "\n";
+  std::cout << "  iter≥2 cases: " << iterGE2 << "\n";
+  std::cout << "    of which pass 1 was already topo-valid: "
+            << iterGE2_pass1_valid << "\n";
+  std::cout << "    of which pass 1 was topo-INVALID (iteration repaired): "
+            << iterGE2_pass1_invalid << "\n";
+  std::cout << "    where pass1 == pass2 at eps quantum (TOPO match): "
+            << iterGE2_topo_match << "\n";
+  std::cout << "    where pass1 == pass2 at eps/100 quantum (FINE match): "
+            << iterGE2_fine_match << "\n";
+  std::cout << "    where TOPO differs (real algorithm change): "
+            << iterGE2_topo_diff << "\n";
+  if (!degradedList.empty()) {
+    std::cout << "\n  DEGRADED cases (pass 1 valid, iteration broke it; first 20):\n";
+    for (size_t i = 0; i < degradedList.size() && i < 20; ++i) {
+      auto [kp, nn, sd, it] = degradedList[i];
+      std::cout << "    kPow=" << kp << " n=" << nn << " seed=" << sd
+                << " iters=" << it << "\n";
+    }
+  }
+  if (!convergedInvalidList.empty()) {
+    std::cout
+        << "\n  CONVERGED-INVALID cases (iteration didn't fix; first 30):\n";
+    for (size_t i = 0; i < convergedInvalidList.size() && i < 30; ++i) {
+      auto [kp, nn, sd, it] = convergedInvalidList[i];
+      std::cout << "    kPow=" << kp << " n=" << nn << " seed=" << sd
+                << " iters=" << it << "\n";
+    }
+  }
 }
 }  // namespace overlap2d
 
@@ -1346,7 +1919,14 @@ int main(int argc, char** argv) {
   using namespace overlap2d;
   if (argc > 1 && std::string(argv[1]) == "diagnose") {
     uint64_t seed = (argc > 2) ? std::stoull(argv[2]) : 0;
-    Diagnose(seed);
+    int kPow = (argc > 3) ? std::atoi(argv[3]) : 30;
+    int n = (argc > 4) ? std::atoi(argv[4]) : 50;
+    Diagnose(seed, kPow, n);
+    return 0;
+  }
+  if (argc > 1 && std::string(argv[1]) == "deepfuzz") {
+    int seedsPerCell = (argc > 2) ? std::atoi(argv[2]) : 200;
+    DeepFuzz(seedsPerCell);
     return 0;
   }
   bool allPass = true;
