@@ -763,6 +763,13 @@ struct HalfEdge {
 };
 }  // namespace dcel_internal
 
+// Debug toggle. Set via OVERLAP2D_DEBUG_DCEL=1 environment-style: just a
+// global bool flipped by the idempotence probe.
+inline bool& DCELDebug() {
+  static bool b = false;
+  return b;
+}
+
 std::vector<OutEdge> FilterByWindingDCEL(const CanonicalSubEdges& canon,
                                          const std::vector<vec2>& verts) {
   using dcel_internal::HalfEdge;
@@ -797,7 +804,9 @@ std::vector<OutEdge> FilterByWindingDCEL(const CanonicalSubEdges& canon,
   // 3. Compute next pointers. For half-edge h arriving at vertex v
   //    (= h.twin.origin), h.next is the half-edge in v's CCW-sorted
   //    outgoing list immediately AFTER h.twin (with wraparound).
-  //    This convention follows the LEFT face of h around its boundary.
+  //    Equivalent: at v, the next outgoing half-edge encountered as you
+  //    sweep CCW from h.twin's direction. Keeps h.face on the LEFT
+  //    throughout the cycle.
   for (int i = 0; i < (int)halfedges.size(); ++i) {
     const int twinIdx = halfedges[i].twin;
     const int destV = halfedges[twinIdx].origin;
@@ -839,6 +848,21 @@ std::vector<OutEdge> FilterByWindingDCEL(const CanonicalSubEdges& canon,
   for (int f = 1; f < nFaces; ++f) {
     if (faceArea[f] < faceArea[outerFace]) outerFace = f;
   }
+  if (DCELDebug()) {
+    std::cerr << "DCEL: " << halfedges.size() << " halfedges, " << nFaces
+              << " faces\n";
+    int negAreaCount = 0;
+    for (int f = 0; f < nFaces; ++f) {
+      std::cerr << "  face " << f << " area=" << faceArea[f]
+                << (f == outerFace ? "  <-- outer" : "") << "\n";
+      if (faceArea[f] < 0 && f != outerFace) ++negAreaCount;
+    }
+    if (negAreaCount > 0) {
+      std::cerr << "  WARNING: " << negAreaCount
+                << " bounded face(s) have negative signed area; cycle "
+                   "convention may be inverted\n";
+    }
+  }
 
   // 6. BFS to propagate winding numbers. Convention: half-edge h has its
   //    LEFT face on one side and its twin's LEFT face (= h's RIGHT face)
@@ -874,6 +898,18 @@ std::vector<OutEdge> FilterByWindingDCEL(const CanonicalSubEdges& canon,
       if (halfedges[h].next == -1 || safety++ > (int)halfedges.size()) break;
       h = halfedges[h].next;
     } while (h != startHE);
+  }
+
+  if (DCELDebug()) {
+    std::cerr << "  face windings:";
+    for (int f = 0; f < nFaces; ++f) {
+      std::cerr << " f" << f << "=";
+      if (faceWind[f] == INT_MIN)
+        std::cerr << "INF";
+      else
+        std::cerr << faceWind[f];
+    }
+    std::cerr << "\n";
   }
 
   // 7. Filter canonical sub-edges by left/right face windings. The first
@@ -1787,6 +1823,11 @@ void DeepFuzz(int seedsPerCell) {
   int iter_repaired = 0;          // pass-1 invalid → converged valid
   int iter_degraded = 0;          // pass-1 valid → converged INVALID
   int pass1_invalid_unfixed = 0;  // pass-1 invalid AND converged invalid
+  // Geometric-emptiness check: counts cases where pass 2 outputs zero edges
+  // even though pass 1 output non-zero. Indicates pass-1 → pass-2 winding-
+  // sign disagreement (output orientation not Smith-convention-compatible).
+  int pass2_collapsed = 0;
+  int pass1_nonempty = 0;
   std::vector<std::tuple<int, int, uint64_t>> topoMismatch;
   std::vector<std::tuple<int, int, uint64_t, int>> convergedInvalidList;
   std::vector<std::tuple<int, int, uint64_t, int>> degradedList;
@@ -1851,6 +1892,8 @@ void DeepFuzz(int seedsPerCell) {
           for (const auto& oe : pass1.edges)
             p2edges.push_back({oe.v0, oe.v1, oe.mult});
           auto pass2 = RemoveOverlaps2D(pass1.verts, p2edges, eps);
+          if (!pass1.edges.empty()) ++pass1_nonempty;
+          if (!pass1.edges.empty() && pass2.edges.empty()) ++pass2_collapsed;
           const std::string fp1_fine = FingerprintAt(pass1, eps * 0.01);
           const std::string fp2_fine = FingerprintAt(pass2, eps * 0.01);
           const std::string fp1_topo = CoarseFingerprint(pass1, eps);
@@ -1895,6 +1938,17 @@ void DeepFuzz(int seedsPerCell) {
             << iterGE2_fine_match << "\n";
   std::cout << "    where TOPO differs (real algorithm change): "
             << iterGE2_topo_diff << "\n";
+  std::cout << "  Geometric collapse: pass1 nonempty=" << pass1_nonempty
+            << " of which pass2=empty: " << pass2_collapsed
+            << " (output orientation bug)\n";
+  // For idempotence diagnosis: dump first 5 iter=2 cases (pass 1 valid).
+  if (!topoMismatch.empty()) {
+    std::cout << "\n  First 5 iter≥2 cases (for idempotence probe):\n";
+    for (size_t i = 0; i < topoMismatch.size() && i < 5; ++i) {
+      auto [kp, nn, sd] = topoMismatch[i];
+      std::cout << "    kPow=" << kp << " n=" << nn << " seed=" << sd << "\n";
+    }
+  }
   if (!degradedList.empty()) {
     std::cout << "\n  DEGRADED cases (pass 1 valid, iteration broke it; first 20):\n";
     for (size_t i = 0; i < degradedList.size() && i < 20; ++i) {
@@ -1927,6 +1981,96 @@ int main(int argc, char** argv) {
   if (argc > 1 && std::string(argv[1]) == "deepfuzz") {
     int seedsPerCell = (argc > 2) ? std::atoi(argv[2]) : 200;
     DeepFuzz(seedsPerCell);
+    return 0;
+  }
+  if (argc > 1 && std::string(argv[1]) == "pentagon") {
+    // Sanity: feed a clean pentagon (displaced if requested), see what DCEL
+    // does. With kPow arg, displaces to that scale to mimic re-feed conditions.
+    int kPow = (argc > 2) ? std::atoi(argv[2]) : 0;
+    const double offset = (kPow > 0) ? std::ldexp(1.5, kPow) : 0.0;
+    const double scale = (kPow > 0) ? offset : 1.0;
+    std::vector<vec2> v = {
+        {std::cos(0.0), std::sin(0.0)},
+        {std::cos(2 * 3.14159 / 5), std::sin(2 * 3.14159 / 5)},
+        {std::cos(4 * 3.14159 / 5), std::sin(4 * 3.14159 / 5)},
+        {std::cos(6 * 3.14159 / 5), std::sin(6 * 3.14159 / 5)},
+        {std::cos(8 * 3.14159 / 5), std::sin(8 * 3.14159 / 5)},
+    };
+    if (kPow > 0)
+      for (auto& p : v) {
+        p.x += offset;
+        p.y += offset;
+      }
+    std::vector<EdgeM> e = {{0, 1, 1}, {1, 2, 1}, {2, 3, 1},
+                            {3, 4, 1}, {4, 0, 1}};
+    auto r = RemoveOverlaps2D(v, e, EpsilonFromScale(scale));
+    std::cerr << "Pentagon (kPow=" << kPow << "): " << r.verts.size()
+              << " verts, " << r.edges.size() << " edges\n";
+    for (const auto& oe : r.edges) {
+      std::cerr << "  " << oe.v0 << "→" << oe.v1 << " mult=" << oe.mult
+                << "\n";
+    }
+    return 0;
+  }
+  if (argc > 1 && std::string(argv[1]) == "idempotence") {
+    // ./overlap2d_proto idempotence <seed> [kPow] [n]
+    // Compares pass 1 vs pass 2 sub-edge sets to identify what's drifting.
+    uint64_t seed = (argc > 2) ? std::stoull(argv[2]) : 0;
+    int kPow = (argc > 3) ? std::atoi(argv[3]) : 10;
+    int n = (argc > 4) ? std::atoi(argv[4]) : 8;
+    const double offset = std::ldexp(1.5, kPow);
+    const double eps = EpsilonFromScale(offset);
+    auto [vIn, eIn] = RandomTopologicalPolygon(n, seed + 1000ull * kPow);
+    Displace(&vIn, offset);
+    std::cerr << "=== idempotence: kPow=" << kPow << " n=" << n
+              << " seed=" << seed << " eps=" << eps << " ===\n";
+    DCELDebug() = true;
+    std::cerr << "--- pass 1 ---\n";
+    auto pass1 = RemoveOverlaps2D(vIn, eIn, eps);
+    std::vector<EdgeM> p2in;
+    for (const auto& oe : pass1.edges)
+      p2in.push_back({oe.v0, oe.v1, oe.mult});
+    std::cerr << "--- pass 2 ---\n";
+    auto pass2 = RemoveOverlaps2D(pass1.verts, p2in, eps);
+    DCELDebug() = false;
+    std::cerr << "pass1: " << pass1.verts.size() << " verts, "
+              << pass1.edges.size() << " edges\n";
+    std::cerr << "pass2: " << pass2.verts.size() << " verts, "
+              << pass2.edges.size() << " edges\n";
+    // Dump pass 1 edges as (qx, qy)→(qx, qy) at eps/100 quantum.
+    auto qedges = [&](const OverlapResult& r) {
+      const double q = eps * 0.01;
+      auto qq = [q](double x) { return (int64_t)std::round(x / q); };
+      std::set<std::tuple<int64_t, int64_t, int64_t, int64_t, int>> s;
+      for (const auto& oe : r.edges) {
+        const vec2 p0 = r.verts[oe.v0], p1 = r.verts[oe.v1];
+        auto a = std::make_pair(qq(p0.x), qq(p0.y));
+        auto b = std::make_pair(qq(p1.x), qq(p1.y));
+        int m = oe.mult;
+        if (b < a) {
+          std::swap(a, b);
+          m = -m;
+        }
+        s.emplace(a.first, a.second, b.first, b.second, m);
+      }
+      return s;
+    };
+    auto e1 = qedges(pass1), e2 = qedges(pass2);
+    std::set<std::tuple<int64_t, int64_t, int64_t, int64_t, int>> only1, only2;
+    std::set_difference(e1.begin(), e1.end(), e2.begin(), e2.end(),
+                        std::inserter(only1, only1.end()));
+    std::set_difference(e2.begin(), e2.end(), e1.begin(), e1.end(),
+                        std::inserter(only2, only2.end()));
+    std::cerr << "Edges in pass1 but not pass2: " << only1.size() << "\n";
+    for (const auto& [ax, ay, bx, by, m] : only1) {
+      std::cerr << "  (" << ax << "," << ay << ")→(" << bx << "," << by
+                << ") mult=" << m << "\n";
+    }
+    std::cerr << "Edges in pass2 but not pass1: " << only2.size() << "\n";
+    for (const auto& [ax, ay, bx, by, m] : only2) {
+      std::cerr << "  (" << ax << "," << ay << ")→(" << bx << "," << by
+                << ") mult=" << m << "\n";
+    }
     return 0;
   }
   bool allPass = true;
