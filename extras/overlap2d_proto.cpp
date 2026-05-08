@@ -66,7 +66,7 @@
 //   - ZoneScoped Tracy markers at phase boundaries.
 //   - ExecutionContext::Impl* ctx threading for parallelism dispatch.
 //   - Internal namespace (overlap2d::detail) hiding everything except
-//     the public OverlapRemovePolygons / Boolean2D entry points.
+//     the public Simplify / Boolean2D entry points.
 
 #include <algorithm>
 #include <cassert>
@@ -760,15 +760,34 @@ struct HalfEdge {
 };
 }  // namespace dcel_internal
 
-// Predicate over a face's winding number deciding whether the face is
-// "inside" the result region. Standard ops:
-//   - Add/Subtract: w > 0  (Smith's wind > 0 union convention)
-//   - Intersect:    w > 1  (both inputs cover the face)
-// An edge is retained iff its left and right faces disagree on this
-// predicate.
+// Fill rule (set-membership classification) for a face's winding number,
+// deciding whether the face is "inside" the result region. Standard CSG
+// vocabulary, matching Clipper2 / SVG / PostScript / CGAL:
+//   - Positive: w > 0   (Smith's wind > 0 union convention; default)
+//   - Negative: w < 0
+//   - EvenOdd:  (w & 1) != 0   (SVG `evenodd`, drives XOR semantics)
+//   - NonZero:  w != 0         (SVG `nonzero`)
+// An edge is retained iff its left and right faces disagree on the rule.
+//
+// Internal Boolean2D-Intersect uses an extra "w > 1" predicate to capture
+// "both inputs cover this face" once their multiplicities are summed; that
+// rule isn't a public FillRule because it depends on per-input mult=+1
+// being maintained by Boolean2D's edge-construction step.
+enum class FillRule { Positive, Negative, EvenOdd, NonZero };
+
 using WindPredicate = std::function<bool(int)>;
 
-inline WindPredicate WindAdd() { return [](int w) { return w > 0; }; }
+inline WindPredicate ToPredicate(FillRule fr) {
+  switch (fr) {
+    case FillRule::Positive: return [](int w) { return w > 0; };
+    case FillRule::Negative: return [](int w) { return w < 0; };
+    case FillRule::EvenOdd:  return [](int w) { return (w & 1) != 0; };
+    case FillRule::NonZero:  return [](int w) { return w != 0; };
+  }
+  return [](int w) { return w > 0; };
+}
+
+inline WindPredicate WindAdd() { return ToPredicate(FillRule::Positive); }
 inline WindPredicate WindIntersect() { return [](int w) { return w > 1; }; }
 
 std::vector<OutEdge> FilterByWindingDCEL(
@@ -1247,19 +1266,27 @@ inline manifold::Polygons OutEdgesToPolygons(
   return polys;
 }
 
-// Public-facing API. Mirrors what `CrossSection` would call into.
-inline manifold::Polygons OverlapRemovePolygons(const manifold::Polygons& in,
-                                                double eps) {
+// Single-input regularization. Same name as `CrossSection::Simplify`,
+// the eventual landing target. Returns the canonical boundary of the
+// region selected by `fill` (default: positive-winding, matching
+// Smith's wind > 0 convention). Use `FillRule::EvenOdd` to interpret
+// `in` under SVG even-odd semantics (gives XOR / symmetric-difference
+// when `in` is a union of two polygon sets).
+inline manifold::Polygons Simplify(const manifold::Polygons& in, double eps,
+                                   FillRule fill = FillRule::Positive) {
   auto [verts, edges] = PolygonsToInput(in);
   if (verts.empty()) return {};
-  auto r = RemoveOverlaps2D(verts, edges, eps);
+  auto r = RemoveOverlaps2D(verts, edges, eps, /*debug=*/false,
+                            ToPredicate(fill));
   return OutEdgesToPolygons(r.verts, r.edges);
 }
 
-// Operation tag for the binary-boolean entry point. `Add` is the union;
-// `Subtract` removes B from A; `Intersect` keeps the region covered by
-// both inputs.
-enum class BoolOp { Add, Subtract, Intersect };
+// Use manifold's existing public `OpType` from <manifold/common.h> rather
+// than defining a parallel local enum. `OpType::{Add, Subtract, Intersect}`
+// is what manifold's 3D `Manifold::Boolean` and 2D `CrossSection::Boolean`
+// both already accept; aligning here means callers can pass the same
+// enum across 3D and 2D codepaths.
+using manifold::OpType;
 
 // Infer eps from a polygon set's bounding-box half-extent via Smith's
 // α-budget formula. Returns 0 for empty input. Used by Boolean2D when
@@ -1296,7 +1323,7 @@ inline double InferEps(const manifold::Polygons& a,
 //
 // Pass `eps <= 0` to auto-infer eps from the combined bounding box.
 inline manifold::Polygons Boolean2D(const manifold::Polygons& a,
-                                    const manifold::Polygons& b, BoolOp op,
+                                    const manifold::Polygons& b, OpType op,
                                     double eps = 0.0) {
   if (eps <= 0.0) eps = InferEps(a, b);
   std::vector<vec2> verts;
@@ -1313,11 +1340,26 @@ inline manifold::Polygons Boolean2D(const manifold::Polygons& a,
     }
   };
   append(a, 1);
-  append(b, op == BoolOp::Subtract ? -1 : 1);
+  append(b, op == OpType::Subtract ? -1 : 1);
   if (verts.empty()) return {};
-  WindPredicate pred = (op == BoolOp::Intersect) ? WindIntersect() : WindAdd();
+  WindPredicate pred = (op == OpType::Intersect) ? WindIntersect() : WindAdd();
   auto r = RemoveOverlaps2D(verts, edges, eps, /*debug=*/false, pred);
   return OutEdgesToPolygons(r.verts, r.edges);
+}
+
+// Symmetric difference (XOR): the region covered by A or B but not both.
+// `manifold::OpType` only has three values (Add/Subtract/Intersect), so
+// XOR doesn't fit through Boolean2D. Implementation: combine A and B
+// with mult=+1 each, then apply EvenOdd fill rule. Regions covered once
+// (only A or only B) have w=1 (odd, kept); regions covered twice (both)
+// have w=2 (even, dropped); regions covered zero times have w=0 (even,
+// dropped). Equivalent to Clipper2's `Xor` clip type.
+inline manifold::Polygons Xor(const manifold::Polygons& a,
+                              const manifold::Polygons& b, double eps = 0.0) {
+  if (eps <= 0.0) eps = InferEps(a, b);
+  manifold::Polygons combined = a;
+  for (const auto& loop : b) combined.push_back(loop);
+  return Simplify(combined, eps, FillRule::EvenOdd);
 }
 
 // =============================================================================
@@ -2047,7 +2089,7 @@ void Diagnose(uint64_t seed, int kPow = 30, int n = 50) {
 // eps = -1.0 means "use a sensible default for this scale". For the
 // overlap-removal tests we infer one from the bounding box.
 //
-// Runs each polygon through OverlapRemovePolygons, checks topology
+// Runs each polygon through Simplify, checks topology
 // validity, and verifies signed area is preserved within a tolerance
 // (since these are mostly already-valid polygons - any large area drift
 // indicates the algorithm modified something it shouldn't have, or
@@ -2109,7 +2151,7 @@ inline void RunCorpus(const std::string& path) {
     ++total;
     double eps = entry.eps > 0 ? entry.eps : InferEps(entry.polys, {});
     if (eps <= 0) eps = EpsilonFromScale(1.0);
-    auto out = OverlapRemovePolygons(entry.polys, eps);
+    auto out = Simplify(entry.polys, eps);
     // Topology: convert input polys to (verts, edges) form, run pipeline,
     // run the project's CheckTopologicalValidity.
     auto [v, e] = PolygonsToInput(entry.polys);
@@ -2188,7 +2230,7 @@ void DeepFuzz(int seedsPerCell) {
   int firstPassFail = 0;
   int convergedPassValid = 0;     // converged result: topo valid
   int convergedPassInvalid = 0;   // converged result: topo invalid
-  int roundTripOK = 0;            // (v, e) → Polygons → OverlapRemovePolygons
+  int roundTripOK = 0;            // (v, e) → Polygons → Simplify
                                   // → no crash + edge count consistent
   int roundTripCrash = 0;         // (asserts at boundaries between API layers)
   std::map<int, int> iterDist;
@@ -2243,7 +2285,7 @@ void DeepFuzz(int seedsPerCell) {
 
         // Polygons round-trip: convert (v, e) (which is a single closed
         // cycle from RandomTopologicalPolygon) into manifold::Polygons,
-        // run the public OverlapRemovePolygons API, and check the
+        // run the public Simplify API, and check the
         // boundary-edge count matches the lower-level RemoveOverlaps2D
         // output. Catches regressions in PolygonsToInput's drop-degenerate
         // logic and OutEdgesToPolygons's loop-walking.
@@ -2259,7 +2301,7 @@ void DeepFuzz(int seedsPerCell) {
             if (cur == e[0].v0) break;
           }
           manifold::Polygons polys = {std::move(loop)};
-          auto out = OverlapRemovePolygons(polys, eps);
+          auto out = Simplify(polys, eps);
           // Sum boundary edges across output loops; should equal
           // pass1.edges.size() up to loop-walk reordering.
           size_t outEdges = 0;
@@ -2594,9 +2636,9 @@ int main(int argc, char** argv) {
   {
     manifold::Polygons a = {{{0, 0}, {1, 0}, {1, 1}, {0, 1}}};
     manifold::Polygons b = {{{0.5, 0}, {1.5, 0}, {1.5, 1}, {0.5, 1}}};
-    auto add = Boolean2D(a, b, BoolOp::Add);
-    auto sub = Boolean2D(a, b, BoolOp::Subtract);
-    auto isec = Boolean2D(a, b, BoolOp::Intersect);
+    auto add = Boolean2D(a, b, OpType::Add);
+    auto sub = Boolean2D(a, b, OpType::Subtract);
+    auto isec = Boolean2D(a, b, OpType::Intersect);
     // Expected boundary edge counts (each square is 4 edges; expected
     // post-overlap: union 4 edges (rectangle 0..1.5 by 0..1 with 4 sides
     // but each side has a midpoint vert from the cross-cut so actually
@@ -2647,7 +2689,7 @@ int main(int argc, char** argv) {
     // perpendicular axis-aligned intersections.
     manifold::Polygons in = {{{0, 0}, {2, 0}, {2, 2}, {0, 2}},
                              {{1, 1}, {3, 1}, {3, 3}, {1, 3}}};
-    auto out = OverlapRemovePolygons(in, EpsilonFromScale(3.0));
+    auto out = Simplify(in, EpsilonFromScale(3.0));
     size_t totalEdges = 0;
     for (const auto& l : out) totalEdges += l.size();
     bool shapeOk = (out.size() == 1 && totalEdges == 8);
@@ -2671,21 +2713,25 @@ int main(int argc, char** argv) {
     manifold::Polygons a = {{{0, 0}, {2, 0}, {2, 2}, {0, 2}}};   // CCW
     manifold::Polygons b = {{{1, 1}, {3, 1}, {3, 3}, {1, 3}}};   // CCW
     const double eps = EpsilonFromScale(3.0);
-    auto add = Boolean2D(a, b, BoolOp::Add, eps);
-    auto sub = Boolean2D(a, b, BoolOp::Subtract, eps);
-    auto isec = Boolean2D(a, b, BoolOp::Intersect, eps);
+    auto add = Boolean2D(a, b, OpType::Add, eps);
+    auto sub = Boolean2D(a, b, OpType::Subtract, eps);
+    auto isec = Boolean2D(a, b, OpType::Intersect, eps);
+    auto xorOp = Xor(a, b, eps);
     const double areaAdd = TotalSignedArea(add);
     const double areaSub = TotalSignedArea(sub);
     const double areaIsec = TotalSignedArea(isec);
+    const double areaXor = TotalSignedArea(xorOp);
     // Expected: A area 4, B area 4, overlap 1.
-    // Add: A union B = 4 + 4 - 1 = 7. Subtract: A \ B = 4 - 1 = 3.
-    // Intersect: 1.
+    // Add: 4 + 4 - 1 = 7.  Subtract: 4 - 1 = 3.  Intersect: 1.
+    // Xor (symmetric difference): (A | B) - (A & B) = 7 - 1 = 6.
     auto near = [](double a, double b) { return std::fabs(a - b) < 1e-9; };
-    bool ok = near(areaAdd, 7.0) && near(areaSub, 3.0) && near(areaIsec, 1.0);
+    bool ok = near(areaAdd, 7.0) && near(areaSub, 3.0) &&
+              near(areaIsec, 1.0) && near(areaXor, 6.0);
     std::cout << "=== Boolean2D area regression: diagonal squares ===\n";
     std::cout << "  Add area:       " << areaAdd << " (expect 7)\n";
     std::cout << "  Subtract area:  " << areaSub << " (expect 3)\n";
     std::cout << "  Intersect area: " << areaIsec << " (expect 1)\n";
+    std::cout << "  Xor area:       " << areaXor << " (expect 6)\n";
     std::cout << "  " << (ok ? "PASS" : "FAIL") << "\n";
     if (!ok) allPass = false;
     std::cout << std::endl;
@@ -2717,12 +2763,12 @@ int main(int argc, char** argv) {
   }
 
   // ---- Polygons-API smoke tests ----
-  // Verify the public OverlapRemovePolygons wrapper round-trips simple
+  // Verify the public Simplify wrapper round-trips simple
   // closed loops through the manifold::Polygons type.
   {
     std::cout << "=== Polygons API: square ===" << std::endl;
     manifold::Polygons in = {{{0, 0}, {1, 0}, {1, 1}, {0, 1}}};
-    auto out = OverlapRemovePolygons(in, EpsilonFromScale(1.0));
+    auto out = Simplify(in, EpsilonFromScale(1.0));
     bool ok = (out.size() == 1 && out[0].size() == 4);
     std::cout << "  Output: " << out.size() << " loop(s)";
     if (!out.empty()) std::cout << ", " << out[0].size() << " verts in loop 0";
@@ -2736,7 +2782,7 @@ int main(int argc, char** argv) {
         {{0, 0}, {4, 0}, {4, 4}, {0, 4}},          // outer CCW
         {{1, 1}, {1, 3}, {3, 3}, {3, 1}},          // inner CW (hole)
     };
-    auto out = OverlapRemovePolygons(in, EpsilonFromScale(4.0));
+    auto out = Simplify(in, EpsilonFromScale(4.0));
     // Expect two loops (outer + hole) with 4 verts each.
     bool ok = (out.size() == 2 && out[0].size() == 4 && out[1].size() == 4);
     std::cout << "  Output: " << out.size() << " loop(s)";
@@ -2753,7 +2799,7 @@ int main(int argc, char** argv) {
     // convention, only the CCW lobe is in the boolean union; the
     // other lobe has wind = −1. So output = 1 triangle.
     manifold::Polygons in = {{{0, 0}, {2, 2}, {2, 0}, {0, 2}}};
-    auto out = OverlapRemovePolygons(in, EpsilonFromScale(2.0));
+    auto out = Simplify(in, EpsilonFromScale(2.0));
     bool ok = (out.size() == 1 && out[0].size() == 3);
     std::cout << "  Output: " << out.size() << " loop(s)";
     for (size_t i = 0; i < out.size(); ++i)
@@ -2768,7 +2814,7 @@ int main(int argc, char** argv) {
         {{0, 0}, {1, 0}, {1, 1}, {0, 1}},          // square A (CCW)
         {{2, 0}, {3, 0}, {3, 1}, {2, 1}},          // square B (CCW)
     };
-    auto out = OverlapRemovePolygons(in, EpsilonFromScale(3.0));
+    auto out = Simplify(in, EpsilonFromScale(3.0));
     bool ok = (out.size() == 2 && out[0].size() == 4 && out[1].size() == 4);
     std::cout << "  Output: " << out.size() << " loop(s)";
     for (size_t i = 0; i < out.size(); ++i)
