@@ -2331,6 +2331,134 @@ int main(int argc, char** argv) {
     std::cout << std::endl;
   }
 
+  // ---- Non-closed / non-manifold input tests ----
+  // The prototype was designed for closed polygons. These tests probe
+  // what happens at the edges of that assumption: open polylines,
+  // shared verts/edges between polygons, T-junctions, etc.
+  //
+  // For *open* inputs (polylines, T-junctions) the per-vertex balance
+  // check `CheckTopologicalValidity` doesn't apply: it compares input
+  // edge contributions per vertex against output edge contributions,
+  // and for open inputs the input has end-vertex balance ±1 while the
+  // algorithm's correct output is empty (balance 0). So we accept
+  // those as observational and only fail closed-input cases.
+  enum class NMExpect { ClosedTopo, OpenObservational };
+  auto runNonManifold = [&allPass](
+                            const char* name, const std::vector<vec2>& v,
+                            const std::vector<EdgeM>& e, double eps,
+                            const char* expectation, NMExpect mode) {
+    std::cout << "=== Non-manifold: " << name << " ===" << std::endl;
+    std::cout << "  Input: " << v.size() << " verts, " << e.size() << " edges, "
+              << "expectation: " << expectation << std::endl;
+    auto r = RemoveOverlaps2D(v, e, eps);
+    std::cout << "  Output: " << r.verts.size() << " verts, " << r.edges.size()
+              << " edges" << std::endl;
+    bool topoOk =
+        CheckTopologicalValidity(r, e, r.inputRemap, r.numMergedVerts);
+    if (mode == NMExpect::ClosedTopo) {
+      std::cout << "  Topological validity: " << (topoOk ? "PASS" : "FAIL")
+                << std::endl;
+      if (!topoOk) allPass = false;
+    } else {
+      std::cout << "  Topological validity: " << (topoOk ? "PASS" : "FAIL")
+                << " (observational — open input, balance check N/A)"
+                << std::endl;
+    }
+    std::cout << std::endl;
+    return r;
+  };
+
+  // (1) Open polyline (zigzag): no closure, no enclosed region.
+  // Expected: empty output (wind > 0 is empty everywhere).
+  {
+    std::vector<vec2> v = {{0, 0}, {1, 1}, {2, 0}, {3, 1}};
+    std::vector<EdgeM> e = {{0, 1, 1}, {1, 2, 1}, {2, 3, 1}};
+    runNonManifold("open polyline (Z-zigzag)", v, e, EpsilonFromScale(3.0),
+                   "empty (no enclosed region)",
+                   NMExpect::OpenObservational);
+  }
+
+  // (2) Two polygons touching at a single vertex (kissing corner).
+  // Squares share v=(1,1); each is otherwise CCW and disjoint.
+  // Expected: 2 disjoint loops (8 output edges total) + the shared
+  // vertex appears in both.
+  {
+    std::vector<vec2> v = {
+        {0, 0}, {1, 0}, {1, 1}, {0, 1},  // square A
+        {2, 1}, {2, 2}, {1, 2},          // square B (shares (1,1))
+    };
+    std::vector<EdgeM> e = {
+        {0, 1, 1}, {1, 2, 1}, {2, 3, 1}, {3, 0, 1},  // square A CCW
+        {2, 4, 1}, {4, 5, 1}, {5, 6, 1}, {6, 2, 1},  // square B CCW (via (1,1))
+    };
+    runNonManifold("two polys touching at a vertex", v, e,
+                   EpsilonFromScale(2.0), "2 disjoint loops",
+                   NMExpect::ClosedTopo);
+  }
+
+  // (3) Two polygons sharing an edge (non-manifold along the shared
+  // segment — two CCW squares glued along (1,0)→(1,1)). The shared
+  // edge has canonical mult = +2 in the combined input. Expected: 1
+  // outer loop = the rectangle [0,2]×[0,1] (the two squares fused).
+  {
+    std::vector<vec2> v = {
+        {0, 0}, {1, 0}, {1, 1}, {0, 1},  // square A
+        {2, 0}, {2, 1},                  // square B's other corners
+    };
+    std::vector<EdgeM> e = {
+        {0, 1, 1}, {1, 2, 1}, {2, 3, 1}, {3, 0, 1},  // square A CCW
+        {1, 4, 1}, {4, 5, 1}, {5, 2, 1}, {2, 1, 1},  // square B CCW
+    };
+    runNonManifold("two polys sharing an edge", v, e, EpsilonFromScale(2.0),
+                   "1 fused outer loop", NMExpect::ClosedTopo);
+  }
+
+  // (4) T-junction: vertex with degree 3, no closure. Three edges
+  // dangling from a common point. No enclosed region.
+  // Expected: empty output.
+  {
+    std::vector<vec2> v = {{0, 0}, {1, 0}, {0, 1}, {-1, 0}};
+    std::vector<EdgeM> e = {{0, 1, 1}, {0, 2, 1}, {0, 3, 1}};
+    runNonManifold("T-junction (degree-3 dangling)", v, e,
+                   EpsilonFromScale(1.0), "empty",
+                   NMExpect::OpenObservational);
+  }
+
+  // (5) Open polyline crossing itself (figure-8 missing the closing
+  // edge). Topology-wise: 5 verts, 4 edges, one self-crossing.
+  // Expected: empty output (no closed boundary).
+  {
+    std::vector<vec2> v = {{0, 0}, {2, 2}, {2, 0}, {0, 2}, {0, 0}};
+    std::vector<EdgeM> e = {{0, 1, 1}, {1, 2, 1}, {2, 3, 1}, {3, 4, 1}};
+    // Note: although the input has 5 verts forming an *open* zigzag,
+    // verts 0 and 4 share the same coordinate (0,0). Step 1's eps-merge
+    // collapses them, turning the input into a *closed* bowtie. So
+    // this case actually exercises the closed bowtie path, not an
+    // open-polyline path — and the topology check applies.
+    runNonManifold("polyline w/ duplicate-position endpoints (=> closed bowtie)",
+                   v, e, EpsilonFromScale(2.0), "1 triangle (= bowtie lobe)",
+                   NMExpect::ClosedTopo);
+  }
+
+  // (6) Degenerate triangle: three collinear verts (zero-area input).
+  // Expected: empty (no enclosed region).
+  {
+    std::vector<vec2> v = {{0, 0}, {1, 0}, {2, 0}};
+    std::vector<EdgeM> e = {{0, 1, 1}, {1, 2, 1}, {2, 0, 1}};
+    runNonManifold("collinear triangle (zero area)", v, e,
+                   EpsilonFromScale(2.0), "empty", NMExpect::ClosedTopo);
+  }
+
+  // (7) Duplicate-vertex polygon: same coordinate listed twice. Step 1
+  // should merge them; step 2 should drop the resulting self-loop edge.
+  // Expected: 1 valid loop (the remaining triangle).
+  {
+    std::vector<vec2> v = {{0, 0}, {1, 0}, {0, 1}, {0, 1}};  // v2 == v3
+    std::vector<EdgeM> e = {{0, 1, 1}, {1, 2, 1}, {2, 3, 1}, {3, 0, 1}};
+    runNonManifold("polygon with duplicate vertex", v, e, EpsilonFromScale(1.0),
+                   "1 triangle (after merge)", NMExpect::ClosedTopo);
+  }
+
   // ---- Self-intersecting cases ----
   {
     std::vector<vec2> v = {{0, 0}, {2, 0}, {0, 2}, {2, 2}};
