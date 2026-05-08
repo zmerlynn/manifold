@@ -98,10 +98,35 @@ development:
 | 5 | Sub-edge canonicalization | `map<lex(v0,v1), signed_mult>`; collinear sub-edges with opposing multiplicity cancel. |
 | 6 | Winding filter | DCEL face traversal; one winding per face via ray-cast from a perpendicular-LEFT offset of any boundary half-edge. Edge retained iff `isInside(leftFace) != isInside(rightFace)`. |
 
-Then **iterate-to-fixed-point** (Smith §7.7): feed step 6's output
-back as input until the fingerprint stabilizes. Default `maxIter=2`
-matches Smith's bound; ~1–3% of cases need iter 2 on the displacement
-fuzz, all topology-correct from pass 1.
+**Pass 1 is the production path.** A 336,000-case fuzz (12,000
+seeds × 4 sizes × 7 displacement scales) shows pass 1 produces
+topology-valid output on every case, including adversarial
+displacements up to 2⁴⁹ where ULP spacing exceeds feature size by
+orders of magnitude. The recommended production default is
+`maxIter=1`: topology is the contract that consumers care about,
+and pass 1 satisfies it on every input we've thrown at it.
+
+What pass 1 is *not* is idempotent in all cases. Feeding pass-1
+output back as pass-2 input occasionally produces a different
+result, which is what the prototype's `IterateToFixedPoint` path
+(default `maxIter=2`, Smith's bound) studies. ~2.4% of fuzz cases
+differ between pass 1 and pass 2 at sub-ε position quanta but
+match at the ε quantum (i.e., topology-identical, geometry shifted
+by a few ULPs). One in 336,000 cases hits a more pathological
+mode: pass 1 produces a geometrically valid but *thin* output
+polygon (all interior dimensions within 2ε), and pass 2 correctly
+notices that the thin polygon's "long way around" coincides
+to within ε with its "short way around" and collapses it to
+empty. This is consistent behavior, not a bug, but it means
+pass-1 output is not always a stable fixed point of the
+algorithm. Production users on `maxIter=1` get the topology-
+valid pass-1 output and don't see the collapse; iterate-to-fixed-
+point users get the collapse as a "this region is sub-ε in some
+dimension" signal.
+
+The prototype keeps `maxIter=2` as its default to match Smith's
+framework citation and to make iter-≥-2 cases easy to study; only
+the production landing should switch to `maxIter=1`.
 
 ## API
 
@@ -128,16 +153,18 @@ predicate then carves A − B.
 
 | Test | Pass rate | Notes |
 |------|-----------|-------|
-| Standard battery | 350/350 | 12 named cases + 350 random topological polygons. Topology-balance: every vertex's input edge contribution = output. |
+| Standard battery | 350/350 | 13 named cases + 350 random topological polygons. Topology-balance: every vertex's input edge contribution = output. |
 | Displacement fuzz | 450/450 | 5 scales (2<sup>10</sup>...2<sup>49</sup>) × 3 sizes × 30 seeds. |
-| Iter convergence | 1:448 2:2 | All 450 converge by iter 2. |
-| DeepFuzz | 2800/2800 | 100 seeds × 4 sizes × 7 displacements; topology-valid after fixed-point; iter dist 1:2729 2:70 3:1; 0 valid→invalid degradations. |
-| Polygons round-trip | 2796/2800 | 4 mismatches: `OutEdgesToPolygons` drops <3-vert loops the lower-level pipeline counts as edges. Documented gap. |
+| DeepFuzz (12,000 seeds) | **336,000 / 336,000 first-pass topology valid** | 12,000 seeds × 4 sizes × 7 displacement scales (2<sup>10</sup> to 2<sup>49</sup>). 0 first-pass FAILs across the entire battery. Iter distribution after fixed-point: 1:327,903; 2:7,937; 3:152; 4:7; 5:1. 0 iteration-DEGRADED (pass-1 valid → broken by iteration). 1 geometric collapse (thin-polygon idempotence quirk; see Pipeline section). |
+| Polygons round-trip | 335,440 / 336,000 | 0.17% mismatch rate (`OutEdgesToPolygons` drops <3-vert loops the lower-level pipeline counts as edges; documented gap). Mismatch rate stable across the 100-seed and 12,000-seed runs. |
 | Boolean2D smoke | 3/3 | Two overlapping unit squares → Add 8 edges, Subtract 4, Intersect 4. |
+| Axis-aligned perpendicular | 1/1 | Two CCW unit squares offset diagonally; produces L-shape union with 8 boundary verts. Regression test for the kernel bug surfaced during OQ #3 / #4 investigation. |
 
 Displacement fuzz is the load-bearing test: traditional FP boolean
 libraries fail catastrophically at 2<sup>k</sup> displacement, which
-is exactly what Smith's framework exists to handle.
+is exactly what Smith's framework exists to handle. The 336,000-case
+run verifies that pass 1 produces topology-valid output across the
+entire adversarial range, in every size and seed tested.
 
 ## Open questions
 
@@ -227,7 +254,12 @@ we don't relitigate.
   a separate phase. Not needed once the trim-and-`Interpolate` kernel
   resolves all-collinear pairs via permutation-parity SoS inline.
   **Retired** before the prototype's current shape.
-- **`maxIter > 2`.** Smith's bound is 2; tested up to 8. ~70 cases
-  out of 2800 in DeepFuzz reach iter 2; 1 reaches iter 3; none reach
-  4+. Default to 2 (Smith's bound); higher values measure tail
-  behavior.
+- **Bumping `maxIter` past 2 to chase the iter ≥ 3 tail.** Smith's
+  bound is 2; tested up to 8. The 12,000-seed DeepFuzz finds 152
+  cases at iter=3, 7 at iter=4, 1 at iter=5 (out of 336,000), all
+  ultimately converging to topology-valid output. Bumping the cap
+  catches more fingerprint-stable convergence but doesn't change
+  topology, since pass 1 was already topology-correct on every
+  case. Production default of `maxIter=1` skips this entirely
+  (see Pipeline section); the prototype's `maxIter=2` matches
+  Smith's bound and is the right knob for studying the tail.
