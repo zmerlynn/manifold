@@ -93,35 +93,48 @@ development:
 | 5 | Sub-edge canonicalization | `map<lex(v0,v1), signed_mult>`; collinear sub-edges with opposing multiplicity cancel. |
 | 6 | Winding filter | DCEL face traversal; one winding per face via ray-cast from a perpendicular-LEFT offset of any boundary half-edge. Edge retained iff `isInside(leftFace) != isInside(rightFace)`. |
 
-**Pass 1 is the production path.** A 336,000-case fuzz (12,000
-seeds × 4 sizes × 7 displacement scales) shows pass 1 produces
-topology-valid output on every case, including adversarial
+**Pass 1 is topology-correct on every fuzz case.** A 336,000-case
+fuzz (12,000 seeds × 4 sizes × 7 displacement scales) shows pass 1
+produces topology-valid output on every input, including adversarial
 displacements up to 2⁴⁹ where ULP spacing exceeds feature size by
-orders of magnitude. The recommended production default is
-`maxIter=1`: topology is the contract that consumers care about,
-and pass 1 satisfies it on every input we've thrown at it.
+orders of magnitude. Topology is the hard contract; pass 1 satisfies
+it across the entire battery.
 
 What pass 1 is *not* is idempotent in all cases. Feeding pass-1
 output back as pass-2 input occasionally produces a different
 result, which is what the prototype's `IterateToFixedPoint` path
 (default `maxIter=2`, Smith's bound) studies. ~2.4% of fuzz cases
 differ between pass 1 and pass 2 at sub-ε position quanta but
-match at the ε quantum (i.e., topology-identical, geometry shifted
-by a few ULPs). One in 336,000 cases hits a more pathological
-mode: pass 1 produces a geometrically valid but *thin* output
-polygon (all interior dimensions within 2ε), and pass 2 correctly
-notices that the thin polygon's "long way around" coincides
-to within ε with its "short way around" and collapses it to
-empty. This is consistent behavior, not a bug, but it means
-pass-1 output is not always a stable fixed point of the
-algorithm. Production users on `maxIter=1` get the topology-
-valid pass-1 output and don't see the collapse; iterate-to-fixed-
-point users get the collapse as a "this region is sub-ε in some
-dimension" signal.
+match at the ε quantum (topology-identical, geometry shifted by a
+few ULPs). One in 336,000 cases hits a more pathological mode:
+pass 1 produces a topologically-valid but geometrically *thin*
+output polygon (all interior dimensions within 2ε), and pass 2
+correctly notices that the thin polygon's "long way around"
+coincides to within ε with its "short way around" and collapses
+it to empty. Consistent behavior under the algorithm's own rules,
+but means pass-1 output is not always a stable fixed point.
 
-The prototype keeps `maxIter=2` as its default to match Smith's
-framework citation and to make iter-≥-2 cases easy to study; only
-the production landing should switch to `maxIter=1`.
+**The right `maxIter` default for production is operation-dependent,
+not a single number.** Manifold's 3D analog of `Simplify` was
+explicitly switched from one-pass to iterate-to-fixed-point
+([#675](https://github.com/elalish/manifold/issues/675), closed by
+[#894](https://github.com/elalish/manifold/pull/894)) because users
+filed bugs ([#1262](https://github.com/elalish/manifold/issues/1262),
+[#1239](https://github.com/elalish/manifold/issues/1239)) about
+topology-valid-but-user-hostile outputs. The thin-polygon collapse
+above is exactly that bug class. So the defensible split:
+
+- `Boolean(Add/Subtract/Intersect)`: `maxIter=1` is reasonable. Inputs
+  are presumed clean; iteration mostly refines positions.
+- `Simplify`: iterate-to-fixed-point. Inputs are dirty by definition;
+  users are explicitly asking for cleanup, and the 3D-side precedent
+  is direct.
+
+The prototype keeps `maxIter=2` as its default for tail-behavior
+study; the production landing should pick per-op as above. The
+landing should also include an **idempotency regression test** in
+addition to topology validity, since the thin-polygon collapse and
+its kin slip past topology-only checks.
 
 ## API
 
@@ -174,6 +187,20 @@ entire adversarial range, in every size and seed tested.
 3. **Multi-threading.** `manifold::Collider` is parallel-ready; the
    prototype is `MANIFOLD_PAR=-1` only. Step 1 union-find and step 6
    per-face ray-cast are the natural parallelism candidates.
+4. **Quantitative correctness oracle.** Every test in the prototype's
+   battery checks topology balance only; no test compares the
+   algorithm's output area against an independent reference. Smith's
+   α-budget bounds *position drift*, not area, so the topology check
+   misses an entire class of "balanced but wrong" failures (the
+   thin-polygon collapse above is one example; a hole filled in or a
+   region orientation-flipped would be others). The repo has
+   `test/polygons/polygon_corpus.txt` (~100 named adversarial
+   polygons with expected triangle counts, including `Eberly`,
+   `Sliver`, `Comb`, `KissingZigzag`, `BarelyValid`, `Tricky`,
+   `Sponge4a`) sitting unused by this prototype; Clipper2's
+   `Polygons.txt` adds 195 cases with `SOL_AREA` references.
+   Production landing should adopt one or both as quantitative
+   oracles in addition to the topology fuzz.
 
 ## Deferred (graduation patch)
 
