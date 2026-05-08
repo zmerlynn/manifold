@@ -74,6 +74,7 @@
 #include <cstdint>
 #include <iostream>
 #include <climits>
+#include <fstream>
 #include <functional>
 #include <map>
 #include <queue>
@@ -102,6 +103,33 @@ using manifold::VecView;
 using manifold::la::dot;
 using manifold::la::length;
 
+// Centered-shoelace signed area of a closed polygon loop. Same FP trick
+// as the per-face area computation in step 6: subtract a reference vert
+// before multiplying so products stay at edge-length scale instead of
+// blowing up to O(L^2) at displaced coordinates. Total telescopes to the
+// same answer as the raw shoelace because Sigma(b - a) around any closed
+// loop is zero. Used by area-preservation regression tests and the
+// area-drift tracking in DeepFuzz.
+inline double SignedArea(const manifold::SimplePolygon& loop) {
+  if (loop.size() < 3) return 0.0;
+  const auto& r = loop[0];
+  double sum = 0.0;
+  for (size_t i = 0; i < loop.size(); ++i) {
+    const auto& a = loop[i];
+    const auto& b = loop[(i + 1) % loop.size()];
+    const double ax = a.x - r.x, ay = a.y - r.y;
+    const double bx = b.x - r.x, by = b.y - r.y;
+    sum += ax * by - bx * ay;
+  }
+  return 0.5 * sum;
+}
+
+inline double TotalSignedArea(const manifold::Polygons& polys) {
+  double total = 0.0;
+  for (const auto& loop : polys) total += SignedArea(loop);
+  return total;
+}
+
 // Per chapter 8: u = 2^-53 for double-precision IEEE 754.
 constexpr double kU = 1.110223024625156540423631668e-16;
 // Smith's per-intersection bound: alpha = sqrt(153) * u * L; sqrt(153)
@@ -117,6 +145,29 @@ struct EdgeM {
   int mult;  // +1 default; -1 for reversed contribution; etc.
 };
 using OutEdge = EdgeM;
+
+// Signed area of an OverlapResult-style edge set, computed directly from
+// the OutEdge list without round-tripping through OutEdgesToPolygons.
+// Each directed edge contributes its centered shoelace term; the sum
+// telescopes to the same answer as walking the boundary in order
+// (because Sigma over a closed face's edges of (b - a) is zero).
+// Avoids the round-trip drop-on-degenerate behavior (the 0.17%
+// mismatch documented elsewhere) so it's the right primitive for the
+// area-drift regression test in DeepFuzz.
+inline double SignedAreaFromOutEdges(const std::vector<vec2>& verts,
+                                     const std::vector<OutEdge>& edges) {
+  if (edges.empty() || verts.empty()) return 0.0;
+  const vec2 r = verts[edges[0].v0];
+  double sum = 0.0;
+  for (const auto& oe : edges) {
+    const vec2& a = verts[oe.v0];
+    const vec2& b = verts[oe.v1];
+    const double ax = a.x - r.x, ay = a.y - r.y;
+    const double bx = b.x - r.x, by = b.y - r.y;
+    sum += oe.mult * (ax * by - bx * ay);
+  }
+  return 0.5 * sum;
+}
 
 // Choose epsilon for the operation. L = bounding box half-extent rounded
 // up to power of 2. k_budget is the user's expected upper bound on how
@@ -1977,6 +2028,140 @@ void Diagnose(uint64_t seed, int kPow = 30, int n = 50) {
 }  // namespace overlap2d
 
 // =============================================================================
+// Polygon corpus runner.
+//
+// Reads the manifold project's existing curated test corpus at
+// test/polygons/polygon_corpus.txt - 100 named adversarial polygons
+// (Eberly, Sliver, Comb, KissingZigzag, BarelyValid, Tricky, Sponge4a,
+// CondensedMatter64, etc.) used in the project's triangulation tests.
+// Each entry has form (matches test/polygon_test.cpp's
+// RegisterPolygonTestsFile):
+//
+//   <name> <expected_tri_count> <eps> <num_loops>
+//   <loop1_vert_count>
+//   <x> <y>     (loop1_vert_count times)
+//   <loop2_vert_count>   (only if multi-loop)
+//   <x> <y>     (loop2_vert_count times)
+//   ...
+//
+// eps = -1.0 means "use a sensible default for this scale". For the
+// overlap-removal tests we infer one from the bounding box.
+//
+// Runs each polygon through OverlapRemovePolygons, checks topology
+// validity, and verifies signed area is preserved within a tolerance
+// (since these are mostly already-valid polygons - any large area drift
+// indicates the algorithm modified something it shouldn't have, or
+// failed to clean up a self-intersection it should have). The
+// expected_tri_count is informational for now (it's a triangulation
+// metric, not directly an overlap-removal one).
+// =============================================================================
+namespace overlap2d {
+
+struct CorpusEntry {
+  std::string name;
+  manifold::Polygons polys;
+  double eps;          // -1 if not specified in file (caller infers)
+  int expected_tris;   // triangulation triangle count (informational)
+};
+
+inline std::vector<CorpusEntry> LoadCorpus(const std::string& path) {
+  std::vector<CorpusEntry> entries;
+  std::ifstream in(path);
+  if (!in) {
+    std::cerr << "Failed to open " << path << "\n";
+    return entries;
+  }
+  while (in.good()) {
+    CorpusEntry entry;
+    int num_loops = 0;
+    if (!(in >> entry.name >> entry.expected_tris >> entry.eps >> num_loops))
+      break;
+    for (int i = 0; i < num_loops; ++i) {
+      int loop_size = 0;
+      if (!(in >> loop_size)) break;
+      manifold::SimplePolygon loop;
+      loop.reserve(loop_size);
+      for (int j = 0; j < loop_size; ++j) {
+        double x, y;
+        if (!(in >> x >> y)) break;
+        loop.push_back({x, y});
+      }
+      entry.polys.push_back(std::move(loop));
+    }
+    entries.push_back(std::move(entry));
+  }
+  return entries;
+}
+
+inline void RunCorpus(const std::string& path) {
+  auto entries = LoadCorpus(path);
+  std::cout << "=== Polygon corpus: " << entries.size() << " entries from "
+            << path << " ===\n";
+  int total = 0;
+  int topo_ok = 0;
+  int topo_fail = 0;
+  int area_preserved = 0;     // |drift| < 1%
+  int area_drifted = 0;       // 1% <= |drift| < 10%
+  int area_collapsed = 0;     // |drift| >= 10%
+  int area_input_zero = 0;    // input had zero net area
+  std::vector<std::tuple<std::string, double>> driftList;
+  for (const auto& entry : entries) {
+    ++total;
+    double eps = entry.eps > 0 ? entry.eps : InferEps(entry.polys, {});
+    if (eps <= 0) eps = EpsilonFromScale(1.0);
+    auto out = OverlapRemovePolygons(entry.polys, eps);
+    // Topology: convert input polys to (verts, edges) form, run pipeline,
+    // run the project's CheckTopologicalValidity.
+    auto [v, e] = PolygonsToInput(entry.polys);
+    auto r = RemoveOverlaps2D(v, e, eps);
+    bool topoOk = CheckTopologicalValidity(r, e, r.inputRemap,
+                                           r.numMergedVerts);
+    if (topoOk) ++topo_ok;
+    else ++topo_fail;
+    const double inArea = std::fabs(TotalSignedArea(entry.polys));
+    const double outArea = std::fabs(TotalSignedArea(out));
+    if (inArea < 1e-12) {
+      ++area_input_zero;
+    } else {
+      const double drift = std::fabs(outArea - inArea) / inArea;
+      if (drift >= 0.10) {
+        ++area_collapsed;
+        driftList.emplace_back(entry.name, drift);
+      } else if (drift >= 0.01) {
+        ++area_drifted;
+        driftList.emplace_back(entry.name, drift);
+      } else {
+        ++area_preserved;
+      }
+    }
+  }
+  std::cout << "  Total: " << total << "\n";
+  std::cout << "  Topology valid:   " << topo_ok << " / " << total << "\n";
+  std::cout << "  Topology INVALID: " << topo_fail << " / " << total << "\n";
+  std::cout << "  Area preserved (drift < 1%):       " << area_preserved
+            << "\n";
+  std::cout << "  Area drifted   (1% <= drift < 10%): " << area_drifted
+            << "\n";
+  std::cout << "  Area collapsed (drift >= 10%):       " << area_collapsed
+            << "\n";
+  std::cout << "  Input had zero net area: " << area_input_zero
+            << " (degenerate or pure-CW polygons; not an oracle case)\n";
+  if (!driftList.empty()) {
+    std::sort(driftList.begin(), driftList.end(),
+              [](const auto& a, const auto& b) {
+                return std::get<1>(a) > std::get<1>(b);
+              });
+    std::cout << "\n  Drift cases (worst first, up to 20):\n";
+    for (size_t i = 0; i < driftList.size() && i < 20; ++i) {
+      auto& [name, dr] = driftList[i];
+      std::cout << "    " << name << "  drift=" << (dr * 100.0) << "%\n";
+    }
+  }
+}
+
+}  // namespace overlap2d
+
+// =============================================================================
 // Deep fuzz: wider seed sweep + iter-vs-topology verification.
 //
 // The standard displacement fuzz uses 30 seeds per (kPow, n) cell. This
@@ -2021,6 +2206,17 @@ void DeepFuzz(int seedsPerCell) {
   // sign disagreement (output orientation not Smith-convention-compatible).
   int pass2_collapsed = 0;
   int pass1_nonempty = 0;
+  // Area-drift tracking: a quantitative oracle on top of the topology
+  // check. Pass 1 produces an output area; iterate-to-fixed-point
+  // produces another. If they differ by > 1% we flag it as a regression
+  // (per the design doc's quantitative oracle recommendation). Catches
+  // thin-polygon-style collapses where iteration empties a non-empty
+  // pass-1 output, which topology balance alone misses.
+  int area_pass1_nonzero = 0;       // pass-1 had a measurable area
+  int area_drift_over_1pct = 0;     // > 1% drift between pass 1 and converged
+  int area_drift_over_10pct = 0;    // > 10% drift (typically a collapse)
+  double area_drift_max = 0.0;      // largest fractional drift seen
+  std::vector<std::tuple<int, int, uint64_t, double>> areaDriftList;
   std::vector<std::tuple<int, int, uint64_t>> topoMismatch;
   std::vector<std::tuple<int, int, uint64_t, int>> convergedInvalidList;
   std::vector<std::tuple<int, int, uint64_t, int>> degradedList;
@@ -2103,6 +2299,29 @@ void DeepFuzz(int seedsPerCell) {
           }
         }
 
+        // Area-drift check: compare pass 1's signed area against the
+        // converged result's signed area. If pass 1 was meaningful
+        // (non-empty, non-zero area) and the iteration changed it by
+        // more than 1%, flag as a regression candidate. Special case:
+        // pass-1-nonempty -> converged-empty is the thin-polygon
+        // collapse mode (drift = 100%, area_drift_over_10pct picks it up).
+        const double pass1Area =
+            SignedAreaFromOutEdges(pass1.verts, pass1.edges);
+        const double convArea =
+            SignedAreaFromOutEdges(rIter.verts, rIter.edges);
+        if (std::fabs(pass1Area) > 0) {
+          ++area_pass1_nonzero;
+          const double drift =
+              std::fabs(convArea - pass1Area) / std::fabs(pass1Area);
+          if (drift > area_drift_max) area_drift_max = drift;
+          if (drift > 0.01) {
+            ++area_drift_over_1pct;
+            areaDriftList.emplace_back(kPow, n,
+                                       static_cast<uint64_t>(seed), drift);
+          }
+          if (drift > 0.10) ++area_drift_over_10pct;
+        }
+
         if (iters >= 2) {
           ++iterGE2;
           if (pass1Valid)
@@ -2170,6 +2389,13 @@ void DeepFuzz(int seedsPerCell) {
             << " (output orientation bug)\n";
   std::cout << "  Polygons round-trip (lower vs API edge count): "
             << roundTripOK << " match, " << roundTripCrash << " mismatch\n";
+  std::cout << "  Area drift (pass-1 vs converged, |delta|/|pass1|):\n";
+  std::cout << "    pass-1 with measurable area: " << area_pass1_nonzero
+            << "\n";
+  std::cout << "    drift > 1%:  " << area_drift_over_1pct << "\n";
+  std::cout << "    drift > 10%: " << area_drift_over_10pct
+            << "  (typically thin-polygon collapse)\n";
+  std::cout << "    max drift seen: " << (area_drift_max * 100.0) << "%\n";
   // For idempotence diagnosis: dump first 5 iter=2 cases (pass 1 valid).
   if (!topoMismatch.empty()) {
     std::cout << "\n  First 5 iter≥2 cases (for idempotence probe):\n";
@@ -2198,6 +2424,19 @@ void DeepFuzz(int seedsPerCell) {
                 << " iters=" << it << "\n";
     }
   }
+  if (!areaDriftList.empty()) {
+    std::cout << "\n  Area-drift cases > 1% (first 10):\n";
+    // Sort by drift magnitude so the worst cases surface first.
+    std::sort(areaDriftList.begin(), areaDriftList.end(),
+              [](const auto& a, const auto& b) {
+                return std::get<3>(a) > std::get<3>(b);
+              });
+    for (size_t i = 0; i < areaDriftList.size() && i < 10; ++i) {
+      auto [kp, nn, sd, dr] = areaDriftList[i];
+      std::cout << "    kPow=" << kp << " n=" << nn << " seed=" << sd
+                << "  drift=" << (dr * 100.0) << "%\n";
+    }
+  }
   if (!convergedInvalidList.empty()) {
     std::cout
         << "\n  CONVERGED-INVALID cases (iteration didn't fix; first 30):\n";
@@ -2222,6 +2461,13 @@ int main(int argc, char** argv) {
   if (argc > 1 && std::string(argv[1]) == "deepfuzz") {
     int seedsPerCell = (argc > 2) ? std::atoi(argv[2]) : 200;
     DeepFuzz(seedsPerCell);
+    return 0;
+  }
+  if (argc > 1 && std::string(argv[1]) == "corpus") {
+    const std::string path = (argc > 2)
+                                  ? argv[2]
+                                  : "test/polygons/polygon_corpus.txt";
+    RunCorpus(path);
     return 0;
   }
   if (argc > 1 && std::string(argv[1]) == "pentagon") {
@@ -2406,9 +2652,42 @@ int main(int argc, char** argv) {
     for (const auto& l : out) totalEdges += l.size();
     bool shapeOk = (out.size() == 1 && totalEdges == 8);
     std::cout << "  Polygons union: " << out.size() << " loop(s), "
-              << totalEdges << " edges — "
+              << totalEdges << " edges, "
               << (shapeOk ? "PASS" : "FAIL") << "\n";
     if (!shapeOk) allPass = false;
+    std::cout << std::endl;
+  }
+
+  // Two CCW unit squares overlapping diagonally, run through all three
+  // Boolean2D ops with quantitative area checks. Smith fig 6.2 in
+  // spirit: a single configuration that exercises every winding rule.
+  // Critically, Intersect drives the `w > 1` predicate (the central
+  // 1x1 overlap region has winding 2 because both inputs cover it).
+  // The existing Boolean2D smoke test (two squares offset *horizontally*)
+  // produces a wind=2 strip but its boundaries are collinear, not
+  // perpendicular, and step-6 Intersect was untested against
+  // axis-aligned perpendicular crossings until this case.
+  {
+    manifold::Polygons a = {{{0, 0}, {2, 0}, {2, 2}, {0, 2}}};   // CCW
+    manifold::Polygons b = {{{1, 1}, {3, 1}, {3, 3}, {1, 3}}};   // CCW
+    const double eps = EpsilonFromScale(3.0);
+    auto add = Boolean2D(a, b, BoolOp::Add, eps);
+    auto sub = Boolean2D(a, b, BoolOp::Subtract, eps);
+    auto isec = Boolean2D(a, b, BoolOp::Intersect, eps);
+    const double areaAdd = TotalSignedArea(add);
+    const double areaSub = TotalSignedArea(sub);
+    const double areaIsec = TotalSignedArea(isec);
+    // Expected: A area 4, B area 4, overlap 1.
+    // Add: A union B = 4 + 4 - 1 = 7. Subtract: A \ B = 4 - 1 = 3.
+    // Intersect: 1.
+    auto near = [](double a, double b) { return std::fabs(a - b) < 1e-9; };
+    bool ok = near(areaAdd, 7.0) && near(areaSub, 3.0) && near(areaIsec, 1.0);
+    std::cout << "=== Boolean2D area regression: diagonal squares ===\n";
+    std::cout << "  Add area:       " << areaAdd << " (expect 7)\n";
+    std::cout << "  Subtract area:  " << areaSub << " (expect 3)\n";
+    std::cout << "  Intersect area: " << areaIsec << " (expect 1)\n";
+    std::cout << "  " << (ok ? "PASS" : "FAIL") << "\n";
+    if (!ok) allPass = false;
     std::cout << std::endl;
   }
 
