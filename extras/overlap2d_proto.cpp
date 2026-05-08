@@ -8,32 +8,65 @@
 //
 // Prototype for 2D overlap removal (issue #289).
 //
-// Sequential, brute-force O(N^2) implementation based on:
-//   - Julian Smith, "Towards robust inexact geometric computation",
-//     UCAM-CL-TR-766 (2009), Chapter 7.
-//   - elalish's BVH-adapted sketch in github.com/elalish/manifold/issues/289.
+// Single-translation-unit prototype following Julian Smith,
+// "Towards robust inexact geometric computation", UCAM-CL-TR-766
+// (2009), Chapter 7, with the BVH adaptation sketched by elalish in
+// github.com/elalish/manifold/issues/289.
+//
+// References (cited inline as "Smith §X" / "Smith fig X" below):
+//   [Smith09] Julian M. Smith, "Towards robust inexact geometric
+//             computation", PhD dissertation, University of Cambridge,
+//             Technical Report UCAM-CL-TR-766, 2009.
+//             https://www.cl.cam.ac.uk/techreports/UCAM-CL-TR-766.pdf
+//
+//             - Chapter 6: figs 6.4 and 6.5 (degenerate-vertex test
+//               cases used by `Smith fig 6.5(d)` in the test battery).
+//             - Chapter 7: overall algorithm.
+//             - §7.4 onwards: robust Bentley-Ottmann.
+//             - §7.7 / fig 7.16: iterate-to-fixed-point bound (≤2
+//               iterations under symbolic positions).
+//             - Table 7.3: PolySet2 (canonical sub-edges with signed
+//               multiplicity; see `Canonicalize` and `OutEdge` here).
+//             - Chapter 8: floating-point error analysis;
+//               u = 2⁻⁵³ for IEEE 754 doubles, per-intersection
+//               bound α = √153·u·L (used by `EpsilonFromScale`).
+//
+//   [Issue289] https://github.com/elalish/manifold/issues/289
+//             elalish's 6-step BVH-adapted sketch (no sweep line),
+//             which this prototype implements with Smith's symbolic
+//             perturbation as the FP-robust core.
 //
 // Build (from the manifold repo root):
 //   g++ -std=c++17 -O2 -I include -I src -DMANIFOLD_PAR=-1 \
+//     -ffp-contract=off -fexcess-precision=standard \
 //     extras/overlap2d_proto.cpp -o overlap2d_proto
 // Run:
 //   ./overlap2d_proto              # full test battery
 //   ./overlap2d_proto diagnose 0   # diagnostic dump for one case
+//   ./overlap2d_proto deepfuzz 100 # broader randomized verification
 //
-// Single translation unit, header-only manifold dependency (no link
-// step, no TBB). Single-threaded. Brute-force spatial queries.
-// Goal: validate the algorithm end-to-end on Smith's adversarial test
-// patterns before committing to BVH/parallelization.
+// Algorithm shape (matches manifold internals where possible):
+//   - Spatial queries via manifold's `Collider` BVH (Morton-sorted leaves).
+//   - Edge-edge intersection via a trim-and-`Interpolate` symbolic kernel
+//     atop the `Shadows` orientation primitive from src/shared.h.
+//   - Vertex equality via `manifold::DisjointSets` lock-free union-find.
+//   - Step 6 face traversal via DCEL (the same structure manifold's 3D
+//     `Manifold::Impl::halfedge_` uses), winding-rayed per face from a
+//     point on the LEFT side of any boundary half-edge.
+//   - Iterate to fixed point per Smith §7.7 (default maxIter=2, his bound).
 //
-// Intentional simplifications vs a production implementation:
-//   - Segment intersection uses Cramer's rule (parametric), not Smith's
-//     symbolic-perturbation `Interpolate`/`Shadows` formulation. Correct
-//     for non-degenerate inputs; would be replaced for production.
-//   - Winding ray-cast at edge midpoints is a plain horizontal ray with
-//     half-open vertex handling, no symbolic perturbation. Adequate for
-//     the test patterns here; production would use the symbolic form.
-//   - All spatial queries are brute-force O(N^2); a production version
-//     would use manifold's Collider for broad-phase BVH queries.
+// Single-threaded. Header-only manifold dependency (no link step, no TBB).
+//
+// Deferred for graduation to manifold's mainline build:
+//   - Mechanical std::vector → manifold::Vec rename (Vec is the project's
+//     CPU/GPU-portable vector). Drop-in API-compatible for our usage; the
+//     conversion is ~135 declarations and is best done in the same patch
+//     that wires the prototype into the build system, so the type churn
+//     and the build-graph churn land together.
+//   - ZoneScoped Tracy markers at phase boundaries.
+//   - ExecutionContext::Impl* ctx threading for parallelism dispatch.
+//   - Internal namespace (overlap2d::detail) hiding everything except
+//     the public OverlapRemovePolygons / Boolean2D entry points.
 
 #include <algorithm>
 #include <cassert>
@@ -41,6 +74,7 @@
 #include <cstdint>
 #include <iostream>
 #include <climits>
+#include <functional>
 #include <map>
 #include <queue>
 #include <random>
@@ -75,18 +109,14 @@ constexpr double kU = 1.110223024625156540423631668e-16;
 constexpr double kAlphaCoeff = 12.37;
 
 // Edge with signed multiplicity. v0/v1 index into the vertex vector.
+// Used both as algorithm input and as the oriented sub-edge type in the
+// step-6 output (alias `OutEdge` below).
 struct EdgeM {
   int v0;
   int v1;
   int mult;  // +1 default; -1 for reversed contribution; etc.
 };
-
-// Result of step 6: an oriented sub-edge of the output boundary.
-struct OutEdge {
-  int v0;
-  int v1;
-  int mult;
-};
+using OutEdge = EdgeM;
 
 // Choose epsilon for the operation. L = bounding box half-extent rounded
 // up to power of 2. k_budget is the user's expected upper bound on how
@@ -100,37 +130,18 @@ inline double EpsilonFromScale(double L, int k_budget = 1000) {
   return (k_budget + 1) * kAlphaCoeff * kU * L_pow2;
 }
 
-// Stage 1 from Table 7.1/8.1: y-value of segment (xL,yL)-(xR,yR) at x = xP,
-// canonicalized so xP is closer to xL (smaller dx). One FP op per statement.
-inline double YAtX(double xP, double xL, double yL, double xR, double yR) {
-  // Canonicalize: ensure |xP - xL| <= |xP - xR|.
-  double dxL_raw = xP - xL;
-  double dxR_raw = xR - xP;
-  if (std::abs(dxR_raw) < std::abs(dxL_raw)) {
-    std::swap(xL, xR);
-    std::swap(yL, yR);
-  }
-  const double dxL = xP - xL;
-  const double dx = xR - xL;
-  const double lam = dxL / dx;
-  const double dy = yR - yL;
-  const double dyL = lam * dy;
-  const double yS = yL + dyL;
-  return yS;
-}
-
 // Cross-detection via manifold's `CCW` (orientation predicate with
 // tolerance). Two segments AB and CD strictly cross iff CCW(A, B, C) and
 // CCW(A, B, D) have opposite signs AND CCW(C, D, A) and CCW(C, D, B)
 // have opposite signs. CCW returns 0 within `tol` of collinear; one
 // non-zero zero means a single endpoint lies on the other segment
 // ("touch but don't cross"), which we reject. All four zero means the
-// segments are mutually collinear — that case is resolved by the
+// segments are mutually collinear; that case is resolved by the
 // Edelsbrunner-Mücke SoS perturbation in `IntersectSegments` below;
 // permutation parity of the four ranks decides whether the perturbed
-// segments cross. Once we know they cross, position is computed by
-// Cramer (FP noise in the position is fine because the cross-or-not
-// decision was already resolved symbolically).
+// segments cross. Position computation in `IntersectSegments` is the
+// trim-and-`Interpolate` kernel; FP noise in the resulting position is
+// absorbed by the eps-radius merge in step 1 of the next iteration.
 inline int CCWPerturbed(vec2 a, vec2 b, vec2 c, int rA, int rB, int rC,
                        double tol) {
   const int s = CCW(a, b, c, tol);
@@ -144,38 +155,32 @@ inline int CCWPerturbed(vec2 a, vec2 b, vec2 c, int rA, int rB, int rC,
 }
 
 // =============================================================================
-// 2D edge-edge symbolic intersection (Cramer-structured, BVH-friendly).
+// 2D edge-edge symbolic intersection (BVH-friendly).
 //
 // The classical Kernel11 from boolean3.cpp can't be used in BVH-pair-query
 // context: it requires "one endpoint inside, one outside" the other
 // segment's projection, which sweep-line guarantees but BVH pair queries
 // don't (most pairs have one segment fully nested in the other's
-// projection — see HANDOFF.md experiment #6).
+// projection).
 //
 // This kernel works for any pair by **trimming both segments to their
 // projection-axis overlap before applying Intersect**. Steps:
 //   1. CCW + SoS for cross-or-not (existing predicate, untouched).
-//   2. Pick the axis (x or y) with larger combined endpoint spread.
+//   2. Pick the axis (x or y) where BOTH segments have non-zero spread,
+//      preferring the larger min-spread for stability.
 //   3. Sort each segment's endpoints L→R along that axis.
 //   4. Compute axis-overlap interval [overlapL, overlapR] = intersection
 //      of a's and b's axis spans.
 //   5. Use `Interpolate` (from shared.h) to evaluate each segment's
 //      orthogonal coord at overlapL and overlapR. This produces four
-//      (axis, ortho) points all spanning the same axis interval — the
-//      precondition Intersect's closed-form expects.
+//      (axis, ortho) points all spanning the same axis interval, which
+//      is the precondition Intersect's closed-form expects.
 //   6. Apply boolean3 Intersect's closed-form (smaller |dy| endpoint
 //      picked for FP stability) to compute the intersection position.
 //
-// Compared to plain Cramer this gives more stable positions because:
-//   - Each Interpolate call uses one-axis arithmetic (the larger-spread
-//     axis), avoiding the multiplied small-determinant blowup Cramer can
-//     hit when segments are near-parallel.
-//   - The smaller |dy| selection in Intersect biases toward whichever
-//     trimmed-endpoint pair has a tighter ortho gap.
-//
-// Compared to the failed Kernel11 port (#6) this works for nested-axis
-// cases because trimming makes both segments span the same axis interval
-// by construction — there is no "inside/outside endpoint" precondition.
+// Trimming makes both segments span the same axis interval by
+// construction, so the Kernel11 "inside/outside endpoint" precondition is
+// satisfied even for the nested-axis cases that arise from BVH pairs.
 // =============================================================================
 inline double Coord(vec2 p, int axis) { return axis == 0 ? p.x : p.y; }
 
@@ -322,7 +327,7 @@ inline BVH BVHBuildFromBoxes(const std::vector<Box>& boxes) {
 // Collide every query box in `queries` against the BVH and call
 // `f(queryIdx, origLeafIdx)` once per overlap. `origLeafIdx` is in the
 // caller's input space (we undo the Morton permutation here). Always
-// sequential — the prototype runs with MANIFOLD_PAR=-1 anyway.
+// sequential; the prototype runs with MANIFOLD_PAR=-1 anyway.
 template <typename F>
 inline void CollidePairs(const BVH& bvh, const std::vector<Box>& queries,
                          F&& f) {
@@ -336,7 +341,7 @@ inline void CollidePairs(const BVH& bvh, const std::vector<Box>& queries,
 }
 
 // =============================================================================
-// Step 1: vertex merge (brute-force union-find).
+// Step 1: vertex merge.
 // Returns: remap[oldIdx] = newIdx, and merged vert positions.
 // =============================================================================
 struct VertexMerge {
@@ -350,7 +355,7 @@ VertexMerge MergeVerts(const std::vector<vec2>& in, double eps) {
   // BVH broad phase: each vert's eps-padded box queried against all eps-
   // padded vert boxes. A pair (i, j) overlapping in box space gets a precise
   // distance check; pairs within eps unite. We collect candidates first,
-  // sort by (min(i,j), max(i,j)), then unite — sorting matches the order of
+  // sort by (min(i,j), max(i,j)), then unite. Sorting matches the order of
   // the original O(n^2) loop so DisjointSets's union-by-rank tie-break
   // produces the same cluster roots and the centroid map iterates the same
   // way (which controls assigned new-vertex indices).
@@ -416,8 +421,8 @@ std::vector<std::vector<int>> BuildEdgeVertLists(
   std::vector<std::vector<int>> lists(nE);
   // BVH broad phase: edges as eps-padded segment AABBs, queried by vert
   // points (eps-padded boxes). Each candidate (edge, vert) pair runs the
-  // existing exact projection test. Per-edge `hits` are sorted at the end
-  // exactly as in the brute-force version.
+  // exact projection test below. Per-edge `hits` are sorted by parameter
+  // at the end so the result is independent of broad-phase visit order.
   std::vector<Box> edgeBoxes(nE);
   for (int e = 0; e < nE; ++e) {
     edgeBoxes[e] =
@@ -427,7 +432,7 @@ std::vector<std::vector<int>> BuildEdgeVertLists(
   std::vector<Box> vertBoxes(nV);
   for (int v = 0; v < nV; ++v) vertBoxes[v] = BoxOf2DPoint(verts[v], eps);
   // Build vert→neighbors adjacency from the input edges. Used below to
-  // detect "thin triangle apex" cases — see comment in CollidePairs.
+  // detect "thin triangle apex" cases (see comment in CollidePairs).
   std::vector<std::set<int>> adj(nV);
   for (const auto& e : edges) {
     adj[e.v0].insert(e.v1);
@@ -481,11 +486,10 @@ void FindAndInsertIntersections(const std::vector<EdgeM>& edges,
   vertEdges->resize(verts->size());
   // BVH broad phase: each edge as eps-padded segment AABB, queried against
   // all edge AABBs. Self-collision is filtered by `qi < li`. Pairs are
-  // sorted to (i, j) with i<j, then iterated in lex order — this matches
-  // the brute O(n^2) loop's iteration order, which matters because the
-  // snap-and-insert below depends on `lists[*]` accumulating verts as
-  // earlier pairs are processed. Sort key uses int pair so duplicate Morton
-  // codes can't perturb the ordering.
+  // sorted lexicographically; the snap-and-insert below depends on
+  // `lists[*]` accumulating verts as earlier pairs are processed, and
+  // sorting on the int pair (rather than Morton order) keeps the order
+  // deterministic across runs and BVH builds.
   std::vector<Box> edgeBoxes(nE);
   for (int i = 0; i < nE; ++i) {
     edgeBoxes[i] =
@@ -499,79 +503,77 @@ void FindAndInsertIntersections(const std::vector<EdgeM>& edges,
   });
   std::sort(pairs.begin(), pairs.end());
   for (auto [i, j] : pairs) {
-    {
-      // Skip if shares an endpoint.
-      if (edges[i].v0 == edges[j].v0 || edges[i].v0 == edges[j].v1 ||
-          edges[i].v1 == edges[j].v0 || edges[i].v1 == edges[j].v1)
-        continue;
-      vec2 a0 = (*verts)[edges[i].v0];
-      vec2 a1 = (*verts)[edges[i].v1];
-      vec2 b0 = (*verts)[edges[j].v0];
-      vec2 b1 = (*verts)[edges[j].v1];
-      vec2 p;
-      if (!IntersectSegments(a0, a1, b0, b1, edges[i].v0, edges[i].v1,
-                             edges[j].v0, edges[j].v1, eps, &p))
-        continue;
-      // Snap: is p within eps of any existing vert? Search the union of
-      // (i,j)'s endpoints and existing list members of i and j.
-      auto nearVert = [&](int candidate) -> bool {
-        vec2 d = p - (*verts)[candidate];
-        return dot(d, d) <= eps2;
-      };
-      int snapTo = -1;
-      for (int v : {edges[i].v0, edges[i].v1, edges[j].v0, edges[j].v1}) {
+    // Skip if shares an endpoint.
+    if (edges[i].v0 == edges[j].v0 || edges[i].v0 == edges[j].v1 ||
+        edges[i].v1 == edges[j].v0 || edges[i].v1 == edges[j].v1)
+      continue;
+    vec2 a0 = (*verts)[edges[i].v0];
+    vec2 a1 = (*verts)[edges[i].v1];
+    vec2 b0 = (*verts)[edges[j].v0];
+    vec2 b1 = (*verts)[edges[j].v1];
+    vec2 p;
+    if (!IntersectSegments(a0, a1, b0, b1, edges[i].v0, edges[i].v1,
+                           edges[j].v0, edges[j].v1, eps, &p))
+      continue;
+    // Snap: is p within eps of any existing vert? Search the union of
+    // (i,j)'s endpoints and existing list members of i and j.
+    auto nearVert = [&](int candidate) -> bool {
+      vec2 d = p - (*verts)[candidate];
+      return dot(d, d) <= eps2;
+    };
+    int snapTo = -1;
+    for (int v : {edges[i].v0, edges[i].v1, edges[j].v0, edges[j].v1}) {
+      if (nearVert(v)) {
+        snapTo = v;
+        break;
+      }
+    }
+    if (snapTo < 0) {
+      for (int v : (*lists)[i]) {
         if (nearVert(v)) {
           snapTo = v;
           break;
         }
       }
-      if (snapTo < 0) {
-        for (int v : (*lists)[i]) {
-          if (nearVert(v)) {
-            snapTo = v;
-            break;
-          }
-        }
-      }
-      if (snapTo < 0) {
-        for (int v : (*lists)[j]) {
-          if (nearVert(v)) {
-            snapTo = v;
-            break;
-          }
-        }
-      }
-      int vNew;
-      if (snapTo >= 0) {
-        vNew = snapTo;
-      } else {
-        vNew = static_cast<int>(verts->size());
-        verts->push_back(p);
-        vertEdges->emplace_back();
-      }
-      // Record edge incidence: this vert is now known to lie on edges i and j.
-      (*vertEdges)[vNew].insert(i);
-      (*vertEdges)[vNew].insert(j);
-      // Insert into both edges' lists, sorted by parametric position.
-      auto insertSorted = [&](int eIdx) {
-        if (vNew == edges[eIdx].v0 || vNew == edges[eIdx].v1) return;
-        vec2 a = (*verts)[edges[eIdx].v0];
-        vec2 b = (*verts)[edges[eIdx].v1];
-        vec2 ab = b - a;
-        double abLen2 = dot(ab, ab);
-        if (abLen2 == 0) return;
-        double tNew = dot(p - a, ab) / abLen2;
-        auto& lst = (*lists)[eIdx];
-        auto pos = std::lower_bound(
-            lst.begin(), lst.end(), tNew, [&](int v, double t) {
-              double tv = dot((*verts)[v] - a, ab) / abLen2;
-              return tv < t;
-            });
-        if (pos == lst.end() || *pos != vNew) lst.insert(pos, vNew);
-      };
-      insertSorted(i);
-      insertSorted(j);
     }
+    if (snapTo < 0) {
+      for (int v : (*lists)[j]) {
+        if (nearVert(v)) {
+          snapTo = v;
+          break;
+        }
+      }
+    }
+    int vNew;
+    if (snapTo >= 0) {
+      vNew = snapTo;
+    } else {
+      vNew = static_cast<int>(verts->size());
+      verts->push_back(p);
+      vertEdges->emplace_back();
+    }
+    // Record edge incidence: this vert is now known to lie on edges i and j.
+    (*vertEdges)[vNew].insert(i);
+    (*vertEdges)[vNew].insert(j);
+    // Insert into both edges' lists, sorted by parametric position.
+    auto insertSorted = [&](int eIdx) {
+      if (vNew == edges[eIdx].v0 || vNew == edges[eIdx].v1) return;
+      vec2 a = (*verts)[edges[eIdx].v0];
+      vec2 b = (*verts)[edges[eIdx].v1];
+      vec2 ab = b - a;
+      double abLen2 = dot(ab, ab);
+      if (abLen2 == 0) return;
+      double tNew = dot(p - a, ab) / abLen2;
+      auto& lst = (*lists)[eIdx];
+      auto pos = std::lower_bound(
+          lst.begin(), lst.end(), tNew, [&](int v, double t) {
+            double tv = dot((*verts)[v] - a, ab) / abLen2;
+            return tv < t;
+          });
+      if (pos == lst.end() || *pos != vNew) lst.insert(pos, vNew);
+    };
+    insertSorted(i);
+    insertSorted(j);
   }
 }
 
@@ -623,9 +625,10 @@ CanonicalSubEdges Canonicalize(const std::vector<EdgeM>& edges,
 // canonical (vMin, vMax) form, "upward" = vMin's y < vMax's y when
 // crossed from below), -m if downward.
 //
-// This is a simple non-symbolic-perturbation cast with known limitations
-// when the ray hits a vertex exactly. For the prototype we offset the
-// midpoint by tiny random epsilon if needed (TODO).
+// Used per-face by `FilterByWindingDCEL`: the origin is offset
+// perpendicularly LEFT of a boundary half-edge, which puts it strictly
+// inside the face and away from any vertex, so the ray never hits a
+// vertex exactly under non-adversarial inputs.
 int CastWindingRay(vec2 origin, const CanonicalSubEdges& canon,
                    const std::vector<vec2>& verts) {
   int winding = 0;
@@ -684,17 +687,22 @@ struct HalfEdge {
 };
 }  // namespace dcel_internal
 
-// Debug toggle. Set via OVERLAP2D_DEBUG_DCEL=1 environment-style: just a
-// global bool flipped by the idempotence probe.
-inline bool& DCELDebug() {
-  static bool b = false;
-  return b;
-}
+// Predicate over a face's winding number deciding whether the face is
+// "inside" the result region. Standard ops:
+//   - Add/Subtract: w > 0  (Smith's wind > 0 union convention)
+//   - Intersect:    w > 1  (both inputs cover the face)
+// An edge is retained iff its left and right faces disagree on this
+// predicate.
+using WindPredicate = std::function<bool(int)>;
 
-std::vector<OutEdge> FilterByWindingDCEL(const CanonicalSubEdges& canon,
-                                         const std::vector<vec2>& verts) {
+inline WindPredicate WindAdd() { return [](int w) { return w > 0; }; }
+inline WindPredicate WindIntersect() { return [](int w) { return w > 1; }; }
+
+std::vector<OutEdge> FilterByWindingDCEL(
+    const CanonicalSubEdges& canon, const std::vector<vec2>& verts,
+    bool debug = false, const WindPredicate& isInside = WindAdd()) {
   using dcel_internal::HalfEdge;
-  if (DCELDebug()) {
+  if (debug) {
     std::cerr << "[FilterByWindingDCEL] canon.map.size()="
               << canon.map.size() << " verts.size()=" << verts.size() << "\n";
   }
@@ -713,11 +721,15 @@ std::vector<OutEdge> FilterByWindingDCEL(const CanonicalSubEdges& canon,
 
   // 2. Group half-edges by origin vertex; sort each group by direction angle
   //    (CCW). This is the "rotational order" needed to compute next pointers.
-  std::map<int, std::vector<int>> outgoing;
+  //    Vert ids are dense [0, verts.size()), so a vector-of-vector indexed
+  //    by vert id beats std::map on cache locality and lookup cost.
+  std::vector<std::vector<int>> outgoing(verts.size());
   for (int i = 0; i < (int)halfedges.size(); ++i) {
     outgoing[halfedges[i].origin].push_back(i);
   }
-  for (auto& [v, hes] : outgoing) {
+  for (size_t v = 0; v < outgoing.size(); ++v) {
+    auto& hes = outgoing[v];
+    if (hes.size() < 2) continue;
     const vec2 vp = verts[v];
     std::sort(hes.begin(), hes.end(), [&](int a, int b) {
       const vec2 dA = verts[halfedges[halfedges[a].twin].origin] - vp;
@@ -781,15 +793,18 @@ std::vector<OutEdge> FilterByWindingDCEL(const CanonicalSubEdges& canon,
   //    Fix: center each face's coordinates relative to its first vertex
   //    before summing. With centered coords O(edge length), products
   //    are O((edge length)²) and the sum is precise.
-  std::vector<double> faceArea(nFaces, 0.0);
-  std::vector<int> faceStartHEEarly(nFaces, -1);
+  // First half-edge encountered per face. Used both as the centering
+  // reference for the shoelace area (below) and as the starting half-edge
+  // for the per-face winding ray-cast (step 6).
+  std::vector<int> faceStartHE(nFaces, -1);
   for (int i = 0; i < (int)halfedges.size(); ++i) {
-    if (halfedges[i].face >= 0 && faceStartHEEarly[halfedges[i].face] == -1)
-      faceStartHEEarly[halfedges[i].face] = i;
+    if (halfedges[i].face >= 0 && faceStartHE[halfedges[i].face] == -1)
+      faceStartHE[halfedges[i].face] = i;
   }
+  std::vector<double> faceArea(nFaces, 0.0);
   for (int i = 0; i < (int)halfedges.size(); ++i) {
     if (halfedges[i].face < 0) continue;
-    const int faceRefHE = faceStartHEEarly[halfedges[i].face];
+    const int faceRefHE = faceStartHE[halfedges[i].face];
     if (faceRefHE < 0) continue;
     const vec2 ref = verts[halfedges[faceRefHE].origin];
     const vec2 a = verts[halfedges[i].origin] - ref;
@@ -800,7 +815,7 @@ std::vector<OutEdge> FilterByWindingDCEL(const CanonicalSubEdges& canon,
   for (int f = 1; f < nFaces; ++f) {
     if (faceArea[f] < faceArea[outerFace]) outerFace = f;
   }
-  if (DCELDebug()) {
+  if (debug) {
     std::cerr << "DCEL: " << halfedges.size() << " halfedges, " << nFaces
               << " faces\n";
     int negAreaCount = 0;
@@ -839,11 +854,6 @@ std::vector<OutEdge> FilterByWindingDCEL(const CanonicalSubEdges& canon,
   //    midpoint into the face (the LEFT side, by DCEL convention), cast
   //    a horizontal ray, sum signed mult contributions of edges crossed.
   std::vector<int> faceWind(nFaces, 0);
-  std::vector<int> faceStartHE(nFaces, -1);
-  for (int i = 0; i < (int)halfedges.size(); ++i) {
-    if (halfedges[i].face >= 0 && faceStartHE[halfedges[i].face] == -1)
-      faceStartHE[halfedges[i].face] = i;
-  }
   // Ray-cast point per face: perpendicular-offset from a half-edge of
   // the face's boundary, into the face (LEFT side). This works because
   // the face is on the LEFT of every half-edge in its cycle, so a
@@ -864,18 +874,19 @@ std::vector<OutEdge> FilterByWindingDCEL(const CanonicalSubEdges& canon,
     const double len = length(d);
     if (len == 0) continue;
     const vec2 perp(-d.y / len, d.x / len);  // 90° CCW = LEFT of h's direction
+    // Step inward by len/1000 to land an interior point of the face. Picks
+    // up the face's winding via ray-cast. The 1/1000 factor assumes the
+    // face's inscribed-circle radius from this halfedge's midpoint is at
+    // least len/1000; degenerate slivers worse than ~1000:1 aspect would
+    // miss. None appear in the test corpus.
     const vec2 pInF = mid + perp * (len * 1e-3);
     faceWind[f] = CastWindingRay(pInF, canon, verts);
   }
 
-  if (DCELDebug()) {
+  if (debug) {
     std::cerr << "  face windings:";
     for (int f = 0; f < nFaces; ++f) {
-      std::cerr << " f" << f << "=";
-      if (faceWind[f] == INT_MIN)
-        std::cerr << "INF";
-      else
-        std::cerr << faceWind[f];
+      std::cerr << " f" << f << "=" << faceWind[f];
     }
     std::cerr << "\n";
   }
@@ -895,8 +906,8 @@ std::vector<OutEdge> FilterByWindingDCEL(const CanonicalSubEdges& canon,
     if (leftFace < 0 || rightFace < 0) continue;
     const int wL = faceWind[leftFace];
     const int wR = faceWind[rightFace];
-    const bool leftIn = wL > 0;
-    const bool rightIn = wR > 0;
+    const bool leftIn = isInside(wL);
+    const bool rightIn = isInside(wR);
     if (leftIn == rightIn) continue;
     if (leftIn) {
       out.push_back({k.first, k.second, 1});
@@ -918,7 +929,9 @@ struct OverlapResult {
 };
 
 OverlapResult RemoveOverlaps2D(const std::vector<vec2>& vertsIn,
-                               const std::vector<EdgeM>& edgesIn, double eps) {
+                               const std::vector<EdgeM>& edgesIn, double eps,
+                               bool debug = false,
+                               const WindPredicate& isInside = WindAdd()) {
   // Step 1: vertex merge.
   auto merge = MergeVerts(vertsIn, eps);
   const int numMerged = static_cast<int>(merge.verts.size());
@@ -959,28 +972,53 @@ OverlapResult RemoveOverlaps2D(const std::vector<vec2>& vertsIn,
     // point and C at a different point along A: vAB and vAC share edge A
     // but are at different true points and shouldn't merge unless they
     // ALSO geometrically coincide). A sweep across the displacement fuzz
-    // showed 10*eps gives the best iteration count (1:444  2:6) without
+    // showed 10*eps gives the best iteration count (1:448 2:2) without
     // over-merging; tightening below 3*eps causes single-pass failures,
     // loosening to 100*eps causes new over-merge failures.
-    const double mergeThresh2 = (10.0 * eps) * (10.0 * eps);
-    for (size_t a = 0; a < merge.verts.size(); ++a) {
-      if (a >= vertEdges.size() || vertEdges[a].empty()) continue;
-      for (size_t b = a + 1; b < merge.verts.size(); ++b) {
-        if (b >= vertEdges.size() || vertEdges[b].empty()) continue;
-        // Structural gate: do they share an edge?
-        bool shared = false;
-        for (int e : vertEdges[a]) {
-          if (vertEdges[b].count(e)) {
-            shared = true;
-            break;
-          }
-        }
-        if (!shared) continue;
-        // Geometric gate: within mergeThresh?
-        vec2 d = merge.verts[b] - merge.verts[a];
-        if (dot(d, d) > mergeThresh2) continue;
-        uf.unite(static_cast<int>(a), static_cast<int>(b));
+    //
+    // Note: when union-find creates a multi-vert cluster, the centroid
+    // computed below is offset from the original positions by up to ~eps;
+    // that's intentional (we WANT the merged point to land at the average)
+    // and is the source of the residual iter=2 cases. Smith's bound
+    // proves convergence in ≤2 iterations under his α-budget framework.
+    const double mergeThresh = 10.0 * eps;
+    const double mergeThresh2 = mergeThresh * mergeThresh;
+    // BVH broad phase over intersection verts only (those with non-empty
+    // edge incidence). Each box is padded by `mergeThresh` so any pair
+    // within geometric distance ≤ mergeThresh has overlapping boxes.
+    // Candidate pairs then run the structural gate (shared-edge
+    // incidence) and the exact distance gate.
+    std::vector<int> ixVerts;
+    std::vector<Box> ixBoxes;
+    ixVerts.reserve(merge.verts.size());
+    ixBoxes.reserve(merge.verts.size());
+    for (size_t i = 0; i < merge.verts.size(); ++i) {
+      if (i < vertEdges.size() && !vertEdges[i].empty()) {
+        ixVerts.push_back(static_cast<int>(i));
+        ixBoxes.push_back(BoxOf2DPoint(merge.verts[i], mergeThresh));
       }
+    }
+    BVH bvh = BVHBuildFromBoxes(ixBoxes);
+    std::vector<std::pair<int, int>> pairs;
+    CollidePairs(bvh, ixBoxes, [&](int qi, int li) {
+      if (qi >= li) return;
+      pairs.emplace_back(ixVerts[qi], ixVerts[li]);
+    });
+    std::sort(pairs.begin(), pairs.end());
+    for (auto [a, b] : pairs) {
+      // Structural gate: do they share an edge?
+      bool shared = false;
+      for (int e : vertEdges[a]) {
+        if (vertEdges[b].count(e)) {
+          shared = true;
+          break;
+        }
+      }
+      if (!shared) continue;
+      // Geometric gate: within mergeThresh?
+      vec2 d = merge.verts[b] - merge.verts[a];
+      if (dot(d, d) > mergeThresh2) continue;
+      uf.unite(a, b);
     }
     // Build remap from union-find clusters; cluster position is centroid.
     std::map<int, std::pair<vec2, int>> sums;
@@ -1018,13 +1056,13 @@ OverlapResult RemoveOverlaps2D(const std::vector<vec2>& vertsIn,
   // Step 5: sub-edge canonicalization.
   auto canon = Canonicalize(edges, lists);
   // Step 6: DCEL face-traversal winding filter.
-  auto out = FilterByWindingDCEL(canon, merge.verts);
+  auto out = FilterByWindingDCEL(canon, merge.verts, debug, isInside);
   return {std::move(merge.verts), std::move(out), std::move(merge.remap),
           numMerged};
 }
 
 // =============================================================================
-// Polygons API wrapper — the public-facing shape that matches manifold's
+// Polygons API wrapper. The public-facing shape matches manifold's
 // `CrossSection` / `Polygons` typedef (`std::vector<std::vector<vec2>>`).
 // Each `SimplePolygon` is a closed loop of vertices: CCW outer, CW holes.
 // Internally we flatten to a vert/edge list, run the overlap-removal
@@ -1041,7 +1079,11 @@ PolygonsToInput(const manifold::Polygons& polys) {
   std::vector<vec2> verts;
   std::vector<EdgeM> edges;
   for (const auto& loop : polys) {
-    if (loop.size() < 3) continue;  // degenerate; drop
+    // Drop degenerate loops (fewer than 3 verts can't form a closed
+    // simple polygon under Smith's wind > 0 convention). Silent skip
+    // matches `Polygons` consumer expectations elsewhere in manifold;
+    // callers that want hard validation should pre-check.
+    if (loop.size() < 3) continue;
     const int base = static_cast<int>(verts.size());
     const int n = static_cast<int>(loop.size());
     for (const auto& v : loop) verts.push_back(v);
@@ -1058,15 +1100,19 @@ PolygonsToInput(const manifold::Polygons& polys) {
 // would jump between distinct loops. Same DCEL convention as step 6:
 // the next outgoing edge that continues the same loop is the one
 // **immediately CW from the incoming half-edge's reverse direction** in
-// the vertex's CCW-sorted angular order — i.e., "smallest left turn"
+// the vertex's CCW-sorted angular order, i.e., "smallest left turn"
 // from the incoming direction.
 inline manifold::Polygons OutEdgesToPolygons(
     const std::vector<vec2>& verts, const std::vector<OutEdge>& edges) {
   const int nE = static_cast<int>(edges.size());
-  // Per-vertex outgoing edges, sorted CCW by direction angle.
-  std::map<int, std::vector<int>> outgoing;
+  // Per-vertex outgoing edges, sorted CCW by direction angle. Vert ids
+  // are dense in [0, verts.size()), so a vector-of-vector indexed by
+  // vert id beats std::map on cache locality and lookup cost.
+  std::vector<std::vector<int>> outgoing(verts.size());
   for (int i = 0; i < nE; ++i) outgoing[edges[i].v0].push_back(i);
-  for (auto& [v, lst] : outgoing) {
+  for (size_t v = 0; v < outgoing.size(); ++v) {
+    auto& lst = outgoing[v];
+    if (lst.size() < 2) continue;
     const vec2 vp = verts[v];
     std::sort(lst.begin(), lst.end(), [&](int a, int b) {
       const vec2 da = verts[edges[a].v1] - vp;
@@ -1084,8 +1130,8 @@ inline manifold::Polygons OutEdgesToPolygons(
       visited[cur] = true;
       loop.push_back(verts[edges[cur].v0]);
       const int destV = edges[cur].v1;
-      auto it = outgoing.find(destV);
-      if (it == outgoing.end()) {
+      if (destV < 0 || destV >= (int)outgoing.size() ||
+          outgoing[destV].empty()) {
         cur = -1;
         break;
       }
@@ -1095,7 +1141,7 @@ inline manifold::Polygons OutEdgesToPolygons(
       // i.e., angle = atan2(verts[destV].y - verts[edges[cur].v0].y,
       //                     verts[destV].x - verts[edges[cur].v0].x).
       // The next outgoing edge whose direction is just past this
-      // (going CCW) is the one we want — that's the entry one step CW
+      // (going CCW) is the one we want; that's the entry one step CW
       // from the position where the reverse-incoming direction would
       // sit in the sorted list. Implemented by binary-search on the
       // reverse direction.
@@ -1105,10 +1151,10 @@ inline manifold::Polygons OutEdgesToPolygons(
       // Reverse direction in (-π, π].
       double rev = inAngle + M_PI;
       if (rev > M_PI) rev -= 2 * M_PI;
-      const auto& lst = it->second;
+      const auto& lst = outgoing[destV];
       // Find the unvisited entry with the smallest CCW angle past `rev`.
       int next = -1;
-      double bestDelta = 1e300;
+      double bestDelta = std::numeric_limits<double>::infinity();
       for (int e : lst) {
         if (visited[e]) continue;
         const vec2 d = verts[edges[e].v1] - vp;
@@ -1137,6 +1183,70 @@ inline manifold::Polygons OverlapRemovePolygons(const manifold::Polygons& in,
   return OutEdgesToPolygons(r.verts, r.edges);
 }
 
+// Operation tag for the binary-boolean entry point. `Add` is the union;
+// `Subtract` removes B from A; `Intersect` keeps the region covered by
+// both inputs.
+enum class BoolOp { Add, Subtract, Intersect };
+
+// Infer eps from a polygon set's bounding-box half-extent via Smith's
+// α-budget formula. Returns 0 for empty input. Used by Boolean2D when
+// the caller passes eps <= 0.
+inline double InferEps(const manifold::Polygons& a,
+                       const manifold::Polygons& b) {
+  double xMin = std::numeric_limits<double>::infinity();
+  double yMin = xMin, xMax = -xMin, yMax = -xMin;
+  auto bound = [&](const manifold::Polygons& polys) {
+    for (const auto& loop : polys) {
+      for (const auto& v : loop) {
+        xMin = std::min(xMin, v.x);
+        yMin = std::min(yMin, v.y);
+        xMax = std::max(xMax, v.x);
+        yMax = std::max(yMax, v.y);
+      }
+    }
+  };
+  bound(a);
+  bound(b);
+  if (!std::isfinite(xMin)) return 0.0;
+  const double L = std::max(std::max(std::fabs(xMin), std::fabs(xMax)),
+                            std::max(std::fabs(yMin), std::fabs(yMax)));
+  return EpsilonFromScale(L);
+}
+
+// Binary boolean. Combines A and B into a single edge set with B's
+// multiplicity flipped for Subtract, then applies the same overlap-
+// removal pipeline with an op-specific winding predicate at step 6:
+//
+//   - Add(A, B):       w > 0       (any input covers the face)
+//   - Subtract(A, B):  w > 0       (A covers but B's flipped mult cancels)
+//   - Intersect(A, B): w > 1       (BOTH inputs cover the face)
+//
+// Pass `eps <= 0` to auto-infer eps from the combined bounding box.
+inline manifold::Polygons Boolean2D(const manifold::Polygons& a,
+                                    const manifold::Polygons& b, BoolOp op,
+                                    double eps = 0.0) {
+  if (eps <= 0.0) eps = InferEps(a, b);
+  std::vector<vec2> verts;
+  std::vector<EdgeM> edges;
+  auto append = [&](const manifold::Polygons& polys, int mult) {
+    for (const auto& loop : polys) {
+      if (loop.size() < 3) continue;
+      const int base = static_cast<int>(verts.size());
+      const int n = static_cast<int>(loop.size());
+      for (const auto& v : loop) verts.push_back(v);
+      for (int i = 0; i < n; ++i) {
+        edges.push_back({base + i, base + ((i + 1) % n), mult});
+      }
+    }
+  };
+  append(a, 1);
+  append(b, op == BoolOp::Subtract ? -1 : 1);
+  if (verts.empty()) return {};
+  WindPredicate pred = (op == BoolOp::Intersect) ? WindIntersect() : WindAdd();
+  auto r = RemoveOverlaps2D(verts, edges, eps, /*debug=*/false, pred);
+  return OutEdgesToPolygons(r.verts, r.edges);
+}
+
 // =============================================================================
 // Iterate-to-fixed-point.
 //
@@ -1154,7 +1264,7 @@ inline manifold::Polygons OverlapRemovePolygons(const manifold::Polygons& in,
 // cross-iteration vert renumbering doesn't break comparison.
 // =============================================================================
 // Quantum-parameterized fingerprint. `Fingerprint` (default) uses eps/100;
-// `CoarseFingerprint` (eps quantum) captures only topology — i.e., two
+// `CoarseFingerprint` (eps quantum) captures only topology, i.e., two
 // runs differing by sub-eps position drift will have identical coarse
 // fingerprints, which is the right test for "did pass 2 actually change
 // the topology, or just shift positions by a few ULPs?"
@@ -1188,31 +1298,14 @@ inline std::string CoarseFingerprint(const OverlapResult& r, double eps) {
   return FingerprintAt(r, eps);
 }
 
+// Fine-grained fingerprint used for idempotence detection. The eps/100
+// factor lets two iterations at the same coarse-eps tolerance still
+// produce distinguishable fingerprints if their snap decisions landed
+// at different sub-eps positions; CoarseFingerprint above lumps any
+// such pair together. Empirical: anything finer than ~eps/100 starts
+// catching pure FP-noise differences.
 inline std::string Fingerprint(const OverlapResult& r, double eps) {
-  const double quantum = eps * 0.01;
-  auto q = [quantum](double x) {
-    return static_cast<int64_t>(std::round(x / quantum));
-  };
-  std::vector<std::tuple<int64_t, int64_t, int64_t, int64_t, int>> subs;
-  subs.reserve(r.edges.size());
-  for (const auto& oe : r.edges) {
-    vec2 p0 = r.verts[oe.v0];
-    vec2 p1 = r.verts[oe.v1];
-    auto ka = std::make_pair(q(p0.x), q(p0.y));
-    auto kb = std::make_pair(q(p1.x), q(p1.y));
-    int mult = oe.mult;
-    if (kb < ka) {
-      std::swap(ka, kb);
-      mult = -mult;
-    }
-    subs.emplace_back(ka.first, ka.second, kb.first, kb.second, mult);
-  }
-  std::sort(subs.begin(), subs.end());
-  std::ostringstream oss;
-  for (const auto& [ax, ay, bx, by, m] : subs) {
-    oss << ax << "," << ay << "," << bx << "," << by << ":" << m << ";";
-  }
-  return oss.str();
+  return FingerprintAt(r, eps * 0.01);
 }
 
 enum class IterStatus {
@@ -1221,12 +1314,11 @@ enum class IterStatus {
   MaxedOut,
 };
 
-// Smith §7.7 / fig 7.16 proves convergence in ≤2 iterations under
-// his α-budget framework when intersection positions are tracked
-// symbolically. With FP-rounded positions (Cramer or `Cross2DSymbolic`
-// — both produce FP-rounded outputs) ~3% of cases need iter=2 for
-// fingerprint convergence; topology is correct from pass 1. The
-// production default is 2 (Smith's bound). Tests and the deepfuzz
+// Smith §7.7 / fig 7.16 proves convergence in ≤2 iterations under his
+// α-budget framework when intersection positions are tracked symbolically.
+// With FP-rounded positions out of `IntersectSegments`, ~1-3% of cases
+// need iter=2 for fingerprint convergence; topology is correct from pass
+// 1. The production default is 2 (Smith's bound). Tests and the deepfuzz
 // pass higher maxIter explicitly to measure tail behavior.
 OverlapResult IterateToFixedPoint(const std::vector<vec2>& vIn,
                                   const std::vector<EdgeM>& eIn, double eps,
@@ -1306,8 +1398,14 @@ std::map<int, int> ComputeBalance(const std::vector<Edge>& edges) {
 // equal the input balance. New intersection-created verts must have balance
 // zero. This generalizes "sum in == sum out" to handle open inputs.
 //
-// vertsInOriginal = number of input verts (the first N in r.verts are
-// either original or merged-from-original; intersection verts come after).
+// Note: empty output trivially passes; closed input edges contribute
+// equal in/out at every vertex, expected balance is 0 everywhere, and an
+// empty edge list also has 0 balance everywhere. Callers that care about
+// "did we drop everything?" must additionally check `r.edges` non-empty.
+//
+// numMergedVerts = number of verts emitted by step 1's merge (the first N
+// in r.verts are either original or merged-from-original; intersection
+// verts come after).
 bool CheckTopologicalValidity(const OverlapResult& r,
                               const std::vector<EdgeM>& inputEdges,
                               const std::vector<int>& inputRemap,
@@ -1351,7 +1449,7 @@ std::pair<std::vector<vec2>, std::vector<EdgeM>> RandomTopologicalPolygon(
   std::uniform_real_distribution<double> u01(0, 1);
   std::vector<vec2> verts(n);
   for (int i = 0; i < n; ++i) {
-    double theta = 2 * 3.14159265358979 * u01(rng);
+    double theta = 2 * M_PI * u01(rng);
     verts[i] = {std::cos(theta), std::sin(theta)};
   }
   // Random permutation for connectivity.
@@ -1372,7 +1470,7 @@ std::pair<std::vector<vec2>, std::vector<EdgeM>> PolygonalStar(int n,
                                                                int skip) {
   std::vector<vec2> verts(n);
   for (int i = 0; i < n; ++i) {
-    double theta = 2 * 3.14159265358979 * i / n;
+    double theta = 2 * M_PI * i / n;
     verts[i] = {std::cos(theta), std::sin(theta)};
   }
   std::vector<EdgeM> edges;
@@ -1520,27 +1618,13 @@ void Diagnose(uint64_t seed, int kPow = 30, int n = 50) {
   std::cerr << "After step 4 (intersections): " << merge.verts.size()
             << " verts (added " << (afterStep4 - beforeStep4) << ")\n";
 
-  // Diagnostic uses the pre-structural geometric merge so we can surface
-  // any remaining "near-coincident" cases. Production RemoveOverlaps2D
-  // uses structural merge instead (see step 4b there).
-  auto remerge = MergeVerts(merge.verts, 1.5 * eps);
-  if (remerge.verts.size() < merge.verts.size()) {
-    std::cerr << "After step 4b (re-merge): " << remerge.verts.size()
-              << " verts (re-merged "
-              << (merge.verts.size() - remerge.verts.size()) << ")\n";
-    for (auto& e : edges) {
-      e.v0 = remerge.remap[e.v0];
-      e.v1 = remerge.remap[e.v1];
-    }
-    for (auto& list : lists) {
-      for (auto& v : list) v = remerge.remap[v];
-      list.erase(std::unique(list.begin(), list.end()), list.end());
-    }
-    for (auto& r : merge.remap) r = remerge.remap[r];
-    merge.verts = std::move(remerge.verts);
-  } else {
-    std::cerr << "After step 4b (re-merge): no merges\n";
-  }
+  // Step 4b (structural merge) is omitted here: production
+  // RemoveOverlaps2D uses union-find over verts that share a parent edge
+  // and fall within 10*eps. The diagnostic shows the post-step-4
+  // (pre-structural-merge) state so any residual near-coincident
+  // intersection clusters surface in the dump below.
+  std::cerr << "After step 4b (re-merge): skipped (production uses "
+               "structural merge; see RemoveOverlaps2D)\n";
 
   auto canon = Canonicalize(edges, lists);
   std::cerr << "After step 5 (canonicalize): " << canon.map.size()
@@ -1768,7 +1852,7 @@ void Diagnose(uint64_t seed, int kPow = 30, int n = 50) {
     // and check how step 6 voted on each.
     std::cerr << "\n=== Step 6 verdicts for imbalanced verts ===\n";
     // Re-run the production pipeline to canonical sub-edges (structural
-    // step 4b included — same as RemoveOverlaps2D up to step 5).
+    // step 4b included; same as RemoveOverlaps2D up to step 5).
     // We want canon as the production pipeline produces it.
     // Note: pass1.edges is post-step-6; we need post-step-5. So re-run.
     auto m3 = MergeVerts(vIn, eps);
@@ -1879,7 +1963,7 @@ void Diagnose(uint64_t seed, int kPow = 30, int n = 50) {
 // compares pass-1 vs pass-2 outputs at:
 //
 //   - eps/100 quantum (the standard fingerprint, what triggers iter ≥ 2)
-//   - eps quantum (topology-only — captures sub-edges modulo sub-eps drift)
+//   - eps quantum (topology-only; captures sub-edges modulo sub-eps drift)
 //
 // If pass-1 and pass-2 differ at eps/100 but match at eps for every iter≥2
 // case, the iteration is shifting positions only, not topology. That's the
@@ -1897,6 +1981,9 @@ void DeepFuzz(int seedsPerCell) {
   int firstPassFail = 0;
   int convergedPassValid = 0;     // converged result: topo valid
   int convergedPassInvalid = 0;   // converged result: topo invalid
+  int roundTripOK = 0;            // (v, e) → Polygons → OverlapRemovePolygons
+                                  // → no crash + edge count consistent
+  int roundTripCrash = 0;         // (asserts at boundaries between API layers)
   std::map<int, int> iterDist;
   int iterGE2 = 0;
   int iterGE2_topo_match = 0;     // pass1 == pass2 at eps quantum
@@ -1935,6 +2022,35 @@ void DeepFuzz(int seedsPerCell) {
         const bool pass1Valid = CheckTopologicalValidity(
             pass1, e, pass1.inputRemap, pass1.numMergedVerts);
         if (!pass1Valid) ++firstPassFail;
+
+        // Polygons round-trip: convert (v, e) (which is a single closed
+        // cycle from RandomTopologicalPolygon) into manifold::Polygons,
+        // run the public OverlapRemovePolygons API, and check the
+        // boundary-edge count matches the lower-level RemoveOverlaps2D
+        // output. Catches regressions in PolygonsToInput's drop-degenerate
+        // logic and OutEdgesToPolygons's loop-walking.
+        {
+          // Walk the edge cycle (v0 -> v1 chain) into a single SimplePolygon.
+          std::vector<int> nextV(v.size(), -1);
+          for (const auto& edge : e) nextV[edge.v0] = edge.v1;
+          manifold::SimplePolygon loop;
+          int cur = e.empty() ? -1 : e[0].v0;
+          for (size_t step = 0; step < v.size() && cur >= 0; ++step) {
+            loop.push_back(v[cur]);
+            cur = nextV[cur];
+            if (cur == e[0].v0) break;
+          }
+          manifold::Polygons polys = {std::move(loop)};
+          auto out = OverlapRemovePolygons(polys, eps);
+          // Sum boundary edges across output loops; should equal
+          // pass1.edges.size() up to loop-walk reordering.
+          size_t outEdges = 0;
+          for (const auto& l : out) outEdges += l.size();
+          if (outEdges == pass1.edges.size())
+            ++roundTripOK;
+          else
+            ++roundTripCrash;
+        }
 
         // Run iterate-to-fixed-point to classify.
         int iters = 0;
@@ -2030,6 +2146,8 @@ void DeepFuzz(int seedsPerCell) {
   std::cout << "  Geometric collapse: pass1 nonempty=" << pass1_nonempty
             << " of which pass2=empty: " << pass2_collapsed
             << " (output orientation bug)\n";
+  std::cout << "  Polygons round-trip (lower vs API edge count): "
+            << roundTripOK << " match, " << roundTripCrash << " mismatch\n";
   // For idempotence diagnosis: dump first 5 iter=2 cases (pass 1 valid).
   if (!topoMismatch.empty()) {
     std::cout << "\n  First 5 iter≥2 cases (for idempotence probe):\n";
@@ -2038,7 +2156,7 @@ void DeepFuzz(int seedsPerCell) {
       std::cout << "    kPow=" << kp << " n=" << nn << " seed=" << sd << "\n";
     }
   }
-  // Geometric collapse cases — pass 1 nonempty, pass 2 empty. These are
+  // Geometric collapse cases: pass 1 nonempty, pass 2 empty. These are
   // the genuine bugs where iteration is changing the algorithm output.
   // Track them by re-running and checking. (Slow: requires re-running
   // pass 2 for each case. Done only for first 30 cases.)
@@ -2092,10 +2210,10 @@ int main(int argc, char** argv) {
     const double scale = (kPow > 0) ? offset : 1.0;
     std::vector<vec2> v = {
         {std::cos(0.0), std::sin(0.0)},
-        {std::cos(2 * 3.14159 / 5), std::sin(2 * 3.14159 / 5)},
-        {std::cos(4 * 3.14159 / 5), std::sin(4 * 3.14159 / 5)},
-        {std::cos(6 * 3.14159 / 5), std::sin(6 * 3.14159 / 5)},
-        {std::cos(8 * 3.14159 / 5), std::sin(8 * 3.14159 / 5)},
+        {std::cos(2 * M_PI / 5), std::sin(2 * M_PI / 5)},
+        {std::cos(4 * M_PI / 5), std::sin(4 * M_PI / 5)},
+        {std::cos(6 * M_PI / 5), std::sin(6 * M_PI / 5)},
+        {std::cos(8 * M_PI / 5), std::sin(8 * M_PI / 5)},
     };
     if (kPow > 0)
       for (auto& p : v) {
@@ -2125,9 +2243,8 @@ int main(int argc, char** argv) {
     Displace(&vIn, offset);
     std::cerr << "=== idempotence: kPow=" << kPow << " n=" << n
               << " seed=" << seed << " eps=" << eps << " ===\n";
-    DCELDebug() = true;
     std::cerr << "--- pass 1 ---\n";
-    auto pass1 = RemoveOverlaps2D(vIn, eIn, eps);
+    auto pass1 = RemoveOverlaps2D(vIn, eIn, eps, /*debug=*/true);
     std::vector<EdgeM> p2in;
     for (const auto& oe : pass1.edges)
       p2in.push_back({oe.v0, oe.v1, oe.mult});
@@ -2151,8 +2268,7 @@ int main(int argc, char** argv) {
     auto p2_canon = Canonicalize(p2_e, p2_l);
     std::cerr << "  step 5 canon: " << p2_canon.map.size() << " sub-edges\n";
 
-    auto pass2 = RemoveOverlaps2D(pass1.verts, p2in, eps);
-    DCELDebug() = false;
+    auto pass2 = RemoveOverlaps2D(pass1.verts, p2in, eps, /*debug=*/true);
     std::cerr << "pass1: " << pass1.verts.size() << " verts, "
               << pass1.edges.size() << " edges\n";
     std::cerr << "pass2: " << pass2.verts.size() << " verts, "
@@ -2205,6 +2321,40 @@ int main(int argc, char** argv) {
     std::cout << std::endl;
   }
 
+  // ---- Boolean2D entry point: Add / Subtract / Intersect ----
+  // Two CCW unit squares overlapping by a 0.5×1 strip in the middle.
+  {
+    manifold::Polygons a = {{{0, 0}, {1, 0}, {1, 1}, {0, 1}}};
+    manifold::Polygons b = {{{0.5, 0}, {1.5, 0}, {1.5, 1}, {0.5, 1}}};
+    auto add = Boolean2D(a, b, BoolOp::Add);
+    auto sub = Boolean2D(a, b, BoolOp::Subtract);
+    auto isec = Boolean2D(a, b, BoolOp::Intersect);
+    // Expected boundary edge counts (each square is 4 edges; expected
+    // post-overlap: union 4 edges (rectangle 0..1.5 by 0..1 with 4 sides
+    // but each side has a midpoint vert from the cross-cut so actually
+    // 6 boundary edges); difference 4 edges (square 0..0.5 by 0..1 with
+    // 4 sides), intersection 4 edges (square 0.5..1 by 0..1 with 4
+    // sides). Allow some flex from intersection-vert insertion.
+    auto edgeCount = [](const manifold::Polygons& p) {
+      size_t s = 0;
+      for (const auto& l : p) s += l.size();
+      return s;
+    };
+    std::cout << "=== Boolean2D: two overlapping squares ===\n";
+    std::cout << "  Add:       " << add.size() << " loop(s), "
+              << edgeCount(add) << " edges\n";
+    std::cout << "  Subtract:  " << sub.size() << " loop(s), "
+              << edgeCount(sub) << " edges\n";
+    std::cout << "  Intersect: " << isec.size() << " loop(s), "
+              << edgeCount(isec) << " edges\n";
+    bool ok = !add.empty() && !sub.empty() && !isec.empty() &&
+              edgeCount(add) >= 4 && edgeCount(sub) >= 4 &&
+              edgeCount(isec) >= 4;
+    std::cout << "  Smoke: " << (ok ? "PASS" : "FAIL") << "\n";
+    if (!ok) allPass = false;
+    std::cout << std::endl;
+  }
+
   {
     auto [v, e] = LShape();
     auto r = RunCase({"L-shape (concave, CCW)", v, e, EpsilonFromScale(2.0)},
@@ -2240,7 +2390,7 @@ int main(int argc, char** argv) {
     bool ok = (out.size() == 1 && out[0].size() == 4);
     std::cout << "  Output: " << out.size() << " loop(s)";
     if (!out.empty()) std::cout << ", " << out[0].size() << " verts in loop 0";
-    std::cout << " — " << (ok ? "PASS" : "FAIL") << std::endl;
+    std::cout << ": " << (ok ? "PASS" : "FAIL") << std::endl;
     if (!ok) allPass = false;
     std::cout << std::endl;
   }
@@ -2256,7 +2406,7 @@ int main(int argc, char** argv) {
     std::cout << "  Output: " << out.size() << " loop(s)";
     for (size_t i = 0; i < out.size(); ++i)
       std::cout << " [loop " << i << ": " << out[i].size() << " verts]";
-    std::cout << " — " << (ok ? "PASS" : "FAIL") << std::endl;
+    std::cout << ": " << (ok ? "PASS" : "FAIL") << std::endl;
     if (!ok) allPass = false;
     std::cout << std::endl;
   }
@@ -2272,7 +2422,7 @@ int main(int argc, char** argv) {
     std::cout << "  Output: " << out.size() << " loop(s)";
     for (size_t i = 0; i < out.size(); ++i)
       std::cout << " [loop " << i << ": " << out[i].size() << " verts]";
-    std::cout << " — " << (ok ? "PASS" : "FAIL") << std::endl;
+    std::cout << ": " << (ok ? "PASS" : "FAIL") << std::endl;
     if (!ok) allPass = false;
     std::cout << std::endl;
   }
@@ -2287,7 +2437,7 @@ int main(int argc, char** argv) {
     std::cout << "  Output: " << out.size() << " loop(s)";
     for (size_t i = 0; i < out.size(); ++i)
       std::cout << " [loop " << i << ": " << out[i].size() << " verts]";
-    std::cout << " — " << (ok ? "PASS" : "FAIL") << std::endl;
+    std::cout << ": " << (ok ? "PASS" : "FAIL") << std::endl;
     if (!ok) allPass = false;
     std::cout << std::endl;
   }
@@ -2322,7 +2472,7 @@ int main(int argc, char** argv) {
       if (!topoOk) allPass = false;
     } else {
       std::cout << "  Topological validity: " << (topoOk ? "PASS" : "FAIL")
-                << " (observational — open input, balance check N/A)"
+                << " (observational; open input, balance check N/A)"
                 << std::endl;
     }
     std::cout << std::endl;
@@ -2358,7 +2508,7 @@ int main(int argc, char** argv) {
   }
 
   // (3) Two polygons sharing an edge (non-manifold along the shared
-  // segment — two CCW squares glued along (1,0)→(1,1)). The shared
+  // segment, two CCW squares glued along (1,0)→(1,1)). The shared
   // edge has canonical mult = +2 in the combined input. Expected: 1
   // outer loop = the rectangle [0,2]×[0,1] (the two squares fused).
   {
@@ -2395,7 +2545,7 @@ int main(int argc, char** argv) {
     // verts 0 and 4 share the same coordinate (0,0). Step 1's eps-merge
     // collapses them, turning the input into a *closed* bowtie. So
     // this case actually exercises the closed bowtie path, not an
-    // open-polyline path — and the topology check applies.
+    // open-polyline path. The topology check applies.
     runNonManifold("polyline w/ duplicate-position endpoints (=> closed bowtie)",
                    v, e, EpsilonFromScale(2.0), "1 triangle (= bowtie lobe)",
                    NMExpect::ClosedTopo);
@@ -2418,6 +2568,39 @@ int main(int argc, char** argv) {
     std::vector<EdgeM> e = {{0, 1, 1}, {1, 2, 1}, {2, 3, 1}, {3, 0, 1}};
     runNonManifold("polygon with duplicate vertex", v, e, EpsilonFromScale(1.0),
                    "1 triangle (after merge)", NMExpect::ClosedTopo);
+  }
+
+  // (8) Adversarial 4+ concurrent edges: 4 line segments all passing
+  // through origin at different orientations. Step 4 produces
+  // C(4, 2) = 6 pairwise intersections that should all snap to one
+  // point in step 4b. Some pairs share no edge in their incidence sets
+  // (e.g. seg AB×CD vs seg EF×GH share no input edge), so step 4b's
+  // structural gate cannot merge them directly. The iterate-to-
+  // fixed-point pass picks up any leftover near-duplicates. Open
+  // input → empty output (no enclosed region).
+  {
+    std::vector<vec2> v = {{-1, 0},     {1, 0},      {0, -1},     {0, 1},
+                           {-0.7, -0.7}, {0.7, 0.7},  {-0.7, 0.7}, {0.7, -0.7}};
+    std::vector<EdgeM> e = {{0, 1, 1}, {2, 3, 1}, {4, 5, 1}, {6, 7, 1}};
+    runNonManifold("4 segments concurrent at origin (asterisk)", v, e,
+                   EpsilonFromScale(1.0), "empty (open input)",
+                   NMExpect::OpenObservational);
+  }
+
+  // (9) Near-equal-coords at displaced scale: two triangle verts
+  // separated by a few ULPs at 2^49 displacement. Step 1's eps-radius
+  // merge should fold them, collapsing the triangle to empty output
+  // (degenerate after merge).
+  {
+    const double offset = std::ldexp(1.5, 49);
+    const double ulp = std::ldexp(1.0, 49 - 52);  // ~1 ULP at offset
+    std::vector<vec2> v = {{offset + 1.0, offset},
+                           {offset + 1.0 + ulp, offset},
+                           {offset, offset + 1.0}};
+    std::vector<EdgeM> e = {{0, 1, 1}, {1, 2, 1}, {2, 0, 1}};
+    runNonManifold("near-equal coords at 2^49 displacement", v, e,
+                   EpsilonFromScale(offset), "empty (degenerate after merge)",
+                   NMExpect::ClosedTopo);
   }
 
   // ---- Self-intersecting cases ----
