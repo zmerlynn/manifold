@@ -222,13 +222,12 @@ per input). Xor combines inputs with mult=+1 each and applies
 |------|-----------|-------|
 | Standard battery | 350/350 | 13 named cases + 350 random topological polygons. Topology-balance: every vertex's input edge contribution = output. Iter dist: 1:449 2:1. |
 | Displacement fuzz | 450/450 | 5 scales (2<sup>10</sup>...2<sup>49</sup>) × 3 sizes × 30 seeds. |
-| DeepFuzz (100 seeds, post-propagation) | **2800/2800 first-pass topology valid** | Iter dist: 1:2735 2:64 3:1. 0 iteration-DEGRADED (pass-1 valid → broken by iteration). **0 geometric collapses** (a 1-of-2800 collapse case in the pre-propagation run was eliminated by step 4's eager propagation). |
-| DeepFuzz (12,000 seeds, pre-propagation) | **336,000 / 336,000 first-pass topology valid** | Iter dist: 1:327,903; 2:7,937; 3:152; 4:7; 5:1. 0 valid→invalid degradations. 1 geometric collapse (the thin-polygon idempotence quirk at `kPow=35 n=20 seed=8993`). Numbers are from before step 4's eager propagation pass; the 100-seed re-run shows the propagation reduces iter≥2 cases by ~9% and eliminates collapse cases caused by k-fold concurrence. |
-| Polygons regularization (100 seeds) | 7 / 2800 (0.25%) | The Polygons API regularizes output (Requicha-Tilove sense): zero-area lens loops (two oriented sub-edges between the same vert pair, tracing the same straight-line path in opposite directions) are dropped because `manifold::Polygons` can't encode 1D features without an enclosing face. Matches CGAL `Polygon_set_2`, Clipper2, and SVG fill-rule convention. The metric tracks regularization frequency (~0.25% post-propagation, ~0.14% pre-propagation; the rate increased because eager propagation creates more sub-edges around concurrent crossings, hence more candidates for regularization). A defensive assert verifies dropped loops always have zero area. |
+| DeepFuzz (12,000 seeds, post-propagation) | **336,000 / 336,000 first-pass topology valid** | Iter dist: 1:328,495 2:7,359 3:139 4:6 5:1. 0 iteration-DEGRADED (pass-1 valid → broken by iteration). 1 geometric collapse (the thin-polygon idempotence quirk at `kPow=35 n=20 seed=8993` documented in Pipeline; survives propagation because it's a step-3 artifact, not k-fold concurrence). Compared to pre-propagation: **+592 cases promoted to iter=1**, fewer iter-2/3/4 cases at every level. |
+| Polygons regularization (12,000 seeds) | 556 / 336,000 (0.17%) | The Polygons API regularizes output (Requicha-Tilove sense): zero-area lens loops (two oriented sub-edges between the same vert pair, tracing the same straight-line path in opposite directions) are dropped because `manifold::Polygons` can't encode 1D features without an enclosing face. Matches CGAL `Polygon_set_2`, Clipper2, and SVG fill-rule convention. Rate stable across the pre- and post-propagation 12k runs (560 → 556). A defensive assert verifies dropped loops always have zero area. |
 | Boolean2D area regression | 4/4 | Two CCW unit squares offset diagonally; Add area=7, Subtract=3, Intersect=1, **Xor=6** (all exact). Drives the wind > 1 predicate against perpendicular axis-aligned crossings, plus EvenOdd via Xor. |
 | Axis-aligned perpendicular | 1/1 | Two CCW unit squares offset diagonally; produces L-shape union with 8 boundary verts. Regression test for the kernel bug surfaced during OQ #3 / #4 investigation. |
 | `polygon_corpus.txt` (100 entries) | 100/100 topology valid | Manifold's existing curated corpus, run via `./overlap2d_proto corpus`. Area breakdown: 87/100 < 1% drift, 1/100 mid-drift (`Precision4` at 2.6%, correct behavior on a sliver-with-eps-thin-tail), 7/100 collapsed by name (`Degenerate4`, `DegenerateRing`, `NearlyLinear`, `Looping1/2`, `Precision`, `Sweep`), 5/100 had zero-area input. |
-| DeepFuzz area drift (100-seed) | 6 cases > 1% (0.21%), 5 > 10% | Quantitative oracle on top of topology. Pre-propagation showed 8 cases > 1% with max 43.9%; post-propagation shows 6 cases > 1% with max 32.1%. All cases at kPow=35 (where ULP precision is weakest). |
+| DeepFuzz area drift (12,000 seeds, post-propagation) | 406 cases > 1% (0.23% of 177,895 measurable), 145 > 10% | Quantitative oracle on top of topology. Of the cases with measurable input area, 0.23% drift > 1% between pass 1 and converged. Almost all cases at kPow=35 (where ULP precision is weakest); a few at kPow=30. Max drift 100% (the seed=8993 thin-polygon collapse). The 100-seed sample showed 6 such cases; the 12k run reveals a longer thin-polygon-class tail invisible at smaller scale. |
 
 Displacement fuzz is the load-bearing test: traditional FP boolean
 libraries fail catastrophically at 2<sup>k</sup> displacement, which
@@ -331,11 +330,11 @@ we don't relitigate.
   resolves all-collinear pairs via permutation-parity SoS inline.
   **Retired** before the prototype's current shape.
 - **Bumping `maxIter` past 2 to chase the iter ≥ 3 tail.** Smith's
-  bound is 2; tested up to 8. The 12,000-seed DeepFuzz finds 152
-  cases at iter=3, 7 at iter=4, 1 at iter=5 (out of 336,000), all
-  ultimately converging to topology-valid output. Bumping the cap
-  catches more fingerprint-stable convergence but doesn't change
-  topology, since pass 1 was already topology-correct on every
-  case. Production default of `maxIter=1` skips this entirely
-  (see Pipeline section); the prototype's `maxIter=2` matches
+  bound is 2; tested up to 8. The 12,000-seed DeepFuzz (post-
+  propagation) finds 139 cases at iter=3, 6 at iter=4, 1 at iter=5
+  (out of 336,000), all ultimately converging to topology-valid
+  output. Bumping the cap catches more fingerprint-stable convergence
+  but doesn't change topology, since pass 1 was already topology-
+  correct on every case. Production default of `maxIter=1` skips this
+  entirely (see Pipeline section); the prototype's `maxIter=2` matches
   Smith's bound and is the right knob for studying the tail.
