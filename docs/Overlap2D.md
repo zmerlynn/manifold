@@ -67,6 +67,24 @@ instead of sweep-line; a 6-step pipeline (vert merge → edge collapse
 `src/shared.h`) so the 2D code lives in the same arithmetic and
 spatial-query world as `Manifold::Impl::Boolean3`.
 
+*Why `Collider` (3D BVH at z=0) and not `tree2d` (manifold's existing
+2D kd-tree used by the polygon triangulator)?* Tree2d's API is
+points-only (`BuildTwoDTree(VecView<PolyVert>)` +
+`QueryTwoDTree(rect, F)`); 3 of the 5 spatial-query sites in this
+pipeline operate on points (steps 1, 4b, plus the eager-propagation
+sub-phase of step 4) and would migrate cleanly. The other 2 sites
+(step 4 main edge-edge broad phase, step 3 edge AABB queries) need
+an edge-AABB tree, which only `Collider` provides. Mixing both
+tree2d (for point sites) and `Collider` (for edge sites) would mean
+two spatial data structures and two query patterns in the same
+algorithm, and tree2d's serial kd-tree would lose the parallel
+broad-phase Emmett's #289 sketch explicitly cited as a reason for
+choosing BVH over sweep-line. Sticking to `Collider` everywhere is
+the lower-complexity, parallel-ready choice; if the production
+landing wants a different split (e.g., tree2d for point sites with
+a custom edge-AABB tree elsewhere), that's reasonable but distinct
+from the prototype's "use the existing parallel-ready BVH" decision.
+
 **Correctness framework: Smith (UCAM-CL-TR-766, §7).** Provides
 the part Emmett's sketch doesn't: a concrete ε formula and a proof
 of convergence in ≤2 iterations under bounded FP error
