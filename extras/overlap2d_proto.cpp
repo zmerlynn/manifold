@@ -809,35 +809,25 @@ struct HalfEdge {
 };
 }  // namespace dcel_internal
 
-// Fill rule (set-membership classification) for a face's winding number,
-// deciding whether the face is "inside" the result region. Standard CSG
-// vocabulary, matching Clipper2 / SVG / PostScript / CGAL:
-//   - Positive: w > 0   (Smith's wind > 0 union convention; default)
-//   - Negative: w < 0
-//   - EvenOdd:  (w & 1) != 0   (SVG `evenodd`, drives XOR semantics)
-//   - NonZero:  w != 0         (SVG `nonzero`)
-// An edge is retained iff its left and right faces disagree on the rule.
-//
-// Internal Boolean2D-Intersect uses an extra "w > 1" predicate to capture
-// "both inputs cover this face" once their multiplicities are summed; that
-// rule isn't a public FillRule because it depends on per-input mult=+1
-// being maintained by Boolean2D's edge-construction step.
-enum class FillRule { Positive, Negative, EvenOdd, NonZero };
-
+// Internal predicate over a face's winding number, deciding whether
+// the face is "inside" the result region. Three predicates are needed:
+//   - WindAdd:       w > 0     (default; Smith's wind > 0 union)
+//   - WindIntersect: w > 1     (Boolean2D::Intersect, both inputs cover)
+//   - WindEvenOdd:   w & 1     (used internally by Xor)
+// An edge is retained iff its left and right faces disagree on the
+// predicate. Kept as an internal mechanism rather than a public
+// FillRule enum: CrossSection's existing API doesn't expose a fill
+// rule (Simplify is (eps), Boolean is (other, OpType)), so a public
+// FillRule on this prototype would be API expansion beyond the
+// landing target. Boolean2D / Xor / Simplify pick the right
+// predicate internally based on the operation requested.
 using WindPredicate = std::function<bool(int)>;
 
-inline WindPredicate ToPredicate(FillRule fr) {
-  switch (fr) {
-    case FillRule::Positive: return [](int w) { return w > 0; };
-    case FillRule::Negative: return [](int w) { return w < 0; };
-    case FillRule::EvenOdd:  return [](int w) { return (w & 1) != 0; };
-    case FillRule::NonZero:  return [](int w) { return w != 0; };
-  }
-  return [](int w) { return w > 0; };
-}
-
-inline WindPredicate WindAdd() { return ToPredicate(FillRule::Positive); }
+inline WindPredicate WindAdd() { return [](int w) { return w > 0; }; }
 inline WindPredicate WindIntersect() { return [](int w) { return w > 1; }; }
+inline WindPredicate WindEvenOdd() {
+  return [](int w) { return (w & 1) != 0; };
+}
 
 std::vector<OutEdge> FilterByWindingDCEL(
     const CanonicalSubEdges& canon, const std::vector<vec2>& verts,
@@ -1336,18 +1326,14 @@ inline manifold::Polygons OutEdgesToPolygons(
   return polys;
 }
 
-// Single-input regularization. Same name as `CrossSection::Simplify`,
-// the eventual landing target. Returns the canonical boundary of the
-// region selected by `fill` (default: positive-winding, matching
-// Smith's wind > 0 convention). Use `FillRule::EvenOdd` to interpret
-// `in` under SVG even-odd semantics (gives XOR / symmetric-difference
-// when `in` is a union of two polygon sets).
-inline manifold::Polygons Simplify(const manifold::Polygons& in, double eps,
-                                   FillRule fill = FillRule::Positive) {
+// Single-input regularization. Matches `CrossSection::Simplify(eps)`
+// (the eventual landing target) exactly: one input, one eps, returns
+// the canonical wind > 0 boundary. No public fill-rule parameter,
+// since CrossSection's existing API has none.
+inline manifold::Polygons Simplify(const manifold::Polygons& in, double eps) {
   auto [verts, edges] = PolygonsToInput(in);
   if (verts.empty()) return {};
-  auto r = RemoveOverlaps2D(verts, edges, eps, /*debug=*/false,
-                            ToPredicate(fill));
+  auto r = RemoveOverlaps2D(verts, edges, eps);
   return OutEdgesToPolygons(r.verts, r.edges);
 }
 
@@ -1420,16 +1406,32 @@ inline manifold::Polygons Boolean2D(const manifold::Polygons& a,
 // Symmetric difference (XOR): the region covered by A or B but not both.
 // `manifold::OpType` only has three values (Add/Subtract/Intersect), so
 // XOR doesn't fit through Boolean2D. Implementation: combine A and B
-// with mult=+1 each, then apply EvenOdd fill rule. Regions covered once
-// (only A or only B) have w=1 (odd, kept); regions covered twice (both)
-// have w=2 (even, dropped); regions covered zero times have w=0 (even,
-// dropped). Equivalent to Clipper2's `Xor` clip type.
+// with mult=+1 each, then apply EvenOdd predicate at step 6. Regions
+// covered once (only A or only B) have w=1 (odd, kept); regions covered
+// twice (both) have w=2 (even, dropped); regions covered zero times
+// have w=0 (even, dropped). Equivalent to Clipper2's `Xor` clip type
+// and the wiring target for `CrossSection::operator^`.
 inline manifold::Polygons Xor(const manifold::Polygons& a,
                               const manifold::Polygons& b, double eps = 0.0) {
   if (eps <= 0.0) eps = InferEps(a, b);
-  manifold::Polygons combined = a;
-  for (const auto& loop : b) combined.push_back(loop);
-  return Simplify(combined, eps, FillRule::EvenOdd);
+  std::vector<vec2> verts;
+  std::vector<EdgeM> edges;
+  auto append = [&](const manifold::Polygons& polys) {
+    for (const auto& loop : polys) {
+      if (loop.size() < 3) continue;
+      const int base = static_cast<int>(verts.size());
+      const int n = static_cast<int>(loop.size());
+      for (const auto& v : loop) verts.push_back(v);
+      for (int i = 0; i < n; ++i) {
+        edges.push_back({base + i, base + ((i + 1) % n), 1});
+      }
+    }
+  };
+  append(a);
+  append(b);
+  if (verts.empty()) return {};
+  auto r = RemoveOverlaps2D(verts, edges, eps, /*debug=*/false, WindEvenOdd());
+  return OutEdgesToPolygons(r.verts, r.edges);
 }
 
 // =============================================================================
@@ -2752,7 +2754,7 @@ int main(int argc, char** argv) {
   // (A's right edge × B's bottom edge at (2,1); A's top edge × B's
   // left edge at (1,2)). The Boolean2D smoke test above offsets the
   // squares horizontally so their crossing edges are *collinear*
-  // (both top edges at y=1), not perpendicular — it doesn't exercise
+  // (both top edges at y=1), not perpendicular - it doesn't exercise
   // axis-aligned perpendicular intersection at all. This test does.
   {
     std::vector<vec2> v = {{0, 0}, {2, 0}, {2, 2}, {0, 2},   // square A CCW

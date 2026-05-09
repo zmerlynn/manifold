@@ -182,13 +182,9 @@ its kin slip past topology-only checks.
 ```cpp
 namespace overlap2d {
 
-// Standard CSG fill rules: SVG/PostScript/Clipper2/CGAL convention.
-enum class FillRule { Positive, Negative, EvenOdd, NonZero };
-
-// Single-input regularization. Same name as `CrossSection::Simplify`
-// (the eventual landing target).
-manifold::Polygons Simplify(const manifold::Polygons& in, double eps,
-                            FillRule fill = FillRule::Positive);
+// Single-input regularization. Matches CrossSection::Simplify(eps)
+// exactly: one input, one eps, returns the canonical wind > 0 boundary.
+manifold::Polygons Simplify(const manifold::Polygons& in, double eps);
 
 // Binary boolean. Uses manifold's existing OpType enum from
 // `include/manifold/common.h` (the same one Manifold::Boolean and
@@ -200,21 +196,27 @@ manifold::Polygons Boolean2D(const manifold::Polygons& a,
                              double eps = 0.0);  // <=0 auto-infers
 
 // Symmetric difference. Standard 4th binary boolean alongside
-// Add/Subtract/Intersect. `manifold::OpType` doesn't include Xor, so
-// it's a separate entry point.
+// Add/Subtract/Intersect; wiring target for `CrossSection::operator^`
+// (which today delegates directly to Clipper2's Xor).
 manifold::Polygons Xor(const manifold::Polygons& a,
                        const manifold::Polygons& b, double eps = 0.0);
 }
 ```
 
-Step 6's classification is internally a `WindPredicate` functor that
-maps a face's winding number to inside/outside. The public `FillRule`
-enum is the user-facing wrapper. Subtract flips B's edge
-multiplicities to −1 before joining, so the same `Positive` rule
-carves A − B. Intersect uses an internal "w > 1" predicate (not a
-public fill rule, since it depends on Boolean2D maintaining mult=+1
-per input). Xor combines inputs with mult=+1 each and applies
-`EvenOdd`.
+The public surface mirrors `CrossSection`'s existing API exactly:
+`Simplify(eps)` matches `CrossSection::Simplify(eps)`, `Boolean2D` is
+the wiring target for `CrossSection::Boolean`, and `Xor` is the
+wiring target for `CrossSection::operator^`. No fill-rule parameter
+is exposed publicly, since `CrossSection`'s existing API has none.
+
+Step 6's classification is internally a `WindPredicate` functor with
+three named instances: `WindAdd` (w > 0, the default for `Simplify`
+and Add/Subtract), `WindIntersect` (w > 1, used by Boolean2D's
+Intersect path once both inputs contribute mult=+1), and `WindEvenOdd`
+(w & 1, used by Xor). Subtract flips B's edge multiplicities to −1
+before joining, so the same `WindAdd` predicate carves A − B. The
+predicates stay internal because they depend on per-input
+multiplicity conventions that the public entry points maintain.
 
 ## Validation
 
