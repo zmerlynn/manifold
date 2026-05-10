@@ -524,9 +524,13 @@ std::vector<EdgeM> RemapAndCollapse(const std::vector<EdgeM>& edges,
 // Step 3: per-edge ordered list of vertices within eps of the edge interior.
 // Returns vertList[edgeIdx] = sorted list of vert indices along the edge.
 // =============================================================================
+// `edgeBoxes` and `bvh` are the eps-padded segment AABBs and the BVH
+// built over them; they are passed in from the caller so step 3 and
+// step 4 can share a single build (the edges array doesn't change
+// between them, so the boxes don't either).
 std::vector<std::vector<int>> BuildEdgeVertLists(
     const std::vector<EdgeM>& edges, const std::vector<vec2>& verts,
-    double eps) {
+    double eps, const std::vector<Box>& edgeBoxes, const BVH& bvh) {
   const int nE = static_cast<int>(edges.size());
   const int nV = static_cast<int>(verts.size());
   const double eps2 = eps * eps;
@@ -535,12 +539,7 @@ std::vector<std::vector<int>> BuildEdgeVertLists(
   // points (eps-padded boxes). Each candidate (edge, vert) pair runs the
   // exact projection test below. Per-edge `hits` are sorted by parameter
   // at the end so the result is independent of broad-phase visit order.
-  std::vector<Box> edgeBoxes(nE);
-  for (int e = 0; e < nE; ++e) {
-    edgeBoxes[e] =
-        BoxOf2DEdge(verts[edges[e].v0], verts[edges[e].v1], eps);
-  }
-  BVH bvh = BVHBuildFromBoxes(edgeBoxes);
+  // (edgeBoxes and bvh are now passed in from the caller — see signature.)
   std::vector<Box> vertBoxes(nV);
   for (int v = 0; v < nV; ++v) vertBoxes[v] = BoxOf2DPoint(verts[v], eps);
   // Build vert→neighbors adjacency from the input edges. Used below to
@@ -601,7 +600,9 @@ void FindAndInsertIntersections(const std::vector<EdgeM>& edges,
                                 std::vector<vec2>* verts,
                                 std::vector<std::vector<int>>* lists,
                                 std::vector<std::vector<int>>* vertEdges,
-                                double eps) {
+                                double eps,
+                                const std::vector<Box>& edgeBoxes,
+                                const BVH& bvh) {
   const int nE = static_cast<int>(edges.size());
   const double eps2 = eps * eps;
   vertEdges->resize(verts->size());
@@ -612,12 +613,7 @@ void FindAndInsertIntersections(const std::vector<EdgeM>& edges,
   // `lists[*]` accumulating verts as earlier pairs are processed, and
   // sorting on the int pair (rather than Morton order) keeps the order
   // deterministic across runs and BVH builds.
-  std::vector<Box> edgeBoxes(nE);
-  for (int i = 0; i < nE; ++i) {
-    edgeBoxes[i] =
-        BoxOf2DEdge((*verts)[edges[i].v0], (*verts)[edges[i].v1], eps);
-  }
-  BVH bvh = BVHBuildFromBoxes(edgeBoxes);
+  // (edgeBoxes/bvh shared from caller — see step 3 signature comment.)
   std::vector<std::pair<int, int>> pairs;
   CollidePairs(bvh, edgeBoxes, [&](int qi, int li) {
     if (qi >= li) return;
@@ -1307,13 +1303,23 @@ OverlapResult RemoveOverlaps2D(const std::vector<vec2>& vertsIn,
   auto edges = RemapAndCollapse(edgesIn, merge.remap);
   auto t2 = Clock::now();
   P.remapNs.fetch_add(Ns(t1, t2), std::memory_order_relaxed);
+  // Build the edge BVH once; steps 3 (BuildEdgeVertLists) and 4
+  // (FindAndInsertIntersections) both query it, so sharing avoids a
+  // duplicate Morton sort and Collider construction per case.
+  std::vector<Box> edgeBoxes(edges.size());
+  for (size_t e = 0; e < edges.size(); ++e) {
+    edgeBoxes[e] =
+        BoxOf2DEdge(merge.verts[edges[e].v0], merge.verts[edges[e].v1], eps);
+  }
+  BVH bvh = BVHBuildFromBoxes(edgeBoxes);
   // Step 3: per-edge vert list.
-  auto lists = BuildEdgeVertLists(edges, merge.verts, eps);
+  auto lists = BuildEdgeVertLists(edges, merge.verts, eps, edgeBoxes, bvh);
   auto t3 = Clock::now();
   P.buildListsNs.fetch_add(Ns(t2, t3), std::memory_order_relaxed);
   // Step 4: intersection discovery.
   std::vector<std::vector<int>> vertEdges;
-  FindAndInsertIntersections(edges, &merge.verts, &lists, &vertEdges, eps);
+  FindAndInsertIntersections(edges, &merge.verts, &lists, &vertEdges, eps,
+                             edgeBoxes, bvh);
   auto t4 = Clock::now();
   P.findIxNs.fetch_add(Ns(t3, t4), std::memory_order_relaxed);
 
@@ -2060,7 +2066,13 @@ void Diagnose(uint64_t seed, int kPow = 30, int n = 50) {
   std::cerr << "After step 2 (collapse): " << edges.size() << " edges (was "
             << eIn.size() << ")\n";
 
-  auto lists = BuildEdgeVertLists(edges, merge.verts, eps);
+  std::vector<Box> diagEdgeBoxes(edges.size());
+  for (size_t i = 0; i < edges.size(); ++i)
+    diagEdgeBoxes[i] = BoxOf2DEdge(merge.verts[edges[i].v0],
+                                   merge.verts[edges[i].v1], eps);
+  BVH diagBvh = BVHBuildFromBoxes(diagEdgeBoxes);
+  auto lists =
+      BuildEdgeVertLists(edges, merge.verts, eps, diagEdgeBoxes, diagBvh);
   size_t totalListSize = 0;
   for (const auto& l : lists) totalListSize += l.size();
   std::cerr << "After step 3 (lists): " << totalListSize
@@ -2068,7 +2080,8 @@ void Diagnose(uint64_t seed, int kPow = 30, int n = 50) {
 
   const int beforeStep4 = static_cast<int>(merge.verts.size());
   std::vector<std::vector<int>> vertEdges;
-  FindAndInsertIntersections(edges, &merge.verts, &lists, &vertEdges, eps);
+  FindAndInsertIntersections(edges, &merge.verts, &lists, &vertEdges, eps,
+                             diagEdgeBoxes, diagBvh);
   const int afterStep4 = static_cast<int>(merge.verts.size());
   std::cerr << "After step 4 (intersections): " << merge.verts.size()
             << " verts (added " << (afterStep4 - beforeStep4) << ")\n";
@@ -2312,9 +2325,14 @@ void Diagnose(uint64_t seed, int kPow = 30, int n = 50) {
     // Note: pass1.edges is post-step-6; we need post-step-5. So re-run.
     auto m3 = MergeVerts(vIn, eps);
     auto e3 = RemapAndCollapse(eIn, m3.remap);
-    auto l3 = BuildEdgeVertLists(e3, m3.verts, eps);
+    std::vector<Box> e3Boxes(e3.size());
+    for (size_t i = 0; i < e3.size(); ++i)
+      e3Boxes[i] =
+          BoxOf2DEdge(m3.verts[e3[i].v0], m3.verts[e3[i].v1], eps);
+    BVH e3Bvh = BVHBuildFromBoxes(e3Boxes);
+    auto l3 = BuildEdgeVertLists(e3, m3.verts, eps, e3Boxes, e3Bvh);
     std::vector<std::vector<int>> ve3;
-    FindAndInsertIntersections(e3, &m3.verts, &l3, &ve3, eps);
+    FindAndInsertIntersections(e3, &m3.verts, &l3, &ve3, eps, e3Boxes, e3Bvh);
     // structural step 4b (copy of the production code)
     {
       DisjointSets uf(static_cast<int>(m3.verts.size()));
@@ -4275,12 +4293,18 @@ int main(int argc, char** argv) {
     auto p2_e = RemapAndCollapse(p2in, p2_mrg.remap);
     std::cerr << "  step 2 remap: " << p2in.size() << "→" << p2_e.size()
               << " edges\n";
-    auto p2_l = BuildEdgeVertLists(p2_e, p2_mrg.verts, eps);
+    std::vector<Box> p2_eBoxes(p2_e.size());
+    for (size_t i = 0; i < p2_e.size(); ++i)
+      p2_eBoxes[i] = BoxOf2DEdge(p2_mrg.verts[p2_e[i].v0],
+                                 p2_mrg.verts[p2_e[i].v1], eps);
+    BVH p2_bvh = BVHBuildFromBoxes(p2_eBoxes);
+    auto p2_l = BuildEdgeVertLists(p2_e, p2_mrg.verts, eps, p2_eBoxes, p2_bvh);
     int p2_totalList = 0;
     for (auto& l : p2_l) p2_totalList += l.size();
     std::cerr << "  step 3 lists: " << p2_totalList << " total entries\n";
     std::vector<std::vector<int>> p2_ve;
-    FindAndInsertIntersections(p2_e, &p2_mrg.verts, &p2_l, &p2_ve, eps);
+    FindAndInsertIntersections(p2_e, &p2_mrg.verts, &p2_l, &p2_ve, eps,
+                               p2_eBoxes, p2_bvh);
     std::cerr << "  step 4 intersections: " << p2_mrg.verts.size()
               << " verts after\n";
     auto p2_canon = Canonicalize(p2_e, p2_l);
