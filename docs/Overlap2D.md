@@ -268,9 +268,57 @@ entire adversarial range, in every size and seed tested.
    as an optional parameter, or always auto-infer? Smith's α-budget
    is conservative (k<sub>budget</sub>=1000); `Simplify` may want
    stricter.
-3. **Multi-threading.** `manifold::Collider` is parallel-ready; the
-   prototype is `MANIFOLD_PAR=-1` only. Step 1 union-find and step 6
-   per-face ray-cast are the natural parallelism candidates.
+3. **Multi-threading.** Resolved. The prototype builds with either
+   `MANIFOLD_PAR=1` (TBB) or `MANIFOLD_PAR=-1` (serial) and parallelizes
+   the data-parallel hot loops via `manifold::for_each(autoPolicy(N), ...)`
+   plus `DisjointSets`'s lock-free atomic `unite()` /  `find()`.
+   Parallelized phases:
+
+   - **Step 6 face-winding ray-cast** (per-face independent; was 82% of
+     pipeline time, now 33-50%).
+   - **Step 6 per-vertex angular sort** (per-vertex independent).
+   - **Step 6 next-pointer computation** (per-halfedge independent).
+   - **Step 1 vertex-merge** geometric gate (parallel filter, serial
+     `unite()` in sorted pair order for deterministic cluster roots).
+   - **Step 4b structural re-merge** geometric+structural gate (same
+     parallel-filter / serial-unite pattern as step 1).
+
+   `autoPolicy()`'s `kSeqThreshold = 1e4` keeps small inputs serial so
+   there's no overhead penalty on per-call latency. Determinism is
+   preserved on all 4 corpora (Clipper2/mfogel/JTS/polygon_corpus.txt)
+   bit-identically.
+
+   Step 4 (`FindAndInsertIntersections`) was not parallelized: the
+   snap-to-existing logic mutates `lists[*]` and reads it on every
+   subsequent pair, making the algorithm inherently sequential without
+   a structural rewrite (e.g., a parallel intersection-discovery phase
+   followed by a separate snap-merge pass).
+
+   An orthogonal serial optimization landed in the same patch: the
+   per-face ray-cast was switched from iterating `canon.map` (a std::map
+   RB-tree) to a pre-flattened `FastEdge` array (`yMin`, `yMax`, `x0`,
+   `dxdy`, `signedMult`) built once before the per-face loop. This is
+   what most of the wall-clock improvement is — the parallel `for_each`
+   on top adds an additional ~1.3x on big workloads.
+
+   **Speedups on the standard workloads** (8-core machine, all corpora
+   produce identical output to the serial baseline):
+
+   | Workload | Original serial | Serial + FastEdge | Parallel + FastEdge |
+   |---|---|---|---|
+   | DeepFuzz 200 (22.7k cases, mostly small) | 71.2 s | 25.1 s (2.84x) | 24.5 s (2.91x) |
+   | JTS overlay (2042 cases, mixed sizes) | 36.95 s | 4.86 s (7.6x) | **3.6 s (10.3x)** |
+
+   Most JTS cases have N < 1e4 verts and stay serial under
+   `autoPolicy()`; the wall-clock win comes from the few large cases
+   (e.g. `TestOverlay-osmwater.xml`, `stmlf.xml`) where step 6's F faces
+   exceed the threshold and parallelize ~4-5x. DeepFuzz cases are all
+   small enough to stay serial — its speedup is purely from FastEdge.
+
+   Per-phase wall-clock instrumentation lives behind a `time` CLI mode
+   (`./overlap2d_proto time deepfuzz | jtscorpus | clipper2corpus | ...`)
+   that prints accumulated nanoseconds per pipeline phase plus a
+   percentage breakdown.
 4. **Additional quantitative oracles.** The prototype consumes
    `polygon_corpus.txt` (100 cases) and Clipper2's `Polygons.txt`
    (195 cases; 189 reachable) — see Validation. The Clipper2 run
