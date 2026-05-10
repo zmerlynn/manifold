@@ -490,6 +490,21 @@ VertexMerge MergeVerts(const std::vector<vec2>& in, double eps) {
   return {std::move(remap), std::move(verts)};
 }
 
+// vertEdges[v] (filled by step 4) and adj[v] (filled by step 3) both
+// hold a small set of int ids per vertex. Almost always 2-4 elements;
+// occasionally larger at concurrent intersection points. A sorted
+// std::vector<int> beats a std::set<int> by 5-10x on per-op cost for
+// sets this small (no node allocation, no tree rebalancing, contiguous
+// memory). Helpers keep the "set" semantics: idempotent insert, fast
+// contains, ordered iteration.
+inline bool VESetContains(const std::vector<int>& vec, int x) {
+  return std::binary_search(vec.begin(), vec.end(), x);
+}
+inline void VESetInsert(std::vector<int>* vec, int x) {
+  auto it = std::lower_bound(vec->begin(), vec->end(), x);
+  if (it == vec->end() || *it != x) vec->insert(it, x);
+}
+
 // =============================================================================
 // Step 2: collapse edges whose endpoints map to the same vertex.
 // =============================================================================
@@ -530,10 +545,12 @@ std::vector<std::vector<int>> BuildEdgeVertLists(
   for (int v = 0; v < nV; ++v) vertBoxes[v] = BoxOf2DPoint(verts[v], eps);
   // Build vert→neighbors adjacency from the input edges. Used below to
   // detect "thin triangle apex" cases (see comment in CollidePairs).
-  std::vector<std::set<int>> adj(nV);
+  // Sorted vector here too — a polygon edge graph has degree ~2-3 per
+  // vert, so std::set is pure overhead.
+  std::vector<std::vector<int>> adj(nV);
   for (const auto& e : edges) {
-    adj[e.v0].insert(e.v1);
-    adj[e.v1].insert(e.v0);
+    VESetInsert(&adj[e.v0], e.v1);
+    VESetInsert(&adj[e.v1], e.v0);
   }
   // Collect (edge, vert) candidate pairs first; then process per edge.
   // (An earlier two-phase attempt that ran the gate in parallel
@@ -552,7 +569,9 @@ std::vector<std::vector<int>> BuildEdgeVertLists(
     // triangle's other two sides, producing empty output. Only-one-
     // endpoint adjacency is normal polygon-neighbor configuration, so
     // we require BOTH to be conservative.
-    if (adj[v].count(edges[e].v0) && adj[v].count(edges[e].v1)) return;
+    if (VESetContains(adj[v], edges[e].v0) &&
+        VESetContains(adj[v], edges[e].v1))
+      return;
     const vec2 a = verts[edges[e].v0];
     const vec2 b = verts[edges[e].v1];
     const vec2 ab = b - a;
@@ -581,7 +600,7 @@ std::vector<std::vector<int>> BuildEdgeVertLists(
 void FindAndInsertIntersections(const std::vector<EdgeM>& edges,
                                 std::vector<vec2>* verts,
                                 std::vector<std::vector<int>>* lists,
-                                std::vector<std::set<int>>* vertEdges,
+                                std::vector<std::vector<int>>* vertEdges,
                                 double eps) {
   const int nE = static_cast<int>(edges.size());
   const double eps2 = eps * eps;
@@ -656,8 +675,8 @@ void FindAndInsertIntersections(const std::vector<EdgeM>& edges,
       vertEdges->emplace_back();
     }
     // Record edge incidence: this vert is now known to lie on edges i and j.
-    (*vertEdges)[vNew].insert(i);
-    (*vertEdges)[vNew].insert(j);
+    VESetInsert(&(*vertEdges)[vNew], i);
+    VESetInsert(&(*vertEdges)[vNew], j);
     // Insert into both edges' lists, sorted by parametric position.
     auto insertSorted = [&](int eIdx) {
       if (vNew == edges[eIdx].v0 || vNew == edges[eIdx].v1) return;
@@ -705,7 +724,7 @@ void FindAndInsertIntersections(const std::vector<EdgeM>& edges,
   CollidePairs(bvh, queryBoxes, [&](int qi, int eIdx) {
     const int v = queryVerts[qi];
     if (v == edges[eIdx].v0 || v == edges[eIdx].v1) return;
-    if ((*vertEdges)[v].count(eIdx)) return;  // already incident
+    if (VESetContains((*vertEdges)[v], eIdx)) return;  // already incident
     const vec2 a = (*verts)[edges[eIdx].v0];
     const vec2 b = (*verts)[edges[eIdx].v1];
     const vec2 ab = b - a;
@@ -724,7 +743,7 @@ void FindAndInsertIntersections(const std::vector<EdgeM>& edges,
           return tv < tQ;
         });
     if (pos == lst.end() || *pos != v) lst.insert(pos, v);
-    (*vertEdges)[v].insert(eIdx);
+    VESetInsert(&(*vertEdges)[v], eIdx);
   });
 }
 
@@ -1248,7 +1267,7 @@ OverlapResult RemoveOverlaps2D(const std::vector<vec2>& vertsIn,
   auto t3 = Clock::now();
   P.buildListsNs.fetch_add(Ns(t2, t3), std::memory_order_relaxed);
   // Step 4: intersection discovery.
-  std::vector<std::set<int>> vertEdges;
+  std::vector<std::vector<int>> vertEdges;
   FindAndInsertIntersections(edges, &merge.verts, &lists, &vertEdges, eps);
   auto t4 = Clock::now();
   P.findIxNs.fetch_add(Ns(t3, t4), std::memory_order_relaxed);
@@ -1328,7 +1347,7 @@ OverlapResult RemoveOverlaps2D(const std::vector<vec2>& vertsIn,
           const auto [a, b] = pairs[i];
           bool shared = false;
           for (int e : vertEdges[a]) {
-            if (vertEdges[b].count(e)) { shared = true; break; }
+            if (VESetContains(vertEdges[b], e)) { shared = true; break; }
           }
           if (!shared) return;
           vec2 d = merge.verts[b] - merge.verts[a];
@@ -1998,7 +2017,7 @@ void Diagnose(uint64_t seed, int kPow = 30, int n = 50) {
             << " total list entries across " << edges.size() << " edges\n";
 
   const int beforeStep4 = static_cast<int>(merge.verts.size());
-  std::vector<std::set<int>> vertEdges;
+  std::vector<std::vector<int>> vertEdges;
   FindAndInsertIntersections(edges, &merge.verts, &lists, &vertEdges, eps);
   const int afterStep4 = static_cast<int>(merge.verts.size());
   std::cerr << "After step 4 (intersections): " << merge.verts.size()
@@ -2244,7 +2263,7 @@ void Diagnose(uint64_t seed, int kPow = 30, int n = 50) {
     auto m3 = MergeVerts(vIn, eps);
     auto e3 = RemapAndCollapse(eIn, m3.remap);
     auto l3 = BuildEdgeVertLists(e3, m3.verts, eps);
-    std::vector<std::set<int>> ve3;
+    std::vector<std::vector<int>> ve3;
     FindAndInsertIntersections(e3, &m3.verts, &l3, &ve3, eps);
     // structural step 4b (copy of the production code)
     {
@@ -2255,7 +2274,7 @@ void Diagnose(uint64_t seed, int kPow = 30, int n = 50) {
         for (size_t b = a + 1; b < m3.verts.size(); ++b) {
           if (b >= ve3.size() || ve3[b].empty()) continue;
           bool shared = false;
-          for (int e : ve3[a]) if (ve3[b].count(e)) { shared = true; break; }
+          for (int e : ve3[a]) if (VESetContains(ve3[b], e)) { shared = true; break; }
           if (!shared) continue;
           vec2 d = m3.verts[b] - m3.verts[a];
           if (dot(d, d) > mergeThresh2) continue;
@@ -4210,7 +4229,7 @@ int main(int argc, char** argv) {
     int p2_totalList = 0;
     for (auto& l : p2_l) p2_totalList += l.size();
     std::cerr << "  step 3 lists: " << p2_totalList << " total entries\n";
-    std::vector<std::set<int>> p2_ve;
+    std::vector<std::vector<int>> p2_ve;
     FindAndInsertIntersections(p2_e, &p2_mrg.verts, &p2_l, &p2_ve, eps);
     std::cerr << "  step 4 intersections: " << p2_mrg.verts.size()
               << " verts after\n";
