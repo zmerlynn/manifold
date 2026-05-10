@@ -592,7 +592,9 @@ std::vector<std::vector<int>> BuildEdgeVertLists(
   // gain because most cases have <1e4 candidates and stay serial under
   // autoPolicy. The serial form is faster across the corpus.)
   std::vector<std::vector<std::pair<double, int>>> hitsPerEdge(nE);
-  CollidePairs(bvh, vertBoxes, [&](int v, int e) {
+  // Per-(v, e) narrow-phase test. Captures the same logic whether
+  // candidates come from BVH or brute-force broad phase.
+  auto narrow = [&](int v, int e) {
     if (v == edges[e].v0 || v == edges[e].v1) return;
     // Thin-triangle-apex skip: when V is connected to BOTH edge endpoints
     // by other edges, V is the apex of a triangle (V, e.v0, e.v1) whose
@@ -616,7 +618,18 @@ std::vector<std::vector<int>> BuildEdgeVertLists(
     const vec2 closest = a + ab * t;
     const vec2 d = verts[v] - closest;
     if (dot(d, d) <= eps2) hitsPerEdge[e].emplace_back(t, v);
-  });
+  };
+  if (bvh.leafToOrig.empty()) {
+    // Brute-force broad phase: O(V·E). Faster than building+querying
+    // a BVH for small E (caller decided E < threshold).
+    for (int v = 0; v < nV; ++v) {
+      for (int e = 0; e < nE; ++e) {
+        if (vertBoxes[v].DoesOverlap(edgeBoxes[e])) narrow(v, e);
+      }
+    }
+  } else {
+    CollidePairs(bvh, vertBoxes, [&](int v, int e) { narrow(v, e); });
+  }
   for (int e = 0; e < nE; ++e) {
     auto& hits = hitsPerEdge[e];
     std::sort(hits.begin(), hits.end());
@@ -649,11 +662,21 @@ void FindAndInsertIntersections(const std::vector<EdgeM>& edges,
   // deterministic across runs and BVH builds.
   // (edgeBoxes/bvh shared from caller — see step 3 signature comment.)
   std::vector<std::pair<int, int>> pairs;
-  CollidePairs(bvh, edgeBoxes, [&](int qi, int li) {
-    if (qi >= li) return;
-    pairs.emplace_back(qi, li);
-  });
-  std::sort(pairs.begin(), pairs.end());
+  if (bvh.leafToOrig.empty()) {
+    // Brute-force self-collide for small E (caller chose to skip BVH).
+    for (int i = 0; i < nE; ++i) {
+      for (int j = i + 1; j < nE; ++j) {
+        if (edgeBoxes[i].DoesOverlap(edgeBoxes[j]))
+          pairs.emplace_back(i, j);
+      }
+    }
+  } else {
+    CollidePairs(bvh, edgeBoxes, [&](int qi, int li) {
+      if (qi >= li) return;
+      pairs.emplace_back(qi, li);
+    });
+    std::sort(pairs.begin(), pairs.end());
+  }
   // (An earlier two-phase split — parallel IntersectSegments compute,
   // serial bookkeeping — measured as a wash on JTS: the per-call
   // allocation of intersection-point buffers cancelled the parallel
@@ -750,13 +773,20 @@ void FindAndInsertIntersections(const std::vector<EdgeM>& edges,
   // step 3's. Step 4b's structural+geometric merge stays as a fallback for
   // FP noise that exceeds eps between near-duplicate intersections (which
   // this propagation does not address).
+  // Fast-path: if no new intersection verts were created in the main
+  // loop, the propagation pass has nothing to do.
+  if ((int)verts->size() == origNumVerts) return;
   std::vector<Box> queryBoxes;
   std::vector<int> queryVerts;
+  queryBoxes.reserve((int)verts->size() - origNumVerts);
+  queryVerts.reserve((int)verts->size() - origNumVerts);
   for (int v = origNumVerts; v < (int)verts->size(); ++v) {
     queryBoxes.push_back(BoxOf2DPoint((*verts)[v], eps));
     queryVerts.push_back(v);
   }
-  CollidePairs(bvh, queryBoxes, [&](int qi, int eIdx) {
+  // Per-(qi, eIdx) propagation step. Same logic for BVH and brute-force
+  // broad phases.
+  auto propagateNarrow = [&](int qi, int eIdx) {
     const int v = queryVerts[qi];
     if (v == edges[eIdx].v0 || v == edges[eIdx].v1) return;
     if (VESetContains((*vertEdges)[v], eIdx)) return;  // already incident
@@ -779,7 +809,18 @@ void FindAndInsertIntersections(const std::vector<EdgeM>& edges,
         });
     if (pos == lst.end() || *pos != v) lst.insert(pos, v);
     VESetInsert(&(*vertEdges)[v], eIdx);
-  });
+  };
+  if (bvh.leafToOrig.empty()) {
+    for (size_t qi = 0; qi < queryBoxes.size(); ++qi) {
+      for (int e = 0; e < nE; ++e) {
+        if (queryBoxes[qi].DoesOverlap(edgeBoxes[e]))
+          propagateNarrow((int)qi, e);
+      }
+    }
+  } else {
+    CollidePairs(bvh, queryBoxes,
+                 [&](int qi, int eIdx) { propagateNarrow(qi, eIdx); });
+  }
 }
 
 // =============================================================================
@@ -1342,15 +1383,18 @@ OverlapResult RemoveOverlaps2D(const std::vector<vec2>& vertsIn,
   auto edges = RemapAndCollapse(edgesIn, merge.remap);
   auto t2 = Clock::now();
   P.remapNs.fetch_add(Ns(t1, t2), std::memory_order_relaxed);
-  // Build the edge BVH once; steps 3 (BuildEdgeVertLists) and 4
-  // (FindAndInsertIntersections) both query it, so sharing avoids a
-  // duplicate Morton sort and Collider construction per case.
+  // Build the edge BVH once for steps 3 and 4. For very small edge
+  // counts (< 32), skip the BVH build — Morton sort + tree
+  // construction overhead beats brute-force O(n²) on tiny inputs. The
+  // step 3/4 functions detect an empty bvh.leafToOrig and fall back to
+  // their brute-force broad phase.
   std::vector<Box> edgeBoxes(edges.size());
   for (size_t e = 0; e < edges.size(); ++e) {
     edgeBoxes[e] =
         BoxOf2DEdge(merge.verts[edges[e].v0], merge.verts[edges[e].v1], eps);
   }
-  BVH bvh = BVHBuildFromBoxes(edgeBoxes);
+  BVH bvh;
+  if (edges.size() >= 32) bvh = BVHBuildFromBoxes(edgeBoxes);
   // Step 3: per-edge vert list.
   auto lists = BuildEdgeVertLists(edges, merge.verts, eps, edgeBoxes, bvh);
   auto t3 = Clock::now();
