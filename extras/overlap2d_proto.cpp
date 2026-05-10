@@ -1130,56 +1130,91 @@ std::vector<OutEdge> FilterByWindingDCEL(
     }
   }
 
-  // 6. Compute winding per face by ray-cast. We do this PER FACE rather
-  //    than per-edge (the old `FilterByWinding`) because per-edge produces
-  //    inconsistent verdicts at shared vertices, AND we do it per-face
-  //    rather than via BFS-from-outer because BFS doesn't propagate
-  //    between disconnected face-graph components (real for self-
-  //    intersecting polygons whose union has multiple disjoint regions).
-  //    Ray-cast errors don't compound since each face decision is
-  //    independent.
+  // 6. Compute winding per face by propagation through twin pointers.
   //
-  //    For each face, find a half-edge on its boundary, perp-offset its
-  //    midpoint into the face (the LEFT side, by DCEL convention), cast
-  //    a horizontal ray, sum signed mult contributions of edges crossed.
-  std::vector<int> faceWind(nFaces, 0);
-  // Ray-cast point per face: perpendicular-offset from a half-edge of
-  // the face's boundary, into the face (LEFT side). This works because
-  // the face is on the LEFT of every half-edge in its cycle, so a
-  // perpendicular-CCW offset from any boundary edge lands inside the
-  // face. Centroids would seem more robust, but for non-convex faces
-  // (common after step 4) the centroid can lie outside the face.
+  //    Earlier this did F independent ray-casts (one per face), which
+  //    is O(F·E) work. Replace with: ray-cast a single seed face per
+  //    connected component of the DCEL, then BFS-propagate to all
+  //    other faces in the component. Stepping from face_A to face_B
+  //    across a halfedge h (h.face=A, h.twin.face=B) crosses h's
+  //    canonical-edge contribution, so faceWind[B] = faceWind[A] -
+  //    h.mult (we're stepping from LEFT of h, where +mult contributes,
+  //    to RIGHT, where 0 does). BFS reaches every face in the
+  //    component exactly once, so total work is O(E + F) instead of
+  //    O(F·E).
   //
-  // Hoist canon.map (RB-tree of canonical sub-edges) into a flat
-  // FastEdge vector ONCE so the F per-face ray-casts iterate a tight
-  // contiguous array instead of walking an RB-tree F times.
+  //    Multi-component arrangements (real for self-intersecting input
+  //    whose result has multiple disjoint regions): when BFS finishes,
+  //    any unvisited face is in another component; ray-cast its
+  //    interior to seed and BFS again. Most cases are single-component
+  //    so this fallback rarely fires.
   //
-  // Parallelism: each face's ray-cast is read-only on (fastEdges,
-  // halfedges, faceStartHE, verts) and writes only to faceWind[f] — no
-  // shared state. autoPolicy() runs serial below kSeqThreshold (1e4
-  // faces) so small inputs aren't penalized. Output is deterministic
-  // because each ray-cast is a pure function of inputs and the
-  // destination index is fixed.
+  //    We keep the FastEdge hoist (still needed for the seed ray-casts)
+  //    but the F-fold dependency on it is gone — propagation is a
+  //    constant per face.
   const auto fastEdges = BuildFastEdges(canon, verts);
-  manifold::for_each(
-      manifold::autoPolicy(nFaces), manifold::countAt(0),
-      manifold::countAt(nFaces), [&](int f) {
-        if (f == outerFace) {
-          faceWind[f] = 0;
-          return;
+  std::vector<int> faceWind(nFaces, 0);
+  std::vector<uint8_t> wAssigned(nFaces, 0);
+  auto seedRayCast = [&](int f) {
+    int h = faceStartHE[f];
+    if (h < 0) {
+      faceWind[f] = 0;
+      wAssigned[f] = 1;
+      return;
+    }
+    const vec2 a = verts[halfedges[h].origin];
+    const vec2 b = verts[halfedges[halfedges[h].twin].origin];
+    const vec2 mid = (a + b) * 0.5;
+    const vec2 d = b - a;
+    const double len = length(d);
+    if (len == 0) {
+      faceWind[f] = 0;
+    } else {
+      const vec2 perp(-d.y / len, d.x / len);
+      const vec2 pInF = mid + perp * (len * 1e-3);
+      faceWind[f] = CastWindingRayFast(pInF, fastEdges);
+    }
+    wAssigned[f] = 1;
+  };
+  // Outer face is the convention-fixed seed: by topology it sits
+  // outside the arrangement, so faceWind = 0. The shoelace area test
+  // identified it above.
+  seedRayCast(outerFace);
+  std::vector<int> bfsQ;
+  bfsQ.reserve(nFaces);
+  auto propagateFrom = [&](int seed) {
+    bfsQ.clear();
+    bfsQ.push_back(seed);
+    size_t head = 0;
+    while (head < bfsQ.size()) {
+      const int f = bfsQ[head++];
+      const int h0 = faceStartHE[f];
+      if (h0 < 0) continue;
+      int hh = h0;
+      int safety = 0;
+      do {
+        const int twinH = halfedges[hh].twin;
+        const int adj = halfedges[twinH].face;
+        if (adj >= 0 && !wAssigned[adj]) {
+          // Stepping LEFT of hh (= f) → RIGHT of hh (= adj):
+          // winding loses the +mult contribution that the LEFT side saw.
+          faceWind[adj] = faceWind[f] - halfedges[hh].mult;
+          wAssigned[adj] = 1;
+          bfsQ.push_back(adj);
         }
-        int h = faceStartHE[f];
-        if (h < 0) return;
-        const vec2 a = verts[halfedges[h].origin];
-        const vec2 b = verts[halfedges[halfedges[h].twin].origin];
-        const vec2 mid = (a + b) * 0.5;
-        const vec2 d = b - a;
-        const double len = length(d);
-        if (len == 0) return;
-        const vec2 perp(-d.y / len, d.x / len);
-        const vec2 pInF = mid + perp * (len * 1e-3);
-        faceWind[f] = CastWindingRayFast(pInF, fastEdges);
-      });
+        hh = halfedges[hh].next;
+        if (hh < 0 || ++safety > (int)halfedges.size()) break;
+      } while (hh != h0);
+    }
+  };
+  propagateFrom(outerFace);
+  // Pick up any disconnected components with their own seed ray-cast.
+  for (int f = 0; f < nFaces; ++f) {
+    if (!wAssigned[f]) {
+      seedRayCast(f);
+      propagateFrom(f);
+    }
+  }
 
   if (debug) {
     std::cerr << "  face windings:";
