@@ -49,14 +49,19 @@
 #include <utility>
 #include <vector>
 
+#include "../src/collider.h"
 #include "manifold/common.h"
 
 namespace overlap2d_int {
 
 using i64 = int64_t;
 using i128 = __int128;
+using manifold::Box;
+using manifold::Collider;
+using manifold::MakeSimpleRecorder;
 using manifold::Polygons;
 using manifold::SimplePolygon;
+using manifold::vec3;
 
 struct Vec2i {
   i64 x, y;
@@ -133,6 +138,69 @@ inline bool IntersectPointSnapped(Vec2i a, Vec2i b, Vec2i c, Vec2i d,
   out->x = (i64)std::llround(px);
   out->y = (i64)std::llround(py);
   return true;
+}
+
+// ============================================================================
+// BVH broad-phase (reuses manifold::Collider, which expects FP boxes).
+// Int verts are widened to double for the box; broad-phase doesn't need
+// exact arithmetic, only the narrow-phase predicates do (and those stay
+// in i128). Padding by 1 unit on each side handles snap-to-grid boundary
+// cases without missing any candidate.
+// ============================================================================
+
+inline Box BoxOf2DPointI(Vec2i p) {
+  vec3 lo((double)p.x - 1, (double)p.y - 1, 0);
+  vec3 hi((double)p.x + 1, (double)p.y + 1, 0);
+  return Box(lo, hi);
+}
+
+inline Box BoxOf2DEdgeI(Vec2i p0, Vec2i p1) {
+  Box b(vec3((double)p0.x, (double)p0.y, 0),
+        vec3((double)p1.x, (double)p1.y, 0));
+  vec3 pad(1, 1, 0);
+  return Box(b.min - pad, b.max + pad);
+}
+
+struct BVH {
+  Collider collider;
+  std::vector<int> leafToOrig;  // sortedLeafIdx -> caller's input index
+};
+
+inline BVH BVHBuildFromBoxes(const std::vector<Box>& boxes) {
+  const int n = (int)boxes.size();
+  BVH out;
+  out.leafToOrig.resize(n);
+  for (int i = 0; i < n; ++i) out.leafToOrig[i] = i;
+  if (n == 0) return out;
+  Box bbox;
+  for (const auto& b : boxes) bbox = bbox.Union(b);
+  std::vector<uint32_t> morton(n);
+  for (int i = 0; i < n; ++i)
+    morton[i] = Collider::MortonCode(boxes[i].Center(), bbox);
+  std::stable_sort(out.leafToOrig.begin(), out.leafToOrig.end(),
+                   [&](int a, int b) { return morton[a] < morton[b]; });
+  std::vector<Box> sortedBB(n);
+  std::vector<uint32_t> sortedMorton(n);
+  for (int i = 0; i < n; ++i) {
+    sortedBB[i] = boxes[out.leafToOrig[i]];
+    sortedMorton[i] = morton[out.leafToOrig[i]];
+  }
+  out.collider = Collider(
+      manifold::VecView<const Box>(sortedBB.data(), sortedBB.size()),
+      manifold::VecView<const uint32_t>(sortedMorton.data(),
+                                         sortedMorton.size()));
+  return out;
+}
+
+template <typename F>
+inline void CollidePairs(const BVH& bvh, const std::vector<Box>& queries,
+                         F&& f) {
+  if (bvh.leafToOrig.empty() || queries.empty()) return;
+  auto adapter = [&](int qi, int leafIdx) { f(qi, bvh.leafToOrig[leafIdx]); };
+  auto recorder = MakeSimpleRecorder(adapter);
+  auto qf = [&](int i) { return queries[i]; };
+  bvh.collider.Collisions<false>(recorder, qf, (int)queries.size(),
+                                 /*parallel=*/false);
 }
 
 // ============================================================================
@@ -222,20 +290,29 @@ inline std::vector<std::vector<int>> BuildEdgeVertLists(
   const int nE = (int)edges.size();
   const int nV = (int)verts.size();
   std::vector<std::vector<int>> lists(nE);
-  for (int e = 0; e < nE; ++e) {
+
+  // BVH on edges, query each vert against it. Saves O(E·V) → O((E+V) log E).
+  std::vector<Box> edgeBoxes(nE);
+  for (int e = 0; e < nE; ++e)
+    edgeBoxes[e] = BoxOf2DEdgeI(verts[edges[e].v0], verts[edges[e].v1]);
+  BVH bvh = BVHBuildFromBoxes(edgeBoxes);
+  std::vector<Box> vertBoxes(nV);
+  for (int v = 0; v < nV; ++v) vertBoxes[v] = BoxOf2DPointI(verts[v]);
+
+  std::vector<std::vector<std::pair<i128, int>>> hitsPerEdge(nE);
+  CollidePairs(bvh, vertBoxes, [&](int v, int e) {
+    if (v == edges[e].v0 || v == edges[e].v1) return;
     const Vec2i a = verts[edges[e].v0];
     const Vec2i b = verts[edges[e].v1];
-    std::vector<std::pair<i128, int>> hits;  // (param_along_edge_squared, v)
-    for (int v = 0; v < nV; ++v) {
-      if (v == edges[e].v0 || v == edges[e].v1) continue;
-      const Vec2i p = verts[v];
-      if (Orient(a, b, p) != 0) continue;       // exact: must be collinear
-      if (!BetweenCollinear(a, b, p)) continue;  // strictly between
-      // Parameter along ab (proportional to |ap| in the longer axis).
-      const i128 key = (i128)(p.x - a.x) * (b.x - a.x) +
-                       (i128)(p.y - a.y) * (b.y - a.y);
-      hits.emplace_back(key, v);
-    }
+    const Vec2i p = verts[v];
+    if (Orient(a, b, p) != 0) return;
+    if (!BetweenCollinear(a, b, p)) return;
+    const i128 key = (i128)(p.x - a.x) * (b.x - a.x) +
+                     (i128)(p.y - a.y) * (b.y - a.y);
+    hitsPerEdge[e].emplace_back(key, v);
+  });
+  for (int e = 0; e < nE; ++e) {
+    auto& hits = hitsPerEdge[e];
     std::sort(hits.begin(), hits.end());
     lists[e].reserve(hits.size());
     for (const auto& [_, v] : hits) lists[e].push_back(v);
@@ -257,51 +334,59 @@ inline void FindAndInsertIntersections(
   // Map from int position → vert index for snap-dedup.
   std::map<Vec2i, int> posToIdx;
   for (int i = 0; i < (int)verts->size(); ++i) posToIdx[(*verts)[i]] = i;
-  for (int i = 0; i < nE; ++i) {
-    for (int j = i + 1; j < nE; ++j) {
-      const Vec2i a = (*verts)[edges[i].v0];
-      const Vec2i b = (*verts)[edges[i].v1];
-      const Vec2i c = (*verts)[edges[j].v0];
-      const Vec2i d = (*verts)[edges[j].v1];
-      // Skip if shares an endpoint — handled by step 3 already.
-      if (edges[i].v0 == edges[j].v0 || edges[i].v0 == edges[j].v1 ||
-          edges[i].v1 == edges[j].v0 || edges[i].v1 == edges[j].v1)
-        continue;
-      if (!SegmentsProperlyCross(a, b, c, d)) continue;
-      Vec2i p;
-      if (!IntersectPointSnapped(a, b, c, d, &p)) continue;
-      // Dedup: does this int point already exist?
-      int vNew;
-      auto it = posToIdx.find(p);
-      if (it != posToIdx.end()) {
-        vNew = it->second;
-      } else {
-        vNew = (int)verts->size();
-        verts->push_back(p);
-        posToIdx[p] = vNew;
-      }
-      // Insert into both edges' lists, sorted by parametric position.
-      auto insertSorted = [&](int eIdx) {
-        if (vNew == edges[eIdx].v0 || vNew == edges[eIdx].v1) return;
-        const Vec2i ea = (*verts)[edges[eIdx].v0];
-        const Vec2i eb = (*verts)[edges[eIdx].v1];
-        const i128 keyP =
-            (i128)(p.x - ea.x) * (eb.x - ea.x) +
-            (i128)(p.y - ea.y) * (eb.y - ea.y);
-        auto& lst = (*lists)[eIdx];
-        auto pos = std::lower_bound(
-            lst.begin(), lst.end(), keyP, [&](int v, i128 k) {
-              const Vec2i vv = (*verts)[v];
-              const i128 kv =
-                  (i128)(vv.x - ea.x) * (eb.x - ea.x) +
-                  (i128)(vv.y - ea.y) * (eb.y - ea.y);
-              return kv < k;
-            });
-        if (pos == lst.end() || *pos != vNew) lst.insert(pos, vNew);
-      };
-      insertSorted(i);
-      insertSorted(j);
+
+  // BVH on edges, self-collide. Saves O(E²) → O((E + k) log E).
+  std::vector<Box> edgeBoxes(nE);
+  for (int e = 0; e < nE; ++e)
+    edgeBoxes[e] = BoxOf2DEdgeI((*verts)[edges[e].v0], (*verts)[edges[e].v1]);
+  BVH bvh = BVHBuildFromBoxes(edgeBoxes);
+  std::vector<std::pair<int, int>> pairs;
+  CollidePairs(bvh, edgeBoxes, [&](int qi, int li) {
+    if (qi >= li) return;
+    pairs.emplace_back(qi, li);
+  });
+  std::sort(pairs.begin(), pairs.end());
+
+  for (auto [i, j] : pairs) {
+    const Vec2i a = (*verts)[edges[i].v0];
+    const Vec2i b = (*verts)[edges[i].v1];
+    const Vec2i c = (*verts)[edges[j].v0];
+    const Vec2i d = (*verts)[edges[j].v1];
+    if (edges[i].v0 == edges[j].v0 || edges[i].v0 == edges[j].v1 ||
+        edges[i].v1 == edges[j].v0 || edges[i].v1 == edges[j].v1)
+      continue;
+    if (!SegmentsProperlyCross(a, b, c, d)) continue;
+    Vec2i p;
+    if (!IntersectPointSnapped(a, b, c, d, &p)) continue;
+    int vNew;
+    auto it = posToIdx.find(p);
+    if (it != posToIdx.end()) {
+      vNew = it->second;
+    } else {
+      vNew = (int)verts->size();
+      verts->push_back(p);
+      posToIdx[p] = vNew;
     }
+    auto insertSorted = [&](int eIdx) {
+      if (vNew == edges[eIdx].v0 || vNew == edges[eIdx].v1) return;
+      const Vec2i ea = (*verts)[edges[eIdx].v0];
+      const Vec2i eb = (*verts)[edges[eIdx].v1];
+      const i128 keyP =
+          (i128)(p.x - ea.x) * (eb.x - ea.x) +
+          (i128)(p.y - ea.y) * (eb.y - ea.y);
+      auto& lst = (*lists)[eIdx];
+      auto pos = std::lower_bound(
+          lst.begin(), lst.end(), keyP, [&](int v, i128 k) {
+            const Vec2i vv = (*verts)[v];
+            const i128 kv =
+                (i128)(vv.x - ea.x) * (eb.x - ea.x) +
+                (i128)(vv.y - ea.y) * (eb.y - ea.y);
+            return kv < k;
+          });
+      if (pos == lst.end() || *pos != vNew) lst.insert(pos, vNew);
+    };
+    insertSorted(i);
+    insertSorted(j);
   }
 }
 
@@ -651,9 +736,81 @@ inline double TotalSignedArea(const Polygons& polys) {
 }  // namespace overlap2d_int
 
 // ============================================================================
-// Main: a few smoke-test cases.
+// Bigger workload: synthesize a self-intersecting polygon with N vertices
+// arranged on a circle but visited in a star-skip order, producing many
+// crossings. Useful for both correctness checking (does the int kernel
+// stay correct as N grows?) and timing.
+// ============================================================================
+
+namespace overlap2d_int {
+
+inline manifold::Polygons MakeStar(int n, int skip, double radius = 100.0) {
+  manifold::SimplePolygon loop;
+  for (int i = 0; i < n; ++i) {
+    int j = (i * skip) % n;
+    if (n > 1) {
+      // ensure we visit n distinct verts when gcd(skip, n) == 1
+    }
+    const double ang = 2 * M_PI * j / n;
+    loop.push_back({radius * std::cos(ang), radius * std::sin(ang)});
+  }
+  return {loop};
+}
+
+}  // namespace overlap2d_int
+
+// ============================================================================
+// Main: smoke tests + a head-to-head timing vs Clipper64 (when built with
+// -DOVERLAP2D_INT_WITH_CLIPPER2).
 // ============================================================================
 #include <chrono>
+
+#ifdef OVERLAP2D_INT_WITH_CLIPPER2
+#include "clipper2/clipper.h"
+namespace overlap2d_int {
+
+inline Clipper2Lib::Paths64 ToPaths64(const manifold::Polygons& p,
+                                      i64 scale) {
+  Clipper2Lib::Paths64 out;
+  out.reserve(p.size());
+  for (const auto& loop : p) {
+    Clipper2Lib::Path64 path;
+    path.reserve(loop.size());
+    for (const auto& v : loop) {
+      path.emplace_back((i64)std::llround(v.x * scale),
+                        (i64)std::llround(v.y * scale));
+    }
+    out.push_back(std::move(path));
+  }
+  return out;
+}
+
+inline manifold::Polygons FromPaths64(const Clipper2Lib::Paths64& p,
+                                       i64 scale) {
+  manifold::Polygons out;
+  out.reserve(p.size());
+  const double inv = 1.0 / (double)scale;
+  for (const auto& path : p) {
+    manifold::SimplePolygon loop;
+    loop.reserve(path.size());
+    for (const auto& pt : path) loop.push_back({pt.x * inv, pt.y * inv});
+    out.push_back(std::move(loop));
+  }
+  return out;
+}
+
+inline manifold::Polygons ClipperSimplify(const manifold::Polygons& in,
+                                          i64 scale) {
+  Clipper2Lib::Clipper64 c;
+  c.AddSubject(ToPaths64(in, scale));
+  Clipper2Lib::Paths64 sol;
+  c.Execute(Clipper2Lib::ClipType::Union,
+            Clipper2Lib::FillRule::NonZero, sol);
+  return FromPaths64(sol, scale);
+}
+
+}  // namespace overlap2d_int
+#endif
 
 namespace {
 
@@ -702,6 +859,66 @@ int main() {
   RunCase("clean_square",
           Polygons{
               SimplePolygon{{0, 0}, {10, 0}, {10, 10}, {0, 10}}});
+
+  // 6. Heavy self-crossing star polygon — exercises the kernel at scale.
+  //    {n/skip} = visit n verts on a circle in (skip)-step order.
+  for (int n : {12, 24, 50}) {
+    int skip = (n / 2) - 1;  // skip-(n/2-1) gives many crossings
+    if (skip < 2) skip = 3;
+    auto star = overlap2d_int::MakeStar(n, skip);
+    char name[64];
+    std::snprintf(name, sizeof(name), "star_n%d_skip%d", n, skip);
+    RunCase(name, star);
+  }
+
+#ifdef OVERLAP2D_INT_WITH_CLIPPER2
+  // Head-to-head vs Clipper64 on a larger workload. Repeated K times so the
+  // wall-clock signal isn't dominated by setup.
+  std::printf("\n=== head-to-head vs Clipper64 ===\n");
+  struct Bench {
+    const char* name;
+    manifold::Polygons input;
+    int reps;
+  };
+  std::vector<Bench> benches = {
+      {"two_overlapping_squares",
+       Polygons{SimplePolygon{{0, 0}, {4, 0}, {4, 4}, {0, 4}},
+                SimplePolygon{{2, 2}, {6, 2}, {6, 6}, {2, 6}}},
+       10000},
+      {"issue_44_three_nested_triangles",
+       Polygons{SimplePolygon{{0, 0}, {3, -2}, {5, 0}},
+                SimplePolygon{{0, 0}, {3, -1}, {4, 0}},
+                SimplePolygon{{0, 0}, {3, -3}, {5, 0}}},
+       10000},
+      {"star_n12", overlap2d_int::MakeStar(12, 5), 5000},
+      {"star_n24", overlap2d_int::MakeStar(24, 11), 1000},
+      {"star_n50", overlap2d_int::MakeStar(50, 23), 200},
+  };
+  for (const auto& b : benches) {
+    using Clock = std::chrono::steady_clock;
+    auto t0 = Clock::now();
+    for (int i = 0; i < b.reps; ++i) {
+      auto _ = overlap2d_int::Simplify(b.input);
+      (void)_;
+    }
+    auto t1 = Clock::now();
+    for (int i = 0; i < b.reps; ++i) {
+      auto _ = overlap2d_int::ClipperSimplify(b.input,
+                                              overlap2d_int::kDefaultScale);
+      (void)_;
+    }
+    auto t2 = Clock::now();
+    const double oursMs =
+        std::chrono::duration<double, std::milli>(t1 - t0).count();
+    const double c2Ms =
+        std::chrono::duration<double, std::milli>(t2 - t1).count();
+    const double oursUs = (oursMs * 1000.0) / b.reps;
+    const double c2Us = (c2Ms * 1000.0) / b.reps;
+    std::printf("  %-40s ours=%.2f us  c2=%.2f us  ratio=%.2fx %s\n", b.name,
+                oursUs, c2Us, oursUs / c2Us,
+                oursUs < c2Us ? "(ours faster)" : "(c2 faster)");
+  }
+#endif
 
   return 0;
 }
