@@ -104,15 +104,23 @@ trim-and-`Interpolate` for FP stability.
 goes its own way, each prompted by a problem that surfaced during
 development:
 
-- **Step 6: DCEL face traversal instead of Smith's per-edge
-  ray-cast.** Per-edge ray-casts produce inconsistent verdicts at
-  shared vertices (270 first-pass topology FAILs in DeepFuzz 14000).
+- **Step 6: DCEL face traversal with winding propagation, not Smith's
+  per-edge ray-cast.** Per-edge ray-casts produce inconsistent verdicts
+  at shared vertices (270 first-pass topology FAILs in DeepFuzz 14000).
   We build a doubly-connected edge list (the same structure
-  `Manifold::Impl::halfedge_` uses for 3D), assign one winding per
-  planar face via a single ray-cast from inside, and keep an edge
-  iff its left and right faces disagree on the inside/outside
-  predicate. Structurally consistent at shared vertices by
-  construction.
+  `Manifold::Impl::halfedge_` uses for 3D), then compute the winding
+  number per face by ray-casting only the seed (outer) face and
+  BFS-propagating winding through twin pointers — stepping from face
+  A across halfedge h (h.face=A, h.twin.face=B) gives faceWind[B] =
+  faceWind[A] − h.mult. Multi-component arrangements seed each
+  component with its own ray-cast. Each face is reached exactly once;
+  total work is O(E + F) instead of the original O(F·E) per-face
+  ray-cast. Edge retained iff its left and right faces disagree on the
+  inside/outside predicate. Structurally consistent at shared vertices
+  by construction; also avoids FP fragility from rays grazing
+  vertices (a real problem with per-face ray-casts: switching to
+  propagation lifted JTS invariant `holds`-within-1e-9 from 1238 to
+  1918 cases out of 2034).
 - **Step 4 has an eager-propagation phase + step 4b is a residual
   cleanup.** When k≥3 input edges are concurrent at one true point,
   pair-by-pair processing (one BVH-pair-query at a time) produces
@@ -146,8 +154,8 @@ development:
 | 3 | Edge → on-edge vert list | BVH broad phase over ε-padded edge AABBs queried by vert AABBs; exact projection-distance gate. Skips "thin-triangle apex" verts (apex of a degenerate triangle whose base is the candidate edge). |
 | 4 | Edge-edge intersections | BVH broad phase over edge AABBs; trim-and-`Interpolate` symbolic kernel atop `CCW`/SoS. Two sub-phases: (a) pair-by-pair intersection insertion with snap-to-existing on the current pair's edges; (b) eager propagation: for each freshly-allocated intersection vert, query the edge BVH for *all* other edges within ε and add the vert to their on-edge vert lists. The propagation pass mirrors `boolean_result.cpp::AddNewEdgeVerts` from manifold's 3D boolean (where an edge × face intersection is added to three lists, not just the source pair). |
 | 4b | Residual cleanup of near-duplicate intersection verts | When pair-by-pair processing produces near-duplicate intersection verts whose FP-rounded positions disagree by *more than ε* (typical at displaced coords with shallow crossings), step 4's eager propagation can't snap them. Union-find with structural (verts share an input edge) + geometric (within 10ε) gates collapses them. Mirrors `edge_op.cpp::CollapseShortEdges` in manifold's 3D `SimplifyTopology` cleanup. |
-| 5 | Sub-edge canonicalization | `map<lex(v0,v1), signed_mult>`; collinear sub-edges with opposing multiplicity cancel. |
-| 6 | Winding filter | DCEL face traversal; one winding per face via ray-cast from a perpendicular-LEFT offset of any boundary half-edge. Edge retained iff `isInside(leftFace) != isInside(rightFace)`. |
+| 5 | Sub-edge canonicalization | Sorted vector of `{vMin, vMax, signedMult}` (was a `std::map<pair, int>` before — switched for cache-friendly sequential scans in step 6, which iterates the canonical set three times: halfedge build, FastEdge ray-cast prep, output filter). Build appends entries unsorted, then sorts and merges duplicates by summing mults; entries summing to zero drop out. Collinear sub-edges with opposing multiplicity still cancel exactly. |
+| 6 | Winding filter | DCEL face traversal. Build halfedges from the canonical sub-edges, group by origin vertex with bucket+cross angular sort (atan2-free), compute next pointers via "smallest left turn", walk face cycles. Per-face winding by ray-cast on the outer face (the most-negative-area face) plus BFS propagation through twin pointers to every other reachable face — O(E + F) instead of the F per-face ray-casts that earlier versions did. Multi-component arrangements re-seed unvisited faces with their own ray-cast. Edge retained iff `isInside(leftFace) != isInside(rightFace)`. |
 
 **Pass 1 is topology-correct on every fuzz case.** A 336,000-case
 fuzz (12,000 seeds × 4 sizes × 7 displacement scales) shows pass 1
@@ -249,7 +257,7 @@ multiplicity conventions that the public entry points maintain.
 | `polygon_corpus.txt` (100 entries) | 100/100 topology valid | Manifold's existing curated corpus, run via `./overlap2d_proto corpus`. Area breakdown: 87/100 < 1% drift, 1/100 mid-drift (`Precision4` at 2.6%, correct behavior on a sliver-with-eps-thin-tail), 7/100 collapsed by name (`Degenerate4`, `DegenerateRing`, `NearlyLinear`, `Looping1/2`, `Precision`, `Sweep`), 5/100 had zero-area input. |
 | Clipper2 `Polygons.txt` corpus (195 entries) | 189/189 topology valid; 173/189 within 1% of current Clipper2 output | Independent third-party oracle, run via `./overlap2d_proto clipper2corpus`. 6 cases skipped (NEGATIVE/POSITIVE fill rule, no predicate analog). 173/189 (91.5%) within 1% of *current* Clipper2's output, 10 in 1-10%, 6 ≥10% — the ≥10% set are exclusively tiny intersections (areas 3-70 units) where 1-13 absolute units of FP error gives a large relative drift. Two findings emerged: (1) the corpus's stored `SOL_AREA` differs from current Clipper2 by ≥1% on 12 cases — it's stale, not a fresh oracle. (2) The `Boolean2D` API as written assumes CCW-canonical, single-orientation input (predicates use Smith's `w > 0` union convention). To match Clipper2's `boolean(fill_rule(subj), fill_rule(clip))` semantics on arbitrary inputs, callers must pre-fill each side with the declared fill rule. The corpus runner does this transparently; consumers wiring overlap2d as a `CrossSection` backend will hit the same need. |
 | mfogel/polygon-clipping end-to-end corpus (134 case-op pairs across 87 named cases) | 134/134 topology valid; 112/134 within 1% of expected | Real-bug-derived JS corpus (run via `./overlap2d_proto mfogelcorpus`). 84% match within 1% after pre-fill under NONZERO with mfogel's first-ring-outer/rest-holes auto-normalization. The 2 cases ≥10% drift are both `coincident-with-invalid-segments` — mfogel-specific quirk on intentionally-malformed input. **Found a real framework bug**: chained `Boolean2D(Boolean2D(A, B), C)` mishandles intermediate T-junction vertices when the next input also has a coincident edge (`issue-44`). Fixed by switching the corpus runner's N-feature dispatch to a single-pass `RemoveOverlaps2D` call with combined inputs and a per-op predicate (`w != 0` for union, `w >= N` for N-input intersection, `w > 0` after mult-flipping for N-input difference, `w & 1` for xor). This is also more semantically faithful to N-input ops than left-to-right chaining. |
-| Performance head-to-head vs Clipper64 (UNION+NONZERO) | overlap2d **~5-6x slower than Clipper64** on JTS overlay, ~6-46x on smaller corpora | Run via `./overlap2d_proto vsclipper2 [all\|clipper2\|jts\|mfogel]` (build with `-DOVERLAP2D_WITH_CLIPPER2` + link `libClipper2.a`). Per-corpus wall-clock for the boolean call only (excludes geometry conversion). Reference is `Clipper64` (native int64 API, scaling factor 1e9), not `ClipperD` — per #1683 the planned post-precision-bug `CrossSection` wiring is `Paths64`. Final numbers (parallel build, 8-core, cloud machine with another tenant — noise widens the band): **JTS overlay (2042 cases) ours min 639 / median ~870 / c2 min 123 / median ~145 ms; ratio min 5.2x / median 6.0x**; Clipper2 corpus (21) ~70 ms vs ~1.5 ms = ~46x; mfogel (62) ~2.6 ms vs ~0.4 ms = ~6x. Clipper2 corpus (21) ~70 ms vs ~1.5 ms = ~46x; mfogel (62) ~2.6 ms vs ~0.4 ms = ~6x. The 46x on Clipper2's tiny-input corpus reflects per-case allocation/setup overhead amortized poorly over short pipelines; on bigger workloads (JTS) the ratio settles around 5x. Earlier in the perf push the ratio was ~10.5x, halved through (in order of impact): (a) winding-number BFS propagation in step 6 replacing F per-face ray-casts — single biggest win, ~27% pipeline reduction AND a correctness improvement (no FP-fragility from rays grazing vertices: JTS invariant `holds`-within-1e-9 went 1238 → 1918, +55%); (b) `canon.map` and cluster maps replaced with sorted vectors / index-by-id arrays; (c) `vertEdges` and `adj` std-set → sorted-vector for tiny sets; (d) atan2-free angular comparator (bucket+cross product); (e) shared edge BVH between steps 3+4; (f) small-N fast paths skipping BVH below 32 boxes; (g) `tbb::parallel_invoke` running step 3 fully + step 4 broad concurrently, gated to E ≥ 256 to avoid TBB overhead under cloud-tenant contention. Remaining headroom: arena allocation across cases (per-call malloc churn), SIMD on the inner narrow phase, true narrow-phase parallelism via pair-conflict-graph coloring. Reaching Clipper2 parity requires a structural rewrite (sweep-line); 5x is a defensible production target. |
+| Performance head-to-head vs Clipper64 (UNION+NONZERO) | overlap2d **~5-6x slower than Clipper64** on JTS overlay, ~6-46x on smaller corpora | Run via `./overlap2d_proto vsclipper2 [all\|clipper2\|jts\|mfogel]` (build with `-DOVERLAP2D_WITH_CLIPPER2` + link `libClipper2.a`). Per-corpus wall-clock for the boolean call only (excludes geometry conversion). Reference is `Clipper64` (native int64 API, scaling factor 1e9), not `ClipperD` — per #1683 the planned post-precision-bug `CrossSection` wiring is `Paths64`. Final numbers (parallel build, 8-core, cloud machine with another tenant — noise widens the band): **JTS overlay (2042 cases) ours min 639 / median ~870 / c2 min 123 / median ~145 ms; ratio min 5.2x / median 6.0x**; Clipper2 corpus (21) ~70 ms vs ~1.5 ms = ~46x; mfogel (62) ~2.6 ms vs ~0.4 ms = ~6x. The 46x on Clipper2's tiny-input corpus reflects per-case allocation/setup overhead amortized poorly over short pipelines; on bigger workloads (JTS) the ratio settles around 5x. Earlier in the perf push the ratio was ~10.5x, halved through (in order of impact): (a) winding-number BFS propagation in step 6 replacing F per-face ray-casts — single biggest win, ~27% pipeline reduction AND a correctness improvement (no FP-fragility from rays grazing vertices: JTS invariant `holds`-within-1e-9 went 1238 → 1918, +55%); (b) `canon.map` and cluster maps replaced with sorted vectors / index-by-id arrays; (c) `vertEdges` and `adj` std-set → sorted-vector for tiny sets; (d) atan2-free angular comparator (bucket+cross product); (e) shared edge BVH between steps 3+4; (f) small-N fast paths skipping BVH below 32 boxes; (g) `tbb::parallel_invoke` running step 3 fully + step 4 broad concurrently, gated to E ≥ 256 to avoid TBB overhead under cloud-tenant contention. Remaining headroom: arena allocation across cases (per-call malloc churn), SIMD on the inner narrow phase, true narrow-phase parallelism via pair-conflict-graph coloring. Reaching Clipper2 parity requires a structural rewrite (sweep-line); 5x is a defensible production target. |
 | JTS robust/overlay corpus (2042 cases) | 2042/2042 topology valid; 2012/2034 invariant satisfied within 1% | Real-world GIS bug corpus from JTS Topology Suite (cases harvested from production tickets in GEOS, PostGIS, QGIS, JTS itself, Shapely). Run via `./overlap2d_proto jtscorpus` after generating the corpus locally with `python3 test/polygons/jts_to_corpus.py <jts_overlay_dir> test/polygons/jts_overlay_corpus.txt` (the 11 MB generated file is `.gitignore`d to keep the repo lean; the converter is checked in). The dominant op (~2034 cases) is `overlayAreaTest`, an invariant check `\|A∪B\| + \|A∩B\| = \|A\| + \|B\|` — a self-checking oracle; a bug in either union or intersection that creates or loses area shows up immediately. 1918 cases hold the invariant to within 1e-9, 94 within 1%, 22 violate by ≥1%. (Earlier numbers — 1238 / 761 / 35 — improved when the per-face ray-cast was replaced by twin-pointer BFS propagation: no more FP fragility from rays grazing vertices.) The 22 violators cluster in two datasets: `TestOverlay-stmlf.xml` (Bavarian land parcels at UTM-million coordinate scale, marked "all handled by snapping" in JTS — exposes the prototype's bbox-α-budget eps being too aggressive at large displacement, OQ #2) and `TestOverlay-isochrone.xml` (very-small-area intersections, ~1e-5 units, where FP noise dominates). XML+WKB+WKT parsing lives in `test/polygons/jts_to_corpus.py` (~150 LOC); the C++ runner just consumes a flat text format, keeping the algorithm code unencumbered by data-format plumbing. The same converter pattern absorbs other XML+WKB corpora (e.g. GEOS testxml) without C++ changes. |
 | DeepFuzz area drift (12,000 seeds, post-propagation) | 406 cases > 1% (0.23% of 177,895 measurable), 145 > 10% | Quantitative oracle on top of topology. Of the cases with measurable input area, 0.23% drift > 1% between pass 1 and converged. Almost all cases at kPow=35 (where ULP precision is weakest); a few at kPow=30. Max drift 100% (the seed=8993 thin-polygon collapse). The 100-seed sample showed 6 such cases; the 12k run reveals a longer thin-polygon-class tail invisible at smaller scale. |
 
@@ -270,56 +278,61 @@ entire adversarial range, in every size and seed tested.
    is conservative (k<sub>budget</sub>=1000); `Simplify` may want
    stricter.
 3. **Multi-threading.** Resolved. The prototype builds with either
-   `MANIFOLD_PAR=1` (TBB) or `MANIFOLD_PAR=-1` (serial) and parallelizes
-   the data-parallel hot loops via `manifold::for_each(autoPolicy(N), ...)`
-   plus `DisjointSets`'s lock-free atomic `unite()` /  `find()`.
-   Parallelized phases:
+   `MANIFOLD_PAR=1` (TBB) or `MANIFOLD_PAR=-1` (serial). Parallel
+   constructs in use:
 
-   - **Step 6 face-winding ray-cast** (per-face independent; was 82% of
-     pipeline time, now 33-50%).
-   - **Step 6 per-vertex angular sort** (per-vertex independent).
-   - **Step 6 next-pointer computation** (per-halfedge independent).
-   - **Step 1 vertex-merge** geometric gate (parallel filter, serial
-     `unite()` in sorted pair order for deterministic cluster roots).
-   - **Step 4b structural re-merge** geometric+structural gate (same
-     parallel-filter / serial-unite pattern as step 1).
+   - **Step 6 per-vertex angular sort** and **next-pointer computation**
+     (per-vertex / per-halfedge independent), via
+     `manifold::for_each(autoPolicy(N), ...)`.
+   - **Step 1 vertex-merge** and **step 4b structural re-merge**
+     geometric gates (parallel filter, serial `unite()` in sorted pair
+     order for deterministic cluster roots). `DisjointSets`'s lock-free
+     atomic `unite()` / `find()` makes the gate evaluation safe
+     without explicit synchronization.
+   - **Steps 3 + step 4 broad phase run concurrently** via
+     `tbb::parallel_invoke`: step 3 (`BuildEdgeVertLists`, broad+narrow)
+     writes `lists`, step 4-broad (`CollectStep4Pairs`) writes `pairs`,
+     both read-only on the shared edge BVH. Gated to E ≥ 256 to avoid
+     TBB region-spawn overhead on tiny cases.
+   - **Step 4 BVH self-collide** uses Collider's parallel mode with a
+     `tbb::combinable<vector<pair>>` thread-local accumulator merged
+     via `combine_each` after the parallel pass. Same E ≥ 256 gate.
 
-   `autoPolicy()`'s `kSeqThreshold = 1e4` keeps small inputs serial so
-   there's no overhead penalty on per-call latency. Determinism is
-   preserved on all 4 corpora (Clipper2/mfogel/JTS/polygon_corpus.txt)
-   bit-identically.
+   Step 4's narrow phase (the per-pair `IntersectSegments` + snap +
+   list-insert loop) stays serial: the snap-to-existing logic reads
+   `lists[*]` mutated by earlier pairs, an inherent ordering
+   constraint. A standalone "parallel narrow phase" via pair-conflict-
+   graph coloring is left as an open extension.
 
-   Step 4 (`FindAndInsertIntersections`) was not parallelized: the
-   snap-to-existing logic mutates `lists[*]` and reads it on every
-   subsequent pair, making the algorithm inherently sequential without
-   a structural rewrite (e.g., a parallel intersection-discovery phase
-   followed by a separate snap-merge pass).
+   Determinism: all four corpora bit-identical to the serial baseline
+   under MANIFOLD_PAR=1.
 
-   An orthogonal serial optimization landed in the same patch: the
-   per-face ray-cast was switched from iterating `canon.map` (a std::map
-   RB-tree) to a pre-flattened `FastEdge` array (`yMin`, `yMax`, `x0`,
-   `dxdy`, `signedMult`) built once before the per-face loop. This is
-   what most of the wall-clock improvement is — the parallel `for_each`
-   on top adds an additional ~1.3x on big workloads.
+   Step 6's biggest single win in the perf push was *not* parallelism
+   per se but an algorithmic change: F per-face ray-casts (O(F·E))
+   replaced by twin-pointer BFS propagation (O(E + F)) seeded by one
+   ray-cast on the outer face per connected component. That alone cut
+   step 6 from ~32% of pipeline time to ~18%, and lifted the JTS
+   invariant `holds`-within-1e-9 count from 1238 to 1918 out of 2034
+   (the per-face ray-cast was FP-fragile when rays grazed vertices).
 
-   **Speedups on the standard workloads** (8-core machine, all corpora
-   produce identical output to the serial baseline):
+   **Cumulative wall-clock impact** (8-core, all corpora bit-identical
+   to the serial baseline, JTS overlay UNION):
 
-   | Workload | Original serial | Serial + FastEdge | Parallel + FastEdge |
-   |---|---|---|---|
-   | DeepFuzz 200 (22.7k cases, mostly small) | 71.2 s | 25.1 s (2.84x) | 24.5 s (2.91x) |
-   | JTS overlay (2042 cases, mixed sizes) | 36.95 s | 4.86 s (7.6x) | **3.6 s (10.3x)** |
-
-   Most JTS cases have N < 1e4 verts and stay serial under
-   `autoPolicy()`; the wall-clock win comes from the few large cases
-   (e.g. `TestOverlay-osmwater.xml`, `stmlf.xml`) where step 6's F faces
-   exceed the threshold and parallelize ~4-5x. DeepFuzz cases are all
-   small enough to stay serial — its speedup is purely from FastEdge.
+   - Original prototype: 1450 ms / case avg 0.310 ms → ratio vs Clipper64 ~10.5x
+   - Final prototype: 660-880 ms (cloud-tenant noise widens the band)
+     / case avg 0.158 ms → ratio vs Clipper64 5-6x
 
    Per-phase wall-clock instrumentation lives behind a `time` CLI mode
    (`./overlap2d_proto time deepfuzz | jtscorpus | clipper2corpus | ...`)
    that prints accumulated nanoseconds per pipeline phase plus a
-   percentage breakdown.
+   percentage breakdown. Final phase split on JTS: step 1 ~20%, step 3
+   ~29%, step 4 ~26%, step 4b ~2%, step 5 ~3%, step 6 ~18%.
+
+   Reaching parity with Clipper2 would need a structural rewrite
+   (sweep-line replacing the per-pair narrow phase). The remaining
+   incremental headroom from BVH/parallelism is small; the biggest
+   un-explored micro-optimization avenues are arena allocation across
+   cases (per-call malloc churn) and SIMD on the inner narrow phase.
 4. **Additional quantitative oracles.** The prototype consumes
    `polygon_corpus.txt` (100 cases) and Clipper2's `Polygons.txt`
    (195 cases; 189 reachable) — see Validation. The Clipper2 run
@@ -385,11 +398,18 @@ we don't relitigate.
   (it's the orientation predicate we already have) but moved
   position computation to the symbolic-perturbation form because
   Smith's α-budget proof requires symbolic positions.
-- **BFS from the outer face** for assigning per-face winding (once
-  we'd switched to DCEL). Doesn't propagate between disconnected
-  components of the face graph (real for self-intersecting inputs
-  whose union has multiple disjoint regions). **Replaced** with
-  per-face ray-cast (`O(F · E)`, independent per face).
+- **Per-face ray-cast for winding** (`O(F · E)`, independent per face).
+  Was the prototype's first approach after switching to DCEL — chosen
+  over BFS-from-outer because BFS doesn't naturally cross
+  disconnected components (real for self-intersecting input whose
+  union has multiple disjoint regions), and because each per-face
+  ray-cast is independent and parallel-friendly. **Eventually replaced**
+  by BFS twin-pointer propagation, with a single ray-cast per
+  connected component to seed (catches the multi-component case
+  that the original objection to BFS targeted): `O(E + F)` total work
+  instead of `O(F · E)`, plus a correctness improvement because the
+  per-face ray-cast was FP-fragile when rays grazed vertices (JTS
+  `holds`-within-1e-9 went from 1238 to 1918 / 2034 after the swap).
 - **Step 4b at threshold ε.** Causes ITER FAILs at shallow crossings.
   Tried 1.5ε (fails), 3ε (still fails on adversarial cases), **10ε**
   (sweet spot, covers crossings down to ~6° angle without
