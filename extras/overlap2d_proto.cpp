@@ -3452,6 +3452,192 @@ inline void RunJtsCorpus(const std::string& path) {
 }  // namespace overlap2d
 
 // =============================================================================
+// Head-to-head benchmark vs Clipper2 (the library overlap2d is intended to
+// eventually replace as `CrossSection`'s boolean/Simplify backend). Built
+// only when -DOVERLAP2D_WITH_CLIPPER2 is defined and Clipper2 is linked.
+//
+// Compile/link:
+//   g++ ... -DOVERLAP2D_WITH_CLIPPER2 -DMANIFOLD_PAR=1 \
+//     -I build/_deps/clipper2-src/CPP/Clipper2Lib/include \
+//     extras/overlap2d_proto.cpp \
+//     build/_deps/clipper2-build/libClipper2.a -ltbb \
+//     -o overlap2d_proto
+//
+// What's timed: the boolean call itself, on already-loaded inputs. We
+// exclude geometry conversion (manifold::Polygons → Clipper2 PathsD)
+// because that's a one-shot cost both sides would amortize out under
+// any real-world wiring.
+//
+// Workloads: each of the three corpora we already validate against,
+// run a UNION on every (sub, clip) pair (or every subject-only case).
+// Clipper2's NONZERO is the cross-comparable fill rule; cases with
+// EVENODD or NEGATIVE/POSITIVE are skipped here so both libraries do
+// the same work. (Correctness comparison happens in the corpus runs;
+// this benchmark is purely about wall-clock at parity.)
+// =============================================================================
+#ifdef OVERLAP2D_WITH_CLIPPER2
+#include "clipper2/clipper.h"
+namespace overlap2d {
+
+inline Clipper2Lib::PathsD ToPathsD(const manifold::Polygons& p) {
+  Clipper2Lib::PathsD out;
+  out.reserve(p.size());
+  for (const auto& loop : p) {
+    Clipper2Lib::PathD path;
+    path.reserve(loop.size());
+    for (const auto& v : loop) path.emplace_back(v.x, v.y);
+    out.push_back(std::move(path));
+  }
+  return out;
+}
+
+struct BenchTotals {
+  int64_t oursNs = 0;
+  int64_t clipperNs = 0;
+  int cases = 0;
+  int oursDrops = 0;     // we returned empty
+  int clipperDrops = 0;  // clipper2 returned empty
+};
+
+inline void TimeOneUnion(const manifold::Polygons& a,
+                         const manifold::Polygons& b, BenchTotals* totals) {
+  using Clock = std::chrono::steady_clock;
+  const double eps = InferEps(a, b);
+  // Ours: single-pass dispatch (mfogel-runner shape). Combine subject
+  // and clip edges with mult=+1 each, run RemoveOverlaps2D once with
+  // a NONZERO `w != 0` predicate — matches Clipper2's UNION+NONZERO
+  // semantics directly without paying for two extra FillUnderRule
+  // pipeline runs that the multi-pass Boolean2D path would incur.
+  std::vector<vec2> verts;
+  std::vector<EdgeM> edges;
+  auto append = [&](const manifold::Polygons& polys) {
+    for (const auto& loop : polys) {
+      if (loop.size() < 3) continue;
+      const int base = static_cast<int>(verts.size());
+      const int n = static_cast<int>(loop.size());
+      for (const auto& v : loop) verts.push_back(v);
+      for (int i = 0; i < n; ++i)
+        edges.push_back({base + i, base + ((i + 1) % n), 1});
+    }
+  };
+  manifold::Polygons ours;
+  auto t0 = Clock::now();
+  append(a);
+  append(b);
+  if (!verts.empty()) {
+    auto r = RemoveOverlaps2D(verts, edges, eps, /*debug=*/false,
+                              [](int w) { return w != 0; });
+    ours = OutEdgesToPolygons(r.verts, r.edges);
+  }
+  auto t1 = Clock::now();
+  totals->oursNs += std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        t1 - t0).count();
+  if (ours.empty()) ++totals->oursDrops;
+
+  // Clipper2 ClipperD (real-coord API; default precision = 2 decimals).
+  auto a2 = ToPathsD(a);
+  auto b2 = ToPathsD(b);
+  Clipper2Lib::ClipperD clip;
+  clip.AddSubject(a2);
+  if (!b.empty()) clip.AddClip(b2);
+  Clipper2Lib::PathsD sol;
+  auto t2 = Clock::now();
+  clip.Execute(Clipper2Lib::ClipType::Union, Clipper2Lib::FillRule::NonZero,
+               sol);
+  auto t3 = Clock::now();
+  totals->clipperNs += std::chrono::duration_cast<std::chrono::nanoseconds>(
+                           t3 - t2).count();
+  if (sol.empty()) ++totals->clipperDrops;
+  ++totals->cases;
+}
+
+inline void ReportBench(const std::string& label, const BenchTotals& t) {
+  auto fmt = [](int64_t ns) {
+    std::ostringstream o; o.setf(std::ios::fixed); o.precision(3);
+    o << ns * 1e-6 << " ms";
+    return o.str();
+  };
+  std::cout << "  " << label << ":\n";
+  std::cout << "    cases:        " << t.cases << "\n";
+  std::cout << "    overlap2d:    " << fmt(t.oursNs)
+            << " (" << (t.cases ? t.oursNs / t.cases / 1000.0 : 0)
+            << " µs/case avg)";
+  if (t.oursDrops) std::cout << "  drops=" << t.oursDrops;
+  std::cout << "\n";
+  std::cout << "    Clipper2 :    " << fmt(t.clipperNs)
+            << " (" << (t.cases ? t.clipperNs / t.cases / 1000.0 : 0)
+            << " µs/case avg)";
+  if (t.clipperDrops) std::cout << "  drops=" << t.clipperDrops;
+  std::cout << "\n";
+  if (t.clipperNs > 0) {
+    const double ratio = static_cast<double>(t.oursNs) / t.clipperNs;
+    std::cout << "    ratio:        ";
+    std::cout.setf(std::ios::fixed); std::cout.precision(2);
+    std::cout << ratio << "x  ("
+              << (ratio < 1 ? "overlap2d faster" : "Clipper2 faster")
+              << ")\n";
+    std::cout.unsetf(std::ios::fixed);
+  }
+}
+
+inline void RunVsClipper2_Clipper2Corpus(const std::string& path) {
+  auto cases = LoadClipper2Cases(path);
+  BenchTotals t;
+  for (const auto& c : cases) {
+    if (c.fillrule != "NONZERO" || c.cliptype != "UNION") continue;
+    TimeOneUnion(c.subjects, c.clips, &t);
+  }
+  ReportBench("Clipper2 corpus / UNION+NONZERO", t);
+}
+
+inline void RunVsClipper2_JtsCorpus(const std::string& path) {
+  auto cases = LoadJtsCorpus(path);
+  BenchTotals t;
+  for (const auto& c : cases) {
+    // overlayAreaTest cases run union(A, B); unionArea is single-input.
+    if (c.op == "overlayAreaTest" || c.op == "overlayareatest") {
+      TimeOneUnion(c.a, c.b, &t);
+    } else if (c.op == "unionArea") {
+      TimeOneUnion(c.a, {}, &t);
+    }
+  }
+  ReportBench("JTS overlay / UNION", t);
+}
+
+inline void RunVsClipper2_MfogelCorpus(const std::string& dir) {
+  auto cases = LoadMfogelCorpus(dir);
+  BenchTotals t;
+  for (const auto& c : cases) {
+    // Run a UNION on the first two features (the most common 2-input
+    // shape; subject-only single-feature cases are skipped here since
+    // that's a self-clean and Clipper2's fill-rule handling differs).
+    if (c.features.size() >= 2 && !c.features[0].empty() &&
+        !c.features[1].empty()) {
+      TimeOneUnion(c.features[0], c.features[1], &t);
+    }
+  }
+  ReportBench("mfogel end-to-end / UNION", t);
+}
+
+inline void RunVsClipper2(const std::string& which) {
+  std::cout << "=== overlap2d vs Clipper2 head-to-head (UNION+NONZERO) ===\n\n";
+  if (which == "all" || which == "clipper2") {
+    RunVsClipper2_Clipper2Corpus(
+        "build/_deps/clipper2-src/Tests/Polygons.txt");
+  }
+  if (which == "all" || which == "jts") {
+    RunVsClipper2_JtsCorpus("test/polygons/jts_overlay_corpus.txt");
+  }
+  if (which == "all" || which == "mfogel") {
+    RunVsClipper2_MfogelCorpus(
+        "build/_deps/mfogel-polygon-clipping-src/test/end-to-end");
+  }
+}
+
+}  // namespace overlap2d
+#endif  // OVERLAP2D_WITH_CLIPPER2
+
+// =============================================================================
 // Deep fuzz: wider seed sweep + iter-vs-topology verification.
 //
 // The standard displacement fuzz uses 30 seeds per (kPow, n) cell. This
@@ -3792,6 +3978,13 @@ int main(int argc, char** argv) {
     RunJtsCorpus(path);
     return 0;
   }
+#ifdef OVERLAP2D_WITH_CLIPPER2
+  if (argc > 1 && std::string(argv[1]) == "vsclipper2") {
+    std::string which = (argc > 2) ? argv[2] : "all";
+    RunVsClipper2(which);
+    return 0;
+  }
+#endif
   if (argc > 1 && std::string(argv[1]) == "time") {
     // Per-phase wall-clock timing on a representative workload. Default
     // workload is DeepFuzz with seedsPerCell=200 (5,600 cases × ~3
