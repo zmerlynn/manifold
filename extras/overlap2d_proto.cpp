@@ -646,6 +646,12 @@ std::vector<EdgeM> RemapAndCollapse(const std::vector<EdgeM>& edges,
 // built over them; they are passed in from the caller so step 3 and
 // step 4 can share a single build (the edges array doesn't change
 // between them, so the boxes don't either).
+//
+// (An attempt to replace the BVH with a uniform grid here regressed
+// JTS step 3 by ~2x: long edges span many grid cells and yield
+// excessive candidate counts even after per-vert deduplication. BVH's
+// hierarchical bbox tightening is a real win for inputs with mixed
+// edge lengths.)
 std::vector<std::vector<int>> BuildEdgeVertLists(
     const std::vector<EdgeM>& edges, const std::vector<vec2>& verts,
     double eps, const std::vector<Box>& edgeBoxes, const BVH& bvh) {
