@@ -497,7 +497,8 @@ VertexMerge MergeVerts(const std::vector<vec2>& in, double eps) {
   // outweigh n² at this scale. The threshold (~32) was tuned empirically
   // on JTS-shape workloads. The pairs are sorted lex-ascending in both
   // paths so the unite step below is deterministic.
-  std::vector<std::pair<int, int>> pairs;
+  thread_local static std::vector<std::pair<int, int>> pairs;
+  pairs.clear();
   if (n < 32) {
     for (int i = 0; i < n; ++i) {
       for (int j = i + 1; j < n; ++j) {
@@ -521,7 +522,8 @@ VertexMerge MergeVerts(const std::vector<vec2>& in, double eps) {
     // lex-ascending at the end so the unite step below stays
     // deterministic.
     auto tBvhStart = Clock::now();
-    std::vector<int> idx(n);
+    thread_local static std::vector<int> idx;
+    idx.resize(n);
     std::iota(idx.begin(), idx.end(), 0);
     std::sort(idx.begin(), idx.end(),
               [&](int a, int b) { return in[a].x < in[b].x; });
@@ -560,7 +562,8 @@ VertexMerge MergeVerts(const std::vector<vec2>& in, double eps) {
   // Parallelize the geometric distance gate (read-only on `in`); unite
   // serially in sorted pair order so cluster roots are deterministic
   // regardless of thread scheduling. See the matching pattern in step 4b.
-  std::vector<uint8_t> doUnite(pairs.size(), 0);
+  thread_local static std::vector<uint8_t> doUnite;
+  doUnite.assign(pairs.size(), 0);
   manifold::for_each_n(
       manifold::autoPolicy(pairs.size()), manifold::countAt(0),
       pairs.size(), [&](size_t k) {
@@ -668,13 +671,29 @@ std::vector<std::vector<int>> BuildEdgeVertLists(
   // exact projection test below. Per-edge `hits` are sorted by parameter
   // at the end so the result is independent of broad-phase visit order.
   // (edgeBoxes and bvh are now passed in from the caller — see signature.)
-  std::vector<Box> vertBoxes(nV);
+  //
+  // Thread-local persistent buffers: `vertBoxes` and `adj` get reused
+  // across RemoveOverlaps2D calls (capacity grows monotonically with the
+  // largest case the thread has seen). For JTS where median ring is 18
+  // pts, this saves ~nV vector<int> allocations per case for `adj` and
+  // one Box-vector grow for `vertBoxes`.
+  //
+  // vertBoxes: resize to exactly nV. Box is a value type with no inner
+  // allocation, so shrinking is free. CollidePairs uses queries.size()
+  // as the BVH-walk query count, so size() must equal nV.
+  // adj: resize only upward (never shrink) so inner vector<int> entries
+  // past `nV` keep their capacity for future cases. We touch only
+  // adj[0..nV-1]; entries past nV are unread.
+  thread_local static std::vector<Box> vertBoxes;
+  thread_local static std::vector<std::vector<int>> adj;
+  vertBoxes.resize(nV);
   for (int v = 0; v < nV; ++v) vertBoxes[v] = BoxOf2DPoint(verts[v], eps);
   // Build vert→neighbors adjacency from the input edges. Used below to
   // detect "thin triangle apex" cases (see comment in CollidePairs).
   // Sorted vector here too — a polygon edge graph has degree ~2-3 per
   // vert, so std::set is pure overhead.
-  std::vector<std::vector<int>> adj(nV);
+  if ((int)adj.size() < nV) adj.resize(nV);
+  for (int i = 0; i < nV; ++i) adj[i].clear();
   for (const auto& e : edges) {
     VESetInsert(&adj[e.v0], e.v1);
     VESetInsert(&adj[e.v1], e.v0);
@@ -958,8 +977,10 @@ void FindAndInsertIntersections(const std::vector<EdgeM>& edges,
                                           std::memory_order_relaxed);
   if ((int)verts->size() == origNumVerts) return;
   auto tPropStart = Clock::now();
-  std::vector<Box> queryBoxes;
-  std::vector<int> queryVerts;
+  thread_local static std::vector<Box> queryBoxes;
+  thread_local static std::vector<int> queryVerts;
+  queryBoxes.clear();
+  queryVerts.clear();
   queryBoxes.reserve((int)verts->size() - origNumVerts);
   queryVerts.reserve((int)verts->size() - origNumVerts);
   for (int v = origNumVerts; v < (int)verts->size(); ++v) {
@@ -1238,7 +1259,12 @@ std::vector<OutEdge> FilterByWindingDCEL(
   //    - hA: vMin → vMax, mult = m
   //    - hB: vMax → vMin, mult = -m
   //    Twins are paired (hA.twin = hB, hB.twin = hA).
-  std::vector<HalfEdge> halfedges;
+  // Thread-local persistent buffers across this whole step. Capacities
+  // grow monotonically with the largest case the thread has seen, so
+  // typical follow-up cases pay zero allocation here. Each gets cleared
+  // (size→0, capacity preserved) at the top of every call.
+  thread_local static std::vector<HalfEdge> halfedges;
+  halfedges.clear();
   halfedges.reserve(2 * canon.edges.size());
   for (const auto& edge : canon.edges) {
     int hA = static_cast<int>(halfedges.size());
@@ -1252,13 +1278,16 @@ std::vector<OutEdge> FilterByWindingDCEL(
   //    Flat CSR layout (outOff[v]..outOff[v+1] indexes into outFlat) avoids
   //    the per-vert vector<int> allocations a vector-of-vector would pay.
   const int nVerts = static_cast<int>(verts.size());
-  std::vector<int> outOff(nVerts + 1, 0);
+  thread_local static std::vector<int> outOff;
+  thread_local static std::vector<int> outFlat;
+  thread_local static std::vector<int> outCur;
+  outOff.assign(nVerts + 1, 0);
   for (int i = 0; i < (int)halfedges.size(); ++i) {
     ++outOff[halfedges[i].origin + 1];
   }
   for (int v = 1; v <= nVerts; ++v) outOff[v] += outOff[v - 1];
-  std::vector<int> outFlat(halfedges.size());
-  std::vector<int> outCur(outOff.begin(), outOff.end());
+  outFlat.resize(halfedges.size());
+  outCur.assign(outOff.begin(), outOff.end());
   for (int i = 0; i < (int)halfedges.size(); ++i) {
     outFlat[outCur[halfedges[i].origin]++] = i;
   }
@@ -1379,12 +1408,14 @@ std::vector<OutEdge> FilterByWindingDCEL(
   // First half-edge encountered per face. Used both as the centering
   // reference for the shoelace area (below) and as the starting half-edge
   // for the per-face winding ray-cast (step 6).
-  std::vector<int> faceStartHE(nFaces, -1);
+  thread_local static std::vector<int> faceStartHE;
+  thread_local static std::vector<double> faceArea;
+  faceStartHE.assign(nFaces, -1);
   for (int i = 0; i < (int)halfedges.size(); ++i) {
     if (halfedges[i].face >= 0 && faceStartHE[halfedges[i].face] == -1)
       faceStartHE[halfedges[i].face] = i;
   }
-  std::vector<double> faceArea(nFaces, 0.0);
+  faceArea.assign(nFaces, 0.0);
   for (int i = 0; i < (int)halfedges.size(); ++i) {
     if (halfedges[i].face < 0) continue;
     const int faceRefHE = faceStartHE[halfedges[i].face];
@@ -1447,8 +1478,10 @@ std::vector<OutEdge> FilterByWindingDCEL(
   //    but the F-fold dependency on it is gone — propagation is a
   //    constant per face.
   const auto fastEdges = BuildFastEdges(canon, verts);
-  std::vector<int> faceWind(nFaces, 0);
-  std::vector<uint8_t> wAssigned(nFaces, 0);
+  thread_local static std::vector<int> faceWind;
+  thread_local static std::vector<uint8_t> wAssigned;
+  faceWind.assign(nFaces, 0);
+  wAssigned.assign(nFaces, 0);
   auto seedRayCast = [&](int f) {
     int h = faceStartHE[f];
     if (h < 0) {
@@ -1484,7 +1517,8 @@ std::vector<OutEdge> FilterByWindingDCEL(
   // correct convention regardless of input orientation.
   faceWind[outerFace] = 0;
   wAssigned[outerFace] = 1;
-  std::vector<int> bfsQ;
+  thread_local static std::vector<int> bfsQ;
+  bfsQ.clear();
   bfsQ.reserve(nFaces);
   auto propagateFrom = [&](int seed) {
     bfsQ.clear();
@@ -1598,7 +1632,8 @@ OverlapResult RemoveOverlaps2D(const std::vector<vec2>& vertsIn,
   // BVH build's amortized cost exceeds the savings on the per-vert
   // query walks. The step 3/4 functions detect an empty bvh.leafToOrig
   // and fall back to their brute-force broad phase.
-  std::vector<Box> edgeBoxes(edges.size());
+  thread_local static std::vector<Box> edgeBoxes;
+  edgeBoxes.resize(edges.size());
   for (size_t e = 0; e < edges.size(); ++e) {
     edgeBoxes[e] =
         BoxOf2DEdge(merge.verts[edges[e].v0], merge.verts[edges[e].v1], eps);
