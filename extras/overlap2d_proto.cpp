@@ -449,21 +449,12 @@ struct PhaseAcc {
   std::atomic<int64_t> step1BvhBuildNs{0};
   std::atomic<int64_t> step1CollideNs{0};
   std::atomic<int64_t> step1RestNs{0};
-  // Step 3 candidate counters: total callbacks, passes through each gate.
-  // gate 1 = not vert == endpoint; gate 2 = not thin-tri apex; gate 3 =
-  // collinear (orient pass + projection in interior); gate 4 = eps² ok.
-  std::atomic<int64_t> step3Candidates{0};
-  std::atomic<int64_t> step3PostGate1{0};
-  std::atomic<int64_t> step3PostGate2{0};
-  std::atomic<int64_t> step3Hits{0};
   void Reset() {
     mergeNs = 0; remapNs = 0; buildListsNs = 0; findIxNs = 0;
     restructNs = 0; canonNs = 0; filterDcelNs = 0; totalNs = 0; cases = 0;
     bvhBuildNs = 0; step3BroadNs = 0; step3NarrowNs = 0;
     step4BroadNs = 0; step4NarrowNs = 0; step4PropNs = 0;
     step1BvhBuildNs = 0; step1CollideNs = 0; step1RestNs = 0;
-    step3Candidates = 0; step3PostGate1 = 0; step3PostGate2 = 0;
-    step3Hits = 0;
   }
 };
 inline PhaseAcc& GlobalPhases() { static PhaseAcc p; return p; }
@@ -656,11 +647,15 @@ std::vector<EdgeM> RemapAndCollapse(const std::vector<EdgeM>& edges,
 // step 4 can share a single build (the edges array doesn't change
 // between them, so the boxes don't either).
 //
-// (An attempt to replace the BVH with a uniform grid here regressed
-// JTS step 3 by ~2x: long edges span many grid cells and yield
-// excessive candidate counts even after per-vert deduplication. BVH's
-// hierarchical bbox tightening is a real win for inputs with mixed
-// edge lengths.)
+// (Tried two alternative broad phases here, both regressed:
+//   1. Uniform grid: long edges span many cells → excessive
+//      candidate counts even after per-vert dedup.
+//   2. Interior-only BVH (boxes shrunk by eps along the edge to
+//      exclude endpoints): the eps perpendicular padding cancels the
+//      along-shrink in the AABB, so endpoints stay inside the box and
+//      no callbacks are filtered. AABB can't cleanly separate
+//      endpoint from "valid vert on edge near endpoint" without
+//      OBB-style geometry.)
 std::vector<std::vector<int>> BuildEdgeVertLists(
     const std::vector<EdgeM>& edges, const std::vector<vec2>& verts,
     double eps, const std::vector<Box>& edgeBoxes, const BVH& bvh) {
@@ -1294,7 +1289,10 @@ std::vector<OutEdge> FilterByWindingDCEL(
   //    only "it-1" produces correctly-oriented face cycles.
   // Each halfedge's .next is determined independently by reading the
   // (now-sorted) outgoing list at its destination vertex. Writes are to
-  // independent slots; reads are read-only.
+  // independent slots; reads are read-only. Tried caching position-of-
+  // self in an int-per-halfedge array — for the typical degree-2
+  // polygon-corner case the std::find on a 2-element vector is faster
+  // than building the cache, so kept the find.
   manifold::for_each(
       manifold::autoPolicy(halfedges.size()), manifold::countAt(0),
       manifold::countAt(static_cast<int>(halfedges.size())), [&](int i) {
@@ -4521,21 +4519,6 @@ int main(int argc, char** argv) {
     row("  step 3+4-broad concurrent",  P.step3BroadNs.load());
     row("  step 4 narrow",              P.step4NarrowNs.load());
     row("  step 4 propagation",         P.step4PropNs.load());
-    std::cout << "\n  Step 3 candidate funnel:\n";
-    const int64_t c = P.step3Candidates.load();
-    const int64_t g1 = P.step3PostGate1.load();
-    const int64_t g2 = P.step3PostGate2.load();
-    const int64_t h = P.step3Hits.load();
-    std::cout << "    callbacks (BVH cand):  " << c << "\n";
-    std::cout << "    pass gate 1 (≠endpt):  " << g1
-              << (c > 0 ? "  (" + std::to_string(g1 * 100 / c) + "%)" : "")
-              << "\n";
-    std::cout << "    pass gate 2 (≠thintri):" << g2
-              << (g1 > 0 ? "  (" + std::to_string(g2 * 100 / g1) + "%)" : "")
-              << "\n";
-    std::cout << "    final hits:            " << h
-              << (g2 > 0 ? "  (" + std::to_string(h * 100 / g2) + "%)" : "")
-              << "\n";
     return 0;
   }
   if (argc > 1 && std::string(argv[1]) == "pentagon") {
