@@ -81,6 +81,7 @@
 #include <iomanip>
 #include <functional>
 #include <map>
+#include <numeric>
 #include <queue>
 #include <random>
 #include <set>
@@ -439,15 +440,39 @@ VertexMerge MergeVerts(const std::vector<vec2>& in, double eps) {
   // produces the same cluster roots and the centroid map iterates the same
   // way (which controls assigned new-vertex indices).
   const double eps2 = eps * eps;
-  std::vector<Box> boxes(n);
-  for (int i = 0; i < n; ++i) boxes[i] = BoxOf2DPoint(in[i], eps);
-  BVH bvh = BVHBuildFromBoxes(boxes);
+  // Broad-phase: collect candidate (i, j) pairs whose padded boxes overlap.
+  // For small n, brute-force O(n²) is faster than the BVH build + Morton
+  // sort + tree traversal — the constant factors for those routines
+  // outweigh n² at this scale. The threshold (~32) was tuned empirically
+  // on JTS-shape workloads. The pairs are sorted lex-ascending in both
+  // paths so the unite step below is deterministic.
   std::vector<std::pair<int, int>> pairs;
-  CollidePairs(bvh, boxes, [&](int qi, int li) {
-    if (qi >= li) return;  // dedupe + skip self
-    pairs.emplace_back(qi, li);
-  });
-  std::sort(pairs.begin(), pairs.end());
+  if (n < 32) {
+    for (int i = 0; i < n; ++i) {
+      for (int j = i + 1; j < n; ++j) {
+        // AABB overlap test (the same the BVH would do): both axes must
+        // overlap on [v[i] - eps, v[i] + eps] ∩ [v[j] - eps, v[j] + eps].
+        const vec2 d = in[i] - in[j];
+        if (std::fabs(d.x) <= 2 * eps && std::fabs(d.y) <= 2 * eps)
+          pairs.emplace_back(i, j);
+      }
+    }
+  } else {
+    std::vector<Box> boxes(n);
+    for (int i = 0; i < n; ++i) boxes[i] = BoxOf2DPoint(in[i], eps);
+    BVH bvh = BVHBuildFromBoxes(boxes);
+    CollidePairs(bvh, boxes, [&](int qi, int li) {
+      if (qi >= li) return;
+      pairs.emplace_back(qi, li);
+    });
+    std::sort(pairs.begin(), pairs.end());
+  }
+  // Fast path: no candidates → no merges, identity remap.
+  if (pairs.empty()) {
+    std::vector<int> remap(n);
+    std::iota(remap.begin(), remap.end(), 0);
+    return {std::move(remap), in};
+  }
   // Parallelize the geometric distance gate (read-only on `in`); unite
   // serially in sorted pair order so cluster roots are deterministic
   // regardless of thread scheduling. See the matching pattern in step 4b.
@@ -459,8 +484,17 @@ VertexMerge MergeVerts(const std::vector<vec2>& in, double eps) {
         vec2 d = in[i] - in[j];
         if (dot(d, d) <= eps2) doUnite[k] = 1;
       });
+  bool anyMerge = false;
   for (size_t k = 0; k < pairs.size(); ++k) {
-    if (doUnite[k]) uf.unite(pairs[k].first, pairs[k].second);
+    if (doUnite[k]) {
+      uf.unite(pairs[k].first, pairs[k].second);
+      anyMerge = true;
+    }
+  }
+  if (!anyMerge) {
+    std::vector<int> remap(n);
+    std::iota(remap.begin(), remap.end(), 0);
+    return {std::move(remap), in};
   }
   // Compute centroid per cluster. Replace the previous std::map<int, ...>
   // (RB-tree, O(log n) per op) with a vector indexed by root id (O(1) per
@@ -620,6 +654,11 @@ void FindAndInsertIntersections(const std::vector<EdgeM>& edges,
     pairs.emplace_back(qi, li);
   });
   std::sort(pairs.begin(), pairs.end());
+  // (An earlier two-phase split — parallel IntersectSegments compute,
+  // serial bookkeeping — measured as a wash on JTS: the per-call
+  // allocation of intersection-point buffers cancelled the parallel
+  // gain because most cases have small pair counts that stay serial
+  // under autoPolicy. Kept the simple sequential form.)
   for (auto [i, j] : pairs) {
     // Skip if shares an endpoint.
     if (edges[i].v0 == edges[j].v0 || edges[i].v0 == edges[j].v1 ||
