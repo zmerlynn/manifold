@@ -1005,10 +1005,20 @@ std::vector<OutEdge> FilterByWindingDCEL(
         auto& hes = outgoing[v];
         if (hes.size() < 2) return;
         const vec2 vp = verts[v];
+        // atan2-free angular comparator: split the plane into two half-
+        // planes (bucket 0 = upper + +x axis, bucket 1 = lower + -x
+        // axis); within a bucket, compare by sign of the cross product.
+        // Sorts CCW from +x. Same monotone order as atan2 but no
+        // transcendental in the per-comparison hot path.
+        auto bucket = [](const vec2& d) {
+          return (d.y > 0 || (d.y == 0 && d.x > 0)) ? 0 : 1;
+        };
         std::sort(hes.begin(), hes.end(), [&](int a, int b) {
           const vec2 dA = verts[halfedges[halfedges[a].twin].origin] - vp;
           const vec2 dB = verts[halfedges[halfedges[b].twin].origin] - vp;
-          return std::atan2(dA.y, dA.x) < std::atan2(dB.y, dB.x);
+          const int bA = bucket(dA), bB = bucket(dB);
+          if (bA != bB) return bA < bB;
+          return dA.x * dB.y - dA.y * dB.x > 0;
         });
       });
 
@@ -1469,6 +1479,10 @@ inline manifold::Polygons OutEdgesToPolygons(
   // vert id beats std::map on cache locality and lookup cost.
   std::vector<std::vector<int>> outgoing(verts.size());
   for (int i = 0; i < nE; ++i) outgoing[edges[i].v0].push_back(i);
+  // atan2-free angular comparator (see step 6 sort site for derivation).
+  auto bucket = [](const vec2& d) {
+    return (d.y > 0 || (d.y == 0 && d.x > 0)) ? 0 : 1;
+  };
   for (size_t v = 0; v < outgoing.size(); ++v) {
     auto& lst = outgoing[v];
     if (lst.size() < 2) continue;
@@ -1476,7 +1490,9 @@ inline manifold::Polygons OutEdgesToPolygons(
     std::sort(lst.begin(), lst.end(), [&](int a, int b) {
       const vec2 da = verts[edges[a].v1] - vp;
       const vec2 db = verts[edges[b].v1] - vp;
-      return std::atan2(da.y, da.x) < std::atan2(db.y, db.x);
+      const int bA = bucket(da), bB = bucket(db);
+      if (bA != bB) return bA < bB;
+      return da.x * db.y - da.y * db.x > 0;
     });
   }
   std::vector<bool> visited(nE, false);
@@ -1500,25 +1516,24 @@ inline manifold::Polygons OutEdgesToPolygons(
       // i.e., angle = atan2(verts[destV].y - verts[edges[cur].v0].y,
       //                     verts[destV].x - verts[edges[cur].v0].x).
       // The next outgoing edge whose direction is just past this
-      // (going CCW) is the one we want; that's the entry one step CW
-      // from the position where the reverse-incoming direction would
-      // sit in the sorted list. Implemented by binary-search on the
-      // reverse direction.
+      // (going CCW) is the one we want. Linear scan with the atan2
+      // delta-from-rev calculation — kept as-is because the walk-step
+      // runs few times per case (avg ~50 steps per RemoveOverlaps2D
+      // output) and atan2 here is not a measurable hotspot vs the
+      // angular-sort comparator above (which executes n log n times
+      // per sort, called once per output vertex).
       const vec2 vp = verts[destV];
       const vec2 inDir = vp - verts[edges[cur].v0];
       const double inAngle = std::atan2(inDir.y, inDir.x);
-      // Reverse direction in (-π, π].
       double rev = inAngle + M_PI;
       if (rev > M_PI) rev -= 2 * M_PI;
       const auto& lst = outgoing[destV];
-      // Find the unvisited entry with the smallest CCW angle past `rev`.
       int next = -1;
       double bestDelta = std::numeric_limits<double>::infinity();
       for (int e : lst) {
         if (visited[e]) continue;
         const vec2 d = verts[edges[e].v1] - vp;
         double ang = std::atan2(d.y, d.x);
-        // CCW delta from rev to ang in [0, 2π).
         double delta = ang - rev;
         if (delta <= 0) delta += 2 * M_PI;
         if (delta < bestDelta) {
