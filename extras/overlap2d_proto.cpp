@@ -462,20 +462,28 @@ VertexMerge MergeVerts(const std::vector<vec2>& in, double eps) {
   for (size_t k = 0; k < pairs.size(); ++k) {
     if (doUnite[k]) uf.unite(pairs[k].first, pairs[k].second);
   }
-  // Compute centroid per cluster.
-  std::map<int, std::pair<vec2, int>> sums;  // root -> (sum, count)
+  // Compute centroid per cluster. Replace the previous std::map<int, ...>
+  // (RB-tree, O(log n) per op) with a vector indexed by root id (O(1) per
+  // op). Sparse — only root ids are populated — but root ids fit in [0, n)
+  // so the address space is dense enough; the constant-factor win on the
+  // 2*n accesses (sum-by-root + remap lookup) more than offsets the
+  // memory.
+  std::vector<vec2> sumPos(n, vec2{0, 0});
+  std::vector<int> sumCnt(n, 0);
   for (int i = 0; i < n; ++i) {
     int r = uf.find(i);
-    auto& s = sums[r];
-    s.first = s.first + in[i];
-    s.second += 1;
+    sumPos[r] = sumPos[r] + in[i];
+    sumCnt[r] += 1;
   }
-  // Assign new indices.
-  std::map<int, int> rootToNew;
+  // Assign new indices in ascending root-id order so output ordering is
+  // deterministic and matches what the old std::map iteration produced.
+  std::vector<int> rootToNew(n, -1);
   std::vector<vec2> verts;
-  for (const auto& [root, sumCount] : sums) {
-    rootToNew[root] = static_cast<int>(verts.size());
-    verts.push_back(sumCount.first * (1.0 / sumCount.second));
+  verts.reserve(n);
+  for (int r = 0; r < n; ++r) {
+    if (sumCnt[r] == 0) continue;
+    rootToNew[r] = static_cast<int>(verts.size());
+    verts.push_back(sumPos[r] * (1.0 / sumCnt[r]));
   }
   std::vector<int> remap(n);
   for (int i = 0; i < n; ++i) remap[i] = rootToNew[uf.find(i)];
@@ -1331,24 +1339,28 @@ OverlapResult RemoveOverlaps2D(const std::vector<vec2>& vertsIn,
       if (doUnite[i]) uf.unite(pairs[i].first, pairs[i].second);
     }
     // Build remap from union-find clusters; cluster position is centroid.
-    std::map<int, std::pair<vec2, int>> sums;
-    for (size_t i = 0; i < merge.verts.size(); ++i) {
-      int r = uf.find(static_cast<int>(i));
-      auto& s = sums[r];
-      s.first = s.first + merge.verts[i];
-      s.second += 1;
+    // Vector-by-root-id replaces std::map (same fix as MergeVerts).
+    const int nV = static_cast<int>(merge.verts.size());
+    std::vector<vec2> sumPos(nV, vec2{0, 0});
+    std::vector<int> sumCnt(nV, 0);
+    int distinctClusters = 0;
+    for (int i = 0; i < nV; ++i) {
+      int r = uf.find(i);
+      if (sumCnt[r] == 0) ++distinctClusters;
+      sumPos[r] = sumPos[r] + merge.verts[i];
+      sumCnt[r] += 1;
     }
-    if (sums.size() < merge.verts.size()) {
-      std::map<int, int> rootToNew;
+    if (distinctClusters < nV) {
+      std::vector<int> rootToNew(nV, -1);
       std::vector<vec2> newVerts;
-      for (const auto& [root, sumCount] : sums) {
-        rootToNew[root] = static_cast<int>(newVerts.size());
-        newVerts.push_back(sumCount.first * (1.0 / sumCount.second));
+      newVerts.reserve(distinctClusters);
+      for (int r = 0; r < nV; ++r) {
+        if (sumCnt[r] == 0) continue;
+        rootToNew[r] = static_cast<int>(newVerts.size());
+        newVerts.push_back(sumPos[r] * (1.0 / sumCnt[r]));
       }
-      std::vector<int> remap(merge.verts.size());
-      for (size_t i = 0; i < merge.verts.size(); ++i) {
-        remap[i] = rootToNew[uf.find(static_cast<int>(i))];
-      }
+      std::vector<int> remap(nV);
+      for (int i = 0; i < nV; ++i) remap[i] = rootToNew[uf.find(i)];
       // Apply remap to edges + lists + composed input remap.
       for (auto& e : edges) {
         e.v0 = remap[e.v0];
