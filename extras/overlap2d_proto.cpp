@@ -449,12 +449,21 @@ struct PhaseAcc {
   std::atomic<int64_t> step1BvhBuildNs{0};
   std::atomic<int64_t> step1CollideNs{0};
   std::atomic<int64_t> step1RestNs{0};
+  // Step 3 candidate counters: total callbacks, passes through each gate.
+  // gate 1 = not vert == endpoint; gate 2 = not thin-tri apex; gate 3 =
+  // collinear (orient pass + projection in interior); gate 4 = eps² ok.
+  std::atomic<int64_t> step3Candidates{0};
+  std::atomic<int64_t> step3PostGate1{0};
+  std::atomic<int64_t> step3PostGate2{0};
+  std::atomic<int64_t> step3Hits{0};
   void Reset() {
     mergeNs = 0; remapNs = 0; buildListsNs = 0; findIxNs = 0;
     restructNs = 0; canonNs = 0; filterDcelNs = 0; totalNs = 0; cases = 0;
     bvhBuildNs = 0; step3BroadNs = 0; step3NarrowNs = 0;
     step4BroadNs = 0; step4NarrowNs = 0; step4PropNs = 0;
     step1BvhBuildNs = 0; step1CollideNs = 0; step1RestNs = 0;
+    step3Candidates = 0; step3PostGate1 = 0; step3PostGate2 = 0;
+    step3Hits = 0;
   }
 };
 inline PhaseAcc& GlobalPhases() { static PhaseAcc p; return p; }
@@ -681,7 +690,13 @@ std::vector<std::vector<int>> BuildEdgeVertLists(
   // candidate buffer and the per-hit Keep flag outweighed the parallel
   // gain because most cases have <1e4 candidates and stay serial under
   // autoPolicy. The serial form is faster across the corpus.)
-  std::vector<std::vector<std::pair<double, int>>> hitsPerEdge(nE);
+  // Single flat (edge, t, vert) buffer instead of vector-of-vectors.
+  // For typical input most edges have zero hits, so the per-edge vector
+  // construction (10170 cases × ~200 edges = ~2M empty-vector
+  // constructions) was a real allocator-churn cost. Sorting one flat
+  // vector and slicing per-edge groups is faster.
+  struct Hit { int e; double t; int v; };
+  std::vector<Hit> flatHits;
   // Per-(v, e) narrow-phase test. Captures the same logic whether
   // candidates come from BVH or brute-force broad phase.
   auto narrow = [&](int v, int e) {
@@ -707,7 +722,7 @@ std::vector<std::vector<int>> BuildEdgeVertLists(
     if (t <= 0 || t >= 1) return;
     const vec2 closest = a + ab * t;
     const vec2 d = verts[v] - closest;
-    if (dot(d, d) <= eps2) hitsPerEdge[e].emplace_back(t, v);
+    if (dot(d, d) <= eps2) flatHits.push_back({e, t, v});
   };
   if (bvh.leafToOrig.empty()) {
     // Brute-force broad phase: O(V·E). Faster than building+querying
@@ -720,11 +735,18 @@ std::vector<std::vector<int>> BuildEdgeVertLists(
   } else {
     CollidePairs(bvh, vertBoxes, [&](int v, int e) { narrow(v, e); });
   }
-  for (int e = 0; e < nE; ++e) {
-    auto& hits = hitsPerEdge[e];
-    std::sort(hits.begin(), hits.end());
-    lists[e].reserve(hits.size());
-    for (const auto& [t, v] : hits) lists[e].push_back(v);
+  // Sort flat hits by (edge, t) and emit per-edge subsequences.
+  std::sort(flatHits.begin(), flatHits.end(), [](const Hit& a, const Hit& b) {
+    if (a.e != b.e) return a.e < b.e;
+    return a.t < b.t;
+  });
+  for (size_t i = 0; i < flatHits.size();) {
+    const int e = flatHits[i].e;
+    size_t j = i;
+    while (j < flatHits.size() && flatHits[j].e == e) ++j;
+    lists[e].reserve(j - i);
+    for (size_t k = i; k < j; ++k) lists[e].push_back(flatHits[k].v);
+    i = j;
   }
   return lists;
 }
@@ -4499,6 +4521,21 @@ int main(int argc, char** argv) {
     row("  step 3+4-broad concurrent",  P.step3BroadNs.load());
     row("  step 4 narrow",              P.step4NarrowNs.load());
     row("  step 4 propagation",         P.step4PropNs.load());
+    std::cout << "\n  Step 3 candidate funnel:\n";
+    const int64_t c = P.step3Candidates.load();
+    const int64_t g1 = P.step3PostGate1.load();
+    const int64_t g2 = P.step3PostGate2.load();
+    const int64_t h = P.step3Hits.load();
+    std::cout << "    callbacks (BVH cand):  " << c << "\n";
+    std::cout << "    pass gate 1 (≠endpt):  " << g1
+              << (c > 0 ? "  (" + std::to_string(g1 * 100 / c) + "%)" : "")
+              << "\n";
+    std::cout << "    pass gate 2 (≠thintri):" << g2
+              << (g1 > 0 ? "  (" + std::to_string(g2 * 100 / g1) + "%)" : "")
+              << "\n";
+    std::cout << "    final hits:            " << h
+              << (g2 > 0 ? "  (" + std::to_string(h * 100 / g2) + "%)" : "")
+              << "\n";
     return 0;
   }
   if (argc > 1 && std::string(argv[1]) == "pentagon") {
