@@ -724,29 +724,62 @@ void FindAndInsertIntersections(const std::vector<EdgeM>& edges,
 // Step 5: break edges into sub-edges; merge duplicates with multiplicity sum.
 // Smith's PolySet2 (Table 7.3): map<lex-ordered segment, signed multiplicity>.
 // =============================================================================
-struct CanonicalSubEdges {
-  std::map<std::pair<int, int>, int> map;  // (vMin, vMax) -> signed mult
+struct CanonEdge {
+  int vMin, vMax;
+  int mult;
+};
 
-  // Add a directed sub-edge. The map key is lex-min-first; multiplicity sign
-  // flips if direction is reversed.
-  void Add(int v0, int v1, int mult) {
+// Canonical sub-edges, stored as a sorted-by-(vMin,vMax) flat vector so
+// the multiple downstream sequential scans (step 6's halfedge build,
+// FastEdge build, and final filter) hit contiguous memory instead of
+// walking a std::map RB-tree three times. Build-side: append unsorted
+// during `Canonicalize`, then `Finalize` sorts and merges duplicates by
+// summing signed mults (matches the older map-insert-with-fold behavior).
+struct CanonicalSubEdges {
+  std::vector<CanonEdge> edges;  // sorted by (vMin, vMax) after Finalize
+
+  inline void Add(int v0, int v1, int mult) {
     if (v0 == v1) return;
     int vMin = std::min(v0, v1);
     int vMax = std::max(v0, v1);
     int signedMult = (v0 < v1) ? mult : -mult;
-    auto it = map.find({vMin, vMax});
-    if (it == map.end()) {
-      map.emplace(std::make_pair(vMin, vMax), signedMult);
-    } else {
-      it->second += signedMult;
-      if (it->second == 0) map.erase(it);
+    edges.push_back({vMin, vMax, signedMult});
+  }
+
+  // Sort by (vMin, vMax), merge consecutive duplicates by summing mults,
+  // drop any whose summed mult is zero.
+  void Finalize() {
+    std::sort(edges.begin(), edges.end(),
+              [](const CanonEdge& a, const CanonEdge& b) {
+                if (a.vMin != b.vMin) return a.vMin < b.vMin;
+                return a.vMax < b.vMax;
+              });
+    size_t w = 0;
+    for (size_t r = 0; r < edges.size();) {
+      size_t k = r;
+      int sumMult = 0;
+      while (k < edges.size() && edges[k].vMin == edges[r].vMin &&
+             edges[k].vMax == edges[r].vMax) {
+        sumMult += edges[k].mult;
+        ++k;
+      }
+      if (sumMult != 0) {
+        edges[w] = {edges[r].vMin, edges[r].vMax, sumMult};
+        ++w;
+      }
+      r = k;
     }
+    edges.resize(w);
   }
 };
 
 CanonicalSubEdges Canonicalize(const std::vector<EdgeM>& edges,
                                const std::vector<std::vector<int>>& lists) {
   CanonicalSubEdges out;
+  // Pre-reserve. Each input edge contributes (1 + lists[e].size()) sub-edges.
+  size_t total = edges.size();
+  for (const auto& l : lists) total += l.size();
+  out.edges.reserve(total);
   for (size_t e = 0; e < edges.size(); ++e) {
     int prev = edges[e].v0;
     for (int v : lists[e]) {
@@ -755,6 +788,7 @@ CanonicalSubEdges Canonicalize(const std::vector<EdgeM>& edges,
     }
     out.Add(prev, edges[e].v1, edges[e].mult);
   }
+  out.Finalize();
   return out;
 }
 
@@ -775,9 +809,10 @@ CanonicalSubEdges Canonicalize(const std::vector<EdgeM>& edges,
 int CastWindingRay(vec2 origin, const CanonicalSubEdges& canon,
                    const std::vector<vec2>& verts) {
   int winding = 0;
-  for (const auto& [key, mult] : canon.map) {
-    vec2 p0 = verts[key.first];
-    vec2 p1 = verts[key.second];
+  for (const auto& edge : canon.edges) {
+    const int mult = edge.mult;
+    vec2 p0 = verts[edge.vMin];
+    vec2 p1 = verts[edge.vMax];
     // Order so p0.y <= p1.y for crossing test.
     bool upward = p0.y < p1.y;
     if (!upward) std::swap(p0, p1);
@@ -822,10 +857,11 @@ struct FastEdge {
 inline std::vector<FastEdge> BuildFastEdges(const CanonicalSubEdges& canon,
                                             const std::vector<vec2>& verts) {
   std::vector<FastEdge> out;
-  out.reserve(canon.map.size());
-  for (const auto& [key, mult] : canon.map) {
-    vec2 p0 = verts[key.first];
-    vec2 p1 = verts[key.second];
+  out.reserve(canon.edges.size());
+  for (const auto& edge : canon.edges) {
+    const int mult = edge.mult;
+    vec2 p0 = verts[edge.vMin];
+    vec2 p1 = verts[edge.vMax];
     const bool upward = p0.y < p1.y;
     if (!upward) std::swap(p0, p1);
     if (p0.y == p1.y) continue;  // horizontal edges contribute nothing
@@ -906,19 +942,20 @@ std::vector<OutEdge> FilterByWindingDCEL(
     bool debug = false, const WindPredicate& isInside = WindAdd()) {
   using dcel_internal::HalfEdge;
   if (debug) {
-    std::cerr << "[FilterByWindingDCEL] canon.map.size()="
-              << canon.map.size() << " verts.size()=" << verts.size() << "\n";
+    std::cerr << "[FilterByWindingDCEL] canon.edges.size()="
+              << canon.edges.size() << " verts.size()=" << verts.size()
+              << "\n";
   }
   // 1. Build half-edges. Each canonical (vMin, vMax) with mult m becomes:
   //    - hA: vMin → vMax, mult = m
   //    - hB: vMax → vMin, mult = -m
   //    Twins are paired (hA.twin = hB, hB.twin = hA).
   std::vector<HalfEdge> halfedges;
-  halfedges.reserve(2 * canon.map.size());
-  for (const auto& [k, m] : canon.map) {
+  halfedges.reserve(2 * canon.edges.size());
+  for (const auto& edge : canon.edges) {
     int hA = static_cast<int>(halfedges.size());
-    halfedges.push_back({hA + 1, -1, k.first, -1, m});
-    halfedges.push_back({hA, -1, k.second, -1, -m});
+    halfedges.push_back({hA + 1, -1, edge.vMin, -1, edge.mult});
+    halfedges.push_back({hA, -1, edge.vMax, -1, -edge.mult});
   }
   if (halfedges.empty()) return {};
 
@@ -1119,9 +1156,9 @@ std::vector<OutEdge> FilterByWindingDCEL(
   //    half-edge of each pair (the (vMin → vMax) direction) is at index
   //    2*i; its twin (vMax → vMin) is at 2*i + 1.
   std::vector<OutEdge> out;
-  out.reserve(canon.map.size());
+  out.reserve(canon.edges.size());
   int hi = 0;
-  for (const auto& [k, m] : canon.map) {
+  for (const auto& edge : canon.edges) {
     const int hA = hi;
     const int hB = hi + 1;
     hi += 2;
@@ -1134,9 +1171,9 @@ std::vector<OutEdge> FilterByWindingDCEL(
     const bool rightIn = isInside(wR);
     if (leftIn == rightIn) continue;
     if (leftIn) {
-      out.push_back({k.first, k.second, 1});
+      out.push_back({edge.vMin, edge.vMax, 1});
     } else {
-      out.push_back({k.second, k.first, 1});
+      out.push_back({edge.vMax, edge.vMin, 1});
     }
   }
   return out;
@@ -1964,14 +2001,14 @@ void Diagnose(uint64_t seed, int kPow = 30, int n = 50) {
                "structural merge; see RemoveOverlaps2D)\n";
 
   auto canon = Canonicalize(edges, lists);
-  std::cerr << "After step 5 (canonicalize): " << canon.map.size()
+  std::cerr << "After step 5 (canonicalize): " << canon.edges.size()
             << " sub-edges (after multiplicity collapse)\n";
 
   // Vertex balance from canonicalized sub-edges.
   std::map<int, int> canonBalance;
-  for (const auto& [k, m] : canon.map) {
-    canonBalance[k.first] += m;
-    canonBalance[k.second] -= m;
+  for (const auto& edge : canon.edges) {
+    canonBalance[edge.vMin] += edge.mult;
+    canonBalance[edge.vMax] -= edge.mult;
   }
 
   // Expected balance from remapped input.
@@ -2000,10 +2037,10 @@ void Diagnose(uint64_t seed, int kPow = 30, int n = 50) {
         // Dump sub-edges touching this vertex.
         std::cerr << "    sub-edges touching v" << v << ":\n";
         int touched = 0;
-        for (const auto& [k, m] : canon.map) {
-          if (k.first == v || k.second == v) {
-            std::cerr << "      (" << k.first << "," << k.second
-                      << ") mult=" << m << "\n";
+        for (const auto& edge : canon.edges) {
+          if (edge.vMin == v || edge.vMax == v) {
+            std::cerr << "      (" << edge.vMin << "," << edge.vMax
+                      << ") mult=" << edge.mult << "\n";
             if (++touched >= 12) {
               std::cerr << "      ... (more truncated)\n";
               break;
@@ -2018,7 +2055,7 @@ void Diagnose(uint64_t seed, int kPow = 30, int n = 50) {
   // Now also run step 6 (winding filter) and check balance again.
   auto out = FilterByWindingDCEL(canon, merge.verts);
   std::cerr << "\nAfter step 6 (winding filter): " << out.size()
-            << " output edges (from " << canon.map.size()
+            << " output edges (from " << canon.edges.size()
             << " canonical sub-edges)\n";
   std::map<int, int> outBalance;
   for (const auto& e : out) {
@@ -2082,10 +2119,10 @@ void Diagnose(uint64_t seed, int kPow = 30, int n = 50) {
     // Per-edge perpendicular-offset ray-cast for diagnostic visualization
     // only (the actual step 6 uses DCEL face traversal).
     const double ofs = eps * 1e-1;
-    for (const auto& [k, m] : canon.map) {
-      if (k.first != targetV && k.second != targetV) continue;
-      vec2 p0 = merge.verts[k.first];
-      vec2 p1 = merge.verts[k.second];
+    for (const auto& edge : canon.edges) {
+      if (edge.vMin != targetV && edge.vMax != targetV) continue;
+      vec2 p0 = merge.verts[edge.vMin];
+      vec2 p1 = merge.verts[edge.vMax];
       vec2 mid = (p0 + p1) * 0.5;
       vec2 d = p1 - p0;
       double len = length(d);
@@ -2094,10 +2131,10 @@ void Diagnose(uint64_t seed, int kPow = 30, int n = 50) {
       vec2 rightPt = mid + perp * -ofs;
       int wL = CastWindingRay(leftPt, canon, merge.verts);
       int wR = CastWindingRay(rightPt, canon, merge.verts);
-      std::cerr << "  sub-edge (" << k.first << "," << k.second
-                << ") mult=" << m << " | mid=(" << mid.x - offset << ","
-                << mid.y - offset << ") perp=(" << perp.x << "," << perp.y
-                << ") | wL=" << wL << " wR=" << wR
+      std::cerr << "  sub-edge (" << edge.vMin << "," << edge.vMax
+                << ") mult=" << edge.mult << " | mid=(" << mid.x - offset
+                << "," << mid.y - offset << ") perp=(" << perp.x << ","
+                << perp.y << ") | wL=" << wL << " wR=" << wR
                 << (((wL > 0) != (wR > 0)) ? " => KEPT" : " => DROPPED")
                 << "\n";
     }
@@ -2239,8 +2276,8 @@ void Diagnose(uint64_t seed, int kPow = 30, int n = 50) {
       }
     }
     auto canon = Canonicalize(e3, l3);
-    std::cerr << "  canonical sub-edges (post step 5): " << canon.map.size()
-              << "\n";
+    std::cerr << "  canonical sub-edges (post step 5): "
+              << canon.edges.size() << "\n";
 
     // For each imbalanced vert, dump every canonical edge touching it and
     // step 6's verdict.
@@ -2252,13 +2289,13 @@ void Diagnose(uint64_t seed, int kPow = 30, int n = 50) {
       std::cerr << "  v" << target << " pos=(" << (vp.x - offset) << ","
                 << (vp.y - offset) << ")\n";
       int sub_count = 0, kept = 0, dropped = 0;
-      for (const auto& [k, m] : canon.map) {
-        if (k.first != target && k.second != target) continue;
+      for (const auto& cedge : canon.edges) {
+        if (cedge.vMin != target && cedge.vMax != target) continue;
         ++sub_count;
-        const int other = (k.first == target) ? k.second : k.first;
+        const int other = (cedge.vMin == target) ? cedge.vMax : cedge.vMin;
         const vec2 op = m3.verts[other];
         vec2 p0 = vp, p1 = op;
-        if (k.first != target) std::swap(p0, p1);
+        if (cedge.vMin != target) std::swap(p0, p1);
         vec2 mid = (p0 + p1) * 0.5;
         vec2 d = p1 - p0;
         const double len = length(d);
@@ -2269,8 +2306,8 @@ void Diagnose(uint64_t seed, int kPow = 30, int n = 50) {
         int wR = CastWindingRay(rpt, canon, m3.verts);
         bool keep = (wL > 0) != (wR > 0);
         if (keep) ++kept; else ++dropped;
-        std::cerr << "    (" << k.first << "↔" << k.second << ") mult=" << m
-                  << " wL=" << wL << " wR=" << wR
+        std::cerr << "    (" << cedge.vMin << "↔" << cedge.vMax
+                  << ") mult=" << cedge.mult << " wL=" << wL << " wR=" << wR
                   << (keep ? " KEEP" : " DROP") << " other.pos=("
                   << (op.x - offset) << "," << (op.y - offset) << ")\n";
         if (sub_count >= 8) {
@@ -4166,7 +4203,8 @@ int main(int argc, char** argv) {
     std::cerr << "  step 4 intersections: " << p2_mrg.verts.size()
               << " verts after\n";
     auto p2_canon = Canonicalize(p2_e, p2_l);
-    std::cerr << "  step 5 canon: " << p2_canon.map.size() << " sub-edges\n";
+    std::cerr << "  step 5 canon: " << p2_canon.edges.size()
+              << " sub-edges\n";
 
     auto pass2 = RemoveOverlaps2D(pass1.verts, p2in, eps, /*debug=*/true);
     std::cerr << "pass1: " << pass1.verts.size() << " verts, "
