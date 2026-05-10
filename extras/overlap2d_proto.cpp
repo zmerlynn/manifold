@@ -3474,6 +3474,12 @@ inline void RunJtsCorpus(const std::string& path) {
 // EVENODD or NEGATIVE/POSITIVE are skipped here so both libraries do
 // the same work. (Correctness comparison happens in the corpus runs;
 // this benchmark is purely about wall-clock at parity.)
+//
+// Reference: `Clipper64` (native int64 API), not `ClipperD` (real-coord
+// wrapper). Per elalish/manifold#1683 the planned post-precision-bug
+// `CrossSection` wiring is `Paths64`-based, so `Clipper64` is the right
+// baseline; `ClipperD`'s per-op rescaling would flatter our number
+// against an end state nobody plans to ship.
 // =============================================================================
 #ifdef OVERLAP2D_WITH_CLIPPER2
 #include "clipper2/clipper.h"
@@ -3486,6 +3492,28 @@ inline Clipper2Lib::PathsD ToPathsD(const manifold::Polygons& p) {
     Clipper2Lib::PathD path;
     path.reserve(loop.size());
     for (const auto& v : loop) path.emplace_back(v.x, v.y);
+    out.push_back(std::move(path));
+  }
+  return out;
+}
+
+// Scale doubles to int64 with a fixed factor and convert to Paths64 (the
+// native Clipper2 API; ClipperD wraps this with rescaling at every op).
+// Per elalish/manifold#1683 the planned post-Clipper2-precision-bug
+// CrossSection wiring is Paths64-based, so the head-to-head we want
+// reports against this faster, full-int-precision path. Scale chosen
+// so a 1e6-coordinate input still has ~1 unit precision in int64.
+constexpr double kPaths64Scale = 1e9;
+inline Clipper2Lib::Paths64 ToPaths64(const manifold::Polygons& p) {
+  Clipper2Lib::Paths64 out;
+  out.reserve(p.size());
+  for (const auto& loop : p) {
+    Clipper2Lib::Path64 path;
+    path.reserve(loop.size());
+    for (const auto& v : loop) {
+      path.emplace_back(static_cast<int64_t>(v.x * kPaths64Scale),
+                        static_cast<int64_t>(v.y * kPaths64Scale));
+    }
     out.push_back(std::move(path));
   }
   return out;
@@ -3534,13 +3562,16 @@ inline void TimeOneUnion(const manifold::Polygons& a,
                         t1 - t0).count();
   if (ours.empty()) ++totals->oursDrops;
 
-  // Clipper2 ClipperD (real-coord API; default precision = 2 decimals).
-  auto a2 = ToPathsD(a);
-  auto b2 = ToPathsD(b);
-  Clipper2Lib::ClipperD clip;
+  // Clipper2 Clipper64 (native int64 API; what CrossSection is targeting
+  // post-#1683 to avoid PathsD's precision cap and rescale overhead).
+  // Conversion to Paths64 is excluded from the timed region; we only
+  // time Execute, the same as for overlap2d.
+  auto a2 = ToPaths64(a);
+  auto b2 = ToPaths64(b);
+  Clipper2Lib::Clipper64 clip;
   clip.AddSubject(a2);
   if (!b.empty()) clip.AddClip(b2);
-  Clipper2Lib::PathsD sol;
+  Clipper2Lib::Paths64 sol;
   auto t2 = Clock::now();
   clip.Execute(Clipper2Lib::ClipType::Union, Clipper2Lib::FillRule::NonZero,
                sol);
