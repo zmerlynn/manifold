@@ -421,6 +421,52 @@ inline void CollidePairs(const BVH& bvh, const std::vector<Box>& queries,
 }
 
 // =============================================================================
+// Per-phase wall-clock accumulator. Atomic so concurrent RemoveOverlaps2D
+// calls (e.g. from a multi-threaded corpus driver, future) can share.
+// Currently RemoveOverlaps2D itself is single-threaded; the accumulator
+// captures cumulative time across many cases for the `time` CLI mode.
+// Defined here so step 3/4 helpers can reference it.
+// =============================================================================
+struct PhaseAcc {
+  std::atomic<int64_t> mergeNs{0};
+  std::atomic<int64_t> remapNs{0};
+  std::atomic<int64_t> buildListsNs{0};
+  std::atomic<int64_t> findIxNs{0};
+  std::atomic<int64_t> restructNs{0};
+  std::atomic<int64_t> canonNs{0};
+  std::atomic<int64_t> filterDcelNs{0};
+  std::atomic<int64_t> totalNs{0};
+  std::atomic<int64_t> cases{0};
+  // Fine-grain sub-phase timers: BVH build, broad phase (collide-pairs),
+  // narrow phase (per-pair work), eager propagation. Steps 3 and 4 share
+  // edgeBoxes + bvh, so build/build is counted once at the call site.
+  std::atomic<int64_t> bvhBuildNs{0};
+  std::atomic<int64_t> step3BroadNs{0};
+  std::atomic<int64_t> step3NarrowNs{0};
+  std::atomic<int64_t> step4BroadNs{0};
+  std::atomic<int64_t> step4NarrowNs{0};
+  std::atomic<int64_t> step4PropNs{0};
+  std::atomic<int64_t> step1BvhBuildNs{0};
+  std::atomic<int64_t> step1CollideNs{0};
+  std::atomic<int64_t> step1RestNs{0};
+  void Reset() {
+    mergeNs = 0; remapNs = 0; buildListsNs = 0; findIxNs = 0;
+    restructNs = 0; canonNs = 0; filterDcelNs = 0; totalNs = 0; cases = 0;
+    bvhBuildNs = 0; step3BroadNs = 0; step3NarrowNs = 0;
+    step4BroadNs = 0; step4NarrowNs = 0; step4PropNs = 0;
+    step1BvhBuildNs = 0; step1CollideNs = 0; step1RestNs = 0;
+  }
+};
+inline PhaseAcc& GlobalPhases() { static PhaseAcc p; return p; }
+
+namespace timing_detail {
+using Clock = std::chrono::steady_clock;
+inline int64_t Ns(Clock::time_point a, Clock::time_point b) {
+  return std::chrono::duration_cast<std::chrono::nanoseconds>(b - a).count();
+}
+}  // namespace timing_detail
+
+// =============================================================================
 // Step 1: vertex merge.
 // Returns: remap[oldIdx] = newIdx, and merged vert positions.
 // =============================================================================
@@ -430,6 +476,11 @@ struct VertexMerge {
 };
 
 VertexMerge MergeVerts(const std::vector<vec2>& in, double eps) {
+  using Clock = std::chrono::steady_clock;
+  auto Ns = [](Clock::time_point a, Clock::time_point b) {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(b - a).count();
+  };
+  auto t0 = Clock::now();
   const int n = static_cast<int>(in.size());
   DisjointSets uf(n);
   // BVH broad phase: each vert's eps-padded box queried against all eps-
@@ -458,17 +509,50 @@ VertexMerge MergeVerts(const std::vector<vec2>& in, double eps) {
       }
     }
   } else {
-    std::vector<Box> boxes(n);
-    for (int i = 0; i < n; ++i) boxes[i] = BoxOf2DPoint(in[i], eps);
-    BVH bvh = BVHBuildFromBoxes(boxes);
-    CollidePairs(bvh, boxes, [&](int qi, int li) {
-      if (qi >= li) return;
-      pairs.emplace_back(qi, li);
-    });
+    // Sort-by-x sweep replaces the BVH self-collide for vertex-vertex
+    // proximity. The BVH build (Morton sort + tree construction +
+    // leaf-permutation table) costs ~20µs even when there are no
+    // candidate pairs, and the typical CrossSection input is
+    // *already* canonical with no close-vert pairs to find. For 1D
+    // proximity (we only need pairs within 2·eps in BOTH axes),
+    // sorting by x and scanning forward until x-distance exceeds 2·eps
+    // is O(n log n) sort + O(n) average sweep — typically 5-10x
+    // faster than BVH at the n's seen in JTS. Pairs are sorted
+    // lex-ascending at the end so the unite step below stays
+    // deterministic.
+    auto tBvhStart = Clock::now();
+    std::vector<int> idx(n);
+    std::iota(idx.begin(), idx.end(), 0);
+    std::sort(idx.begin(), idx.end(),
+              [&](int a, int b) { return in[a].x < in[b].x; });
+    auto tBvhEnd = Clock::now();
+    GlobalPhases().step1BvhBuildNs.fetch_add(Ns(tBvhStart, tBvhEnd),
+                                              std::memory_order_relaxed);
+    auto tCollideStart = Clock::now();
+    const double thresh = 2 * eps;
+    for (int i = 0; i < n; ++i) {
+      const int ai = idx[i];
+      const double ax = in[ai].x;
+      const double ay = in[ai].y;
+      for (int j = i + 1; j < n; ++j) {
+        const int bi = idx[j];
+        const double dx = in[bi].x - ax;
+        if (dx > thresh) break;
+        if (std::fabs(in[bi].y - ay) > thresh) continue;
+        if (ai < bi) pairs.emplace_back(ai, bi);
+        else pairs.emplace_back(bi, ai);
+      }
+    }
     std::sort(pairs.begin(), pairs.end());
+    auto tCollideEnd = Clock::now();
+    GlobalPhases().step1CollideNs.fetch_add(Ns(tCollideStart, tCollideEnd),
+                                             std::memory_order_relaxed);
   }
   // Fast path: no candidates → no merges, identity remap.
   if (pairs.empty()) {
+    auto tRest = Clock::now();
+    GlobalPhases().step1RestNs.fetch_add(Ns(t0, tRest) - 0,
+                                          std::memory_order_relaxed);
     std::vector<int> remap(n);
     std::iota(remap.begin(), remap.end(), 0);
     return {std::move(remap), in};
@@ -719,6 +803,11 @@ void FindAndInsertIntersections(const std::vector<EdgeM>& edges,
                                 const std::vector<Box>& edgeBoxes,
                                 const BVH& bvh,
                                 const std::vector<std::pair<int, int>>& pairs) {
+  using Clock = std::chrono::steady_clock;
+  auto Ns = [](Clock::time_point a, Clock::time_point b) {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(b - a).count();
+  };
+  auto tNarrowStart = Clock::now();
   const int nE = static_cast<int>(edges.size());
   (void)nE;
   const double eps2 = eps * eps;
@@ -826,7 +915,11 @@ void FindAndInsertIntersections(const std::vector<EdgeM>& edges,
   // this propagation does not address).
   // Fast-path: if no new intersection verts were created in the main
   // loop, the propagation pass has nothing to do.
+  auto tNarrowEnd = Clock::now();
+  GlobalPhases().step4NarrowNs.fetch_add(Ns(tNarrowStart, tNarrowEnd),
+                                          std::memory_order_relaxed);
   if ((int)verts->size() == origNumVerts) return;
+  auto tPropStart = Clock::now();
   std::vector<Box> queryBoxes;
   std::vector<int> queryVerts;
   queryBoxes.reserve((int)verts->size() - origNumVerts);
@@ -872,6 +965,9 @@ void FindAndInsertIntersections(const std::vector<EdgeM>& edges,
     CollidePairs(bvh, queryBoxes,
                  [&](int qi, int eIdx) { propagateNarrow(qi, eIdx); });
   }
+  auto tPropEnd = Clock::now();
+  GlobalPhases().step4PropNs.fetch_add(Ns(tPropStart, tPropEnd),
+                                        std::memory_order_relaxed);
 }
 
 // =============================================================================
@@ -1392,29 +1488,8 @@ struct OverlapResult {
 // calls (e.g. from a multi-threaded corpus driver, future) can share.
 // Currently RemoveOverlaps2D itself is single-threaded; the accumulator
 // captures cumulative time across many cases for the `time` CLI mode.
-struct PhaseAcc {
-  std::atomic<int64_t> mergeNs{0};
-  std::atomic<int64_t> remapNs{0};
-  std::atomic<int64_t> buildListsNs{0};
-  std::atomic<int64_t> findIxNs{0};
-  std::atomic<int64_t> restructNs{0};
-  std::atomic<int64_t> canonNs{0};
-  std::atomic<int64_t> filterDcelNs{0};
-  std::atomic<int64_t> totalNs{0};
-  std::atomic<int64_t> cases{0};
-  void Reset() {
-    mergeNs = 0; remapNs = 0; buildListsNs = 0; findIxNs = 0;
-    restructNs = 0; canonNs = 0; filterDcelNs = 0; totalNs = 0; cases = 0;
-  }
-};
-inline PhaseAcc& GlobalPhases() { static PhaseAcc p; return p; }
-
-namespace timing_detail {
-using Clock = std::chrono::steady_clock;
-inline int64_t Ns(Clock::time_point a, Clock::time_point b) {
-  return std::chrono::duration_cast<std::chrono::nanoseconds>(b - a).count();
-}
-}  // namespace timing_detail
+// Defined earlier in the file — see the PhaseAcc declaration above the
+// step 1 helpers.
 
 OverlapResult RemoveOverlaps2D(const std::vector<vec2>& vertsIn,
                                const std::vector<EdgeM>& edgesIn, double eps,
@@ -1444,8 +1519,11 @@ OverlapResult RemoveOverlaps2D(const std::vector<vec2>& vertsIn,
     edgeBoxes[e] =
         BoxOf2DEdge(merge.verts[edges[e].v0], merge.verts[edges[e].v1], eps);
   }
+  auto tBvhStart = Clock::now();
   BVH bvh;
   if (edges.size() >= 32) bvh = BVHBuildFromBoxes(edgeBoxes);
+  auto tBvhEnd = Clock::now();
+  P.bvhBuildNs.fetch_add(Ns(tBvhStart, tBvhEnd), std::memory_order_relaxed);
   // Steps 3 (BuildEdgeVertLists) and 4-broad (CollectStep4Pairs) are
   // independent: step 3 writes `lists`, step 4-broad writes `pairs`,
   // both read-only on (edges, verts, edgeBoxes, bvh). Run them in
@@ -1456,6 +1534,10 @@ OverlapResult RemoveOverlaps2D(const std::vector<vec2>& vertsIn,
   // machine (where blind parallelism regressed wall-clock vs serial).
   std::vector<std::vector<int>> lists;
   std::vector<std::pair<int, int>> step4Pairs;
+  // Sub-phase timing: time step 3 (full) and step 4 broad separately
+  // even when they run concurrently — measures the total CPU time, not
+  // wall-clock, so the sum of the two roughly equals the work done.
+  auto tStep3Start = Clock::now();
 #if MANIFOLD_PAR == 1
   if (edges.size() >= 256) {
     tbb::parallel_invoke(
@@ -1471,6 +1553,14 @@ OverlapResult RemoveOverlaps2D(const std::vector<vec2>& vertsIn,
   lists = BuildEdgeVertLists(edges, merge.verts, eps, edgeBoxes, bvh);
   step4Pairs = CollectStep4Pairs(edges, edgeBoxes, bvh);
 #endif
+  // Charge to step3BroadNs as a stand-in for the combined step 3 work
+  // (broad + narrow are interleaved inside BuildEdgeVertLists' callback;
+  // splitting them would require a structural change). step 4 broad
+  // phase is included in this same wall-clock segment because of
+  // parallel_invoke; the breakdown is approximate.
+  auto tStep3End = Clock::now();
+  P.step3BroadNs.fetch_add(Ns(tStep3Start, tStep3End),
+                            std::memory_order_relaxed);
   auto t3 = Clock::now();
   P.buildListsNs.fetch_add(Ns(t2, t3), std::memory_order_relaxed);
   // Step 4 narrow phase: order-dependent serial pass.
@@ -4396,6 +4486,13 @@ int main(int argc, char** argv) {
     row("step 4b structural re-merge", P.restructNs.load());
     row("step 5  Canonicalize",        P.canonNs.load());
     row("step 6  FilterByWindingDCEL", P.filterDcelNs.load());
+    std::cout << "\n  Sub-phase breakdown (% of pipeline total):\n";
+    row("  step 1 BVH build",           P.step1BvhBuildNs.load());
+    row("  step 1 BVH self-collide",    P.step1CollideNs.load());
+    row("  step 3+4 BVH build",         P.bvhBuildNs.load());
+    row("  step 3+4-broad concurrent",  P.step3BroadNs.load());
+    row("  step 4 narrow",              P.step4NarrowNs.load());
+    row("  step 4 propagation",         P.step4PropNs.load());
     return 0;
   }
   if (argc > 1 && std::string(argv[1]) == "pentagon") {
