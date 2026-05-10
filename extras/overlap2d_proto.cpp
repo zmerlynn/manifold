@@ -683,14 +683,24 @@ inline std::vector<std::pair<int, int>> CollectStep4Pairs(
     return pairs;
   }
 #if (MANIFOLD_PAR == 1)
-  step4_recorder::PairsRecorder rec{bvh.leafToOrig, {}};
-  auto qf = [&](int i) { return edgeBoxes[i]; };
-  bvh.collider.Collisions<false>(rec, qf, nE, /*parallel=*/true);
-  // Merge thread-local pair lists into the global one.
-  rec.tls.combine_each([&](const auto& localPairs) {
-    pairs.insert(pairs.end(), localPairs.begin(), localPairs.end());
-  });
-  std::sort(pairs.begin(), pairs.end());
+  // Same threshold story as parallel_invoke: only enable Collider's
+  // parallel mode when the work justifies the per-thread accumulator +
+  // combine_each overhead. Below the threshold, use the serial adapter.
+  if (nE >= 256) {
+    step4_recorder::PairsRecorder rec{bvh.leafToOrig, {}};
+    auto qf = [&](int i) { return edgeBoxes[i]; };
+    bvh.collider.Collisions<false>(rec, qf, nE, /*parallel=*/true);
+    rec.tls.combine_each([&](const auto& localPairs) {
+      pairs.insert(pairs.end(), localPairs.begin(), localPairs.end());
+    });
+    std::sort(pairs.begin(), pairs.end());
+  } else {
+    CollidePairs(bvh, edgeBoxes, [&](int qi, int li) {
+      if (qi >= li) return;
+      pairs.emplace_back(qi, li);
+    });
+    std::sort(pairs.begin(), pairs.end());
+  }
 #else
   CollidePairs(bvh, edgeBoxes, [&](int qi, int li) {
     if (qi >= li) return;
@@ -1439,14 +1449,24 @@ OverlapResult RemoveOverlaps2D(const std::vector<vec2>& vertsIn,
   // Steps 3 (BuildEdgeVertLists) and 4-broad (CollectStep4Pairs) are
   // independent: step 3 writes `lists`, step 4-broad writes `pairs`,
   // both read-only on (edges, verts, edgeBoxes, bvh). Run them in
-  // parallel; step 4-narrow then reads both outputs.
+  // parallel via tbb::parallel_invoke when the work is large enough to
+  // amortize the parallel-task overhead — TBB pays a few µs to spin up
+  // a parallel region, which can exceed the gain on tiny cases. The
+  // E≥256 threshold was tuned empirically on a contended cloud
+  // machine (where blind parallelism regressed wall-clock vs serial).
   std::vector<std::vector<int>> lists;
   std::vector<std::pair<int, int>> step4Pairs;
 #if MANIFOLD_PAR == 1
-  tbb::parallel_invoke(
-      [&] { lists = BuildEdgeVertLists(edges, merge.verts, eps, edgeBoxes,
-                                        bvh); },
-      [&] { step4Pairs = CollectStep4Pairs(edges, edgeBoxes, bvh); });
+  if (edges.size() >= 256) {
+    tbb::parallel_invoke(
+        [&] {
+          lists = BuildEdgeVertLists(edges, merge.verts, eps, edgeBoxes, bvh);
+        },
+        [&] { step4Pairs = CollectStep4Pairs(edges, edgeBoxes, bvh); });
+  } else {
+    lists = BuildEdgeVertLists(edges, merge.verts, eps, edgeBoxes, bvh);
+    step4Pairs = CollectStep4Pairs(edges, edgeBoxes, bvh);
+  }
 #else
   lists = BuildEdgeVertLists(edges, merge.verts, eps, edgeBoxes, bvh);
   step4Pairs = CollectStep4Pairs(edges, edgeBoxes, bvh);
