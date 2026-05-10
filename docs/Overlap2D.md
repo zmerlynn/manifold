@@ -247,6 +247,9 @@ multiplicity conventions that the public entry points maintain.
 | Boolean2D area regression | 4/4 | Two CCW unit squares offset diagonally; Add area=7, Subtract=3, Intersect=1, **Xor=6** (all exact). Drives the wind > 1 predicate against perpendicular axis-aligned crossings, plus EvenOdd via Xor. |
 | Axis-aligned perpendicular | 1/1 | Two CCW unit squares offset diagonally; produces L-shape union with 8 boundary verts. Regression test for the kernel bug surfaced during OQ #3 / #4 investigation. |
 | `polygon_corpus.txt` (100 entries) | 100/100 topology valid | Manifold's existing curated corpus, run via `./overlap2d_proto corpus`. Area breakdown: 87/100 < 1% drift, 1/100 mid-drift (`Precision4` at 2.6%, correct behavior on a sliver-with-eps-thin-tail), 7/100 collapsed by name (`Degenerate4`, `DegenerateRing`, `NearlyLinear`, `Looping1/2`, `Precision`, `Sweep`), 5/100 had zero-area input. |
+| Clipper2 `Polygons.txt` corpus (195 entries) | 189/189 topology valid; 173/189 within 1% of current Clipper2 output | Independent third-party oracle, run via `./overlap2d_proto clipper2corpus`. 6 cases skipped (NEGATIVE/POSITIVE fill rule, no predicate analog). 173/189 (91.5%) within 1% of *current* Clipper2's output, 10 in 1-10%, 6 ≥10% — the ≥10% set are exclusively tiny intersections (areas 3-70 units) where 1-13 absolute units of FP error gives a large relative drift. Two findings emerged: (1) the corpus's stored `SOL_AREA` differs from current Clipper2 by ≥1% on 12 cases — it's stale, not a fresh oracle. (2) The `Boolean2D` API as written assumes CCW-canonical, single-orientation input (predicates use Smith's `w > 0` union convention). To match Clipper2's `boolean(fill_rule(subj), fill_rule(clip))` semantics on arbitrary inputs, callers must pre-fill each side with the declared fill rule. The corpus runner does this transparently; consumers wiring overlap2d as a `CrossSection` backend will hit the same need. |
+| mfogel/polygon-clipping end-to-end corpus (134 case-op pairs across 87 named cases) | 134/134 topology valid; 112/134 within 1% of expected | Real-bug-derived JS corpus (run via `./overlap2d_proto mfogelcorpus`). 84% match within 1% after pre-fill under NONZERO with mfogel's first-ring-outer/rest-holes auto-normalization. The 2 cases ≥10% drift are both `coincident-with-invalid-segments` — mfogel-specific quirk on intentionally-malformed input. **Found a real framework bug**: chained `Boolean2D(Boolean2D(A, B), C)` mishandles intermediate T-junction vertices when the next input also has a coincident edge (`issue-44`). Fixed by switching the corpus runner's N-feature dispatch to a single-pass `RemoveOverlaps2D` call with combined inputs and a per-op predicate (`w != 0` for union, `w >= N` for N-input intersection, `w > 0` after mult-flipping for N-input difference, `w & 1` for xor). This is also more semantically faithful to N-input ops than left-to-right chaining. |
+| JTS robust/overlay corpus (2042 cases) | 2042/2042 topology valid; 1999/2034 invariant satisfied within 1% | Real-world GIS bug corpus from JTS Topology Suite (cases harvested from production tickets in GEOS, PostGIS, QGIS, JTS itself, Shapely). Run via `./overlap2d_proto jtscorpus` after generating the corpus locally with `python3 test/polygons/jts_to_corpus.py <jts_overlay_dir> test/polygons/jts_overlay_corpus.txt` (the 11 MB generated file is `.gitignore`d to keep the repo lean; the converter is checked in). The dominant op (~2034 cases) is `overlayAreaTest`, an invariant check `\|A∪B\| + \|A∩B\| = \|A\| + \|B\|` — a self-checking oracle; a bug in either union or intersection that creates or loses area shows up immediately. 1238 cases hold the invariant to within 1e-9, 761 within 1%, 35 violate by ≥1%. The 35 violators cluster in two datasets: `TestOverlay-stmlf.xml` (Bavarian land parcels at UTM-million coordinate scale, marked "all handled by snapping" in JTS — exposes the prototype's bbox-α-budget eps being too aggressive at large displacement, OQ #2) and `TestOverlay-isochrone.xml` (very-small-area intersections, ~1e-5 units, where FP noise dominates). XML+WKB+WKT parsing lives in `test/polygons/jts_to_corpus.py` (~150 LOC); the C++ runner just consumes a flat text format, keeping the algorithm code unencumbered by data-format plumbing. The same converter pattern absorbs other XML+WKB corpora (e.g. GEOS testxml) without C++ changes. |
 | DeepFuzz area drift (12,000 seeds, post-propagation) | 406 cases > 1% (0.23% of 177,895 measurable), 145 > 10% | Quantitative oracle on top of topology. Of the cases with measurable input area, 0.23% drift > 1% between pass 1 and converged. Almost all cases at kPow=35 (where ULP precision is weakest); a few at kPow=30. Max drift 100% (the seed=8993 thin-polygon collapse). The 100-seed sample showed 6 such cases; the 12k run reveals a longer thin-polygon-class tail invisible at smaller scale. |
 
 Displacement fuzz is the load-bearing test: traditional FP boolean
@@ -268,14 +271,18 @@ entire adversarial range, in every size and seed tested.
 3. **Multi-threading.** `manifold::Collider` is parallel-ready; the
    prototype is `MANIFOLD_PAR=-1` only. Step 1 union-find and step 6
    per-face ray-cast are the natural parallelism candidates.
-4. **Additional quantitative oracles.** The prototype now has area
-   preservation and area-drift tracking on top of the topology check
-   (see Validation), and consumes `polygon_corpus.txt` directly. The
-   remaining easy add is Clipper2's `Polygons.txt` (195 numbered
-   cases with `SOL_AREA` references), which gives an independent
-   third-party oracle on a wider input distribution than
-   `polygon_corpus.txt`. Worth doing for production landing; not
-   strictly required for the design discussion.
+4. **Additional quantitative oracles.** The prototype consumes
+   `polygon_corpus.txt` (100 cases) and Clipper2's `Polygons.txt`
+   (195 cases; 189 reachable) — see Validation. The Clipper2 run
+   surfaced one design item worth flagging: the `Boolean2D` API
+   currently assumes CCW-canonical input (predicates `w > 0` /
+   `w > 1`), so reproducing Clipper2's `boolean(fill_rule(subj),
+   fill_rule(clip))` semantics on arbitrary fill-rule input requires
+   each side to be pre-filled under its declared fill rule first.
+   The corpus runner does this with a `FillUnderRule` helper; whether
+   `CrossSection`'s wiring should expose a fill-rule parameter (or
+   always auto-canonicalize internally) is the production-landing
+   question.
 
 ## Deferred (graduation patch)
 
