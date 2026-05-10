@@ -647,6 +647,28 @@ std::vector<std::vector<int>> BuildEdgeVertLists(
 // overlap. Output is sorted lex-ascending. Extracted as a separate
 // function so it can run concurrently with step 3 (BuildEdgeVertLists)
 // via tbb::parallel_invoke.
+//
+// For BVH path, uses Collider's parallel-capable Collisions API with a
+// thread-local accumulator (tbb::combinable). Each thread emits pairs
+// into its own vector; combine_each merges them, then a single sort
+// re-establishes lex order. This is faster than the previous serial
+// CollidePairs adapter when the candidate count justifies the parallel
+// overhead.
+#if (MANIFOLD_PAR == 1)
+namespace step4_recorder {
+struct PairsRecorder {
+  using Local = std::vector<std::pair<int, int>>;
+  const std::vector<int>& leafToOrig;
+  tbb::combinable<Local> tls;
+  inline void record(int queryIdx, int leafIdx, Local& local) const {
+    const int li = leafToOrig[leafIdx];
+    if (queryIdx < li) local.emplace_back(queryIdx, li);
+  }
+  Local& local() { return tls.local(); }
+};
+}  // namespace step4_recorder
+#endif
+
 inline std::vector<std::pair<int, int>> CollectStep4Pairs(
     const std::vector<EdgeM>& edges, const std::vector<Box>& edgeBoxes,
     const BVH& bvh) {
@@ -658,13 +680,24 @@ inline std::vector<std::pair<int, int>> CollectStep4Pairs(
         if (edgeBoxes[i].DoesOverlap(edgeBoxes[j])) pairs.emplace_back(i, j);
       }
     }
-  } else {
-    CollidePairs(bvh, edgeBoxes, [&](int qi, int li) {
-      if (qi >= li) return;
-      pairs.emplace_back(qi, li);
-    });
-    std::sort(pairs.begin(), pairs.end());
+    return pairs;
   }
+#if (MANIFOLD_PAR == 1)
+  step4_recorder::PairsRecorder rec{bvh.leafToOrig, {}};
+  auto qf = [&](int i) { return edgeBoxes[i]; };
+  bvh.collider.Collisions<false>(rec, qf, nE, /*parallel=*/true);
+  // Merge thread-local pair lists into the global one.
+  rec.tls.combine_each([&](const auto& localPairs) {
+    pairs.insert(pairs.end(), localPairs.begin(), localPairs.end());
+  });
+  std::sort(pairs.begin(), pairs.end());
+#else
+  CollidePairs(bvh, edgeBoxes, [&](int qi, int li) {
+    if (qi >= li) return;
+    pairs.emplace_back(qi, li);
+  });
+  std::sort(pairs.begin(), pairs.end());
+#endif
   return pairs;
 }
 
