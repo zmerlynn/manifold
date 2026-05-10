@@ -1428,7 +1428,17 @@ std::vector<OutEdge> FilterByWindingDCEL(
   // Outer face is the convention-fixed seed: by topology it sits
   // outside the arrangement, so faceWind = 0. The shoelace area test
   // identified it above.
-  seedRayCast(outerFace);
+  //
+  // Don't ray-cast — at large coord magnitudes (e.g. JTS GIS data with
+  // coords ~4.5e6 and polygon extents only ~80), the perpendicular step
+  // (`len * 1e-3`) can be small enough relative to coordinate ULPs that
+  // the FP-rounded `pInF` doesn't reliably land in the *outer* half-
+  // plane of the boundary edge — the ray-cast then returns a non-zero
+  // winding and every other face's BFS-propagated winding inherits the
+  // bias. By topology the outer face is unbounded, so winding=0 is the
+  // correct convention regardless of input orientation.
+  faceWind[outerFace] = 0;
+  wAssigned[outerFace] = 1;
   std::vector<int> bfsQ;
   bfsQ.reserve(nFaces);
   auto propagateFrom = [&](int seed) {
@@ -4077,6 +4087,89 @@ inline void RunVsClipper2(const std::string& which) {
   }
 }
 
+// Diagnostic: walk the JTS corpus and print every case where overlap2d's
+// output diverges from Clipper2's (one drops while the other doesn't, or
+// area differs by more than a small tolerance). Used to triage drop cases
+// without polluting the timed benchmark path.
+inline void RunJtsDropDiag(const std::string& path) {
+  auto cases = LoadJtsCorpus(path);
+  std::cout << "=== JTS drop / divergence diagnostic ===\n";
+  int oursDrops = 0, clipperDrops = 0, bothEmpty = 0, bothNonEmpty = 0;
+  int ourEmptyTheyNot = 0, theirEmptyOursNot = 0;
+  for (const auto& c : cases) {
+    bool isUnion = (c.op == "overlayAreaTest" || c.op == "overlayareatest");
+    bool isUnionArea = (c.op == "unionArea");
+    if (!isUnion && !isUnionArea) continue;
+    const manifold::Polygons& A = c.a;
+    const manifold::Polygons& B = isUnion ? c.b : manifold::Polygons{};
+    const double eps = InferEps(A, B);
+    // Build inputs for overlap2d.
+    std::vector<vec2> verts;
+    std::vector<EdgeM> edges;
+    auto append = [&](const manifold::Polygons& polys) {
+      for (const auto& loop : polys) {
+        if (loop.size() < 3) continue;
+        const int base = static_cast<int>(verts.size());
+        const int n = static_cast<int>(loop.size());
+        for (const auto& v : loop) verts.push_back(v);
+        for (int i = 0; i < n; ++i)
+          edges.push_back({base + i, base + ((i + 1) % n), 1});
+      }
+    };
+    append(A); append(B);
+    manifold::Polygons ours;
+    if (!verts.empty()) {
+      auto r = RemoveOverlaps2D(verts, edges, eps, /*debug=*/false,
+                                [](int w) { return w != 0; });
+      ours = OutEdgesToPolygons(r.verts, r.edges);
+    }
+    // Clipper2 reference.
+    auto a2 = ToPaths64(A);
+    auto b2 = ToPaths64(B);
+    Clipper2Lib::Clipper64 clip;
+    clip.AddSubject(a2);
+    if (!B.empty()) clip.AddClip(b2);
+    Clipper2Lib::Paths64 sol;
+    clip.Execute(Clipper2Lib::ClipType::Union, Clipper2Lib::FillRule::NonZero,
+                 sol);
+    const bool oursEmpty = ours.empty();
+    const bool theirsEmpty = sol.empty();
+    if (oursEmpty) ++oursDrops;
+    if (theirsEmpty) ++clipperDrops;
+    if (oursEmpty && theirsEmpty) ++bothEmpty;
+    if (!oursEmpty && !theirsEmpty) ++bothNonEmpty;
+    if (oursEmpty && !theirsEmpty) {
+      ++ourEmptyTheyNot;
+      // Clipper2 area for context.
+      double clipArea = 0;
+      for (const auto& p : sol) clipArea += Clipper2Lib::Area(p);
+      // Total input vert/edge count for size context.
+      int totalVerts = 0, totalRings = 0;
+      for (const auto& p : A) { totalVerts += p.size(); ++totalRings; }
+      for (const auto& p : B) { totalVerts += p.size(); ++totalRings; }
+      std::cout << "OURS-DROP case=" << c.n << " op=" << c.op
+                << " src=" << c.source
+                << " A.rings=" << A.size() << " B.rings=" << B.size()
+                << " verts=" << totalVerts
+                << " eps=" << eps
+                << " clipperArea=" << clipArea << "\n";
+    }
+    if (!oursEmpty && theirsEmpty) {
+      ++theirEmptyOursNot;
+      std::cout << "THEY-DROP case=" << c.n << " op=" << c.op
+                << " src=" << c.source << "\n";
+    }
+  }
+  std::cout << "\nSummary:\n";
+  std::cout << "  total cases:           " << cases.size() << "\n";
+  std::cout << "  both nonempty:         " << bothNonEmpty << "\n";
+  std::cout << "  both empty:            " << bothEmpty << "\n";
+  std::cout << "  ours drops, theirs ok: " << ourEmptyTheyNot << "\n";
+  std::cout << "  theirs drops, ours ok: " << theirEmptyOursNot << "\n";
+  std::cout << "  total ours drops:      " << oursDrops << "\n";
+  std::cout << "  total theirs drops:    " << clipperDrops << "\n";
+}
+
 }  // namespace overlap2d
 #endif  // OVERLAP2D_WITH_CLIPPER2
 
@@ -4426,6 +4519,74 @@ int main(int argc, char** argv) {
     std::string which = (argc > 2) ? argv[2] : "all";
     RunVsClipper2(which);
     return 0;
+  }
+  if (argc > 1 && std::string(argv[1]) == "jtsdrops") {
+    std::string path = (argc > 2) ? argv[2] : "test/polygons/jts_overlay_corpus.txt";
+    RunJtsDropDiag(path);
+    return 0;
+  }
+  if (argc > 1 && std::string(argv[1]) == "jtsdiag") {
+    if (argc < 3) {
+      std::cerr << "Usage: jtsdiag <case_n>\n";
+      return 1;
+    }
+    int targetCase = std::atoi(argv[2]);
+    auto cases = LoadJtsCorpus("test/polygons/jts_overlay_corpus.txt");
+    for (const auto& c : cases) {
+      if (c.n != targetCase) continue;
+      std::cout << "=== JTS case " << c.n << " ===\n";
+      std::cout << "  op=" << c.op << " src=" << c.source << "\n";
+      std::cout << "  A.rings=" << c.a.size() << " B.rings=" << c.b.size() << "\n";
+      double xMin = 1e300, yMin = 1e300, xMax = -1e300, yMax = -1e300;
+      int totalVerts = 0;
+      auto bound = [&](const manifold::Polygons& polys) {
+        for (const auto& loop : polys) {
+          totalVerts += loop.size();
+          for (const auto& v : loop) {
+            xMin = std::min(xMin, v.x); yMin = std::min(yMin, v.y);
+            xMax = std::max(xMax, v.x); yMax = std::max(yMax, v.y);
+          }
+        }
+      };
+      bound(c.a); bound(c.b);
+      const double eps = InferEps(c.a, c.b);
+      std::cout << "  bbox: x=[" << xMin << ".." << xMax << "] y=[" << yMin << ".." << yMax << "]\n";
+      std::cout << "  total verts: " << totalVerts << " eps: " << eps << "\n";
+      // Run our pipeline with debug=true.
+      const manifold::Polygons& A = c.a;
+      const manifold::Polygons& B = (c.op == "overlayAreaTest" || c.op == "overlayareatest") ? c.b : manifold::Polygons{};
+      std::vector<vec2> verts;
+      std::vector<EdgeM> edges;
+      auto append = [&](const manifold::Polygons& polys) {
+        for (const auto& loop : polys) {
+          if (loop.size() < 3) continue;
+          const int base = static_cast<int>(verts.size());
+          const int n = static_cast<int>(loop.size());
+          for (const auto& v : loop) verts.push_back(v);
+          for (int i = 0; i < n; ++i)
+            edges.push_back({base + i, base + ((i + 1) % n), 1});
+        }
+      };
+      append(A); append(B);
+      std::cout << "  Pipeline input: " << verts.size() << " verts, " << edges.size() << " edges\n";
+      auto r = RemoveOverlaps2D(verts, edges, eps, /*debug=*/true,
+                                [](int w) { return w != 0; });
+      auto out = OutEdgesToPolygons(r.verts, r.edges);
+      std::cout << "  Pipeline output: " << r.verts.size() << " verts, " << r.edges.size() << " edges, " << out.size() << " polygons\n";
+      // Clipper2 reference for comparison.
+      auto a2 = ToPaths64(A);
+      auto b2 = ToPaths64(B);
+      Clipper2Lib::Clipper64 clip;
+      clip.AddSubject(a2);
+      if (!B.empty()) clip.AddClip(b2);
+      Clipper2Lib::Paths64 sol;
+      clip.Execute(Clipper2Lib::ClipType::Union, Clipper2Lib::FillRule::NonZero, sol);
+      double clipArea = 0; for (const auto& p : sol) clipArea += Clipper2Lib::Area(p);
+      std::cout << "  Clipper2 output: " << sol.size() << " paths, area=" << clipArea << "\n";
+      return 0;
+    }
+    std::cerr << "Case " << targetCase << " not found\n";
+    return 1;
   }
 #endif
   if (argc > 1 && std::string(argv[1]) == "time") {
