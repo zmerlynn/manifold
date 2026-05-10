@@ -74,6 +74,7 @@
 #include <cstdint>
 #include <iostream>
 #include <climits>
+#include <cstring>
 #include <fstream>
 #include <functional>
 #include <map>
@@ -2276,6 +2277,1032 @@ inline void RunCorpus(const std::string& path) {
 }  // namespace overlap2d
 
 // =============================================================================
+// Clipper2 Polygons.txt corpus runner.
+//
+// Independent third-party oracle from Clipper2's test suite (195 numbered
+// cases at build/_deps/clipper2-src/Tests/Polygons.txt). Each case has:
+//
+//   CAPTION: <n>. [<note>]
+//   CLIPTYPE: UNION | INTERSECTION | DIFFERENCE
+//   FILLRULE: NONZERO | EVENODD | NEGATIVE | POSITIVE
+//   SOL_AREA: <expected absolute area, or -1 if not validated>
+//   SOL_COUNT: <expected loop count, or -1>
+//   SUBJECTS
+//   x,y, x,y, ...        (one polygon per line; integer coords)
+//   ...
+//   [CLIPS
+//   x,y, x,y, ...]
+//   <blank line>
+//
+// Dispatch model: Clipper2's CLIPTYPE × FILLRULE semantics is
+//
+//   result = boolean_op(fill_rule(subjects), fill_rule(clips))
+//
+// i.e. each input is independently canonicalized to a CCW arrangement
+// under the declared fill rule, then the boolean op combines them. The
+// prototype's public Simplify/Boolean2D/Xor APIs assume CCW-canonical
+// input (predicates use Smith's w>0 union convention), so they don't
+// match Clipper2's semantics directly when inputs are self-intersecting
+// or in screen-coord (y-down → CW in y-up math) orientation.
+//
+// To fairly compare, we run each case through a pre-fill stage:
+//
+//   - FILLRULE: NONZERO → RemoveOverlaps2D with predicate w != 0
+//   - FILLRULE: EVENODD → RemoveOverlaps2D with predicate w & 1
+//   - FILLRULE: NEGATIVE/POSITIVE → unsupported (6 cases skipped).
+//
+// After pre-fill, both sides are CCW-canonical, and we combine via:
+//
+//   - UNION        → Boolean2D::Add        (w>0 on combined CCW)
+//   - INTERSECTION → Boolean2D::Intersect  (w>1 on combined CCW)
+//   - DIFFERENCE   → Boolean2D::Subtract   (B mult flipped, then w>0)
+//
+// The eps inferred from the bounding box (Smith α-budget at L = max
+// |coord|) lands at ~1e-12 for these int-coordinate inputs — well below
+// the unit grid the corpus uses, so iteration shouldn't be triggered
+// by snap-induced changes.
+// =============================================================================
+namespace overlap2d {
+
+struct Clipper2Case {
+  int n = 0;
+  std::string caption;
+  std::string cliptype;
+  std::string fillrule;
+  double solArea = -1.0;
+  int solCount = -1;
+  manifold::Polygons subjects;
+  manifold::Polygons clips;
+};
+
+// Parse one polygon line "x,y, x,y, x,y" into a SimplePolygon. Coordinates
+// are comma-separated; pairs are flat in the list. Tolerates trailing
+// whitespace/commas.
+inline manifold::SimplePolygon ParseClipper2PolyLine(const std::string& line) {
+  manifold::SimplePolygon poly;
+  std::vector<double> nums;
+  std::string buf;
+  for (char c : line) {
+    if (c == ',' || std::isspace(static_cast<unsigned char>(c))) {
+      if (!buf.empty()) {
+        try { nums.push_back(std::stod(buf)); } catch (...) {}
+        buf.clear();
+      }
+    } else {
+      buf.push_back(c);
+    }
+  }
+  if (!buf.empty()) {
+    try { nums.push_back(std::stod(buf)); } catch (...) {}
+  }
+  for (size_t i = 0; i + 1 < nums.size(); i += 2) {
+    poly.push_back({nums[i], nums[i + 1]});
+  }
+  return poly;
+}
+
+inline std::vector<Clipper2Case> LoadClipper2Cases(const std::string& path) {
+  std::vector<Clipper2Case> cases;
+  std::ifstream in(path);
+  if (!in) {
+    std::cerr << "Failed to open " << path << "\n";
+    return cases;
+  }
+  Clipper2Case cur;
+  bool inCase = false;
+  enum class Section { None, Subjects, Clips };
+  Section sec = Section::None;
+  std::string line;
+  auto flush = [&]() {
+    if (inCase && !cur.caption.empty()) cases.push_back(std::move(cur));
+    cur = Clipper2Case{};
+    inCase = false;
+    sec = Section::None;
+  };
+  while (std::getline(in, line)) {
+    while (!line.empty() && (line.back() == '\r' || line.back() == ' '))
+      line.pop_back();
+    if (line.empty()) {
+      flush();
+      continue;
+    }
+    auto starts = [&](const char* k) {
+      size_t n = std::strlen(k);
+      return line.size() >= n && line.compare(0, n, k) == 0;
+    };
+    if (starts("CAPTION:")) {
+      flush();
+      inCase = true;
+      cur.caption = line.substr(8);
+      // Strip leading whitespace and trailing dot.
+      size_t p = 0;
+      while (p < cur.caption.size() && std::isspace(static_cast<unsigned char>(cur.caption[p]))) ++p;
+      cur.caption = cur.caption.substr(p);
+      cur.n = std::atoi(cur.caption.c_str());
+      continue;
+    }
+    if (!inCase) continue;
+    if (starts("CLIPTYPE:")) { cur.cliptype = line.substr(9); auto p = cur.cliptype.find_first_not_of(" \t"); cur.cliptype = (p == std::string::npos) ? "" : cur.cliptype.substr(p); continue; }
+    if (starts("FILLRULE:")) { cur.fillrule = line.substr(9); auto p = cur.fillrule.find_first_not_of(" \t"); cur.fillrule = (p == std::string::npos) ? "" : cur.fillrule.substr(p); continue; }
+    if (starts("SOL_AREA:")) { cur.solArea = std::stod(line.substr(9)); continue; }
+    if (starts("SOL_COUNT:")) { cur.solCount = std::atoi(line.c_str() + 10); continue; }
+    if (line == "SUBJECTS" || line == "SUBJECTS_OPEN") { sec = Section::Subjects; continue; }
+    if (line == "CLIPS" || line == "CLIPS_OPEN") { sec = Section::Clips; continue; }
+    auto poly = ParseClipper2PolyLine(line);
+    if (poly.size() >= 3) {
+      if (sec == Section::Clips) cur.clips.push_back(std::move(poly));
+      else cur.subjects.push_back(std::move(poly));
+    }
+  }
+  flush();
+  return cases;
+}
+
+enum class Clipper2Reach { Supported, Unsupported };
+
+inline Clipper2Reach ClassifyCase(const Clipper2Case& c) {
+  if (c.fillrule == "NEGATIVE" || c.fillrule == "POSITIVE")
+    return Clipper2Reach::Unsupported;
+  if (c.fillrule != "NONZERO" && c.fillrule != "EVENODD")
+    return Clipper2Reach::Unsupported;
+  if (c.cliptype != "UNION" && c.cliptype != "INTERSECTION" &&
+      c.cliptype != "DIFFERENCE")
+    return Clipper2Reach::Unsupported;
+  return Clipper2Reach::Supported;
+}
+
+// Pre-fill polys under the declared fill rule. Output is a CCW-canonical
+// arrangement (no self-overlap). Reuses RemoveOverlaps2D with a custom
+// predicate so we don't perturb the public API surface.
+inline manifold::Polygons FillUnderRule(const manifold::Polygons& polys,
+                                        const std::string& rule, double eps) {
+  if (polys.empty()) return {};
+  std::vector<vec2> verts;
+  std::vector<EdgeM> edges;
+  for (const auto& loop : polys) {
+    if (loop.size() < 3) continue;
+    const int base = static_cast<int>(verts.size());
+    const int n = static_cast<int>(loop.size());
+    for (const auto& v : loop) verts.push_back(v);
+    for (int i = 0; i < n; ++i)
+      edges.push_back({base + i, base + ((i + 1) % n), 1});
+  }
+  if (verts.empty()) return {};
+  WindPredicate pred = (rule == "EVENODD")
+                           ? WindEvenOdd()
+                           : WindPredicate([](int w) { return w != 0; });
+  auto r = RemoveOverlaps2D(verts, edges, eps, /*debug=*/false, pred);
+  return OutEdgesToPolygons(r.verts, r.edges);
+}
+
+// Run one case under the universal pre-fill model. Returns the output
+// polygons; sets `reach` to indicate whether the case was dispatched.
+inline manifold::Polygons RunClipper2Case(const Clipper2Case& c,
+                                          Clipper2Reach* reach,
+                                          double* epsOut = nullptr) {
+  *reach = ClassifyCase(c);
+  if (*reach == Clipper2Reach::Unsupported) return {};
+  const double eps = InferEps(c.subjects, c.clips);
+  if (epsOut) *epsOut = eps;
+  auto a = FillUnderRule(c.subjects, c.fillrule, eps);
+  auto b = FillUnderRule(c.clips, c.fillrule, eps);
+  if (c.cliptype == "UNION") {
+    if (b.empty()) return a;
+    if (a.empty()) return b;
+    return Boolean2D(a, b, OpType::Add, eps);
+  }
+  if (c.cliptype == "INTERSECTION") {
+    if (a.empty() || b.empty()) return {};
+    return Boolean2D(a, b, OpType::Intersect, eps);
+  }
+  if (c.cliptype == "DIFFERENCE") {
+    if (a.empty()) return {};
+    if (b.empty()) return a;
+    return Boolean2D(a, b, OpType::Subtract, eps);
+  }
+  return {};
+}
+
+inline void RunClipper2Corpus(const std::string& path) {
+  auto cases = LoadClipper2Cases(path);
+  std::cout << "=== Clipper2 corpus: " << cases.size() << " cases from "
+            << path << " ===\n\n";
+  // Per-case TSV (case_n, op, fillrule, structure, sol_area, output_area)
+  // is written to /tmp/clipper2_proto_areas.tsv so the per-case area can
+  // be diffed against Clipper2's own current output. SOL_AREA in the
+  // corpus is older Clipper2 stored output and may differ from what
+  // current Clipper2 produces for the same input.
+  std::ofstream tsv("/tmp/clipper2_proto_areas.tsv");
+  tsv << "n\top\tfillrule\tstructure\tsol_area\tproto_area\n";
+  int total = 0;
+  int run = 0, unsupported = 0;
+  int topoOk = 0, topoFail = 0;
+  int areaPreserved = 0;     // < 1% of SOL_AREA
+  int areaDrifted = 0;       // 1% .. 10%
+  int areaCollapsed = 0;     // > 10% (or zero output where SOL_AREA > 0)
+  int solSkipped = 0;        // SOL_AREA <= 0 (no oracle)
+  int outZeroOk = 0;         // SOL_AREA == 0 and we returned ~0 area
+  std::vector<std::tuple<int, std::string, double, double, double>> drifters;
+  // (case_n, descriptor, drift_pct, outArea, solArea)
+  for (const auto& c : cases) {
+    ++total;
+    Clipper2Reach reach;
+    double eps = 0.0;
+    manifold::Polygons out;
+    try {
+      out = RunClipper2Case(c, &reach, &eps);
+    } catch (const std::exception& ex) {
+      std::cerr << "  case " << c.n << " (" << c.cliptype << "+" << c.fillrule
+                << "): EXCEPTION " << ex.what() << "\n";
+      ++topoFail;
+      continue;
+    }
+    std::string desc = c.cliptype + "+" + c.fillrule +
+                       (c.clips.empty() ? "/sub-only" : "/sub+clip");
+    if (reach == Clipper2Reach::Unsupported) {
+      ++unsupported;
+      continue;
+    }
+    ++run;
+    {
+      const double outArea = std::fabs(TotalSignedArea(out));
+      tsv << c.n << '\t' << c.cliptype << '\t' << c.fillrule << '\t'
+          << (c.clips.empty() ? "subonly" : "subclip") << '\t'
+          << c.solArea << '\t' << outArea << '\n';
+    }
+
+    // Topology check on the output polygons (treat as a fresh input).
+    auto [v, e] = PolygonsToInput(out);
+    if (!v.empty()) {
+      auto r2 = RemoveOverlaps2D(v, e, eps);
+      bool topo = CheckTopologicalValidity(r2, e, r2.inputRemap,
+                                           r2.numMergedVerts);
+      // For a valid output, re-running RemoveOverlaps2D should be a no-op
+      // (idempotent under sub-eps drift). Topology failure here flags
+      // either an invalid output or a corner case the pipeline mishandles
+      // when fed back its own result.
+      if (topo) ++topoOk;
+      else ++topoFail;
+    } else {
+      // Empty output: only "valid" when SOL_AREA == 0 or unsupported.
+      ++topoOk;
+    }
+
+    const double outArea = std::fabs(TotalSignedArea(out));
+    if (c.solArea < 0) {
+      ++solSkipped;
+    } else if (c.solArea == 0.0) {
+      if (outArea < 1.0) ++outZeroOk;
+      else { ++areaCollapsed; drifters.emplace_back(c.n, desc, outArea, outArea, c.solArea); }
+    } else {
+      const double drift = std::fabs(outArea - c.solArea) / c.solArea;
+      if (drift < 0.01) ++areaPreserved;
+      else if (drift < 0.10) {
+        ++areaDrifted;
+        drifters.emplace_back(c.n, desc, drift, outArea, c.solArea);
+      } else {
+        ++areaCollapsed;
+        drifters.emplace_back(c.n, desc, drift, outArea, c.solArea);
+      }
+    }
+  }
+  std::cout << "  Total cases:     " << total << "\n";
+  std::cout << "  Run:             " << run << "\n";
+  std::cout << "  Unsupported:     " << unsupported
+            << " (NEGATIVE/POSITIVE fill rule)\n";
+  std::cout << "\n  Of " << run << " cases run:\n";
+  std::cout << "    Topology valid:   " << topoOk << " / " << run << "\n";
+  std::cout << "    Topology INVALID: " << topoFail << " / " << run << "\n";
+  std::cout << "    Area within  1% of SOL_AREA: " << areaPreserved << "\n";
+  std::cout << "    Area within  1-10% of SOL_AREA: " << areaDrifted << "\n";
+  std::cout << "    Area > 10% from SOL_AREA:     " << areaCollapsed << "\n";
+  std::cout << "    SOL_AREA == 0, returned ~0:    " << outZeroOk << "\n";
+  std::cout << "    SOL_AREA < 0 (no oracle):      " << solSkipped << "\n";
+  if (!drifters.empty()) {
+    std::sort(drifters.begin(), drifters.end(),
+              [](const auto& a, const auto& b) {
+                return std::get<2>(a) > std::get<2>(b);
+              });
+    std::cout << "\n  Drift cases (worst first, up to 30):\n";
+    for (size_t i = 0; i < drifters.size() && i < 30; ++i) {
+      auto& [n, desc, drift, outA, solA] = drifters[i];
+      std::cout << "    #" << n << "  " << desc
+                << "  drift=" << (drift * 100.0) << "%"
+                << "  out=" << outA << "  sol=" << solA << "\n";
+    }
+  }
+}
+
+}  // namespace overlap2d
+
+// =============================================================================
+// mfogel/polygon-clipping end-to-end fixtures.
+//
+// Independent third-party corpus harvested from real bug reports against
+// the JS polygon-clipping library. Each fixture lives in its own dir
+// under build/_deps/mfogel-polygon-clipping-src/test/end-to-end/<name>/:
+//
+//   args.geojson   — GeoJSON FeatureCollection of N input operands.
+//                    Each Feature is a Polygon or MultiPolygon.
+//   union.geojson, intersection.geojson, difference.geojson,
+//   xor.geojson    — expected outputs for each op (at most one per file).
+//   all.geojson    — expected output that's the same for every op
+//                    (typical for single-input self-cleanup cases).
+//   broken-issue-* — args only; no expected output. Skip these.
+//
+// GeoJSON convention (RFC 7946): exterior rings CCW, interior (hole)
+// rings CW. NONZERO fill rule under that orientation isolates outer−hole.
+// The runner pre-fills each feature under NONZERO, then chains the
+// boolean op left-to-right across features.
+//
+// The corpus is small (~120 dirs) but its naming is itself a degeneracy
+// taxonomy: triple-coincident-segments, almost-colinear-segments,
+// infinitely-thin-polygon, self-intersects-but-doesnt-cross, ...
+// This is exactly the layer Clipper2's int-coord corpus doesn't cover.
+// =============================================================================
+namespace overlap2d {
+
+// ---------------------------------------------------------------------------
+// Minimal JSON value + parser. Hand-rolled to avoid a third-party
+// dependency for what is otherwise a single-translation-unit prototype.
+// Supports only what GeoJSON needs: object, array, string, number, bool,
+// null. No escape parsing in strings beyond \" and \\ — none of the
+// fixture files use richer escapes.
+// ---------------------------------------------------------------------------
+struct JsonValue {
+  enum Kind { Null, Bool, Number, String, Array, Object };
+  Kind kind = Null;
+  bool b = false;
+  double num = 0.0;
+  std::string str;
+  std::vector<JsonValue> arr;
+  std::map<std::string, JsonValue> obj;
+};
+
+struct JsonParser {
+  const std::string& s;
+  size_t i = 0;
+  explicit JsonParser(const std::string& src) : s(src) {}
+  void skipWs() {
+    while (i < s.size() && std::isspace(static_cast<unsigned char>(s[i]))) ++i;
+  }
+  bool match(char c) {
+    skipWs();
+    if (i < s.size() && s[i] == c) { ++i; return true; }
+    return false;
+  }
+  void expect(char c) {
+    if (!match(c)) throw std::runtime_error(
+        std::string("expected '") + c + "' at " + std::to_string(i));
+  }
+  JsonValue parseValue() {
+    skipWs();
+    if (i >= s.size()) throw std::runtime_error("unexpected eof");
+    char c = s[i];
+    if (c == '{') return parseObject();
+    if (c == '[') return parseArray();
+    if (c == '"') return parseString();
+    if (c == 't' || c == 'f') return parseBool();
+    if (c == 'n') return parseNull();
+    return parseNumber();
+  }
+  JsonValue parseObject() {
+    JsonValue v; v.kind = JsonValue::Object;
+    expect('{');
+    skipWs();
+    if (match('}')) return v;
+    for (;;) {
+      JsonValue key = parseString();
+      expect(':');
+      v.obj[key.str] = parseValue();
+      skipWs();
+      if (match(',')) continue;
+      expect('}');
+      break;
+    }
+    return v;
+  }
+  JsonValue parseArray() {
+    JsonValue v; v.kind = JsonValue::Array;
+    expect('[');
+    skipWs();
+    if (match(']')) return v;
+    for (;;) {
+      v.arr.push_back(parseValue());
+      skipWs();
+      if (match(',')) continue;
+      expect(']');
+      break;
+    }
+    return v;
+  }
+  JsonValue parseString() {
+    JsonValue v; v.kind = JsonValue::String;
+    expect('"');
+    while (i < s.size() && s[i] != '"') {
+      if (s[i] == '\\' && i + 1 < s.size()) {
+        char n = s[i + 1];
+        if (n == '"' || n == '\\') { v.str.push_back(n); i += 2; continue; }
+        v.str.push_back(s[i]); ++i;
+      } else {
+        v.str.push_back(s[i]); ++i;
+      }
+    }
+    expect('"');
+    return v;
+  }
+  JsonValue parseBool() {
+    JsonValue v; v.kind = JsonValue::Bool;
+    if (s.compare(i, 4, "true") == 0) { v.b = true; i += 4; }
+    else if (s.compare(i, 5, "false") == 0) { v.b = false; i += 5; }
+    else throw std::runtime_error("bad bool");
+    return v;
+  }
+  JsonValue parseNull() {
+    JsonValue v; v.kind = JsonValue::Null;
+    if (s.compare(i, 4, "null") == 0) { i += 4; return v; }
+    throw std::runtime_error("bad null");
+  }
+  JsonValue parseNumber() {
+    JsonValue v; v.kind = JsonValue::Number;
+    size_t start = i;
+    if (s[i] == '-' || s[i] == '+') ++i;
+    while (i < s.size() && (std::isdigit(static_cast<unsigned char>(s[i])) ||
+                            s[i] == '.' || s[i] == 'e' || s[i] == 'E' ||
+                            s[i] == '-' || s[i] == '+'))
+      ++i;
+    v.num = std::stod(s.substr(start, i - start));
+    return v;
+  }
+};
+
+inline JsonValue ParseJsonFile(const std::string& path) {
+  std::ifstream in(path);
+  if (!in) throw std::runtime_error("open: " + path);
+  std::ostringstream oss; oss << in.rdbuf();
+  std::string text = oss.str();
+  JsonParser p(text);
+  return p.parseValue();
+}
+
+// mfogel's polygon-clipping library normalizes ring winding by position:
+// the first ring of each polygon is outer (CCW), subsequent rings are
+// holes (CW). It does this regardless of the input's actual winding —
+// the corpus has explicit "backward-ring-winding-order" test cases that
+// rely on this auto-normalization. Strict GeoJSON conformance (RFC 7946)
+// agrees with this convention but doesn't mandate enforcement; mfogel
+// enforces. We do the same here so NONZERO pre-fill on the combined
+// rings reproduces outer−holes correctly.
+inline void NormalizeMfogelWinding(manifold::Polygons& rings) {
+  for (size_t i = 0; i < rings.size(); ++i) {
+    const double a = SignedArea(rings[i]);
+    const bool wantCCW = (i == 0);
+    if ((wantCCW && a < 0) || (!wantCCW && a > 0))
+      std::reverse(rings[i].begin(), rings[i].end());
+  }
+}
+
+// Extract a list of polygons from one Feature's geometry.
+// Polygon: coordinates = [ring1, ring2, ...] → one polygon with multiple
+//          rings (exterior + holes).
+// MultiPolygon: coordinates = [[ring1, ring2], [ring1], ...] → one
+//          polygon per outer entry.
+// Returns vector<Polygons> (each entry = one polygon, possibly with holes).
+inline std::vector<manifold::Polygons> ExtractFeatureGeometry(
+    const JsonValue& feature) {
+  std::vector<manifold::Polygons> polys;
+  auto gIt = feature.obj.find("geometry");
+  if (gIt == feature.obj.end() || gIt->second.kind != JsonValue::Object)
+    return polys;
+  const auto& geom = gIt->second;
+  auto tIt = geom.obj.find("type");
+  auto cIt = geom.obj.find("coordinates");
+  if (tIt == geom.obj.end() || cIt == geom.obj.end()) return polys;
+  const std::string& gtype = tIt->second.str;
+  auto parseRing = [](const JsonValue& ring) {
+    manifold::SimplePolygon out;
+    for (const auto& pt : ring.arr) {
+      if (pt.arr.size() >= 2)
+        out.push_back({pt.arr[0].num, pt.arr[1].num});
+    }
+    // Drop the closing duplicate vertex if present (RFC 7946 requires it).
+    if (out.size() >= 2 && out.front().x == out.back().x &&
+        out.front().y == out.back().y)
+      out.pop_back();
+    return out;
+  };
+  // mfogel drops the entire polygon if its outer (first) ring is
+  // degenerate (< 3 verts after closure-removal). The corpus has the
+  // explicit `rings-with-no-area` case for this. Subsequent (hole)
+  // rings can be silently dropped if degenerate; the polygon survives.
+  auto collect = [&](const JsonValue& ringList,
+                     manifold::Polygons& dest) -> bool {
+    bool first = true;
+    for (const auto& ring : ringList.arr) {
+      auto r = parseRing(ring);
+      if (first) {
+        first = false;
+        if (r.size() < 3) return false;
+        dest.push_back(std::move(r));
+      } else {
+        if (r.size() >= 3) dest.push_back(std::move(r));
+      }
+    }
+    return !dest.empty();
+  };
+  if (gtype == "Polygon") {
+    manifold::Polygons one;
+    if (collect(cIt->second, one)) {
+      NormalizeMfogelWinding(one);
+      polys.push_back(std::move(one));
+    }
+  } else if (gtype == "MultiPolygon") {
+    for (const auto& poly : cIt->second.arr) {
+      manifold::Polygons one;
+      if (collect(poly, one)) {
+        NormalizeMfogelWinding(one);
+        polys.push_back(std::move(one));
+      }
+    }
+  }
+  return polys;
+}
+
+// Flatten a list-of-Polygons (one per outer polygon in a MultiPolygon)
+// into a single Polygons (concat all rings). NONZERO pre-fill on the
+// concatenation reproduces the multipolygon's covered region under
+// GeoJSON's CCW-outer / CW-hole convention.
+inline manifold::Polygons FlattenMulti(
+    const std::vector<manifold::Polygons>& multi) {
+  manifold::Polygons flat;
+  for (const auto& p : multi)
+    for (const auto& r : p) flat.push_back(r);
+  return flat;
+}
+
+// Top-level extractor: returns one polygon-group per Feature in the file.
+// Handles either a single Feature or a FeatureCollection at the root.
+inline std::vector<std::vector<manifold::Polygons>> ExtractFeatures(
+    const std::string& path) {
+  JsonValue root = ParseJsonFile(path);
+  std::vector<std::vector<manifold::Polygons>> out;
+  if (root.kind != JsonValue::Object) return out;
+  auto tIt = root.obj.find("type");
+  if (tIt == root.obj.end()) return out;
+  if (tIt->second.str == "FeatureCollection") {
+    auto fIt = root.obj.find("features");
+    if (fIt == root.obj.end()) return out;
+    for (const auto& f : fIt->second.arr)
+      out.push_back(ExtractFeatureGeometry(f));
+  } else if (tIt->second.str == "Feature") {
+    out.push_back(ExtractFeatureGeometry(root));
+  }
+  return out;
+}
+
+struct MfogelCase {
+  std::string name;
+  std::vector<manifold::Polygons> features;  // one entry per arg feature
+  std::map<std::string, manifold::Polygons> expected;  // op -> expected (flat)
+};
+
+inline std::vector<MfogelCase> LoadMfogelCorpus(const std::string& dir) {
+  std::vector<MfogelCase> cases;
+  // Walk subdirs without <filesystem> dependency: ls via popen.
+  std::string cmd = "ls -1 " + dir;
+  FILE* fp = popen(cmd.c_str(), "r");
+  if (!fp) return cases;
+  char buf[1024];
+  std::vector<std::string> names;
+  while (std::fgets(buf, sizeof(buf), fp)) {
+    std::string n = buf;
+    if (!n.empty() && n.back() == '\n') n.pop_back();
+    if (!n.empty()) names.push_back(n);
+  }
+  pclose(fp);
+  for (const auto& name : names) {
+    const std::string caseDir = dir + "/" + name;
+    const std::string args = caseDir + "/args.geojson";
+    std::ifstream chk(args);
+    if (!chk) continue;
+    MfogelCase c;
+    c.name = name;
+    try {
+      auto feats = ExtractFeatures(args);
+      for (auto& f : feats) {
+        // Collapse each feature's polygon list into one rings-list. We
+        // pre-fill under NONZERO so the orientation-encoded holes work.
+        c.features.push_back(FlattenMulti(f));
+      }
+    } catch (const std::exception& e) {
+      std::cerr << "  parse failed for " << name << ": " << e.what() << "\n";
+      continue;
+    }
+    for (const char* op :
+         {"union", "intersection", "difference", "xor", "all"}) {
+      const std::string p = caseDir + "/" + op + ".geojson";
+      std::ifstream chk2(p);
+      if (!chk2) continue;
+      try {
+        auto feats = ExtractFeatures(p);
+        manifold::Polygons exp;
+        for (auto& f : feats) {
+          auto flat = FlattenMulti(f);
+          for (auto& r : flat) exp.push_back(std::move(r));
+        }
+        c.expected[op] = std::move(exp);
+      } catch (...) {}
+    }
+    cases.push_back(std::move(c));
+  }
+  return cases;
+}
+
+// Run one (case, op) pair through the prototype as a single-pass
+// combined-input pipeline.
+//
+// Earlier this chained `Boolean2D(acc, filled[i], op)` left-to-right.
+// The chain breaks on N>=3-feature cases like `issue-44` because the
+// intermediate `acc` accumulates T-junction vertices (extra colinear
+// verts on shared edges) that the next feature doesn't have, and the
+// pipeline mishandles those collinear runs at the next merge.
+//
+// Single-pass dispatch sidesteps the chain by feeding all features into
+// one RemoveOverlaps2D call with appropriate multiplicities + predicate:
+//
+//   union          → mult=+1 each, predicate w != 0
+//   xor            → mult=+1 each, predicate (w & 1)
+//   intersection   → mult=+1 each, predicate w >= N (covered by every input)
+//   difference     → A mult=+1, others mult=-1, predicate w > 0
+//
+// Each feature is pre-filled under NONZERO first so its rings are
+// CCW-canonical before being merged into the combined input.
+inline manifold::Polygons RunMfogelOp(const MfogelCase& c,
+                                      const std::string& op, double eps) {
+  if (c.features.empty()) return {};
+  std::vector<manifold::Polygons> filled;
+  for (const auto& f : c.features) {
+    if (f.empty()) { filled.push_back({}); continue; }
+    filled.push_back(FillUnderRule(f, "NONZERO", eps));
+  }
+  if (op == "all") return filled[0];
+
+  // Combine all features' edges into one input list with appropriate
+  // per-feature multiplicities.
+  std::vector<vec2> verts;
+  std::vector<EdgeM> edges;
+  size_t nNonEmpty = 0;
+  auto append = [&](const manifold::Polygons& polys, int mult) {
+    if (polys.empty()) return;
+    ++nNonEmpty;
+    for (const auto& loop : polys) {
+      if (loop.size() < 3) continue;
+      const int base = static_cast<int>(verts.size());
+      const int n = static_cast<int>(loop.size());
+      for (const auto& v : loop) verts.push_back(v);
+      for (int i = 0; i < n; ++i)
+        edges.push_back({base + i, base + ((i + 1) % n), mult});
+    }
+  };
+  if (op == "difference") {
+    append(filled[0], +1);
+    for (size_t i = 1; i < filled.size(); ++i) append(filled[i], -1);
+  } else {
+    for (auto& f : filled) append(f, +1);
+  }
+  if (verts.empty()) return {};
+  WindPredicate pred;
+  if (op == "union") {
+    pred = [](int w) { return w != 0; };
+  } else if (op == "xor") {
+    pred = WindEvenOdd();
+  } else if (op == "intersection") {
+    const int N = static_cast<int>(filled.size());
+    pred = [N](int w) { return w >= N; };
+  } else if (op == "difference") {
+    pred = WindAdd();  // w > 0
+  } else {
+    return {};
+  }
+  auto r = RemoveOverlaps2D(verts, edges, eps, /*debug=*/false, pred);
+  return OutEdgesToPolygons(r.verts, r.edges);
+}
+
+inline double InferEpsForFeatures(
+    const std::vector<manifold::Polygons>& features) {
+  manifold::Polygons all;
+  for (const auto& f : features)
+    for (const auto& r : f) all.push_back(r);
+  return InferEps(all, {});
+}
+
+inline void RunMfogelCorpus(const std::string& dir) {
+  auto cases = LoadMfogelCorpus(dir);
+  std::cout << "=== mfogel/polygon-clipping corpus: " << cases.size()
+            << " dirs from " << dir << " ===\n\n";
+  int casesWithExpected = 0;
+  int totalOps = 0;
+  int topoOk = 0, topoFail = 0;
+  int areaPreserved = 0, areaDrifted = 0, areaCollapsed = 0;
+  int oracleEmptyOk = 0;          // expected = 0 area, we returned ~0
+  int oracleEmptyFail = 0;        // expected = 0, we returned non-zero
+  std::vector<std::tuple<std::string, std::string, double, double, double>>
+      drifters;
+  for (const auto& c : cases) {
+    if (c.expected.empty()) continue;
+    ++casesWithExpected;
+    const double eps = InferEpsForFeatures(c.features);
+    for (const auto& [op, expected] : c.expected) {
+      ++totalOps;
+      manifold::Polygons out;
+      try {
+        out = RunMfogelOp(c, op, eps);
+      } catch (const std::exception& e) {
+        std::cerr << "  EXC " << c.name << "/" << op << ": " << e.what()
+                  << "\n";
+        ++topoFail;
+        continue;
+      }
+      // Topology check by re-feeding output into the pipeline.
+      auto [v, e] = PolygonsToInput(out);
+      if (!v.empty()) {
+        auto r2 = RemoveOverlaps2D(v, e, eps);
+        bool topo = CheckTopologicalValidity(r2, e, r2.inputRemap,
+                                             r2.numMergedVerts);
+        if (topo) ++topoOk;
+        else ++topoFail;
+      } else {
+        ++topoOk;
+      }
+      const double outA = std::fabs(TotalSignedArea(out));
+      const double expA = std::fabs(TotalSignedArea(expected));
+      if (expA < 1e-9) {
+        if (outA < 1e-9) ++oracleEmptyOk;
+        else { ++oracleEmptyFail; drifters.emplace_back(c.name, op, outA, outA, 0.0); }
+      } else {
+        const double drift = std::fabs(outA - expA) / expA;
+        if (drift < 0.01) ++areaPreserved;
+        else if (drift < 0.10) {
+          ++areaDrifted;
+          drifters.emplace_back(c.name, op, drift, outA, expA);
+        } else {
+          ++areaCollapsed;
+          drifters.emplace_back(c.name, op, drift, outA, expA);
+        }
+      }
+    }
+  }
+  std::cout << "  Cases with expected-output files: " << casesWithExpected
+            << " / " << cases.size() << "\n";
+  std::cout << "  (Skipped: cases with only args.geojson — known broken in"
+               " mfogel itself, e.g. broken-issue-*.)\n";
+  std::cout << "  Total (case, op) pairs run:       " << totalOps << "\n\n";
+  std::cout << "  Topology valid:   " << topoOk << " / " << totalOps << "\n";
+  std::cout << "  Topology INVALID: " << topoFail << " / " << totalOps << "\n";
+  std::cout << "  Area within  1%:  " << areaPreserved << "\n";
+  std::cout << "  Area 1-10%:        " << areaDrifted << "\n";
+  std::cout << "  Area >= 10%:       " << areaCollapsed << "\n";
+  std::cout << "  Expected empty, returned ~0:  " << oracleEmptyOk << "\n";
+  std::cout << "  Expected empty, returned >0: " << oracleEmptyFail << "\n";
+  if (!drifters.empty()) {
+    std::sort(drifters.begin(), drifters.end(),
+              [](const auto& a, const auto& b) {
+                return std::get<2>(a) > std::get<2>(b);
+              });
+    std::cout << "\n  Drift cases (worst first, up to 30):\n";
+    for (size_t i = 0; i < drifters.size() && i < 30; ++i) {
+      auto& [name, op, drift, outA, expA] = drifters[i];
+      std::cout << "    " << name << " / " << op
+                << "  drift=" << (drift * 100.0) << "%"
+                << "  out=" << outA << "  exp=" << expA << "\n";
+    }
+  }
+}
+
+}  // namespace overlap2d
+
+// =============================================================================
+// JTS robust/overlay corpus runner.
+//
+// JTS Topology Suite (LocationTech) ships an XML+WKB test format with
+// cases harvested from real GIS bug reports (GEOS, PostGIS, QGIS, JTS
+// itself, Shapely, OSGeo). The dominant op is `overlayAreaTest`, which
+// checks the invariant
+//
+//     |A∪B| + |A∩B| = |A| + |B|
+//
+// This is a self-checking oracle — no expected-output WKB needed —
+// and it's the strongest single cross-check available: a bug in either
+// union or intersection that creates or loses area shows up immediately.
+// Real-bug-derived inputs from production GIS systems mean the invariant
+// is the right shape of test for them.
+//
+// XML+WKB parsing lives outside this prototype in test/polygons/
+// jts_to_corpus.py, which produces test/polygons/jts_overlay_corpus.txt.
+// That keeps the WKB/XML/EWKB/WKT plumbing out of the algorithm code
+// and makes the corpus inspectable as plain text. The same converter
+// handles other JTS-format-compatible corpora (GEOS testxml, etc.) if
+// added later.
+//
+// Format consumed here:
+//
+//   CASE <n> <op> <source>[#<idx>] [<expected_value>]
+//   A <num_rings>
+//   <num_pts> x y x y ...    (one ring per line; coords space-separated)
+//   B <num_rings>            (omit if no B)
+//   <num_pts> ...
+//   <blank line>
+//
+// Supported ops: `overlayAreaTest` (invariant) and `unionArea` (oracle).
+// =============================================================================
+namespace overlap2d {
+
+struct JtsCase {
+  int n = 0;
+  std::string op;
+  std::string source;
+  double expected = 0.0;
+  bool hasExpected = false;
+  manifold::Polygons a;  // flat ring list (orientation preserved)
+  manifold::Polygons b;
+};
+
+inline std::vector<JtsCase> LoadJtsCorpus(const std::string& path) {
+  std::vector<JtsCase> cases;
+  std::ifstream in(path);
+  if (!in) {
+    std::cerr << "Failed to open " << path << "\n";
+    return cases;
+  }
+  std::string line;
+  JtsCase cur;
+  bool inCase = false;
+  // When we see "A <n>" or "B <n>" we then expect <n> ring lines.
+  int ringsRemaining = 0;
+  bool readingA = false;
+  auto flush = [&]() {
+    if (inCase && cur.n > 0) cases.push_back(std::move(cur));
+    cur = JtsCase{};
+    inCase = false;
+    ringsRemaining = 0;
+    readingA = false;
+  };
+  while (std::getline(in, line)) {
+    while (!line.empty() && (line.back() == '\r' || line.back() == ' '))
+      line.pop_back();
+    if (line.empty() || line[0] == '#') {
+      if (line.empty()) flush();
+      continue;
+    }
+    std::istringstream ss(line);
+    if (ringsRemaining > 0) {
+      // Ring line: <num_pts> x y x y ...
+      int npts;
+      ss >> npts;
+      manifold::SimplePolygon ring;
+      ring.reserve(npts);
+      for (int i = 0; i < npts; ++i) {
+        double x, y;
+        if (!(ss >> x >> y)) break;
+        ring.push_back({x, y});
+      }
+      if (ring.size() >= 3) {
+        if (readingA) cur.a.push_back(std::move(ring));
+        else cur.b.push_back(std::move(ring));
+      }
+      --ringsRemaining;
+      continue;
+    }
+    std::string token;
+    ss >> token;
+    if (token == "CASE") {
+      flush();
+      inCase = true;
+      ss >> cur.n >> cur.op >> cur.source;
+      double v;
+      if (ss >> v) { cur.expected = v; cur.hasExpected = true; }
+    } else if (token == "A") {
+      ss >> ringsRemaining;
+      readingA = true;
+    } else if (token == "B") {
+      ss >> ringsRemaining;
+      readingA = false;
+    }
+    // Other lines silently ignored (forward-compat with format extensions).
+  }
+  flush();
+  return cases;
+}
+
+inline void RunJtsCorpus(const std::string& path) {
+  auto cases = LoadJtsCorpus(path);
+  std::cout << "=== JTS overlay corpus: " << cases.size()
+            << " cases from " << path << " ===\n\n";
+  size_t areaTests = 0, unionAreaTests = 0, skipped = 0;
+  size_t topoOk = 0, topoFail = 0;
+  size_t invariantHeld = 0;
+  size_t invariantDriftSmall = 0;  // < 1%
+  size_t invariantDriftLarge = 0;  // >= 1%
+  size_t unionAreaOk = 0, unionAreaDrift = 0;
+  std::vector<std::tuple<std::string, double, double, double, double>>
+      drifters;  // (source, drift_pct, A∪B, A∩B, |A|+|B|)
+  for (const auto& c : cases) {
+    if (c.op != "overlayAreaTest" && c.op != "overlayareatest" &&
+        c.op != "unionArea") {
+      ++skipped;
+      continue;
+    }
+    try {
+      const double eps = InferEps(c.a, c.b);
+      auto fa = FillUnderRule(c.a, "NONZERO", eps);
+      if (c.op == "unionArea") {
+        ++unionAreaTests;
+        auto [v, e] = PolygonsToInput(fa);
+        if (!v.empty()) {
+          auto r2 = RemoveOverlaps2D(v, e, eps);
+          if (CheckTopologicalValidity(r2, e, r2.inputRemap,
+                                       r2.numMergedVerts)) ++topoOk;
+          else ++topoFail;
+        } else ++topoOk;
+        const double a = std::fabs(TotalSignedArea(fa));
+        if (c.hasExpected && c.expected > 0) {
+          double drift = std::fabs(a - c.expected) / c.expected;
+          if (drift < 0.01) ++unionAreaOk; else ++unionAreaDrift;
+        } else {
+          ++unionAreaOk;
+        }
+        continue;
+      }
+      ++areaTests;
+      auto fb = FillUnderRule(c.b, "NONZERO", eps);
+      const double Aa = std::fabs(TotalSignedArea(fa));
+      const double Ab = std::fabs(TotalSignedArea(fb));
+      manifold::Polygons unionAB, interAB;
+      if (fa.empty()) unionAB = fb;
+      else if (fb.empty()) unionAB = fa;
+      else unionAB = Boolean2D(fa, fb, OpType::Add, eps);
+      if (!fa.empty() && !fb.empty())
+        interAB = Boolean2D(fa, fb, OpType::Intersect, eps);
+      const double Au = std::fabs(TotalSignedArea(unionAB));
+      const double Ai = std::fabs(TotalSignedArea(interAB));
+      auto [v, e] = PolygonsToInput(unionAB);
+      if (!v.empty()) {
+        auto r2 = RemoveOverlaps2D(v, e, eps);
+        if (CheckTopologicalValidity(r2, e, r2.inputRemap,
+                                     r2.numMergedVerts)) ++topoOk;
+        else ++topoFail;
+      } else ++topoOk;
+      const double lhs = Au + Ai;
+      const double rhs = Aa + Ab;
+      const double scale = std::max(rhs, 1e-12);
+      const double drift = std::fabs(lhs - rhs) / scale;
+      if (drift < 1e-9) ++invariantHeld;
+      else if (drift < 0.01) ++invariantDriftSmall;
+      else {
+        ++invariantDriftLarge;
+        drifters.emplace_back(c.source, drift, Au, Ai, rhs);
+      }
+    } catch (const std::exception& ex) {
+      std::cerr << "  EXC " << c.source << ": " << ex.what() << "\n";
+      ++topoFail;
+    }
+  }
+  std::cout << "  overlayAreaTest run:   " << areaTests << "\n";
+  std::cout << "  unionArea run:         " << unionAreaTests << "\n";
+  std::cout << "  Skipped (other ops):   " << skipped << "\n\n";
+  std::cout << "  Topology valid:   " << topoOk << "\n";
+  std::cout << "  Topology INVALID: " << topoFail << "\n\n";
+  std::cout << "  Invariant holds (drift < 1e-9):  " << invariantHeld
+            << " / " << areaTests << "\n";
+  std::cout << "  Invariant near-holds (< 1%):     " << invariantDriftSmall
+            << " / " << areaTests << "\n";
+  std::cout << "  Invariant violated (>= 1%):      " << invariantDriftLarge
+            << " / " << areaTests << "\n";
+  if (unionAreaTests > 0) {
+    std::cout << "  unionArea matches expected:   " << unionAreaOk << " / "
+              << unionAreaTests << "\n";
+    std::cout << "  unionArea drifts:             " << unionAreaDrift << " / "
+              << unionAreaTests << "\n";
+  }
+  if (!drifters.empty()) {
+    std::sort(drifters.begin(), drifters.end(),
+              [](const auto& a, const auto& b) {
+                return std::get<1>(a) > std::get<1>(b);
+              });
+    std::cout << "\n  Invariant violators (worst first, up to 20):\n";
+    for (size_t i = 0; i < drifters.size() && i < 20; ++i) {
+      auto& [src, drift, Au, Ai, rhs] = drifters[i];
+      std::cout << "    " << src
+                << "  drift=" << (drift * 100.0) << "%"
+                << "  A∪B=" << Au << "  A∩B=" << Ai << "  |A|+|B|=" << rhs
+                << "\n";
+    }
+  }
+}
+
+}  // namespace overlap2d
+
+// =============================================================================
 // Deep fuzz: wider seed sweep + iter-vs-topology verification.
 //
 // The standard displacement fuzz uses 30 seeds per (kPow, n) cell. This
@@ -2594,6 +3621,26 @@ int main(int argc, char** argv) {
                                   ? argv[2]
                                   : "test/polygons/polygon_corpus.txt";
     RunCorpus(path);
+    return 0;
+  }
+  if (argc > 1 && std::string(argv[1]) == "clipper2corpus") {
+    std::string path =
+        "build/_deps/clipper2-src/Tests/Polygons.txt";
+    if (argc > 2) path = argv[2];
+    RunClipper2Corpus(path);
+    return 0;
+  }
+  if (argc > 1 && std::string(argv[1]) == "mfogelcorpus") {
+    std::string dir =
+        "build/_deps/mfogel-polygon-clipping-src/test/end-to-end";
+    if (argc > 2) dir = argv[2];
+    RunMfogelCorpus(dir);
+    return 0;
+  }
+  if (argc > 1 && std::string(argv[1]) == "jtscorpus") {
+    std::string path = "test/polygons/jts_overlay_corpus.txt";
+    if (argc > 2) path = argv[2];
+    RunJtsCorpus(path);
     return 0;
   }
   if (argc > 1 && std::string(argv[1]) == "pentagon") {
