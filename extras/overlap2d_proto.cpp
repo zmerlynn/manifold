@@ -692,6 +692,18 @@ std::vector<std::vector<int>> BuildEdgeVertLists(
   // vector and slicing per-edge groups is faster.
   struct Hit { int e; double t; int v; };
   std::vector<Hit> flatHits;
+  // Pre-compute per-edge geometry (anchor, direction, length²) once. The
+  // narrow phase used to recompute these every BVH callback (often
+  // multiple times per edge), which on big JTS rings (p99=319 pts/ring,
+  // max=60k) is meaningful: the data is hot, but the redundant
+  // multiplications and the verts[edges[e].v?] indirections add up.
+  struct EdgeG { vec2 a, ab; double abLen2; };
+  std::vector<EdgeG> edgeG(nE);
+  for (int e = 0; e < nE; ++e) {
+    edgeG[e].a = verts[edges[e].v0];
+    edgeG[e].ab = verts[edges[e].v1] - edgeG[e].a;
+    edgeG[e].abLen2 = dot(edgeG[e].ab, edgeG[e].ab);
+  }
   // Per-(v, e) narrow-phase test. Captures the same logic whether
   // candidates come from BVH or brute-force broad phase.
   auto narrow = [&](int v, int e) {
@@ -707,17 +719,20 @@ std::vector<std::vector<int>> BuildEdgeVertLists(
     if (VESetContains(adj[v], edges[e].v0) &&
         VESetContains(adj[v], edges[e].v1))
       return;
-    const vec2 a = verts[edges[e].v0];
-    const vec2 b = verts[edges[e].v1];
-    const vec2 ab = b - a;
-    const double abLen2 = dot(ab, ab);
-    if (abLen2 == 0) return;
-    const vec2 ap = verts[v] - a;
-    const double t = dot(ap, ab) / abLen2;
-    if (t <= 0 || t >= 1) return;
-    const vec2 closest = a + ab * t;
-    const vec2 d = verts[v] - closest;
-    if (dot(d, d) <= eps2) flatHits.push_back({e, t, v});
+    const auto& g = edgeG[e];
+    if (g.abLen2 == 0) return;
+    const vec2 ap = verts[v] - g.a;
+    // Avoid the divide for the t-range gate: `t = dot/abLen2 ∈ (0,1)` iff
+    // `0 < dot < abLen2`. Reject before computing closest-point distance.
+    const double dotAB = ap.x * g.ab.x + ap.y * g.ab.y;
+    if (dotAB <= 0 || dotAB >= g.abLen2) return;
+    // Perpendicular squared distance from p to line ab is
+    // (cross(ap, ab))^2 / abLen2. Compare to eps^2 by rearranging:
+    // cross^2 <= eps^2 * abLen2. Avoids the closest-point computation.
+    const double cross = ap.x * g.ab.y - ap.y * g.ab.x;
+    if (cross * cross > eps2 * g.abLen2) return;
+    // Only compute t (for sort key) on the ~rare survivor.
+    flatHits.push_back({e, dotAB / g.abLen2, v});
   };
   if (bvh.leafToOrig.empty()) {
     // Brute-force broad phase: O(V·E). Faster than building+querying
@@ -1234,38 +1249,64 @@ std::vector<OutEdge> FilterByWindingDCEL(
 
   // 2. Group half-edges by origin vertex; sort each group by direction angle
   //    (CCW). This is the "rotational order" needed to compute next pointers.
-  //    Vert ids are dense [0, verts.size()), so a vector-of-vector indexed
-  //    by vert id beats std::map on cache locality and lookup cost.
-  std::vector<std::vector<int>> outgoing(verts.size());
+  //    Flat CSR layout (outOff[v]..outOff[v+1] indexes into outFlat) avoids
+  //    the per-vert vector<int> allocations a vector-of-vector would pay.
+  const int nVerts = static_cast<int>(verts.size());
+  std::vector<int> outOff(nVerts + 1, 0);
   for (int i = 0; i < (int)halfedges.size(); ++i) {
-    outgoing[halfedges[i].origin].push_back(i);
+    ++outOff[halfedges[i].origin + 1];
+  }
+  for (int v = 1; v <= nVerts; ++v) outOff[v] += outOff[v - 1];
+  std::vector<int> outFlat(halfedges.size());
+  std::vector<int> outCur(outOff.begin(), outOff.end());
+  for (int i = 0; i < (int)halfedges.size(); ++i) {
+    outFlat[outCur[halfedges[i].origin]++] = i;
   }
   // Per-vertex angular sort: each vertex's outgoing list is independent
   // (read-only on halfedges/verts; writes only its own slot). atan2 is
   // expensive and the inner sort is O(d log d) per vertex of degree d;
   // for big arrangements the total is the second-largest serial cost
   // inside step 6. Output is deterministic because the sort is pure.
+  // atan2-free angular comparator: split the plane into two half-planes
+  // (bucket 0 = upper + +x axis, bucket 1 = lower + -x axis); within a
+  // bucket, compare by sign of the cross product. Sorts CCW from +x.
+  // Same monotone order as atan2 but no transcendental in the per-
+  // comparison hot path.
+  auto bucketOf = [](const vec2& d) {
+    return (d.y > 0 || (d.y == 0 && d.x > 0)) ? 0 : 1;
+  };
   manifold::for_each(
-      manifold::autoPolicy(outgoing.size()), manifold::countAt(0),
-      manifold::countAt(outgoing.size()), [&](size_t v) {
-        auto& hes = outgoing[v];
-        if (hes.size() < 2) return;
+      manifold::autoPolicy(nVerts), manifold::countAt(0),
+      manifold::countAt(nVerts), [&](int v) {
+        const int beg = outOff[v];
+        const int end = outOff[v + 1];
+        const int n = end - beg;
+        if (n < 2) return;
         const vec2 vp = verts[v];
-        // atan2-free angular comparator: split the plane into two half-
-        // planes (bucket 0 = upper + +x axis, bucket 1 = lower + -x
-        // axis); within a bucket, compare by sign of the cross product.
-        // Sorts CCW from +x. Same monotone order as atan2 but no
-        // transcendental in the per-comparison hot path.
-        auto bucket = [](const vec2& d) {
-          return (d.y > 0 || (d.y == 0 && d.x > 0)) ? 0 : 1;
-        };
-        std::sort(hes.begin(), hes.end(), [&](int a, int b) {
-          const vec2 dA = verts[halfedges[halfedges[a].twin].origin] - vp;
-          const vec2 dB = verts[halfedges[halfedges[b].twin].origin] - vp;
-          const int bA = bucket(dA), bB = bucket(dB);
-          if (bA != bB) return bA < bB;
-          return dA.x * dB.y - dA.y * dB.x > 0;
-        });
+        if (n == 2) {
+          // Fast path for typical polygon corners (degree 2). Skip the
+          // std::sort overhead — direct compare-and-swap.
+          const vec2 dA =
+              verts[halfedges[halfedges[outFlat[beg]].twin].origin] - vp;
+          const vec2 dB =
+              verts[halfedges[halfedges[outFlat[beg + 1]].twin].origin] - vp;
+          const int bA = bucketOf(dA), bB = bucketOf(dB);
+          bool aFirst;
+          if (bA != bB) aFirst = bA < bB;
+          else aFirst = (dA.x * dB.y - dA.y * dB.x > 0);
+          if (!aFirst) std::swap(outFlat[beg], outFlat[beg + 1]);
+          return;
+        }
+        std::sort(outFlat.begin() + beg, outFlat.begin() + end,
+                  [&](int a, int b) {
+                    const vec2 dA =
+                        verts[halfedges[halfedges[a].twin].origin] - vp;
+                    const vec2 dB =
+                        verts[halfedges[halfedges[b].twin].origin] - vp;
+                    const int bA = bucketOf(dA), bB = bucketOf(dB);
+                    if (bA != bB) return bA < bB;
+                    return dA.x * dB.y - dA.y * dB.x > 0;
+                  });
       });
 
   // 3. Compute next pointers. For half-edge h arriving at vertex v
@@ -1298,10 +1339,14 @@ std::vector<OutEdge> FilterByWindingDCEL(
       manifold::countAt(static_cast<int>(halfedges.size())), [&](int i) {
         const int twinIdx = halfedges[i].twin;
         const int destV = halfedges[twinIdx].origin;
-        auto& sorted = outgoing[destV];
-        auto it = std::find(sorted.begin(), sorted.end(), twinIdx);
-        if (it == sorted.end()) return;
-        auto prevIt = (it == sorted.begin()) ? (sorted.end() - 1) : (it - 1);
+        const int beg = outOff[destV];
+        const int end = outOff[destV + 1];
+        auto it = std::find(outFlat.begin() + beg, outFlat.begin() + end,
+                            twinIdx);
+        if (it == outFlat.begin() + end) return;
+        auto prevIt = (it == outFlat.begin() + beg)
+                          ? (outFlat.begin() + end - 1)
+                          : (it - 1);
         halfedges[i].next = *prevIt;
       });
 
@@ -1545,11 +1590,14 @@ OverlapResult RemoveOverlaps2D(const std::vector<vec2>& vertsIn,
   auto edges = RemapAndCollapse(edgesIn, merge.remap);
   auto t2 = Clock::now();
   P.remapNs.fetch_add(Ns(t1, t2), std::memory_order_relaxed);
-  // Build the edge BVH once for steps 3 and 4. For very small edge
-  // counts (< 32), skip the BVH build — Morton sort + tree
-  // construction overhead beats brute-force O(n²) on tiny inputs. The
-  // step 3/4 functions detect an empty bvh.leafToOrig and fall back to
-  // their brute-force broad phase.
+  // Build the edge BVH once for steps 3 and 4. Skip the build below a
+  // size threshold — Morton sort + tree construction + leaf-permutation
+  // table cost more than the O(V·E) brute-force broad phase on small
+  // inputs. Threshold 256 was tuned empirically against the JTS overlay
+  // corpus (median ring 18 pts, p90 71): on cases under ~256 edges the
+  // BVH build's amortized cost exceeds the savings on the per-vert
+  // query walks. The step 3/4 functions detect an empty bvh.leafToOrig
+  // and fall back to their brute-force broad phase.
   std::vector<Box> edgeBoxes(edges.size());
   for (size_t e = 0; e < edges.size(); ++e) {
     edgeBoxes[e] =
@@ -1557,7 +1605,7 @@ OverlapResult RemoveOverlaps2D(const std::vector<vec2>& vertsIn,
   }
   auto tBvhStart = Clock::now();
   BVH bvh;
-  if (edges.size() >= 32) bvh = BVHBuildFromBoxes(edgeBoxes);
+  if (edges.size() >= 256) bvh = BVHBuildFromBoxes(edgeBoxes);
   auto tBvhEnd = Clock::now();
   P.bvhBuildNs.fetch_add(Ns(tBvhStart, tBvhEnd), std::memory_order_relaxed);
   // Steps 3 (BuildEdgeVertLists) and 4-broad (CollectStep4Pairs) are
@@ -1646,51 +1694,59 @@ OverlapResult RemoveOverlaps2D(const std::vector<vec2>& vertsIn,
     // proves convergence in ≤2 iterations under his α-budget framework.
     const double mergeThresh = 10.0 * eps;
     const double mergeThresh2 = mergeThresh * mergeThresh;
-    // BVH broad phase over intersection verts only (those with non-empty
-    // edge incidence). Each box is padded by `mergeThresh` so any pair
-    // within geometric distance ≤ mergeThresh has overlapping boxes.
-    // Candidate pairs then run the structural gate (shared-edge
-    // incidence) and the exact distance gate.
-    std::vector<int> ixVerts;
-    std::vector<Box> ixBoxes;
-    ixVerts.reserve(merge.verts.size());
-    ixBoxes.reserve(merge.verts.size());
-    for (size_t i = 0; i < merge.verts.size(); ++i) {
-      if (i < vertEdges.size() && !vertEdges[i].empty()) {
-        ixVerts.push_back(static_cast<int>(i));
-        ixBoxes.push_back(BoxOf2DPoint(merge.verts[i], mergeThresh));
+    // Edge-list sweep replaces a BVH-over-intersection-verts. Two
+    // intersection verts that should merge necessarily share at least one
+    // edge in their incidence (any two of {AB, AC, BC} share an edge);
+    // both therefore appear in that edge's sorted on-edge list. So sweep
+    // each edge's list, considering pairs of intersection verts whose
+    // along-edge t-distance falls within mergeThresh/|edge|, and distance-
+    // check those candidates in 2D. This is strictly equivalent to the
+    // previous BVH-broad + structural-gate approach (same pair set) but
+    // is linear in edge count and avoids the per-call BVH build, which
+    // had become disproportionate (~24% of pipeline) on JTS-shape inputs
+    // where intersection-vert counts are typically small per edge.
+    std::vector<std::pair<int, int>> pairs;
+    std::vector<std::pair<double, int>> tlist;  // reused per edge
+    for (size_t e = 0; e < edges.size(); ++e) {
+      const auto& list = lists[e];
+      if (list.size() < 2) continue;
+      const vec2 a = merge.verts[edges[e].v0];
+      const vec2 b = merge.verts[edges[e].v1];
+      const vec2 ab = b - a;
+      const double abLen2 = dot(ab, ab);
+      if (abLen2 == 0) continue;
+      const double abLen = std::sqrt(abLen2);
+      const double tThresh = mergeThresh / abLen;
+      tlist.clear();
+      tlist.reserve(list.size());
+      // The list is sorted by t (invariant maintained by
+      // BuildEdgeVertLists and FindAndInsertIntersections's lower_bound
+      // insertion); filter to intersection verts only.
+      for (int v : list) {
+        if (v >= (int)vertEdges.size() || vertEdges[v].empty()) continue;
+        const vec2 p = merge.verts[v];
+        const double t = dot(p - a, ab) / abLen2;
+        tlist.emplace_back(t, v);
+      }
+      if (tlist.size() < 2) continue;
+      // Sweep window: for each i, advance j while along-edge gap ≤ tThresh.
+      for (size_t i = 0; i < tlist.size(); ++i) {
+        for (size_t j = i + 1;
+             j < tlist.size() && tlist[j].first - tlist[i].first <= tThresh;
+             ++j) {
+          const int va = tlist[i].second;
+          const int vb = tlist[j].second;
+          const vec2 d = merge.verts[vb] - merge.verts[va];
+          if (dot(d, d) > mergeThresh2) continue;
+          const int p = std::min(va, vb);
+          const int q = std::max(va, vb);
+          pairs.emplace_back(p, q);
+        }
       }
     }
-    BVH bvh = BVHBuildFromBoxes(ixBoxes);
-    std::vector<std::pair<int, int>> pairs;
-    CollidePairs(bvh, ixBoxes, [&](int qi, int li) {
-      if (qi >= li) return;
-      pairs.emplace_back(ixVerts[qi], ixVerts[li]);
-    });
     std::sort(pairs.begin(), pairs.end());
-    // Parallelize the gate checks (read-only on vertEdges/merge.verts,
-    // independent per pair); collect pass/fail into a flag vector. Then
-    // unite() serially in the sorted pair order so the choice of cluster
-    // root (rank-based merge) is deterministic regardless of thread
-    // scheduling. The serial-unite cost is trivial vs the gate cost (set
-    // intersection + sqrt-free distance test).
-    std::vector<uint8_t> doUnite(pairs.size(), 0);
-    manifold::for_each_n(
-        manifold::autoPolicy(pairs.size()), manifold::countAt(0),
-        pairs.size(), [&](size_t i) {
-          const auto [a, b] = pairs[i];
-          bool shared = false;
-          for (int e : vertEdges[a]) {
-            if (VESetContains(vertEdges[b], e)) { shared = true; break; }
-          }
-          if (!shared) return;
-          vec2 d = merge.verts[b] - merge.verts[a];
-          if (dot(d, d) > mergeThresh2) return;
-          doUnite[i] = 1;
-        });
-    for (size_t i = 0; i < pairs.size(); ++i) {
-      if (doUnite[i]) uf.unite(pairs[i].first, pairs[i].second);
-    }
+    pairs.erase(std::unique(pairs.begin(), pairs.end()), pairs.end());
+    for (const auto& pr : pairs) uf.unite(pr.first, pr.second);
     // Build remap from union-find clusters; cluster position is centroid.
     // Vector-by-root-id replaces std::map (same fix as MergeVerts).
     const int nV = static_cast<int>(merge.verts.size());
