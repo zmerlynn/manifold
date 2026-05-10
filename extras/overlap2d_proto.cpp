@@ -69,13 +69,16 @@
 //     the public Simplify / Boolean2D entry points.
 
 #include <algorithm>
+#include <atomic>
 #include <cassert>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <iostream>
 #include <climits>
 #include <cstring>
 #include <fstream>
+#include <iomanip>
 #include <functional>
 #include <map>
 #include <queue>
@@ -88,6 +91,8 @@
 
 #include "../src/collider.h"
 #include "../src/disjoint_sets.h"
+#include "../src/iters.h"
+#include "../src/parallel.h"
 #include "../src/shared.h"
 #include "../src/utils.h"
 #include "manifold/common.h"
@@ -443,9 +448,19 @@ VertexMerge MergeVerts(const std::vector<vec2>& in, double eps) {
     pairs.emplace_back(qi, li);
   });
   std::sort(pairs.begin(), pairs.end());
-  for (auto [i, j] : pairs) {
-    vec2 d = in[i] - in[j];
-    if (dot(d, d) <= eps2) uf.unite(i, j);
+  // Parallelize the geometric distance gate (read-only on `in`); unite
+  // serially in sorted pair order so cluster roots are deterministic
+  // regardless of thread scheduling. See the matching pattern in step 4b.
+  std::vector<uint8_t> doUnite(pairs.size(), 0);
+  manifold::for_each_n(
+      manifold::autoPolicy(pairs.size()), manifold::countAt(0),
+      pairs.size(), [&](size_t k) {
+        const auto [i, j] = pairs[k];
+        vec2 d = in[i] - in[j];
+        if (dot(d, d) <= eps2) doUnite[k] = 1;
+      });
+  for (size_t k = 0; k < pairs.size(); ++k) {
+    if (doUnite[k]) uf.unite(pairs[k].first, pairs[k].second);
   }
   // Compute centroid per cluster.
   std::map<int, std::pair<vec2, int>> sums;  // root -> (sum, count)
@@ -513,6 +528,11 @@ std::vector<std::vector<int>> BuildEdgeVertLists(
     adj[e.v1].insert(e.v0);
   }
   // Collect (edge, vert) candidate pairs first; then process per edge.
+  // (An earlier two-phase attempt that ran the gate in parallel
+  // regressed wall-clock by ~25% on JTS — the extra allocation for the
+  // candidate buffer and the per-hit Keep flag outweighed the parallel
+  // gain because most cases have <1e4 candidates and stay serial under
+  // autoPolicy. The serial form is faster across the corpus.)
   std::vector<std::vector<std::pair<double, int>>> hitsPerEdge(nE);
   CollidePairs(bvh, vertBoxes, [&](int v, int e) {
     if (v == edges[e].v0 || v == edges[e].v1) return;
@@ -781,6 +801,57 @@ int CastWindingRay(vec2 origin, const CanonicalSubEdges& canon,
   return winding;
 }
 
+// Pre-flattened canonical sub-edges for the per-face ray-cast loop. Step
+// 6 calls CastWindingRay once per face, each call iterating canon.map
+// (an RB-tree). For F faces and E canonical edges that's F·E tree
+// traversals. Hoisting to a flat array of (yMin, yMax, x0, dx_dy,
+// signedMult) once before the parallel for_each turns the inner loop
+// into a tight cache-friendly scan and removes per-call indirection
+// through canon.map / verts[].
+//
+// signedMult encodes both direction and magnitude: positive when the
+// canonical (vMin → vMax) form is upward (p0.y < p1.y), negative when
+// downward. The ray-cast then just sums signedMult over crossed edges.
+struct FastEdge {
+  double yMin, yMax;       // canonical orientation: yMin < yMax
+  double x0;               // x at y = yMin
+  double dxdy;             // (x1 - x0) / (yMax - yMin)
+  int signedMult;          // mult if upward in canonical form, else -mult
+};
+
+inline std::vector<FastEdge> BuildFastEdges(const CanonicalSubEdges& canon,
+                                            const std::vector<vec2>& verts) {
+  std::vector<FastEdge> out;
+  out.reserve(canon.map.size());
+  for (const auto& [key, mult] : canon.map) {
+    vec2 p0 = verts[key.first];
+    vec2 p1 = verts[key.second];
+    const bool upward = p0.y < p1.y;
+    if (!upward) std::swap(p0, p1);
+    if (p0.y == p1.y) continue;  // horizontal edges contribute nothing
+    FastEdge e;
+    e.yMin = p0.y;
+    e.yMax = p1.y;
+    e.x0 = p0.x;
+    e.dxdy = (p1.x - p0.x) / (p1.y - p0.y);
+    e.signedMult = upward ? mult : -mult;
+    out.push_back(e);
+  }
+  return out;
+}
+
+inline int CastWindingRayFast(vec2 origin,
+                              const std::vector<FastEdge>& edges) {
+  int winding = 0;
+  for (const auto& e : edges) {
+    if (origin.y < e.yMin || origin.y >= e.yMax) continue;
+    const double xCross = e.x0 + e.dxdy * (origin.y - e.yMin);
+    if (xCross < origin.x) continue;
+    winding += e.signedMult;
+  }
+  return winding;
+}
+
 // =============================================================================
 // Step 6: planar face traversal (DCEL).
 //
@@ -859,16 +930,23 @@ std::vector<OutEdge> FilterByWindingDCEL(
   for (int i = 0; i < (int)halfedges.size(); ++i) {
     outgoing[halfedges[i].origin].push_back(i);
   }
-  for (size_t v = 0; v < outgoing.size(); ++v) {
-    auto& hes = outgoing[v];
-    if (hes.size() < 2) continue;
-    const vec2 vp = verts[v];
-    std::sort(hes.begin(), hes.end(), [&](int a, int b) {
-      const vec2 dA = verts[halfedges[halfedges[a].twin].origin] - vp;
-      const vec2 dB = verts[halfedges[halfedges[b].twin].origin] - vp;
-      return std::atan2(dA.y, dA.x) < std::atan2(dB.y, dB.x);
-    });
-  }
+  // Per-vertex angular sort: each vertex's outgoing list is independent
+  // (read-only on halfedges/verts; writes only its own slot). atan2 is
+  // expensive and the inner sort is O(d log d) per vertex of degree d;
+  // for big arrangements the total is the second-largest serial cost
+  // inside step 6. Output is deterministic because the sort is pure.
+  manifold::for_each(
+      manifold::autoPolicy(outgoing.size()), manifold::countAt(0),
+      manifold::countAt(outgoing.size()), [&](size_t v) {
+        auto& hes = outgoing[v];
+        if (hes.size() < 2) return;
+        const vec2 vp = verts[v];
+        std::sort(hes.begin(), hes.end(), [&](int a, int b) {
+          const vec2 dA = verts[halfedges[halfedges[a].twin].origin] - vp;
+          const vec2 dB = verts[halfedges[halfedges[b].twin].origin] - vp;
+          return std::atan2(dA.y, dA.x) < std::atan2(dB.y, dB.x);
+        });
+      });
 
   // 3. Compute next pointers. For half-edge h arriving at vertex v
   //    (= h.twin.origin), h.next must be the outgoing edge that makes
@@ -889,15 +967,20 @@ std::vector<OutEdge> FilterByWindingDCEL(
   //    "it+1" and "it-1" equivalent and both work. For degree-≥3
   //    vertices (intersection points after step 4), they differ and
   //    only "it-1" produces correctly-oriented face cycles.
-  for (int i = 0; i < (int)halfedges.size(); ++i) {
-    const int twinIdx = halfedges[i].twin;
-    const int destV = halfedges[twinIdx].origin;
-    auto& sorted = outgoing[destV];
-    auto it = std::find(sorted.begin(), sorted.end(), twinIdx);
-    if (it == sorted.end()) continue;
-    auto prevIt = (it == sorted.begin()) ? (sorted.end() - 1) : (it - 1);
-    halfedges[i].next = *prevIt;
-  }
+  // Each halfedge's .next is determined independently by reading the
+  // (now-sorted) outgoing list at its destination vertex. Writes are to
+  // independent slots; reads are read-only.
+  manifold::for_each(
+      manifold::autoPolicy(halfedges.size()), manifold::countAt(0),
+      manifold::countAt(static_cast<int>(halfedges.size())), [&](int i) {
+        const int twinIdx = halfedges[i].twin;
+        const int destV = halfedges[twinIdx].origin;
+        auto& sorted = outgoing[destV];
+        auto it = std::find(sorted.begin(), sorted.end(), twinIdx);
+        if (it == sorted.end()) return;
+        auto prevIt = (it == sorted.begin()) ? (sorted.end() - 1) : (it - 1);
+        halfedges[i].next = *prevIt;
+      });
 
   // 4. Walk face cycles, assign face IDs. Each unmarked half-edge starts a
   //    new face; follow `next` chain back to the start.
@@ -992,28 +1075,37 @@ std::vector<OutEdge> FilterByWindingDCEL(
   // perpendicular-CCW offset from any boundary edge lands inside the
   // face. Centroids would seem more robust, but for non-convex faces
   // (common after step 4) the centroid can lie outside the face.
-  for (int f = 0; f < nFaces; ++f) {
-    if (f == outerFace) {
-      faceWind[f] = 0;
-      continue;
-    }
-    int h = faceStartHE[f];
-    if (h < 0) continue;
-    const vec2 a = verts[halfedges[h].origin];
-    const vec2 b = verts[halfedges[halfedges[h].twin].origin];
-    const vec2 mid = (a + b) * 0.5;
-    const vec2 d = b - a;
-    const double len = length(d);
-    if (len == 0) continue;
-    const vec2 perp(-d.y / len, d.x / len);  // 90° CCW = LEFT of h's direction
-    // Step inward by len/1000 to land an interior point of the face. Picks
-    // up the face's winding via ray-cast. The 1/1000 factor assumes the
-    // face's inscribed-circle radius from this halfedge's midpoint is at
-    // least len/1000; degenerate slivers worse than ~1000:1 aspect would
-    // miss. None appear in the test corpus.
-    const vec2 pInF = mid + perp * (len * 1e-3);
-    faceWind[f] = CastWindingRay(pInF, canon, verts);
-  }
+  //
+  // Hoist canon.map (RB-tree of canonical sub-edges) into a flat
+  // FastEdge vector ONCE so the F per-face ray-casts iterate a tight
+  // contiguous array instead of walking an RB-tree F times.
+  //
+  // Parallelism: each face's ray-cast is read-only on (fastEdges,
+  // halfedges, faceStartHE, verts) and writes only to faceWind[f] — no
+  // shared state. autoPolicy() runs serial below kSeqThreshold (1e4
+  // faces) so small inputs aren't penalized. Output is deterministic
+  // because each ray-cast is a pure function of inputs and the
+  // destination index is fixed.
+  const auto fastEdges = BuildFastEdges(canon, verts);
+  manifold::for_each(
+      manifold::autoPolicy(nFaces), manifold::countAt(0),
+      manifold::countAt(nFaces), [&](int f) {
+        if (f == outerFace) {
+          faceWind[f] = 0;
+          return;
+        }
+        int h = faceStartHE[f];
+        if (h < 0) return;
+        const vec2 a = verts[halfedges[h].origin];
+        const vec2 b = verts[halfedges[halfedges[h].twin].origin];
+        const vec2 mid = (a + b) * 0.5;
+        const vec2 d = b - a;
+        const double len = length(d);
+        if (len == 0) return;
+        const vec2 perp(-d.y / len, d.x / len);
+        const vec2 pInF = mid + perp * (len * 1e-3);
+        faceWind[f] = CastWindingRayFast(pInF, fastEdges);
+      });
 
   if (debug) {
     std::cerr << "  face windings:";
@@ -1060,20 +1152,61 @@ struct OverlapResult {
   int numMergedVerts;           // count of verts before step-4 intersections
 };
 
+// Per-phase wall-clock accumulator. Atomic so concurrent RemoveOverlaps2D
+// calls (e.g. from a multi-threaded corpus driver, future) can share.
+// Currently RemoveOverlaps2D itself is single-threaded; the accumulator
+// captures cumulative time across many cases for the `time` CLI mode.
+struct PhaseAcc {
+  std::atomic<int64_t> mergeNs{0};
+  std::atomic<int64_t> remapNs{0};
+  std::atomic<int64_t> buildListsNs{0};
+  std::atomic<int64_t> findIxNs{0};
+  std::atomic<int64_t> restructNs{0};
+  std::atomic<int64_t> canonNs{0};
+  std::atomic<int64_t> filterDcelNs{0};
+  std::atomic<int64_t> totalNs{0};
+  std::atomic<int64_t> cases{0};
+  void Reset() {
+    mergeNs = 0; remapNs = 0; buildListsNs = 0; findIxNs = 0;
+    restructNs = 0; canonNs = 0; filterDcelNs = 0; totalNs = 0; cases = 0;
+  }
+};
+inline PhaseAcc& GlobalPhases() { static PhaseAcc p; return p; }
+
+namespace timing_detail {
+using Clock = std::chrono::steady_clock;
+inline int64_t Ns(Clock::time_point a, Clock::time_point b) {
+  return std::chrono::duration_cast<std::chrono::nanoseconds>(b - a).count();
+}
+}  // namespace timing_detail
+
 OverlapResult RemoveOverlaps2D(const std::vector<vec2>& vertsIn,
                                const std::vector<EdgeM>& edgesIn, double eps,
                                bool debug = false,
                                const WindPredicate& isInside = WindAdd()) {
+  using timing_detail::Clock;
+  using timing_detail::Ns;
+  auto& P = GlobalPhases();
+  const auto tStart = Clock::now();
   // Step 1: vertex merge.
+  auto t0 = Clock::now();
   auto merge = MergeVerts(vertsIn, eps);
+  auto t1 = Clock::now();
+  P.mergeNs.fetch_add(Ns(t0, t1), std::memory_order_relaxed);
   const int numMerged = static_cast<int>(merge.verts.size());
   // Step 2: collapse edges.
   auto edges = RemapAndCollapse(edgesIn, merge.remap);
+  auto t2 = Clock::now();
+  P.remapNs.fetch_add(Ns(t1, t2), std::memory_order_relaxed);
   // Step 3: per-edge vert list.
   auto lists = BuildEdgeVertLists(edges, merge.verts, eps);
+  auto t3 = Clock::now();
+  P.buildListsNs.fetch_add(Ns(t2, t3), std::memory_order_relaxed);
   // Step 4: intersection discovery.
   std::vector<std::set<int>> vertEdges;
   FindAndInsertIntersections(edges, &merge.verts, &lists, &vertEdges, eps);
+  auto t4 = Clock::now();
+  P.findIxNs.fetch_add(Ns(t3, t4), std::memory_order_relaxed);
 
   // Step 4b: structural re-merge of intersection verts. Step 4 inserts each
   // intersection at the time its parent edge pair is processed; if pairs
@@ -1137,20 +1270,28 @@ OverlapResult RemoveOverlaps2D(const std::vector<vec2>& vertsIn,
       pairs.emplace_back(ixVerts[qi], ixVerts[li]);
     });
     std::sort(pairs.begin(), pairs.end());
-    for (auto [a, b] : pairs) {
-      // Structural gate: do they share an edge?
-      bool shared = false;
-      for (int e : vertEdges[a]) {
-        if (vertEdges[b].count(e)) {
-          shared = true;
-          break;
-        }
-      }
-      if (!shared) continue;
-      // Geometric gate: within mergeThresh?
-      vec2 d = merge.verts[b] - merge.verts[a];
-      if (dot(d, d) > mergeThresh2) continue;
-      uf.unite(a, b);
+    // Parallelize the gate checks (read-only on vertEdges/merge.verts,
+    // independent per pair); collect pass/fail into a flag vector. Then
+    // unite() serially in the sorted pair order so the choice of cluster
+    // root (rank-based merge) is deterministic regardless of thread
+    // scheduling. The serial-unite cost is trivial vs the gate cost (set
+    // intersection + sqrt-free distance test).
+    std::vector<uint8_t> doUnite(pairs.size(), 0);
+    manifold::for_each_n(
+        manifold::autoPolicy(pairs.size()), manifold::countAt(0),
+        pairs.size(), [&](size_t i) {
+          const auto [a, b] = pairs[i];
+          bool shared = false;
+          for (int e : vertEdges[a]) {
+            if (vertEdges[b].count(e)) { shared = true; break; }
+          }
+          if (!shared) return;
+          vec2 d = merge.verts[b] - merge.verts[a];
+          if (dot(d, d) > mergeThresh2) return;
+          doUnite[i] = 1;
+        });
+    for (size_t i = 0; i < pairs.size(); ++i) {
+      if (doUnite[i]) uf.unite(pairs[i].first, pairs[i].second);
     }
     // Build remap from union-find clusters; cluster position is centroid.
     std::map<int, std::pair<vec2, int>> sums;
@@ -1185,10 +1326,18 @@ OverlapResult RemoveOverlaps2D(const std::vector<vec2>& vertsIn,
     }
   }
 
+  auto t4b = Clock::now();
+  P.restructNs.fetch_add(Ns(t4, t4b), std::memory_order_relaxed);
   // Step 5: sub-edge canonicalization.
   auto canon = Canonicalize(edges, lists);
+  auto t5 = Clock::now();
+  P.canonNs.fetch_add(Ns(t4b, t5), std::memory_order_relaxed);
   // Step 6: DCEL face-traversal winding filter.
   auto out = FilterByWindingDCEL(canon, merge.verts, debug, isInside);
+  auto t6 = Clock::now();
+  P.filterDcelNs.fetch_add(Ns(t5, t6), std::memory_order_relaxed);
+  P.totalNs.fetch_add(Ns(tStart, t6), std::memory_order_relaxed);
+  P.cases.fetch_add(1, std::memory_order_relaxed);
   return {std::move(merge.verts), std::move(out), std::move(merge.remap),
           numMerged};
 }
@@ -3641,6 +3790,92 @@ int main(int argc, char** argv) {
     std::string path = "test/polygons/jts_overlay_corpus.txt";
     if (argc > 2) path = argv[2];
     RunJtsCorpus(path);
+    return 0;
+  }
+  if (argc > 1 && std::string(argv[1]) == "time") {
+    // Per-phase wall-clock timing on a representative workload. Default
+    // workload is DeepFuzz with seedsPerCell=200 (5,600 cases × ~3
+    // RemoveOverlaps2D calls each ≈ 17k pipeline runs); selectable by a
+    // second positional arg matching another mode name. Examples:
+    //
+    //   ./overlap2d_proto time                 # deepfuzz 200
+    //   ./overlap2d_proto time deepfuzz 1000   # 28k cases
+    //   ./overlap2d_proto time jtscorpus       # JTS overlay corpus
+    //   ./overlap2d_proto time clipper2corpus
+    //   ./overlap2d_proto time mfogelcorpus
+    //   ./overlap2d_proto time corpus          # polygon_corpus.txt
+    //
+    // Output: total wall-clock + per-phase ns + percentage breakdown.
+    GlobalPhases().Reset();
+    const auto wallStart = std::chrono::steady_clock::now();
+    std::string sub = (argc > 2) ? argv[2] : "deepfuzz";
+    // Silence per-mode stdout so timing summary is uncluttered.
+    std::ostringstream sink;
+    std::streambuf* oldCout = std::cout.rdbuf(sink.rdbuf());
+    if (sub == "deepfuzz") {
+      int seeds = (argc > 3) ? std::atoi(argv[3]) : 200;
+      DeepFuzz(seeds);
+    } else if (sub == "corpus") {
+      const std::string p = (argc > 3) ? argv[3] : "test/polygons/polygon_corpus.txt";
+      RunCorpus(p);
+    } else if (sub == "clipper2corpus") {
+      const std::string p = (argc > 3) ? argv[3]
+        : std::string("build/_deps/clipper2-src/Tests/Polygons.txt");
+      RunClipper2Corpus(p);
+    } else if (sub == "mfogelcorpus") {
+      const std::string p = (argc > 3) ? argv[3]
+        : std::string("build/_deps/mfogel-polygon-clipping-src/test/end-to-end");
+      RunMfogelCorpus(p);
+    } else if (sub == "jtscorpus") {
+      const std::string p = (argc > 3) ? argv[3] : "test/polygons/jts_overlay_corpus.txt";
+      RunJtsCorpus(p);
+    } else {
+      std::cout.rdbuf(oldCout);
+      std::cerr << "unknown subcommand: " << sub << "\n";
+      return 2;
+    }
+    std::cout.rdbuf(oldCout);
+    const auto wallEnd = std::chrono::steady_clock::now();
+    const int64_t wallNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        wallEnd - wallStart).count();
+    const auto& P = GlobalPhases();
+    const int64_t total = P.totalNs.load();
+    const int64_t cases = P.cases.load();
+    auto pct = [&](int64_t ns) {
+      return total > 0 ? (ns * 100.0 / total) : 0.0;
+    };
+    auto fmt = [](int64_t ns) {
+      double ms = ns * 1e-6;
+      std::ostringstream o;
+      o.setf(std::ios::fixed);
+      o.precision(3);
+      o << ms << " ms";
+      return o.str();
+    };
+    std::cout << "=== timing: " << sub << " ===\n";
+    std::cout << "  Wall (driver+pipeline): " << fmt(wallNs) << "\n";
+    std::cout << "  Pipeline only (sum):    " << fmt(total) << "\n";
+    std::cout << "  RemoveOverlaps2D calls: " << cases << "\n";
+    if (cases > 0) {
+      std::cout << "  Avg per call:           " << fmt(total / cases) << "\n";
+    }
+    std::cout << "\n  Per-phase breakdown (% of pipeline total):\n";
+    auto row = [&](const char* name, int64_t ns) {
+      std::cout << "    " << std::left << std::setw(28) << name
+                << std::right << std::setw(12) << fmt(ns)
+                << "  " << std::setw(6);
+      std::cout.setf(std::ios::fixed);
+      std::cout.precision(2);
+      std::cout << pct(ns) << "%\n";
+      std::cout.unsetf(std::ios::fixed);
+    };
+    row("step 1  MergeVerts",          P.mergeNs.load());
+    row("step 2  RemapAndCollapse",    P.remapNs.load());
+    row("step 3  BuildEdgeVertLists",  P.buildListsNs.load());
+    row("step 4  FindAndInsertIxs",    P.findIxNs.load());
+    row("step 4b structural re-merge", P.restructNs.load());
+    row("step 5  Canonicalize",        P.canonNs.load());
+    row("step 6  FilterByWindingDCEL", P.filterDcelNs.load());
     return 0;
   }
   if (argc > 1 && std::string(argv[1]) == "pentagon") {
