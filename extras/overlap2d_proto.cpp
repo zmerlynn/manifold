@@ -643,31 +643,19 @@ std::vector<std::vector<int>> BuildEdgeVertLists(
 // Step 4: edge-edge intersection discovery; insert new verts (or snap to
 // existing nearby verts) into per-edge lists.
 // =============================================================================
-void FindAndInsertIntersections(const std::vector<EdgeM>& edges,
-                                std::vector<vec2>* verts,
-                                std::vector<std::vector<int>>* lists,
-                                std::vector<std::vector<int>>* vertEdges,
-                                double eps,
-                                const std::vector<Box>& edgeBoxes,
-                                const BVH& bvh) {
+// Step 4 broad phase only: find candidate (i, j) edge pairs whose AABBs
+// overlap. Output is sorted lex-ascending. Extracted as a separate
+// function so it can run concurrently with step 3 (BuildEdgeVertLists)
+// via tbb::parallel_invoke.
+inline std::vector<std::pair<int, int>> CollectStep4Pairs(
+    const std::vector<EdgeM>& edges, const std::vector<Box>& edgeBoxes,
+    const BVH& bvh) {
   const int nE = static_cast<int>(edges.size());
-  const double eps2 = eps * eps;
-  vertEdges->resize(verts->size());
-  const int origNumVerts = static_cast<int>(verts->size());
-  // BVH broad phase: each edge as eps-padded segment AABB, queried against
-  // all edge AABBs. Self-collision is filtered by `qi < li`. Pairs are
-  // sorted lexicographically; the snap-and-insert below depends on
-  // `lists[*]` accumulating verts as earlier pairs are processed, and
-  // sorting on the int pair (rather than Morton order) keeps the order
-  // deterministic across runs and BVH builds.
-  // (edgeBoxes/bvh shared from caller — see step 3 signature comment.)
   std::vector<std::pair<int, int>> pairs;
   if (bvh.leafToOrig.empty()) {
-    // Brute-force self-collide for small E (caller chose to skip BVH).
     for (int i = 0; i < nE; ++i) {
       for (int j = i + 1; j < nE; ++j) {
-        if (edgeBoxes[i].DoesOverlap(edgeBoxes[j]))
-          pairs.emplace_back(i, j);
+        if (edgeBoxes[i].DoesOverlap(edgeBoxes[j])) pairs.emplace_back(i, j);
       }
     }
   } else {
@@ -677,6 +665,26 @@ void FindAndInsertIntersections(const std::vector<EdgeM>& edges,
     });
     std::sort(pairs.begin(), pairs.end());
   }
+  return pairs;
+}
+
+void FindAndInsertIntersections(const std::vector<EdgeM>& edges,
+                                std::vector<vec2>* verts,
+                                std::vector<std::vector<int>>* lists,
+                                std::vector<std::vector<int>>* vertEdges,
+                                double eps,
+                                const std::vector<Box>& edgeBoxes,
+                                const BVH& bvh,
+                                const std::vector<std::pair<int, int>>& pairs) {
+  const int nE = static_cast<int>(edges.size());
+  (void)nE;
+  const double eps2 = eps * eps;
+  vertEdges->resize(verts->size());
+  const int origNumVerts = static_cast<int>(verts->size());
+  // Broad phase (BVH self-collide → `pairs`) is now caller-supplied so it
+  // can run concurrently with step 3 via tbb::parallel_invoke. The
+  // narrow-phase loop below is order-dependent (snap-to-existing reads
+  // `lists[*]` mutated by earlier pairs), so it stays serial.
   // (An earlier two-phase split — parallel IntersectSegments compute,
   // serial bookkeeping — measured as a wash on JTS: the per-call
   // allocation of intersection-point buffers cancelled the parallel
@@ -1395,14 +1403,27 @@ OverlapResult RemoveOverlaps2D(const std::vector<vec2>& vertsIn,
   }
   BVH bvh;
   if (edges.size() >= 32) bvh = BVHBuildFromBoxes(edgeBoxes);
-  // Step 3: per-edge vert list.
-  auto lists = BuildEdgeVertLists(edges, merge.verts, eps, edgeBoxes, bvh);
+  // Steps 3 (BuildEdgeVertLists) and 4-broad (CollectStep4Pairs) are
+  // independent: step 3 writes `lists`, step 4-broad writes `pairs`,
+  // both read-only on (edges, verts, edgeBoxes, bvh). Run them in
+  // parallel; step 4-narrow then reads both outputs.
+  std::vector<std::vector<int>> lists;
+  std::vector<std::pair<int, int>> step4Pairs;
+#if MANIFOLD_PAR == 1
+  tbb::parallel_invoke(
+      [&] { lists = BuildEdgeVertLists(edges, merge.verts, eps, edgeBoxes,
+                                        bvh); },
+      [&] { step4Pairs = CollectStep4Pairs(edges, edgeBoxes, bvh); });
+#else
+  lists = BuildEdgeVertLists(edges, merge.verts, eps, edgeBoxes, bvh);
+  step4Pairs = CollectStep4Pairs(edges, edgeBoxes, bvh);
+#endif
   auto t3 = Clock::now();
   P.buildListsNs.fetch_add(Ns(t2, t3), std::memory_order_relaxed);
-  // Step 4: intersection discovery.
+  // Step 4 narrow phase: order-dependent serial pass.
   std::vector<std::vector<int>> vertEdges;
   FindAndInsertIntersections(edges, &merge.verts, &lists, &vertEdges, eps,
-                             edgeBoxes, bvh);
+                             edgeBoxes, bvh, step4Pairs);
   auto t4 = Clock::now();
   P.findIxNs.fetch_add(Ns(t3, t4), std::memory_order_relaxed);
 
@@ -2163,8 +2184,9 @@ void Diagnose(uint64_t seed, int kPow = 30, int n = 50) {
 
   const int beforeStep4 = static_cast<int>(merge.verts.size());
   std::vector<std::vector<int>> vertEdges;
+  auto diagPairs = CollectStep4Pairs(edges, diagEdgeBoxes, diagBvh);
   FindAndInsertIntersections(edges, &merge.verts, &lists, &vertEdges, eps,
-                             diagEdgeBoxes, diagBvh);
+                             diagEdgeBoxes, diagBvh, diagPairs);
   const int afterStep4 = static_cast<int>(merge.verts.size());
   std::cerr << "After step 4 (intersections): " << merge.verts.size()
             << " verts (added " << (afterStep4 - beforeStep4) << ")\n";
@@ -2415,7 +2437,9 @@ void Diagnose(uint64_t seed, int kPow = 30, int n = 50) {
     BVH e3Bvh = BVHBuildFromBoxes(e3Boxes);
     auto l3 = BuildEdgeVertLists(e3, m3.verts, eps, e3Boxes, e3Bvh);
     std::vector<std::vector<int>> ve3;
-    FindAndInsertIntersections(e3, &m3.verts, &l3, &ve3, eps, e3Boxes, e3Bvh);
+    auto e3Pairs = CollectStep4Pairs(e3, e3Boxes, e3Bvh);
+    FindAndInsertIntersections(e3, &m3.verts, &l3, &ve3, eps, e3Boxes, e3Bvh,
+                               e3Pairs);
     // structural step 4b (copy of the production code)
     {
       DisjointSets uf(static_cast<int>(m3.verts.size()));
@@ -4386,8 +4410,9 @@ int main(int argc, char** argv) {
     for (auto& l : p2_l) p2_totalList += l.size();
     std::cerr << "  step 3 lists: " << p2_totalList << " total entries\n";
     std::vector<std::vector<int>> p2_ve;
+    auto p2_pairs = CollectStep4Pairs(p2_e, p2_eBoxes, p2_bvh);
     FindAndInsertIntersections(p2_e, &p2_mrg.verts, &p2_l, &p2_ve, eps,
-                               p2_eBoxes, p2_bvh);
+                               p2_eBoxes, p2_bvh, p2_pairs);
     std::cerr << "  step 4 intersections: " << p2_mrg.verts.size()
               << " verts after\n";
     auto p2_canon = Canonicalize(p2_e, p2_l);
