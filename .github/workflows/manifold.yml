@@ -372,11 +372,17 @@ jobs:
         overwrite: true
 
   build_fuzzer:
-    name: fuzzer
+    name: fuzzer (${{matrix.os}}, Backend:${{matrix.cross_section_backend}})
     timeout-minutes: 30
     strategy:
       matrix:
-        os: [ubuntu-24.04, macos-latest]
+        include:
+          - os: ubuntu-24.04
+            cross_section_backend: clipper2
+          - os: macos-latest
+            cross_section_backend: clipper2
+          - os: ubuntu-24.04
+            cross_section_backend: boolean2
     runs-on: ${{matrix.os}}
     steps:
     - uses: actions/checkout@v6
@@ -406,10 +412,16 @@ jobs:
           -DMANIFOLD_PYBIND=OFF \
           -DCMAKE_CXX_COMPILER=clang++ \
           -DMANIFOLD_CROSS_SECTION=ON \
+          -DMANIFOLD_CROSS_SECTION_BACKEND=${{matrix.cross_section_backend}} \
           -DFETCHCONTENT_SOURCE_DIR_CLIPPER2=clipper2 \
           -DFETCHCONTENT_SOURCE_DIR_FUZZTEST=fuzztest \
           . -B build
         ASAN_OPTIONS=detect_container_overflow=0 cmake --build build
+    - name: CrossSection fuzz smoke
+      if: matrix.cross_section_backend == 'boolean2'
+      run: |
+        ASAN_OPTIONS=detect_container_overflow=0 \
+          ctest --test-dir build -R '^CrossSectionFuzz\.' --output-on-failure -j2
 
   build_sanitizer:
     name: Sanitizer (ASan+UBSan)
