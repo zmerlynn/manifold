@@ -3881,6 +3881,7 @@ int main(int argc, char** argv) {
         std::cout << "\n  Edge-vertex shape breakdown:\n";
         std::cout << "    calls=" << evCalls
                   << " brute=" << P.edgeVertBruteCalls.load()
+                  << " vertexBvh=" << P.edgeVertVertexBvhCalls.load()
                   << " bvh=" << P.edgeVertBvhCalls.load()
                   << " avgE=" << (evEdges * 1.0 / evCalls)
                   << " avgV=" << (evVerts * 1.0 / evCalls)
