@@ -1,16 +1,13 @@
-# Boolean2 CrossSection Core
+# Boolean2 CrossSection Backend
 
-Status: experimental core library for a future `CrossSection` backend. The
-default backend remains `clipper2`; this branch only adds the Boolean2 library
-and a staged, empty-returning `boolean2` backend translation unit. A later PR
-wires that translation unit into the public `CrossSection` methods.
+Status: experimental backend for `CrossSection`, selected with
+`MANIFOLD_CROSS_SECTION_BACKEND=boolean2`. The default backend remains
+`clipper2`.
 
-Boolean2 is a manifold-native 2D arrangement pipeline for polygon fill and
-Boolean operations. Sibling utilities in
-`src/cross_section/boolean2/` provide the decomposition and offset pieces that
-the follow-up backend wiring uses to cover the rest of the public
-`CrossSection` API. The current branch keeps the implementation reviewable by
-landing the core library before that public backend wiring is enabled.
+Boolean2 is a manifold-native 2D arrangement pipeline for
+`CrossSection::Boolean`, `BatchBoolean`, `Simplify`, `Decompose`, and
+`Offset`. It keeps the existing public `CrossSection` API while replacing the
+Clipper2 implementation behind the backend selector.
 
 ## Goals
 
@@ -18,15 +15,11 @@ landing the core library before that public backend wiring is enabled.
 - Reuse manifold's geometric primitives where practical:
   BVH broad phase queries, `DisjointSets` for vertex equality, and
   symbolic predicates from `shared.h`.
-- Keep the core independent from Clipper2 so the follow-up backend can compile
-  either implementation from the same public API surface.
-- Make robustness testable through deterministic regression tests and later
+- Make robustness testable through deterministic regression tests and
   FuzzTest targets that exercise the public `CrossSection` API and
   `CrossSection`/`Manifold` round trips.
 
 ## Build Selection
-
-This core can be built behind the experimental backend selector:
 
 ```sh
 cmake -S . -B build/clipper \
@@ -39,9 +32,7 @@ cmake -S . -B build/boolean2 \
 ```
 
 `clipper2` is the default. Invalid backend names fail at configure time when
-`MANIFOLD_CROSS_SECTION` is enabled. In this branch, selecting `boolean2`
-builds the core library and an empty-returning placeholder backend, but usable
-public `CrossSection` dispatch still lands in the follow-up backend-wiring PR.
+`MANIFOLD_CROSS_SECTION` is enabled.
 
 ## Algorithm Outline
 
@@ -133,9 +124,16 @@ result and the face on the other side is outside. The built-in predicates are:
 - `Negative`: `w < 0`, available for construction-time fill and negative-offset
   fallback.
 
-Construction-time fill rules are exposed through `FillByRule`. The public
-`CrossSection` backend mapping from `FillRule`, `OpType`, decomposition, and
-offset is staged in the backend-wiring branch.
+## Intentional Differences
+
+`Simplify` is the main behavioral difference from the Clipper2 backend. It
+regularizes through the Boolean2 winding pipeline and drops degenerate
+near-zero rings. That is intentional for the experimental backend, but tests
+should make any user-visible difference explicit.
+
+`Offset` is also implemented by the Boolean2 backend instead of delegating to
+Clipper2. Focused offset regressions and the `CrossSectionFuzz.Offset*` targets
+cover this path.
 
 ## Regularization And Epsilon
 
@@ -163,22 +161,31 @@ future cleanup decisions within the epsilon regime.
 Useful local checks:
 
 ```sh
-cmake -S . -B build/boolean2-core \
+cmake -S . -B build/boolean2-test \
   -DMANIFOLD_CROSS_SECTION=ON \
-  -DMANIFOLD_CROSS_SECTION_BACKEND=boolean2
-cmake --build build/boolean2-core -j4 --target manifold
-
-cmake -S . -B build/clipper-test \
-  -DMANIFOLD_CROSS_SECTION=ON \
-  -DMANIFOLD_CROSS_SECTION_BACKEND=clipper2 \
+  -DMANIFOLD_CROSS_SECTION_BACKEND=boolean2 \
   -DMANIFOLD_TEST=ON
-cmake --build build/clipper-test -j4 --target manifold_test
-ctest --test-dir build/clipper-test -R '^CrossSection\\.' --output-on-failure
+cmake --build build/boolean2-test -j4 --target manifold_test
+ctest --test-dir build/boolean2-test -R '^CrossSection\\.' --output-on-failure
 ```
 
-The `CrossSection` regression command above intentionally targets `clipper2` in
-this branch. `MANIFOLD_CROSS_SECTION_BACKEND=boolean2` only builds the core and
-empty placeholder backend until the follow-up backend-wiring PR.
+Fuzz smoke checks require Clang because FuzzTest mode does not support GCC:
 
-Focused backend regression tests, FuzzTest targets, and corpus tooling are
-staged in later branches so this core-library branch stays reviewable.
+```sh
+CC=clang CXX=clang++ cmake -S . -B build/fuzz \
+  -DMANIFOLD_CROSS_SECTION=ON \
+  -DMANIFOLD_CROSS_SECTION_BACKEND=boolean2 \
+  -DMANIFOLD_TEST=ON \
+  -DMANIFOLD_FUZZ=ON
+cmake --build build/fuzz -j4 --target cross_section_fuzz
+scripts/fuzz-cross-section-smoke.sh
+```
+
+Longer fuzzing can be run with:
+
+```sh
+FUZZ_FOR=10m scripts/fuzz-cross-section-asan.sh
+```
+
+Corpus persistence and long-running CI are intentionally deferred. Local corpus
+directories should stay under `build/` unless a later PR adds a curated corpus.
