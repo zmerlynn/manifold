@@ -59,8 +59,8 @@
 //     atop the `Shadows` orientation primitive from src/shared.h.
 //   - Vertex equality via `manifold::DisjointSets` lock-free union-find.
 //   - Face traversal via DCEL (the same structure manifold's 3D
-//     `Manifold::Impl::halfedge_` uses), winding-rayed per face from a
-//     point on the LEFT side of any boundary half-edge.
+//     `Manifold::Impl::halfedge_` uses), with winding propagated across
+//     adjacent faces from component seeds.
 //   - Iterate to fixed point per Smith §7.7 (default maxIter=2, his bound).
 //
 // Build can be single-threaded with MANIFOLD_PAR=-1 or use manifold's TBB
