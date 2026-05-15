@@ -3883,6 +3883,7 @@ int main(int argc, char** argv) {
                   << " brute=" << P.edgeVertBruteCalls.load()
                   << " vertexBvh=" << P.edgeVertVertexBvhCalls.load()
                   << " bvh=" << P.edgeVertBvhCalls.load()
+                  << " pairDerived=" << P.edgeVertPairDerivedCalls.load()
                   << " avgE=" << (evEdges * 1.0 / evCalls)
                   << " avgV=" << (evVerts * 1.0 / evCalls)
                   << " flatHits=" << P.edgeVertHitsFlat.load() << "\n";
