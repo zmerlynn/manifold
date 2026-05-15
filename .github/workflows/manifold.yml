@@ -98,23 +98,31 @@ jobs:
         name: meshes-windows
         path: meshes-windows/
   build:
-    name: GCC ${{matrix.gcc}} (CrossSection:${{matrix.cross_section}}, TBB:${{matrix.parallelization}})
+    name: GCC ${{matrix.gcc}} (CrossSection:${{matrix.cross_section}}, Backend:${{matrix.cross_section_backend}}, TBB:${{matrix.parallelization}})
     timeout-minutes: 45
     strategy:
       matrix:
         cross_section: [ON]
+        cross_section_backend: [clipper2]
         parallelization: [OFF, ON]
         os: [ubuntu-24.04]
         gcc: [13, 14]
         include:
           - cross_section: OFF
+            cross_section_backend: clipper2
             parallelization: ON
             os: ubuntu-24.04
             gcc: 14
           - cross_section: ON
+            cross_section_backend: clipper2
             parallelization: ON
             os: ubuntu-22.04
             gcc: 11
+          - cross_section: ON
+            cross_section_backend: boolean2
+            parallelization: OFF
+            os: ubuntu-24.04
+            gcc: 14
     runs-on: ${{ matrix.os }}
     env:
       CC: gcc-${{ matrix.gcc }}
@@ -146,6 +154,7 @@ jobs:
           -DFETCHCONTENT_SOURCE_DIR_CLIPPER2=clipper2 \
           -DFETCHCONTENT_SOURCE_DIR_NANOBIND=nanobind \
           -DMANIFOLD_CROSS_SECTION=${{matrix.cross_section}} \
+          -DMANIFOLD_CROSS_SECTION_BACKEND=${{matrix.cross_section_backend}} \
           -DASSIMP_ENABLE=ON \
           -DMANIFOLD_PAR=${{matrix.parallelization}} \
           . -B build
@@ -153,11 +162,15 @@ jobs:
     - name: Test
       if: matrix.cross_section == 'ON'
       run: |
-        ./build/test/manifold_test
-        # python tests
-        export PYTHONPATH=$PYTHONPATH:$(pwd)/build/bindings/python
-        python3 bindings/python/examples/run_all.py -e
-        python3 -m pytest
+        if [ "${{ matrix.cross_section_backend }}" = "boolean2" ]; then
+          ./build/test/manifold_test --gtest_filter='CrossSection.*'
+        else
+          ./build/test/manifold_test
+          # python tests
+          export PYTHONPATH=$PYTHONPATH:$(pwd)/build/bindings/python
+          python3 bindings/python/examples/run_all.py -e
+          python3 -m pytest
+        fi
     - name: Export determinism meshes
       if: matrix.parallelization == 'OFF' && matrix.gcc == 14 && matrix.os == 'ubuntu-24.04'
       env:

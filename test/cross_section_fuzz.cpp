@@ -1,0 +1,1110 @@
+// Copyright 2026 The Manifold Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#include <algorithm>
+#include <cmath>
+#include <map>
+#include <tuple>
+#include <utility>
+#include <vector>
+
+#include "../src/cross_section/boolean2/boolean2.h"
+#include "fuzztest/fuzztest.h"
+#include "gtest/gtest.h"
+#include "manifold/common.h"
+#include "manifold/cross_section.h"
+#include "manifold/manifold.h"
+
+using namespace fuzztest;
+
+namespace {
+
+using RawPoint = std::pair<double, double>;
+using RawRing = std::vector<RawPoint>;
+using RawPolygons = std::vector<RawRing>;
+using BooleanSeed = std::tuple<RawPolygons, RawPolygons, manifold::OpType>;
+using OffsetSeed =
+    std::tuple<RawPolygons, double, manifold::CrossSection::JoinType, int>;
+using ExtrudeSeed = std::tuple<RawPolygons, double, int>;
+using StarSeed = std::tuple<std::vector<double>>;
+using StarExtrudeSeed = std::tuple<std::vector<double>, double, int>;
+using BooleanExtrudeSeed =
+    std::tuple<std::vector<double>, std::vector<double>, double, double,
+               manifold::OpType, double, int>;
+using PrismBooleanSeed =
+    std::tuple<int, double, int, double, double, double, manifold::OpType>;
+using TranslatedSliceSeed =
+    std::tuple<int, double, double, double, double, double>;
+using RotatedSliceSeed = std::tuple<int, double, double, double>;
+using HoledBooleanExtrudeSeed =
+    std::tuple<std::vector<double>, std::vector<double>, double, double, double,
+               double, manifold::OpType, double, int>;
+using TransformExtrudeSeed =
+    std::tuple<std::vector<double>, double, double, double, double, int>;
+using MultiComponentSeed = std::tuple<std::vector<double>, int, double>;
+using BatchBooleanSeed = std::tuple<int, double, int, double>;
+using WarpAffineSeed =
+    std::tuple<int, double, double, double, double, double, int>;
+using MirrorExtrudeSeed = std::tuple<int, double, double, double, double, int>;
+using SimpleOffsetSeed = std::tuple<std::vector<double>, double,
+                                    manifold::CrossSection::JoinType, int>;
+using OffsetExtrudeSeed =
+    std::tuple<std::vector<double>, double, manifold::CrossSection::JoinType,
+               int, double, int>;
+using HoleExtrudeSeed = std::tuple<std::vector<double>, double, double, int>;
+
+manifold::Polygons ToPolygons(const RawPolygons& raw) {
+  manifold::Polygons polys;
+  polys.reserve(raw.size());
+  for (const auto& rawRing : raw) {
+    manifold::SimplePolygon ring;
+    ring.reserve(rawRing.size());
+    for (const auto& [x, y] : rawRing) {
+      if (std::isfinite(x) && std::isfinite(y)) ring.push_back({x, y});
+    }
+    polys.push_back(std::move(ring));
+  }
+  return polys;
+}
+
+template <typename Edge>
+std::map<int, int> ComputeBalance(const std::vector<Edge>& edges) {
+  std::map<int, int> balance;
+  for (const auto& edge : edges) {
+    balance[edge.v0] += edge.mult;
+    balance[edge.v1] -= edge.mult;
+  }
+  return balance;
+}
+
+bool CheckTopologicalValidity(
+    const manifold::boolean2::OverlapResult& result,
+    const std::vector<manifold::boolean2::EdgeM>& inputEdges,
+    const std::vector<int>& inputRemap, int numMergedVerts) {
+  std::vector<manifold::boolean2::EdgeM> remapped;
+  remapped.reserve(inputEdges.size());
+  for (const auto& edge : inputEdges) {
+    const int a = inputRemap[edge.v0];
+    const int b = inputRemap[edge.v1];
+    if (a != b) remapped.push_back({a, b, edge.mult});
+  }
+
+  const auto expected = ComputeBalance(remapped);
+  const auto actual = ComputeBalance(result.edges);
+  for (int v = 0; v < static_cast<int>(result.verts.size()); ++v) {
+    const int expectedBalance =
+        expected.count(v) ? expected.find(v)->second : 0;
+    const int actualBalance = actual.count(v) ? actual.find(v)->second : 0;
+    const int target = (v < numMergedVerts) ? expectedBalance : 0;
+    if (actualBalance != target) return false;
+  }
+  return true;
+}
+
+void ExpectFinite(const manifold::Polygons& polys) {
+  for (const auto& ring : polys) {
+    for (const auto& point : ring) {
+      EXPECT_TRUE(std::isfinite(point.x));
+      EXPECT_TRUE(std::isfinite(point.y));
+    }
+  }
+}
+
+void ExpectBoolean2TopologyValid(const manifold::Polygons& polys) {
+  const auto [verts, edges] = manifold::boolean2::PolygonsToInput(polys);
+  if (verts.empty()) return;
+  const double eps = manifold::boolean2::InferEps(polys, {});
+  const auto result = manifold::boolean2::RemoveOverlaps2D(verts, edges, eps);
+  EXPECT_TRUE(CheckTopologicalValidity(result, edges, result.inputRemap,
+                                       result.numMergedVerts));
+}
+
+void ExpectCrossSectionValid(const manifold::CrossSection& crossSection) {
+  EXPECT_TRUE(std::isfinite(crossSection.Area()));
+  const auto polys = crossSection.ToPolygons();
+  ExpectFinite(polys);
+  ExpectBoolean2TopologyValid(polys);
+
+  const auto simplified = crossSection.Simplify();
+  EXPECT_TRUE(std::isfinite(simplified.Area()));
+  const auto simplifiedAgain = simplified.Simplify();
+  EXPECT_NEAR(simplified.Area(), simplifiedAgain.Area(),
+              1e-8 * (1.0 + std::fabs(simplified.Area())));
+}
+
+manifold::CrossSection ApplyBoolean(const manifold::CrossSection& a,
+                                    const manifold::CrossSection& b,
+                                    manifold::OpType op) {
+  switch (op) {
+    case manifold::OpType::Add:
+      return a + b;
+    case manifold::OpType::Subtract:
+      return a - b;
+    case manifold::OpType::Intersect:
+      return a.Boolean(b, manifold::OpType::Intersect);
+  }
+  return a + b;
+}
+
+manifold::Manifold ApplyBoolean(const manifold::Manifold& a,
+                                const manifold::Manifold& b,
+                                manifold::OpType op) {
+  switch (op) {
+    case manifold::OpType::Add:
+      return a + b;
+    case manifold::OpType::Subtract:
+      return a - b;
+    case manifold::OpType::Intersect:
+      return a ^ b;
+  }
+  return a + b;
+}
+
+void BooleanRobustness(const RawPolygons& rawA, const RawPolygons& rawB,
+                       manifold::OpType op) {
+  const manifold::Polygons aPolys = ToPolygons(rawA);
+  const manifold::Polygons bPolys = ToPolygons(rawB);
+  const manifold::CrossSection a(aPolys);
+  const manifold::CrossSection b(bPolys);
+  const auto result = ApplyBoolean(a, b, op);
+  ExpectCrossSectionValid(result);
+}
+
+void OffsetRobustness(const RawPolygons& raw, double delta,
+                      manifold::CrossSection::JoinType joinType,
+                      int circularSegments) {
+  const manifold::Polygons polys = ToPolygons(raw);
+  const manifold::CrossSection input(polys);
+  const auto output =
+      input.Offset(delta, joinType, /*miter_limit=*/2.0, circularSegments);
+  ExpectCrossSectionValid(output);
+}
+
+void ManifoldExtrudeRoundTrip(const RawPolygons& raw, double height,
+                              int nDivisions) {
+  const manifold::CrossSection input(ToPolygons(raw));
+  ExpectCrossSectionValid(input);
+  if (input.IsEmpty() || std::fabs(input.Area()) <= 1e-9) return;
+
+  const auto solid =
+      manifold::Manifold::Extrude(input.ToPolygons(), height, nDivisions);
+  EXPECT_EQ(solid.Status(), manifold::Manifold::Error::NoError);
+  EXPECT_TRUE(std::isfinite(solid.Volume()));
+
+  const manifold::CrossSection projected(solid.Project());
+  ExpectCrossSectionValid(projected);
+
+  const manifold::CrossSection middle(solid.Slice(height * 0.5));
+  ExpectCrossSectionValid(middle);
+}
+
+manifold::SimplePolygon StarPolygon(const std::vector<double>& radii) {
+  manifold::SimplePolygon ring;
+  ring.reserve(radii.size());
+  const double kPi = std::acos(-1.0);
+  const int n = static_cast<int>(radii.size());
+  for (int i = 0; i < n; ++i) {
+    const double r = 0.1 + std::fabs(radii[i]);
+    const double theta = 2.0 * kPi * i / n;
+    ring.push_back({r * std::cos(theta), r * std::sin(theta)});
+  }
+  return ring;
+}
+
+manifold::SimplePolygon RegularPolygon(int sides, double radius) {
+  manifold::SimplePolygon ring;
+  ring.reserve(sides);
+  const double kPi = std::acos(-1.0);
+  const double r = 0.1 + std::fabs(radius);
+  for (int i = 0; i < sides; ++i) {
+    const double theta = 2.0 * kPi * i / sides;
+    ring.push_back({r * std::cos(theta), r * std::sin(theta)});
+  }
+  return ring;
+}
+
+manifold::Polygons StarWithHole(const std::vector<double>& radii,
+                                double innerScale) {
+  manifold::Polygons polys;
+  manifold::SimplePolygon outer;
+  outer.reserve(radii.size());
+  manifold::SimplePolygon hole;
+  hole.reserve(radii.size());
+  const double kPi = std::acos(-1.0);
+  const int n = static_cast<int>(radii.size());
+  for (int i = 0; i < n; ++i) {
+    const double theta = 2.0 * kPi * i / n;
+    outer.push_back({(10.0 + std::fabs(radii[i])) * std::cos(theta),
+                     (10.0 + std::fabs(radii[i])) * std::sin(theta)});
+    hole.push_back({(5.0 * innerScale) * std::cos(theta),
+                    (5.0 * innerScale) * std::sin(theta)});
+  }
+  polys.push_back(std::move(outer));
+  std::reverse(hole.begin(), hole.end());
+  polys.push_back(std::move(hole));
+  return polys;
+}
+
+std::vector<manifold::CrossSection> SeparatedStars(
+    const std::vector<double>& radii, int copies, double spacing) {
+  std::vector<manifold::CrossSection> stars;
+  stars.reserve(copies);
+  const manifold::CrossSection base(StarPolygon(radii));
+  const double offset = 2500.0 + spacing;
+  for (int i = 0; i < copies; ++i) {
+    stars.push_back(base.Translate({offset * i, 0.0}));
+  }
+  return stars;
+}
+
+std::vector<manifold::CrossSection> SeparatedRegulars(int sides, double radius,
+                                                      int copies,
+                                                      double spacing) {
+  std::vector<manifold::CrossSection> sections;
+  sections.reserve(copies);
+  const double r = 0.1 + std::fabs(radius);
+  const manifold::CrossSection base(RegularPolygon(sides, r));
+  const double offset = 100.0 + spacing + 3.0 * r;
+  for (int i = 0; i < copies; ++i) {
+    sections.push_back(base.Translate({offset * i, 0.0}));
+  }
+  return sections;
+}
+
+void ManifoldSimpleExtrudeRoundTrip(const std::vector<double>& radii,
+                                    double height, int nDivisions) {
+  const manifold::CrossSection input(StarPolygon(radii));
+  ExpectCrossSectionValid(input);
+  if (input.IsEmpty() || std::fabs(input.Area()) <= 1e-9) return;
+
+  const auto solid =
+      manifold::Manifold::Extrude(input.ToPolygons(), height, nDivisions);
+  EXPECT_EQ(solid.Status(), manifold::Manifold::Error::NoError);
+  EXPECT_TRUE(std::isfinite(solid.Volume()));
+  EXPECT_NEAR(solid.Volume(), input.Area() * height,
+              1e-6 * (1.0 + std::fabs(input.Area() * height)));
+
+  const manifold::CrossSection projected(solid.Project());
+  ExpectCrossSectionValid(projected);
+  EXPECT_NEAR(projected.Area(), input.Area(),
+              1e-6 * (1.0 + std::fabs(input.Area())));
+
+  const manifold::CrossSection middle(solid.Slice(height * 0.5));
+  ExpectCrossSectionValid(middle);
+  EXPECT_NEAR(middle.Area(), input.Area(),
+              1e-6 * (1.0 + std::fabs(input.Area())));
+}
+
+void BooleanExtrudeRoundTrip(const std::vector<double>& radiiA,
+                             const std::vector<double>& radiiB,
+                             double translateX, double translateY,
+                             manifold::OpType op, double height,
+                             int nDivisions) {
+  const manifold::CrossSection a(StarPolygon(radiiA));
+  const manifold::CrossSection b = manifold::CrossSection(StarPolygon(radiiB))
+                                       .Translate({translateX, translateY});
+  const auto result = ApplyBoolean(a, b, op);
+  ExpectCrossSectionValid(result);
+  if (result.IsEmpty() || std::fabs(result.Area()) <= 1e-9) return;
+
+  const auto solid =
+      manifold::Manifold::Extrude(result.ToPolygons(), height, nDivisions);
+  EXPECT_EQ(solid.Status(), manifold::Manifold::Error::NoError);
+  EXPECT_TRUE(std::isfinite(solid.Volume()));
+  EXPECT_NEAR(solid.Volume(), result.Area() * height,
+              1e-6 * (1.0 + std::fabs(result.Area() * height)));
+
+  const manifold::CrossSection projected(solid.Project());
+  ExpectCrossSectionValid(projected);
+
+  const manifold::CrossSection middle(solid.Slice(height * 0.5));
+  ExpectCrossSectionValid(middle);
+}
+
+void PrismBooleanMatchesCrossSection(int sidesA, double radiusA, int sidesB,
+                                     double radiusB, double translateX,
+                                     double translateY, manifold::OpType op) {
+  const manifold::CrossSection a(RegularPolygon(sidesA, radiusA));
+  const manifold::CrossSection b =
+      manifold::CrossSection(RegularPolygon(sidesB, radiusB))
+          .Translate({translateX, translateY});
+  const auto expected = ApplyBoolean(a, b, op);
+  ExpectCrossSectionValid(expected);
+
+  const double height = 5.0;
+  const double areaToleranceScale = 1.0 + std::fabs(a.Area()) +
+                                    std::fabs(b.Area()) +
+                                    std::fabs(expected.Area());
+  const auto solidA = manifold::Manifold::Extrude(a.ToPolygons(), height);
+  const auto solidB = manifold::Manifold::Extrude(b.ToPolygons(), height);
+  const auto result = ApplyBoolean(solidA, solidB, op);
+  EXPECT_EQ(result.Status(), manifold::Manifold::Error::NoError);
+  EXPECT_TRUE(std::isfinite(result.Volume()));
+  EXPECT_NEAR(result.Volume(), expected.Area() * height,
+              1e-5 * areaToleranceScale * height);
+
+  const manifold::CrossSection projected(result.Project());
+  ExpectCrossSectionValid(projected);
+  EXPECT_NEAR(projected.Area(), expected.Area(), 1e-5 * areaToleranceScale);
+
+  const manifold::CrossSection middle(result.Slice(height * 0.5));
+  ExpectCrossSectionValid(middle);
+  EXPECT_NEAR(middle.Area(), expected.Area(), 1e-5 * areaToleranceScale);
+}
+
+void DecomposeComposeAndHull(const std::vector<double>& radii, int copies,
+                             double spacing) {
+  const auto stars = SeparatedStars(radii, copies, spacing);
+  const auto input = manifold::CrossSection::Compose(stars);
+  ExpectCrossSectionValid(input);
+  if (input.IsEmpty() || std::fabs(input.Area()) <= 1e-9) return;
+
+  const auto components = input.Decompose();
+  EXPECT_FALSE(components.empty());
+  double componentArea = 0.0;
+  for (const auto& component : components) {
+    ExpectCrossSectionValid(component);
+    componentArea += component.Area();
+  }
+  EXPECT_NEAR(componentArea, input.Area(),
+              1e-6 * (1.0 + std::fabs(input.Area())));
+
+  const auto recomposed = manifold::CrossSection::Compose(components);
+  ExpectCrossSectionValid(recomposed);
+  EXPECT_NEAR(recomposed.Area(), input.Area(),
+              1e-6 * (1.0 + std::fabs(input.Area())));
+
+  const auto hull = manifold::CrossSection::Hull(components);
+  ExpectCrossSectionValid(hull);
+  EXPECT_GE(hull.Area(), input.Area() - 1e-6 * (1.0 + input.Area()));
+  const auto solid = manifold::Manifold::Extrude(hull.ToPolygons(), 1.0);
+  EXPECT_EQ(solid.Status(), manifold::Manifold::Error::NoError);
+  EXPECT_TRUE(std::isfinite(solid.Volume()));
+}
+
+void BatchBooleanSeparated(int sides, double radius, int copies,
+                           double spacing) {
+  const auto sections = SeparatedRegulars(sides, radius, copies, spacing);
+  ASSERT_FALSE(sections.empty());
+
+  double sumArea = 0.0;
+  for (const auto& section : sections) {
+    ExpectCrossSectionValid(section);
+    sumArea += section.Area();
+  }
+
+  const auto added =
+      manifold::CrossSection::BatchBoolean(sections, manifold::OpType::Add);
+  ExpectCrossSectionValid(added);
+  EXPECT_NEAR(added.Area(), sumArea, 1e-6 * (1.0 + std::fabs(sumArea)));
+
+  const auto intersected = manifold::CrossSection::BatchBoolean(
+      sections, manifold::OpType::Intersect);
+  ExpectCrossSectionValid(intersected);
+  if (sections.size() == 1) {
+    EXPECT_NEAR(intersected.Area(), sections.front().Area(),
+                1e-6 * (1.0 + std::fabs(sections.front().Area())));
+  } else {
+    EXPECT_TRUE(intersected.IsEmpty());
+  }
+
+  const auto subtracted = manifold::CrossSection::BatchBoolean(
+      sections, manifold::OpType::Subtract);
+  ExpectCrossSectionValid(subtracted);
+  EXPECT_NEAR(subtracted.Area(), sections.front().Area(),
+              1e-6 * (1.0 + std::fabs(sections.front().Area())));
+
+  const auto solid = manifold::Manifold::Extrude(added.ToPolygons(), 1.0);
+  EXPECT_EQ(solid.Status(), manifold::Manifold::Error::NoError);
+  EXPECT_TRUE(std::isfinite(solid.Volume()));
+}
+
+void DecomposedExtrusionsRecompose(int sides, double radius, int copies,
+                                   double spacing) {
+  const auto sections = SeparatedRegulars(sides, radius, copies, spacing);
+  const auto input = manifold::CrossSection::Compose(sections);
+  ExpectCrossSectionValid(input);
+
+  const auto components = input.Decompose();
+  ASSERT_FALSE(components.empty());
+
+  const double height = 3.0;
+  std::vector<manifold::Manifold> solids;
+  solids.reserve(components.size());
+  for (const auto& component : components) {
+    ExpectCrossSectionValid(component);
+    solids.push_back(
+        manifold::Manifold::Extrude(component.ToPolygons(), height));
+    EXPECT_EQ(solids.back().Status(), manifold::Manifold::Error::NoError);
+  }
+
+  const auto recomposed =
+      manifold::Manifold::BatchBoolean(solids, manifold::OpType::Add);
+  EXPECT_EQ(recomposed.Status(), manifold::Manifold::Error::NoError);
+  EXPECT_TRUE(std::isfinite(recomposed.Volume()));
+  EXPECT_NEAR(recomposed.Volume(), input.Area() * height,
+              1e-6 * (1.0 + std::fabs(input.Area() * height)));
+
+  const manifold::CrossSection projected(recomposed.Project());
+  ExpectCrossSectionValid(projected);
+  EXPECT_NEAR(projected.Area(), input.Area(),
+              1e-6 * (1.0 + std::fabs(input.Area())));
+
+  const manifold::CrossSection middle(recomposed.Slice(height * 0.5));
+  ExpectCrossSectionValid(middle);
+  EXPECT_NEAR(middle.Area(), input.Area(),
+              1e-6 * (1.0 + std::fabs(input.Area())));
+}
+
+void TranslatedExtrusionSliceMatchesCrossSection(int sides, double radius,
+                                                 double translateX,
+                                                 double translateY,
+                                                 double translateZ,
+                                                 double height) {
+  const manifold::CrossSection input(RegularPolygon(sides, radius));
+  const auto expected = input.Translate({translateX, translateY});
+  ExpectCrossSectionValid(expected);
+
+  const auto solid = manifold::Manifold::Extrude(input.ToPolygons(), height)
+                         .Translate({translateX, translateY, translateZ});
+  EXPECT_EQ(solid.Status(), manifold::Manifold::Error::NoError);
+  EXPECT_TRUE(std::isfinite(solid.Volume()));
+  EXPECT_NEAR(solid.Volume(), input.Area() * height,
+              1e-6 * (1.0 + std::fabs(input.Area() * height)));
+
+  const manifold::CrossSection projected(solid.Project());
+  ExpectCrossSectionValid(projected);
+  EXPECT_NEAR(projected.Area(), expected.Area(),
+              1e-6 * (1.0 + std::fabs(expected.Area())));
+
+  const manifold::CrossSection middle(solid.Slice(translateZ + height * 0.5));
+  ExpectCrossSectionValid(middle);
+  EXPECT_NEAR(middle.Area(), expected.Area(),
+              1e-6 * (1.0 + std::fabs(expected.Area())));
+}
+
+void RotatedExtrusionSliceMatchesCrossSection(int sides, double radius,
+                                              double rotation, double height) {
+  const manifold::CrossSection input(RegularPolygon(sides, radius));
+  const auto expected = input.Rotate(rotation);
+  ExpectCrossSectionValid(expected);
+
+  const auto solid = manifold::Manifold::Extrude(input.ToPolygons(), height)
+                         .Rotate(0.0, 0.0, rotation);
+  EXPECT_EQ(solid.Status(), manifold::Manifold::Error::NoError);
+  EXPECT_TRUE(std::isfinite(solid.Volume()));
+  EXPECT_NEAR(solid.Volume(), expected.Area() * height,
+              1e-6 * (1.0 + std::fabs(expected.Area() * height)));
+
+  const manifold::CrossSection projected(solid.Project());
+  ExpectCrossSectionValid(projected);
+  EXPECT_NEAR(projected.Area(), expected.Area(),
+              1e-6 * (1.0 + std::fabs(expected.Area())));
+
+  const manifold::CrossSection middle(solid.Slice(height * 0.5));
+  ExpectCrossSectionValid(middle);
+  EXPECT_NEAR(middle.Area(), expected.Area(),
+              1e-6 * (1.0 + std::fabs(expected.Area())));
+}
+
+void HoledBooleanExtrudeRoundTrip(const std::vector<double>& radiiA,
+                                  const std::vector<double>& radiiB,
+                                  double innerScaleA, double innerScaleB,
+                                  double translateX, double translateY,
+                                  manifold::OpType op, double height,
+                                  int nDivisions) {
+  const manifold::CrossSection a(StarWithHole(radiiA, innerScaleA));
+  const manifold::CrossSection b =
+      manifold::CrossSection(StarWithHole(radiiB, innerScaleB))
+          .Translate({translateX, translateY});
+  const auto result = ApplyBoolean(a, b, op);
+  ExpectCrossSectionValid(result);
+  if (result.IsEmpty() || std::fabs(result.Area()) <= 1e-9) return;
+
+  const auto solid =
+      manifold::Manifold::Extrude(result.ToPolygons(), height, nDivisions);
+  EXPECT_EQ(solid.Status(), manifold::Manifold::Error::NoError);
+  EXPECT_TRUE(std::isfinite(solid.Volume()));
+  EXPECT_NEAR(solid.Volume(), result.Area() * height,
+              1e-6 * (1.0 + std::fabs(result.Area() * height)));
+
+  const manifold::CrossSection projected(solid.Project());
+  ExpectCrossSectionValid(projected);
+
+  const manifold::CrossSection middle(solid.Slice(height * 0.5));
+  ExpectCrossSectionValid(middle);
+}
+
+void WarpAffineEquivalence(int sides, double radius, double scaleX,
+                           double scaleY, double translateX, double translateY,
+                           int nDivisions) {
+  const manifold::CrossSection base(RegularPolygon(sides, radius));
+  const auto transformed =
+      base.Scale({scaleX, scaleY}).Translate({translateX, translateY});
+  const auto warped = base.Warp([=](manifold::vec2& v) {
+    v.x = v.x * scaleX + translateX;
+    v.y = v.y * scaleY + translateY;
+  });
+
+  ExpectCrossSectionValid(transformed);
+  ExpectCrossSectionValid(warped);
+  EXPECT_NEAR(warped.Area(), transformed.Area(),
+              1e-6 * (1.0 + std::fabs(transformed.Area())));
+
+  const auto transformedSolid =
+      manifold::Manifold::Extrude(transformed.ToPolygons(), 1.0, nDivisions);
+  const auto warpedSolid =
+      manifold::Manifold::Extrude(warped.ToPolygons(), 1.0, nDivisions);
+  EXPECT_EQ(transformedSolid.Status(), manifold::Manifold::Error::NoError);
+  EXPECT_EQ(warpedSolid.Status(), manifold::Manifold::Error::NoError);
+  EXPECT_TRUE(std::isfinite(transformedSolid.Volume()));
+  EXPECT_TRUE(std::isfinite(warpedSolid.Volume()));
+  EXPECT_NEAR(warpedSolid.Volume(), transformedSolid.Volume(),
+              1e-6 * (1.0 + std::fabs(transformedSolid.Volume())));
+}
+
+void MirrorExtrudeRoundTrip(int sides, double radius, double axisX,
+                            double axisY, double height, int nDivisions) {
+  const manifold::CrossSection base(RegularPolygon(sides, radius));
+  const auto mirrored = base.Mirror({axisX, axisY});
+  if (axisX == 0.0 && axisY == 0.0) {
+    EXPECT_TRUE(mirrored.IsEmpty());
+    return;
+  }
+
+  ExpectCrossSectionValid(base);
+  ExpectCrossSectionValid(mirrored);
+  EXPECT_NEAR(mirrored.Area(), base.Area(),
+              1e-6 * (1.0 + std::fabs(base.Area())));
+
+  const auto solid =
+      manifold::Manifold::Extrude(mirrored.ToPolygons(), height, nDivisions);
+  EXPECT_EQ(solid.Status(), manifold::Manifold::Error::NoError);
+  EXPECT_TRUE(std::isfinite(solid.Volume()));
+  EXPECT_NEAR(solid.Volume(), mirrored.Area() * height,
+              1e-6 * (1.0 + std::fabs(mirrored.Area() * height)));
+
+  const manifold::CrossSection projected(solid.Project());
+  ExpectCrossSectionValid(projected);
+  EXPECT_NEAR(projected.Area(), mirrored.Area(),
+              1e-6 * (1.0 + std::fabs(mirrored.Area())));
+
+  const manifold::CrossSection middle(solid.Slice(height * 0.5));
+  ExpectCrossSectionValid(middle);
+  EXPECT_NEAR(middle.Area(), mirrored.Area(),
+              1e-6 * (1.0 + std::fabs(mirrored.Area())));
+}
+
+void ManifoldTransformedExtrudeRoundTrip(const std::vector<double>& radii,
+                                         double rotation, double scaleX,
+                                         double scaleY, double height,
+                                         int nDivisions) {
+  const manifold::CrossSection input =
+      manifold::CrossSection(StarPolygon(radii))
+          .Rotate(rotation)
+          .Scale({scaleX, scaleY});
+  ExpectCrossSectionValid(input);
+  if (input.IsEmpty() || std::fabs(input.Area()) <= 1e-9) return;
+
+  const auto solid =
+      manifold::Manifold::Extrude(input.ToPolygons(), height, nDivisions);
+  EXPECT_EQ(solid.Status(), manifold::Manifold::Error::NoError);
+  EXPECT_TRUE(std::isfinite(solid.Volume()));
+  EXPECT_NEAR(solid.Volume(), input.Area() * height,
+              1e-6 * (1.0 + std::fabs(input.Area() * height)));
+
+  const manifold::CrossSection projected(solid.Project());
+  ExpectCrossSectionValid(projected);
+  EXPECT_NEAR(projected.Area(), input.Area(),
+              1e-6 * (1.0 + std::fabs(input.Area())));
+
+  const manifold::CrossSection middle(solid.Slice(height * 0.5));
+  ExpectCrossSectionValid(middle);
+  EXPECT_NEAR(middle.Area(), input.Area(),
+              1e-6 * (1.0 + std::fabs(input.Area())));
+}
+
+void SimpleBooleanIdentities(const std::vector<double>& radii) {
+  const manifold::CrossSection input(StarPolygon(radii));
+  ExpectCrossSectionValid(input);
+  if (input.IsEmpty() || std::fabs(input.Area()) <= 1e-9) return;
+
+  const auto unioned = input + input;
+  ExpectCrossSectionValid(unioned);
+  EXPECT_NEAR(unioned.Area(), input.Area(),
+              1e-6 * (1.0 + std::fabs(input.Area())));
+
+  const auto intersected = input.Boolean(input, manifold::OpType::Intersect);
+  ExpectCrossSectionValid(intersected);
+  EXPECT_NEAR(intersected.Area(), input.Area(),
+              1e-6 * (1.0 + std::fabs(input.Area())));
+
+  const auto subtracted = input - input;
+  ExpectCrossSectionValid(subtracted);
+  EXPECT_TRUE(subtracted.IsEmpty());
+}
+
+void SimplePositiveOffset(const std::vector<double>& radii, double delta,
+                          manifold::CrossSection::JoinType joinType,
+                          int circularSegments) {
+  const manifold::CrossSection input(StarPolygon(radii));
+  ExpectCrossSectionValid(input);
+  if (input.IsEmpty() || std::fabs(input.Area()) <= 1e-9) return;
+
+  const auto output =
+      input.Offset(delta, joinType, /*miter_limit=*/2.0, circularSegments);
+  ExpectCrossSectionValid(output);
+  EXPECT_FALSE(output.IsEmpty());
+  EXPECT_GE(output.Area(), input.Area() - 1e-6 * (1.0 + input.Area()));
+}
+
+void OffsetExtrudeRoundTrip(const std::vector<double>& radii, double delta,
+                            manifold::CrossSection::JoinType joinType,
+                            int circularSegments, double height,
+                            int nDivisions) {
+  const manifold::CrossSection input(StarPolygon(radii));
+  const auto output =
+      input.Offset(delta, joinType, /*miter_limit=*/2.0, circularSegments);
+  ExpectCrossSectionValid(output);
+  if (output.IsEmpty() || std::fabs(output.Area()) <= 1e-9) return;
+
+  const auto solid =
+      manifold::Manifold::Extrude(output.ToPolygons(), height, nDivisions);
+  EXPECT_EQ(solid.Status(), manifold::Manifold::Error::NoError);
+  EXPECT_TRUE(std::isfinite(solid.Volume()));
+  EXPECT_NEAR(solid.Volume(), output.Area() * height,
+              1e-6 * (1.0 + std::fabs(output.Area() * height)));
+
+  const manifold::CrossSection projected(solid.Project());
+  ExpectCrossSectionValid(projected);
+
+  const manifold::CrossSection middle(solid.Slice(height * 0.5));
+  ExpectCrossSectionValid(middle);
+}
+
+void ManifoldHoledExtrudeRoundTrip(const std::vector<double>& radii,
+                                   double innerScale, double height,
+                                   int nDivisions) {
+  const manifold::CrossSection input(StarWithHole(radii, innerScale));
+  ExpectCrossSectionValid(input);
+  if (input.IsEmpty() || std::fabs(input.Area()) <= 1e-9) return;
+
+  const auto solid =
+      manifold::Manifold::Extrude(input.ToPolygons(), height, nDivisions);
+  EXPECT_EQ(solid.Status(), manifold::Manifold::Error::NoError);
+  EXPECT_TRUE(std::isfinite(solid.Volume()));
+  EXPECT_EQ(solid.Genus(), 1);
+  EXPECT_NEAR(solid.Volume(), input.Area() * height,
+              1e-6 * (1.0 + std::fabs(input.Area() * height)));
+
+  const manifold::CrossSection projected(solid.Project());
+  ExpectCrossSectionValid(projected);
+  EXPECT_NEAR(projected.Area(), input.Area(),
+              1e-6 * (1.0 + std::fabs(input.Area())));
+
+  const manifold::CrossSection middle(solid.Slice(height * 0.5));
+  ExpectCrossSectionValid(middle);
+  EXPECT_NEAR(middle.Area(), input.Area(),
+              1e-6 * (1.0 + std::fabs(input.Area())));
+}
+
+std::vector<BooleanSeed> BooleanSeeds() {
+  return {
+      {{{{{0, 0}, {10, 0}, {10, 10}, {0, 10}}}},
+       {{{{5, -1}, {11, 5}, {5, 11}, {-1, 5}}}},
+       manifold::OpType::Add},
+      {{{{{0, 0}, {10, 0}, {10, 1}, {0, 1}}}},
+       {{{{5, 0}, {15, 0}, {15, 1}, {5, 1}}}},
+       manifold::OpType::Intersect},
+      {{{{{0, 0}, {8, 0}, {8, 8}, {0, 8}}, {{2, 6}, {6, 6}, {6, 2}, {2, 2}}}},
+       {{{{4, -2}, {10, 4}, {4, 10}, {-2, 4}}}},
+       manifold::OpType::Subtract},
+  };
+}
+
+std::vector<OffsetSeed> OffsetSeeds() {
+  return {
+      {{{{{0, 0}, {20, 0}, {20, 20}, {0, 20}}}},
+       3.0,
+       manifold::CrossSection::JoinType::Round,
+       16},
+      {{{{{0, 0}, {20, 0}, {20, 2}, {2, 2}, {2, 20}, {0, 20}}}},
+       -0.9,
+       manifold::CrossSection::JoinType::Miter,
+       0},
+      {{{{{0, 0}, {12, 0}, {6, 0.01}, {12, 8}, {0, 8}}}},
+       2.0,
+       manifold::CrossSection::JoinType::Square,
+       0},
+  };
+}
+
+std::vector<ExtrudeSeed> ExtrudeSeeds() {
+  return {
+      {{{{{0, 0}, {10, 0}, {10, 10}, {0, 10}}}}, 5.0, 0},
+      {{{{{0, 0}, {20, 0}, {20, 20}, {0, 20}},
+         {{5, 15}, {15, 15}, {15, 5}, {5, 5}}}},
+       3.0,
+       2},
+      {{{{{0, 0}, {12, 0}, {6, 0.01}, {12, 8}, {0, 8}}}}, 2.0, 1},
+  };
+}
+
+std::vector<StarExtrudeSeed> StarExtrudeSeeds() {
+  return {
+      {{1.0, 1.0, 1.0, 1.0}, 5.0, 0},
+      {{1.0, 2.0, 0.5, 2.0, 1.0}, 3.0, 2},
+      {{0.1, 3.0, 0.1, 3.0, 0.1, 3.0}, 2.0, 1},
+  };
+}
+
+std::vector<BooleanExtrudeSeed> BooleanExtrudeSeeds() {
+  return {
+      {{1.0, 1.0, 1.0, 1.0},
+       {1.0, 1.0, 1.0, 1.0},
+       0.5,
+       0.0,
+       manifold::OpType::Add,
+       5.0,
+       0},
+      {{1.0, 2.0, 0.5, 2.0, 1.0},
+       {0.5, 1.5, 0.5, 1.5, 0.5},
+       0.25,
+       -0.25,
+       manifold::OpType::Subtract,
+       3.0,
+       1},
+      {{0.1, 3.0, 0.1, 3.0, 0.1, 3.0},
+       {1.0, 1.0, 1.0, 1.0, 1.0, 1.0},
+       0.0,
+       0.0,
+       manifold::OpType::Intersect,
+       2.0,
+       2},
+  };
+}
+
+std::vector<PrismBooleanSeed> PrismBooleanSeeds() {
+  return {
+      {4, 1.0, 4, 1.0, 0.5, 0.0, manifold::OpType::Add},
+      {5, 2.0, 6, 1.5, 0.25, -0.25, manifold::OpType::Subtract},
+      {8, 3.0, 7, 2.0, 1.0, 0.0, manifold::OpType::Intersect},
+      {17, 35.115498790314518, 7, 38.316457438114696, -0.0,
+       -0.30479173448248414, manifold::OpType::Subtract},
+  };
+}
+
+std::vector<TranslatedSliceSeed> TranslatedSliceSeeds() {
+  return {
+      {4, 1.0, 0.0, 0.0, 0.0, 5.0},
+      {5, 2.0, 10.0, -20.0, 3.0, 2.0},
+      {12, 3.0, -100.0, 50.0, -25.0, 10.0},
+  };
+}
+
+std::vector<RotatedSliceSeed> RotatedSliceSeeds() {
+  return {
+      {4, 1.0, 0.0, 5.0},
+      {5, 2.0, 45.0, 2.0},
+      {12, 3.0, -90.0, 10.0},
+  };
+}
+
+std::vector<HoledBooleanExtrudeSeed> HoledBooleanExtrudeSeeds() {
+  return {
+      {{1.0, 1.0, 1.0, 1.0},
+       {1.0, 1.0, 1.0, 1.0},
+       0.25,
+       0.2,
+       2.0,
+       0.0,
+       manifold::OpType::Add,
+       5.0,
+       0},
+      {{1.0, 2.0, 0.5, 2.0, 1.0},
+       {0.5, 1.5, 0.5, 1.5, 0.5},
+       0.2,
+       0.15,
+       0.25,
+       -0.25,
+       manifold::OpType::Subtract,
+       3.0,
+       1},
+      {{0.1, 3.0, 0.1, 3.0, 0.1, 3.0},
+       {1.0, 1.0, 1.0, 1.0, 1.0, 1.0},
+       0.1,
+       0.3,
+       0.0,
+       0.0,
+       manifold::OpType::Intersect,
+       2.0,
+       2},
+      {{1.0, 4.0, 1.0, 4.0, 1.0, 4.0, 1.0, 4.0},
+       {4.0, 1.0, 4.0, 1.0, 4.0, 1.0, 4.0, 1.0},
+       0.1,
+       0.1,
+       1.0,
+       1.0,
+       manifold::OpType::Add,
+       4.0,
+       4},
+      {{3.0, 0.5, 2.0, 0.5, 3.0, 0.5},
+       {2.0, 0.5, 3.0, 0.5, 2.0, 0.5},
+       0.15,
+       0.15,
+       -0.5,
+       0.5,
+       manifold::OpType::Subtract,
+       1.5,
+       2},
+  };
+}
+
+std::vector<TransformExtrudeSeed> TransformExtrudeSeeds() {
+  return {
+      {{1.0, 1.0, 1.0, 1.0}, 45.0, 2.0, 0.5, 5.0, 0},
+      {{1.0, 2.0, 0.5, 2.0, 1.0}, -30.0, 1.5, 3.0, 3.0, 2},
+      {{0.1, 3.0, 0.1, 3.0, 0.1, 3.0}, 90.0, 0.25, 4.0, 2.0, 1},
+  };
+}
+
+std::vector<MultiComponentSeed> MultiComponentSeeds() {
+  return {
+      {{1.0, 1.0, 1.0, 1.0}, 2, 0.0},
+      {{1.0, 2.0, 0.5, 2.0, 1.0}, 3, 500.0},
+      {{0.1, 3.0, 0.1, 3.0, 0.1, 3.0}, 2, 1000.0},
+  };
+}
+
+std::vector<BatchBooleanSeed> BatchBooleanSeeds() {
+  return {
+      {4, 1.0, 1, 0.0},
+      {5, 2.0, 2, 50.0},
+      {12, 3.0, 3, 100.0},
+  };
+}
+
+std::vector<WarpAffineSeed> WarpAffineSeeds() {
+  return {
+      {4, 1.0, 2.0, 3.0, 4.0, 5.0, 0},
+      {5, 2.0, 0.5, 4.0, -10.0, 20.0, 1},
+      {12, 3.0, 10.0, 0.25, 100.0, -50.0, 2},
+  };
+}
+
+std::vector<MirrorExtrudeSeed> MirrorExtrudeSeeds() {
+  return {
+      {4, 1.0, 1.0, 0.0, 5.0, 0},
+      {5, 2.0, 1.0, 1.0, 3.0, 1},
+      {12, 3.0, -1.0, 1.0, 2.0, 2},
+      {6, 1.0, 0.0, 0.0, 1.0, 0},
+  };
+}
+
+std::vector<StarSeed> StarSeeds() {
+  return {
+      {{1.0, 1.0, 1.0, 1.0}},
+      {{1.0, 2.0, 0.5, 2.0, 1.0}},
+      {{0.1, 3.0, 0.1, 3.0, 0.1, 3.0}},
+  };
+}
+
+std::vector<SimpleOffsetSeed> SimpleOffsetSeeds() {
+  return {
+      {{1.0, 1.0, 1.0, 1.0}, 0.5, manifold::CrossSection::JoinType::Round, 16},
+      {{1.0, 2.0, 0.5, 2.0, 1.0},
+       0.25,
+       manifold::CrossSection::JoinType::Miter,
+       0},
+      {{0.1, 3.0, 0.1, 3.0, 0.1, 3.0},
+       0.1,
+       manifold::CrossSection::JoinType::Bevel,
+       0},
+  };
+}
+
+std::vector<OffsetExtrudeSeed> OffsetExtrudeSeeds() {
+  return {
+      {{1.0, 1.0, 1.0, 1.0},
+       0.5,
+       manifold::CrossSection::JoinType::Round,
+       16,
+       5.0,
+       0},
+      {{1.0, 2.0, 0.5, 2.0, 1.0},
+       -0.1,
+       manifold::CrossSection::JoinType::Miter,
+       0,
+       3.0,
+       1},
+      {{0.1, 3.0, 0.1, 3.0, 0.1, 3.0},
+       0.25,
+       manifold::CrossSection::JoinType::Bevel,
+       0,
+       2.0,
+       2},
+  };
+}
+
+std::vector<HoleExtrudeSeed> HoleExtrudeSeeds() {
+  return {
+      {{1.0, 1.0, 1.0, 1.0}, 0.25, 5.0, 0},
+      {{1.0, 2.0, 0.5, 2.0, 1.0}, 0.2, 3.0, 2},
+      {{0.1, 3.0, 0.1, 3.0, 0.1, 3.0}, 0.1, 2.0, 1},
+  };
+}
+
+auto CoordinateDomain() {
+  return OneOf(InRange(-1000.0, 1000.0),
+               ElementOf({-1024.0, -1.0, -1e-6, 0.0, 1e-6, 1.0, 1024.0}));
+}
+
+auto RawRingDomain() {
+  return VectorOf(PairOf(CoordinateDomain(), CoordinateDomain()))
+      .WithMinSize(3)
+      .WithMaxSize(48);
+}
+
+auto RawPolygonsDomain() {
+  return VectorOf(RawRingDomain()).WithMinSize(1).WithMaxSize(4);
+}
+
+auto StarRadiiDomain() {
+  return VectorOf(InRange(0.0, 1000.0)).WithMinSize(4).WithMaxSize(48);
+}
+
+auto SmallStarRadiiDomain() {
+  return VectorOf(InRange(0.0, 50.0)).WithMinSize(4).WithMaxSize(24);
+}
+
+}  // namespace
+
+FUZZ_TEST(CrossSectionFuzz, BooleanRobustness)
+    .WithDomains(RawPolygonsDomain(), RawPolygonsDomain(),
+                 ElementOf({manifold::OpType::Add, manifold::OpType::Subtract,
+                            manifold::OpType::Intersect}))
+    .WithSeeds(BooleanSeeds);
+
+FUZZ_TEST(CrossSectionFuzz, OffsetRobustness)
+    .WithDomains(RawPolygonsDomain(), InRange(-100.0, 100.0),
+                 ElementOf({manifold::CrossSection::JoinType::Square,
+                            manifold::CrossSection::JoinType::Round,
+                            manifold::CrossSection::JoinType::Miter,
+                            manifold::CrossSection::JoinType::Bevel}),
+                 ElementOf({0, 4, 8, 16, 32}))
+    .WithSeeds(OffsetSeeds);
+
+FUZZ_TEST(CrossSectionFuzz, ManifoldExtrudeRoundTrip)
+    .WithDomains(RawPolygonsDomain(), InRange(0.1, 50.0),
+                 ElementOf({0, 1, 2, 4}))
+    .WithSeeds(ExtrudeSeeds);
+
+FUZZ_TEST(CrossSectionFuzz, ManifoldSimpleExtrudeRoundTrip)
+    .WithDomains(StarRadiiDomain(), InRange(0.1, 50.0), ElementOf({0, 1, 2, 4}))
+    .WithSeeds(StarExtrudeSeeds);
+
+FUZZ_TEST(CrossSectionFuzz, BooleanExtrudeRoundTrip)
+    .WithDomains(SmallStarRadiiDomain(), SmallStarRadiiDomain(),
+                 InRange(-100.0, 100.0), InRange(-100.0, 100.0),
+                 ElementOf({manifold::OpType::Add, manifold::OpType::Subtract,
+                            manifold::OpType::Intersect}),
+                 InRange(0.1, 50.0), ElementOf({0, 1, 2, 4}))
+    .WithSeeds(BooleanExtrudeSeeds);
+
+FUZZ_TEST(CrossSectionFuzz, PrismBooleanMatchesCrossSection)
+    .WithDomains(InRange(3, 32), InRange(0.1, 50.0), InRange(3, 32),
+                 InRange(0.1, 50.0), InRange(-75.0, 75.0), InRange(-75.0, 75.0),
+                 ElementOf({manifold::OpType::Add, manifold::OpType::Subtract,
+                            manifold::OpType::Intersect}))
+    .WithSeeds(PrismBooleanSeeds);
+
+FUZZ_TEST(CrossSectionFuzz, ManifoldTransformedExtrudeRoundTrip)
+    .WithDomains(StarRadiiDomain(), InRange(-180.0, 180.0), InRange(0.1, 10.0),
+                 InRange(0.1, 10.0), InRange(0.1, 50.0),
+                 ElementOf({0, 1, 2, 4}))
+    .WithSeeds(TransformExtrudeSeeds);
+
+FUZZ_TEST(CrossSectionFuzz, DecomposeComposeAndHull)
+    .WithDomains(StarRadiiDomain(), ElementOf({1, 2, 3}), InRange(0.0, 2000.0))
+    .WithSeeds(MultiComponentSeeds);
+
+FUZZ_TEST(CrossSectionFuzz, BatchBooleanSeparated)
+    .WithDomains(InRange(3, 64), InRange(0.1, 100.0), ElementOf({1, 2, 3}),
+                 InRange(0.0, 2000.0))
+    .WithSeeds(BatchBooleanSeeds);
+
+FUZZ_TEST(CrossSectionFuzz, DecomposedExtrusionsRecompose)
+    .WithDomains(InRange(3, 64), InRange(0.1, 100.0), ElementOf({1, 2, 3}),
+                 InRange(0.0, 2000.0))
+    .WithSeeds(BatchBooleanSeeds);
+
+FUZZ_TEST(CrossSectionFuzz, TranslatedExtrusionSliceMatchesCrossSection)
+    .WithDomains(InRange(3, 64), InRange(0.1, 100.0), InRange(-1000.0, 1000.0),
+                 InRange(-1000.0, 1000.0), InRange(-1000.0, 1000.0),
+                 InRange(0.1, 50.0))
+    .WithSeeds(TranslatedSliceSeeds);
+
+FUZZ_TEST(CrossSectionFuzz, RotatedExtrusionSliceMatchesCrossSection)
+    .WithDomains(InRange(3, 64), InRange(0.1, 100.0), InRange(-180.0, 180.0),
+                 InRange(0.1, 50.0))
+    .WithSeeds(RotatedSliceSeeds);
+
+FUZZ_TEST(CrossSectionFuzz, HoledBooleanExtrudeRoundTrip)
+    .WithDomains(SmallStarRadiiDomain(), SmallStarRadiiDomain(),
+                 InRange(0.05, 0.45), InRange(0.05, 0.45), InRange(-25.0, 25.0),
+                 InRange(-25.0, 25.0),
+                 ElementOf({manifold::OpType::Add, manifold::OpType::Subtract,
+                            manifold::OpType::Intersect}),
+                 InRange(0.1, 50.0), ElementOf({0, 1, 2, 4}))
+    .WithSeeds(HoledBooleanExtrudeSeeds);
+
+FUZZ_TEST(CrossSectionFuzz, WarpAffineEquivalence)
+    .WithDomains(InRange(3, 64), InRange(0.1, 100.0), InRange(0.1, 10.0),
+                 InRange(0.1, 10.0), InRange(-1000.0, 1000.0),
+                 InRange(-1000.0, 1000.0), ElementOf({0, 1, 2}))
+    .WithSeeds(WarpAffineSeeds);
+
+FUZZ_TEST(CrossSectionFuzz, MirrorExtrudeRoundTrip)
+    .WithDomains(InRange(3, 64), InRange(0.1, 100.0), InRange(-10.0, 10.0),
+                 InRange(-10.0, 10.0), InRange(0.1, 50.0),
+                 ElementOf({0, 1, 2, 4}))
+    .WithSeeds(MirrorExtrudeSeeds);
+
+FUZZ_TEST(CrossSectionFuzz, SimpleBooleanIdentities)
+    .WithDomains(StarRadiiDomain())
+    .WithSeeds(StarSeeds);
+
+FUZZ_TEST(CrossSectionFuzz, SimplePositiveOffset)
+    .WithDomains(SmallStarRadiiDomain(), InRange(0.05, 25.0),
+                 ElementOf({manifold::CrossSection::JoinType::Square,
+                            manifold::CrossSection::JoinType::Round,
+                            manifold::CrossSection::JoinType::Miter,
+                            manifold::CrossSection::JoinType::Bevel}),
+                 ElementOf({0, 4, 8, 16, 32}))
+    .WithSeeds(SimpleOffsetSeeds);
+
+FUZZ_TEST(CrossSectionFuzz, OffsetExtrudeRoundTrip)
+    .WithDomains(SmallStarRadiiDomain(), InRange(-5.0, 10.0),
+                 ElementOf({manifold::CrossSection::JoinType::Square,
+                            manifold::CrossSection::JoinType::Round,
+                            manifold::CrossSection::JoinType::Miter,
+                            manifold::CrossSection::JoinType::Bevel}),
+                 ElementOf({0, 4, 8, 16, 32}), InRange(0.1, 50.0),
+                 ElementOf({0, 1, 2, 4}))
+    .WithSeeds(OffsetExtrudeSeeds);
+
+FUZZ_TEST(CrossSectionFuzz, ManifoldHoledExtrudeRoundTrip)
+    .WithDomains(StarRadiiDomain(), InRange(0.05, 0.45), InRange(0.1, 50.0),
+                 ElementOf({0, 1, 2, 4}))
+    .WithSeeds(HoleExtrudeSeeds);
