@@ -389,6 +389,21 @@ TEST(CrossSection, SimplifyUsesFixedPointWrapper) {
   EXPECT_NEAR(boolean2::TotalSignedArea(simplified), 1.76559, 1e-5);
 }
 
+TEST(CrossSection, ConstructorUsesFixedPointWrapper) {
+  Polygons polys{RandomTopologicalRing(8, 618)};
+  const double eps = boolean2::InferEps(polys, {});
+  const auto [verts, edges] = boolean2::PolygonsToInput(polys);
+  auto single = boolean2::RemoveOverlaps2D(verts, edges, eps);
+  auto singlePolys = boolean2::OutEdgesToPolygons(single.verts, single.edges);
+  ASSERT_EQ(singlePolys.size(), 2);
+
+  CrossSection constructed(polys, CrossSection::FillRule::NonZero);
+
+  EXPECT_EQ(constructed.NumContour(), 1);
+  EXPECT_EQ(constructed.NumVert(), 17);
+  EXPECT_NEAR(constructed.Area(), 1.7657086786950753, 1e-9);
+}
+
 TEST(CrossSection, Empty) {
   Polygons polys(2);
   auto e = CrossSection(polys);
@@ -465,6 +480,33 @@ TEST(CrossSection, Decompose) {
             Manifold::Extrude(decomp[1].ToPolygons(), 1.).GetMeshGL());
   Identical(Manifold::Extrude(ab.ToPolygons(), 1.).GetMeshGL(),
             Manifold::Extrude(recomp.ToPolygons(), 1.).GetMeshGL());
+}
+
+TEST(CrossSection, DecomposeNestedHoleAndIsland) {
+  SimplePolygon outer = {{-5, -5}, {5, -5}, {5, 5}, {-5, 5}};
+  SimplePolygon hole = {{-3, -3}, {-3, 3}, {3, 3}, {3, -3}};
+  SimplePolygon island = {{-1, -1}, {1, -1}, {1, 1}, {-1, 1}};
+  CrossSection input({outer, hole, island}, CrossSection::FillRule::EvenOdd);
+
+  auto components = input.Decompose();
+  ASSERT_EQ(components.size(), 2);
+
+  double totalArea = 0.0;
+  size_t donutCount = 0;
+  size_t islandCount = 0;
+  for (const auto& component : components) {
+    totalArea += component.Area();
+    if (component.NumContour() == 2) {
+      ++donutCount;
+    } else if (component.NumContour() == 1) {
+      ++islandCount;
+    }
+  }
+
+  EXPECT_EQ(donutCount, 1);
+  EXPECT_EQ(islandCount, 1);
+  EXPECT_NEAR(totalArea, input.Area(), 1e-9);
+  EXPECT_NEAR(CrossSection::Compose(components).Area(), input.Area(), 1e-9);
 }
 
 TEST(CrossSection, FillRule) {
@@ -550,6 +592,103 @@ TEST(CrossSection, BatchBoolean) {
 
   EXPECT_FLOAT_EQ(subtract.Area(), 7234.478452);
   EXPECT_FLOAT_EQ(subtract.NumVert(), 42);
+}
+
+// Seed: BooleanRobustness (2026-05-23 daemon find)
+// Counterexample-hash: pending minimization
+// Suspected owner: pr/boolean2-core (output topology balance check fails
+// after Add on raw multi-contour, near-duplicate-heavy polygons).
+TEST(CrossSection, BooleanRobustnessMergeTopologyBalance) {
+  const Polygons a = {{{1024., 1024.},
+                       {1., 1.},
+                       {9.9999999999999995e-07, -9.9999999999999995e-07}}};
+  const Polygons b = {{{0., 1.},
+                       {9.9999999999999995e-07, 1024.},
+                       {-1., -1024.},
+                       {-0., 1024.},
+                       {1., -1.}},
+                      {{1., 1.},
+                       {-9.9999999999999995e-07, -0.},
+                       {1., 1024.},
+                       {9.9999999999999995e-07, 0.}},
+                      {{-111.03407576117854, 0.},
+                       {560.59976308273758, 2.9313131393310714},
+                       {-1024., 1.},
+                       {89.678187020143696, 0.},
+                       {1024., 1.}},
+                      {{0., 0.},
+                       {3.2408667776584608, 1024.},
+                       {-1000., 9.9999999999999995e-07},
+                       {1024., -1.},
+                       {-1., -0.}}};
+  const auto [verts, edges] = CombinedInput(a, b, /*bMult=*/1);
+  ASSERT_FALSE(verts.empty());
+  const double eps = boolean2::InferEps(a, b);
+  const auto overlap = boolean2::RemoveOverlaps2D(
+      verts, edges, eps, /*debug=*/false, boolean2::WindRule::Add);
+  EXPECT_TRUE(CheckTopologicalValidity(overlap, edges, overlap.inputRemap,
+                                       overlap.numMergedVerts));
+}
+
+// Seed: BooleanRobustness (2026-05-23 daemon find)
+// Counterexample-hash: pending minimization
+// Suspected owner: pr/boolean2-core (direct-cast disconnected-component
+// winding fallback emitted an open spur after Add).
+TEST(CrossSection, BooleanRobustnessDirectCastKeepsExpectedArea) {
+  const Polygons a = {{{-9.9999999999999995e-07, 9.9999999999999995e-07},
+                       {-9.9999999999999995e-07, -9.9999999999999995e-07},
+                       {-0., 0.},
+                       {1., 1024.}},
+                      {{1024., 1024.},
+                       {1., 1.},
+                       {9.9999999999999995e-07, -9.9999999999999995e-07}}};
+  const Polygons b = {{{0., 1.},
+                       {9.9999999999999995e-07, 1024.},
+                       {-1., -1024.},
+                       {-0., 1024.},
+                       {1., -1.}},
+                      {{1., 1.},
+                       {-9.9999999999999995e-07, -0.},
+                       {1., 1024.},
+                       {9.9999999999999995e-07, 0.}},
+                      {{-111.03407576117854, 0.},
+                       {560.59976308273758, 2.9313131393310714},
+                       {-1024., 1.},
+                       {89.678187020143696, 0.},
+                       {1024., 1.}}};
+  const auto [verts, edges] = CombinedInput(a, b, /*bMult=*/1);
+  ASSERT_FALSE(verts.empty());
+  const double eps = boolean2::InferEps(a, b);
+  const auto overlap = boolean2::RemoveOverlaps2D(
+      verts, edges, eps, /*debug=*/false, boolean2::WindRule::Add);
+  EXPECT_TRUE(CheckTopologicalValidity(overlap, edges, overlap.inputRemap,
+                                       overlap.numMergedVerts));
+
+  const auto polys = boolean2::OutEdgesToPolygons(overlap.verts, overlap.edges);
+  EXPECT_EQ(polys.size(), 11);
+  EXPECT_NEAR(boolean2::TotalSignedArea(polys), 1678.2538553263785,
+              1e-10 * (1.0 + 1678.2538553263785));
+}
+
+TEST(CrossSection, BooleanOperatorAssignments) {
+  CrossSection a = CrossSection::Square({10, 10});
+  CrossSection b = CrossSection::Square({10, 10}).Translate({5, 0});
+
+  EXPECT_NEAR((a + b).Area(), 150.0, 1e-9);
+  EXPECT_NEAR((a - b).Area(), 50.0, 1e-9);
+  EXPECT_NEAR((a ^ b).Area(), 50.0, 1e-9);
+
+  CrossSection add = a;
+  add += b;
+  EXPECT_NEAR(add.Area(), 150.0, 1e-9);
+
+  CrossSection subtract = a;
+  subtract -= b;
+  EXPECT_NEAR(subtract.Area(), 50.0, 1e-9);
+
+  CrossSection intersect = a;
+  intersect ^= b;
+  EXPECT_NEAR(intersect.Area(), 50.0, 1e-9);
 }
 
 TEST(CrossSection, NegativeOffset) {
