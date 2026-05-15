@@ -16,13 +16,99 @@
 
 #include <gtest/gtest.h>
 
+#include <cmath>
+#include <limits>
+#include <map>
+#include <random>
 #include <vector>
 
+#ifdef MANIFOLD_CROSS_SECTION_BACKEND_BOOLEAN2
+#include "../src/cross_section/boolean2/boolean2.h"
+#include "../src/cross_section/boolean2/intersections.h"
+#endif
 #include "manifold/common.h"
 #include "manifold/manifold.h"
 #include "test.h"
 
 using namespace manifold;
+
+namespace {
+
+SimplePolygon RandomTopologicalRing(int n, uint64_t seed) {
+  std::mt19937_64 rng(seed);
+  std::uniform_real_distribution<double> dist(0.0, 1.0);
+  std::vector<vec2> verts(n);
+  for (int i = 0; i < n; ++i) {
+    const double theta = 2.0 * kPi * dist(rng);
+    verts[i] = {std::cos(theta), std::sin(theta)};
+  }
+
+  std::vector<int> order(n);
+  for (int i = 0; i < n; ++i) order[i] = i;
+  std::shuffle(order.begin(), order.end(), rng);
+
+  SimplePolygon ring;
+  ring.reserve(n);
+  for (int i : order) ring.push_back(verts[i]);
+  return ring;
+}
+
+template <typename Edge>
+std::map<int, int> ComputeBalance(const std::vector<Edge>& edges) {
+  std::map<int, int> balance;
+  for (const auto& edge : edges) {
+    balance[edge.v0] += edge.mult;
+    balance[edge.v1] -= edge.mult;
+  }
+  return balance;
+}
+
+bool CheckTopologicalValidity(const boolean2::OverlapResult& result,
+                              const std::vector<boolean2::EdgeM>& inputEdges,
+                              const std::vector<int>& inputRemap,
+                              int numMergedVerts) {
+  std::vector<boolean2::EdgeM> remapped;
+  remapped.reserve(inputEdges.size());
+  for (const auto& edge : inputEdges) {
+    const int a = inputRemap[edge.v0];
+    const int b = inputRemap[edge.v1];
+    if (a != b) remapped.push_back({a, b, edge.mult});
+  }
+
+  const auto expected = ComputeBalance(remapped);
+  const auto actual = ComputeBalance(result.edges);
+  for (const auto& [v, actualBalance] : actual) {
+    if (v < 0 || v >= static_cast<int>(result.verts.size())) {
+      return false;
+    }
+    (void)actualBalance;
+  }
+  for (int v = 0; v < static_cast<int>(result.verts.size()); ++v) {
+    const int expectedBalance =
+        expected.count(v) ? expected.find(v)->second : 0;
+    const int actualBalance = actual.count(v) ? actual.find(v)->second : 0;
+    const int target = (v < numMergedVerts) ? expectedBalance : 0;
+    if (actualBalance != target) return false;
+  }
+  return true;
+}
+
+std::pair<std::vector<vec2>, std::vector<boolean2::EdgeM>> CombinedInput(
+    const Polygons& a, const Polygons& b, int bMult) {
+  auto [verts, edges] = boolean2::PolygonsToInput(a);
+  auto [bVerts, bEdges] = boolean2::PolygonsToInput(b);
+  const int base = static_cast<int>(verts.size());
+  verts.insert(verts.end(), bVerts.begin(), bVerts.end());
+  for (auto edge : bEdges) {
+    edge.v0 += base;
+    edge.v1 += base;
+    edge.mult *= bMult;
+    edges.push_back(edge);
+  }
+  return {std::move(verts), std::move(edges)};
+}
+
+}  // namespace
 
 TEST(CrossSection, Square) {
   auto a = Manifold::Cube({5, 5, 5});
@@ -91,6 +177,216 @@ TEST(CrossSection, BevelOffset) {
   EXPECT_NEAR(result.Volume(),
               5 * (((20. + (2 * 5.)) * (20. + (2 * 5.))) - (2 * 5. * 5)), 1);
   EXPECT_EQ(rounded.NumVert(), 4 + 4);
+}
+
+TEST(CrossSection, MiterOffset) {
+  auto square = CrossSection::Square({20., 20.}, true);
+  auto offset = square.Offset(5., CrossSection::JoinType::Miter);
+  auto result = Manifold::Extrude(offset.ToPolygons(), 1.);
+
+  EXPECT_EQ(result.Genus(), 0);
+  EXPECT_NEAR(result.Volume(), 30. * 30., 0.01);
+  EXPECT_EQ(offset.NumVert(), 4);
+}
+
+TEST(CrossSection, OffsetWithHole) {
+  SimplePolygon outer = {{-10, -10}, {10, -10}, {10, 10}, {-10, 10}};
+  SimplePolygon hole = {{-2, -2}, {-2, 2}, {2, 2}, {2, -2}};
+  CrossSection cs({outer, hole}, CrossSection::FillRule::EvenOdd);
+
+  auto inflated = cs.Offset(1., CrossSection::JoinType::Miter);
+  EXPECT_NEAR(inflated.Area(), 484. - 4., 0.01);
+
+  auto inset = cs.Offset(-1., CrossSection::JoinType::Miter);
+  EXPECT_NEAR(inset.Area(), 324. - 36., 0.01);
+}
+
+TEST(CrossSection, OffsetThinPinch) {
+  CrossSection thin = CrossSection::Square({100., 2.}, true);
+  auto inset = thin.Offset(-1., CrossSection::JoinType::Miter);
+
+  EXPECT_TRUE(inset.IsEmpty() || inset.Area() < 0.01);
+}
+
+TEST(CrossSection, OffsetMultipleDisjointOuters) {
+  SimplePolygon a = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
+  SimplePolygon b = {{10, 0}, {11, 0}, {11, 1}, {10, 1}};
+  CrossSection cs({a, b});
+
+  auto separated = cs.Offset(0.5, CrossSection::JoinType::Miter);
+  EXPECT_EQ(separated.NumContour(), 2);
+  EXPECT_NEAR(separated.Area(), 8., 0.01);
+
+  auto merged = cs.Offset(5., CrossSection::JoinType::Miter);
+  EXPECT_EQ(merged.NumContour(), 1);
+}
+
+TEST(CrossSection, FourConcurrentEdges) {
+  auto rhomb = [](double angleDegrees) {
+    const double angle = angleDegrees * kPi / 180.;
+    const double cosA = std::cos(angle);
+    const double sinA = std::sin(angle);
+    constexpr double radius = 1.0;
+    constexpr double width = 0.1;
+    return SimplePolygon{{radius * cosA, radius * sinA},
+                         {-width * sinA, width * cosA},
+                         {-radius * cosA, -radius * sinA},
+                         {width * sinA, -width * cosA}};
+  };
+
+  Polygons polys;
+  for (double angle : {0., 45., 90., 135.}) polys.push_back(rhomb(angle));
+  CrossSection cs(polys, CrossSection::FillRule::NonZero);
+
+  EXPECT_EQ(cs.NumContour(), 1);
+  EXPECT_NEAR(cs.Area(), 0.644423, 1e-4);
+  for (const auto& loop : cs.ToPolygons()) {
+    for (const vec2& v : loop) {
+      EXPECT_TRUE(std::isfinite(v.x));
+      EXPECT_TRUE(std::isfinite(v.y));
+      EXPECT_LE(la::length(v), 1.05);
+    }
+  }
+}
+
+TEST(CrossSection, ConcurrentIndependentEdgePairs) {
+  auto rhomb = [](double angleDegrees) {
+    const double angle = angleDegrees * kPi / 180.;
+    const double cosA = std::cos(angle);
+    const double sinA = std::sin(angle);
+    constexpr double radius = 1.0;
+    constexpr double width = 0.08;
+    return SimplePolygon{{radius * cosA, radius * sinA},
+                         {-width * sinA, width * cosA},
+                         {-radius * cosA, -radius * sinA},
+                         {width * sinA, -width * cosA}};
+  };
+
+  Polygons polys;
+  for (double angle : {0., 30., 90., 120.}) polys.push_back(rhomb(angle));
+  CrossSection cs(polys, CrossSection::FillRule::NonZero);
+
+  EXPECT_EQ(cs.NumContour(), 1);
+  EXPECT_NEAR(cs.Area(), 0.527482, 1e-4);
+  for (const auto& loop : cs.ToPolygons()) {
+    for (const vec2& v : loop) {
+      EXPECT_TRUE(std::isfinite(v.x));
+      EXPECT_TRUE(std::isfinite(v.y));
+      EXPECT_LE(la::length(v), 1.05);
+    }
+  }
+}
+
+TEST(CrossSection, PropagatesShallowIndependentIntersections) {
+  using boolean2::Box2;
+  using boolean2::BoxOf2DEdge;
+  using boolean2::BVH;
+  using boolean2::EdgeM;
+  using boolean2::FindAndInsertIntersections;
+
+  constexpr double eps = 1e-3;
+  std::vector<vec2> verts = {{-1., 0.},
+                             {1., 0.},
+                             {0., -1.},
+                             {0., 1.},
+                             {-1., 5. * eps},
+                             {1., 5. * eps},
+                             {0., -1. + 5. * eps},
+                             {0., 1. + 5. * eps},
+                             {0., -1.},
+                             {0., 1.}};
+  std::vector<EdgeM> edges = {
+      {0, 1, 1}, {2, 3, 1}, {4, 5, 1}, {6, 7, 1}, {8, 9, 1}};
+  std::vector<Box2> edgeBoxes;
+  edgeBoxes.reserve(edges.size());
+  for (const EdgeM& edge : edges) {
+    edgeBoxes.push_back(BoxOf2DEdge(verts[edge.v0], verts[edge.v1], eps));
+  }
+  std::vector<std::vector<int>> lists(edges.size());
+  std::vector<std::vector<int>> vertEdges;
+  const std::vector<std::pair<int, int>> pairs = {{0, 1}, {2, 3}};
+
+  FindAndInsertIntersections(edges, &verts, &lists, &vertEdges, eps, edgeBoxes,
+                             BVH{}, pairs);
+
+  ASSERT_EQ(verts.size(), 12);
+  EXPECT_EQ(lists[4].size(), 2);
+}
+
+TEST(CrossSection, TranslatedShallowConcurrentEdges) {
+  auto rhomb = [](double angleDegrees, vec2 offset) {
+    const double angle = angleDegrees * kPi / 180.;
+    const double cosA = std::cos(angle);
+    const double sinA = std::sin(angle);
+    constexpr double radius = 1.0;
+    constexpr double width = 0.08;
+    return SimplePolygon{{offset.x + radius * cosA, offset.y + radius * sinA},
+                         {offset.x - width * sinA, offset.y + width * cosA},
+                         {offset.x - radius * cosA, offset.y - radius * sinA},
+                         {offset.x + width * sinA, offset.y - width * cosA}};
+  };
+
+  auto polysAt = [&](vec2 offset) {
+    Polygons polys;
+    for (double angle : {0., 6., 90., 96.})
+      polys.push_back(rhomb(angle, offset));
+    return polys;
+  };
+
+  const double base = std::ldexp(1.0, 40);
+  CrossSection origin(polysAt({0., 0.}), CrossSection::FillRule::NonZero);
+  CrossSection shifted(polysAt({base, -base}), CrossSection::FillRule::NonZero);
+  CrossSection shiftedBack = shifted.Translate({-base, base});
+
+  EXPECT_EQ(origin.NumContour(), 1);
+  EXPECT_EQ(shifted.NumContour(), 1);
+  EXPECT_EQ(shiftedBack.NumContour(), origin.NumContour());
+  EXPECT_NEAR(shiftedBack.Area(), origin.Area(), 1e-4);
+  EXPECT_NEAR(shiftedBack.Bounds().Size().x, origin.Bounds().Size().x, 1e-4);
+  EXPECT_NEAR(shiftedBack.Bounds().Size().y, origin.Bounds().Size().y, 1e-4);
+}
+
+TEST(CrossSection, TranslatedSmallPolygonKeepsFeatures) {
+  const double base = std::ldexp(1.0, 49) * 1.5;
+  SimplePolygon square = {{base, -base},
+                          {base + 10.0, -base},
+                          {base + 10.0, -base + 10.0},
+                          {base, -base + 10.0}};
+
+  CrossSection cs(square);
+
+  EXPECT_EQ(cs.NumContour(), 1);
+  EXPECT_EQ(cs.NumVert(), 4);
+  const vec2 size = cs.Bounds().Size();
+  EXPECT_NEAR(size.x, 10.0, 1e-9);
+  EXPECT_NEAR(size.y, 10.0, 1e-9);
+}
+
+TEST(CrossSection, NonFiniteInputReturnsEmpty) {
+  const double inf = std::numeric_limits<double>::infinity();
+  SimplePolygon bad = {{0.0, 0.0}, {1.0, 0.0}, {inf, 1.0}, {0.0, 1.0}};
+
+  CrossSection constructed(bad);
+  EXPECT_TRUE(constructed.IsEmpty());
+
+  Polygons finite = {{{0.0, 0.0}, {1.0, 0.0}, {1.0, 1.0}, {0.0, 1.0}}};
+  EXPECT_TRUE(boolean2::Boolean2D(Polygons{bad}, finite, OpType::Add).empty());
+}
+
+TEST(CrossSection, SimplifyUsesFixedPointWrapper) {
+  Polygons polys{RandomTopologicalRing(8, 618)};
+  const double eps = boolean2::InferEps(polys, {});
+
+  const auto [verts, edges] = boolean2::PolygonsToInput(polys);
+  auto single = boolean2::RemoveOverlaps2D(verts, edges, eps);
+  auto singlePolys = boolean2::OutEdgesToPolygons(single.verts, single.edges);
+  ASSERT_EQ(singlePolys.size(), 2);
+
+  auto simplified = boolean2::Simplify(polys, eps);
+  EXPECT_EQ(simplified.size(), 1);
+  ASSERT_FALSE(simplified.empty());
+  EXPECT_EQ(simplified.front().size(), 11);
+  EXPECT_NEAR(boolean2::TotalSignedArea(simplified), 1.76559, 1e-5);
 }
 
 TEST(CrossSection, Empty) {
