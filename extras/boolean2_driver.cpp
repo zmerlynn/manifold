@@ -1969,50 +1969,105 @@ inline manifold::Polygons Frame(double outer, double inner) {
 }
 
 #ifdef BOOLEAN2_WITH_MANIFOLD
-inline void MiniMengerFractal(std::vector<Manifold>* holes,
-                              const Manifold& baseHole, double w,
-                              vec2 position, int depth, int maxDepth) {
-  w /= 3.0;
-  holes->push_back(baseHole.Scale({w, w, 1.0}).Translate(vec3(position, 0.0)));
-  if (depth == maxDepth) return;
-  const vec2 offsets[8] = {{-w, -w}, {-w, 0.0}, {-w, w}, {0.0, w},
-                           {w, w},   {w, 0.0},  {w, -w}, {0.0, -w}};
-  for (const vec2& offset : offsets)
-    MiniMengerFractal(holes, baseHole, w, position + offset, depth + 1,
-                      maxDepth);
+inline bool HasAnyLoop(const manifold::Polygons& polygons) {
+  for (const auto& loop : polygons) {
+    if (loop.size() >= 3) return true;
+  }
+  return false;
 }
 
-inline Manifold MiniMengerSponge(int depth) {
-  Manifold result = Manifold::Cube(vec3(1.0), true);
-  std::vector<Manifold> holes;
-  MiniMengerFractal(&holes, result, 1.0, {0.0, 0.0}, 1, depth);
-  Manifold hole = Manifold::BatchBoolean(holes, OpType::Add);
-  result -= hole;
-  result -= hole.Rotate(90);
-  result -= hole.Rotate(0, 0, 90);
-  return result;
+inline void AddCadCase(std::vector<CadCase>* cases, std::string name,
+                       manifold::Polygons a, manifold::Polygons b) {
+  if (!HasAnyLoop(a) || !HasAnyLoop(b)) return;
+  cases->push_back({std::move(name), std::move(a), std::move(b)});
+}
+
+inline void AddProjectPair(std::vector<CadCase>* cases, const std::string& name,
+                           const Manifold& a, const Manifold& b) {
+  AddCadCase(cases, name + " project", a.Project(), b.Project());
+}
+
+inline void AddSlicePair(std::vector<CadCase>* cases, const std::string& name,
+                         const Manifold& a, const Manifold& b,
+                         std::initializer_list<double> heights) {
+  for (double z : heights) {
+    std::ostringstream label;
+    label << name << " slice z=" << z;
+    AddCadCase(cases, label.str(), a.Slice(z), b.Slice(z));
+  }
+}
+
+inline Manifold SlottedBlock() {
+  Manifold block = Manifold::Cube({1.45, 1.2, 1.0}, true);
+  const Manifold slotX =
+      Manifold::Cylinder(1.8, 0.18, -1.0, 48, true).Rotate(0, 90, 0);
+  const Manifold slotY =
+      Manifold::Cylinder(1.6, 0.13, -1.0, 40, true).Rotate(90, 0, 0);
+  block -= slotX.Translate({0.0, 0.28, 0.0});
+  block -= slotX.Translate({0.0, -0.28, 0.0});
+  block -= slotY.Translate({0.32, 0.0, 0.18});
+  block -= slotY.Translate({-0.32, 0.0, -0.18});
+  return block;
+}
+
+inline Manifold TwistedStarPrism(int n, double phase) {
+  return Manifold::Extrude({RadialPart(n, 0.0, 0.0, 0.42, 0.78, phase)},
+                           1.2, 10, 35.0, {0.72, 1.08})
+      .Translate({0.0, 0.0, -0.6});
+}
+
+inline Manifold GyroidPatch() {
+  return Manifold::LevelSet(
+      [](vec3 p) {
+        return std::sin(4.0 * p.x) * std::cos(4.0 * p.y) +
+               std::sin(4.0 * p.y) * std::cos(4.0 * p.z) +
+               std::sin(4.0 * p.z) * std::cos(4.0 * p.x) - 0.15;
+      },
+      Box({-0.85, -0.85, -0.85}, {0.85, 0.85, 0.85}), 0.14);
 }
 
 inline void AppendManifoldDerivedCadCases(std::vector<CadCase>* cases) {
-  const Manifold sponge = MiniMengerSponge(2);
   const Manifold sphere = Manifold::Sphere(0.72, 48);
-  const Manifold spongeSphere = sponge ^ sphere;
-  cases->push_back({"project sponge vs sphere",
-                    sponge.Project(),
-                    sphere.Translate({0.18, -0.08, 0.0}).Project()});
-  cases->push_back({"project sponge-sphere intersection vs bar",
-                    spongeSphere.Project(),
-                    {Rect(-0.8, -0.09, 0.8, 0.09)}});
-  cases->push_back({"slice sponge vs sphere",
-                    sponge.Slice(0.08),
-                    sphere.Translate({0.12, 0.04, 0.0}).Slice(0.0)});
   const Manifold drilled =
       Manifold::Cube(vec3(1.4), true) -
       Manifold::Cylinder(1.7, 0.23, -1.0, 40, true).Rotate(90, 0, 0) -
       Manifold::Cylinder(1.7, 0.18, -1.0, 36, true).Rotate(0, 90, 0);
-  cases->push_back({"project drilled cube vs circle",
-                    drilled.Project(),
-                    {RegularPoly(96, 0.12, -0.04, 0.58)}});
+  AddCadCase(cases, "drilled cube project vs circle", drilled.Project(),
+             {RegularPoly(96, 0.12, -0.04, 0.58)});
+  AddSlicePair(cases, "drilled cube vs sphere", drilled,
+               sphere.Translate({0.08, -0.06, 0.0}),
+               {-0.34, -0.16, 0.0, 0.16, 0.34});
+
+  const Manifold slotted = SlottedBlock();
+  const Manifold crossingCylinder =
+      Manifold::Cylinder(1.7, 0.16, -1.0, 64, true).Rotate(90, 0, 0);
+  AddProjectPair(cases, "slotted block vs crossing cylinder", slotted,
+                 crossingCylinder.Translate({0.18, 0.0, 0.05}));
+  AddSlicePair(cases, "slotted block vs crossing cylinder", slotted,
+               crossingCylinder.Translate({0.18, 0.0, 0.05}),
+               {-0.32, -0.12, 0.12, 0.32});
+
+  const Manifold starA = TwistedStarPrism(72, 0.0);
+  const Manifold starB =
+      TwistedStarPrism(96, M_PI / 11.0).Rotate(0, 0, 18).Translate(
+          {0.14, -0.08, 0.0});
+  AddProjectPair(cases, "twisted radial prisms", starA, starB);
+  AddSlicePair(cases, "twisted radial prisms", starA, starB,
+               {-0.42, -0.18, 0.0, 0.18, 0.42});
+
+  const Manifold cylinder =
+      Manifold::Cylinder(1.8, 0.46, 0.22, 96, true).Rotate(18, 0, 0);
+  AddProjectPair(cases, "cone-cylinder vs sphere", cylinder,
+                 sphere.Translate({0.12, 0.02, 0.0}));
+  AddSlicePair(cases, "cone-cylinder vs slotted block", cylinder, slotted,
+               {-0.36, -0.12, 0.12, 0.36});
+
+  const Manifold gyroid = GyroidPatch();
+  AddProjectPair(cases, "gyroid patch vs sphere", gyroid,
+                 sphere.Translate({0.05, -0.04, 0.0}));
+  AddSlicePair(cases, "gyroid patch vs crossing cylinder", gyroid,
+               crossingCylinder,
+               {-0.36, -0.18, 0.0, 0.18, 0.36});
 }
 #else
 inline void AppendManifoldDerivedCadCases(std::vector<CadCase>*) {}
