@@ -527,7 +527,7 @@ TEST(CrossSection, OffsetPositiveOnExtremeRadiusStar) {
 //   `area(A-B)+area(A∩B)=area(A)` etc. fails. Likely an eps-inference
 //   or vertex-merge cliff where A's tiny scale gets crushed by B's
 //   eps).
-TEST(CrossSection, DISABLED_SubtractInvariantsTinyVsLargeStars) {
+TEST(CrossSection, SubtractInvariantsTinyVsLargeStars) {
   auto star = [](const std::vector<double>& radii) {
     SimplePolygon ring;
     ring.reserve(radii.size());
