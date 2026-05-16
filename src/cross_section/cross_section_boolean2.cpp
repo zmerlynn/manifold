@@ -26,6 +26,14 @@ namespace b2 = manifold::boolean2;
 
 using namespace manifold;
 
+// Linker fingerprint: this symbol is only emitted when the boolean2
+// backend is compiled in. Test/fuzz code that requires boolean2 can
+// reference it as `extern "C" int ManifoldCrossSectionBackendIsBoolean2();`
+// to fail loudly on Clipper2 builds (undefined-reference at link time
+// or non-1 return at runtime). The Clipper2 backend's translation unit
+// (cross_section.cpp) does not define this symbol.
+extern "C" int ManifoldCrossSectionBackendIsBoolean2() { return 1; }
+
 namespace manifold {
 struct PathImpl {
   PathImpl(Polygons paths) : paths_(std::move(paths)) {}
