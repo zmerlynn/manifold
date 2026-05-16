@@ -467,6 +467,58 @@ TEST(CrossSection, ManyPolygonsShareCenterVertex) {
   EXPECT_NEAR(cs.Area(), expectedArea, 1e-9);
 }
 
+// Seed: SimplePositiveOffset (2026-05-16 iteration #3)
+// Counterexample-hash: 50ede5b9d980d52c
+// Suspected owner: pr/boolean2-core (20-gon with extreme-magnitude
+//   radii alternating between O(0.1) and O(8.9); Offset(7.21, Bevel)
+//   returns a polygon with area ~ input.Area() instead of expanding -
+//   effectively a no-op. Likely b2::Offset's normal/miter calc breaks
+//   on the near-zero edges produced by the +0.1 floor on tiny radii).
+TEST(CrossSection, DISABLED_OffsetPositiveOnExtremeRadiusStar) {
+  const std::vector<double> radii = {
+      0.,
+      0.40098345505108085,
+      4.7498113621644447e-99,
+      3.7120810186334277,
+      8.8389852354367608,
+      7.8626648130962875e-111,
+      0.37816850000826657,
+      0.,
+      2.0448856906274785e-158,
+      0.,
+      0.2582179499017509,
+      0.,
+      7.224596115948677e-174,
+      0.,
+      0.21952411055214244,
+      0.,
+      9.550952284653982e-128,
+      0.18006645730017631,
+      0.,
+      3.9220883255587997e-118};
+  SimplePolygon ring;
+  ring.reserve(radii.size());
+  const int n = static_cast<int>(radii.size());
+  for (int i = 0; i < n; ++i) {
+    const double r = 0.1 + std::fabs(radii[i]);
+    const double theta = 2.0 * kPi * i / n;
+    ring.push_back({r * std::cos(theta), r * std::sin(theta)});
+  }
+  const CrossSection input(ring);
+  ASSERT_FALSE(input.IsEmpty());
+  ASSERT_GT(std::fabs(input.Area()), 1e-9);
+
+  const double delta = 7.2097955766145416;
+  const auto output =
+      input.Offset(delta, CrossSection::JoinType::Bevel,
+                   /*miter_limit=*/2.0, /*circularSegments=*/0);
+  EXPECT_FALSE(output.IsEmpty());
+  // A positive offset on a non-self-intersecting ring should always
+  // grow the area. Observed locally: output.Area() ~= input.Area(),
+  // i.e. Offset is effectively a no-op for this input.
+  EXPECT_GE(output.Area(), input.Area() - 1e-6 * (1.0 + input.Area()));
+}
+
 TEST(CrossSection, NonFiniteInputReturnsEmpty) {
   const double inf = std::numeric_limits<double>::infinity();
   SimplePolygon bad = {{0.0, 0.0}, {1.0, 0.0}, {inf, 1.0}, {0.0, 1.0}};
