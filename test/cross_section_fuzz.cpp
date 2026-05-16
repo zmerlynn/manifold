@@ -821,6 +821,49 @@ void BooleanCommutativity(const std::vector<double>& radiiA,
 // the subtract-side correctness coverage that PrismBooleanMatchesCrossSection
 // gave up when it had to skip 3D Project()/Slice() assertions for the
 // hole-producing Subtract op.
+// Boolean associativity: (A ∪ B) ∪ C == A ∪ (B ∪ C),
+// (A ∩ B) ∩ C == A ∩ (B ∩ C). Both ops are associative; reordering
+// the bracketing shouldn't change area or contour count. Catches
+// order-dependent bugs in the two boolean entry points (binary vs
+// batch).
+void BooleanAssociativity(const std::vector<double>& radiiA,
+                          const std::vector<double>& radiiB,
+                          const std::vector<double>& radiiC, double tBx,
+                          double tBy, double tCx, double tCy) {
+  if (!std::isfinite(tBx) || !std::isfinite(tBy)) return;
+  if (!std::isfinite(tCx) || !std::isfinite(tCy)) return;
+
+  const manifold::CrossSection a(StarPolygon(radiiA));
+  const manifold::CrossSection b =
+      manifold::CrossSection(StarPolygon(radiiB)).Translate({tBx, tBy});
+  const manifold::CrossSection c =
+      manifold::CrossSection(StarPolygon(radiiC)).Translate({tCx, tCy});
+  if (a.IsEmpty() || b.IsEmpty() || c.IsEmpty()) return;
+
+  const auto ab = a + b;
+  const auto ab_c = ab + c;
+  const auto bc = b + c;
+  const auto a_bc = a + bc;
+  ExpectCrossSectionValid(ab_c);
+  ExpectCrossSectionValid(a_bc);
+
+  const auto aIntB = a.Boolean(b, manifold::OpType::Intersect);
+  const auto aIntB_C = aIntB.Boolean(c, manifold::OpType::Intersect);
+  const auto bIntC = b.Boolean(c, manifold::OpType::Intersect);
+  const auto a_IntBC = a.Boolean(bIntC, manifold::OpType::Intersect);
+  ExpectCrossSectionValid(aIntB_C);
+  ExpectCrossSectionValid(a_IntBC);
+
+  const double tol = 1e-6 * (1.0 + std::fabs(a.Area()) + std::fabs(b.Area()) +
+                             std::fabs(c.Area()));
+  EXPECT_NEAR(ab_c.Area(), a_bc.Area(), tol)
+      << "(A ∪ B) ∪ C != A ∪ (B ∪ C)";
+  EXPECT_NEAR(aIntB_C.Area(), a_IntBC.Area(), tol)
+      << "(A ∩ B) ∩ C != A ∩ (B ∩ C)";
+  EXPECT_EQ(ab_c.NumContour(), a_bc.NumContour())
+      << "union associativity: contour count differs";
+}
+
 void SubtractInvariants(const std::vector<double>& radiiA,
                         const std::vector<double>& radiiB, double translateX,
                         double translateY) {
@@ -1328,6 +1371,11 @@ FUZZ_TEST(CrossSectionFuzz, SubtractInvariants)
 
 FUZZ_TEST(CrossSectionFuzz, BooleanCommutativity)
     .WithDomains(StarRadiiDomain(), StarRadiiDomain(), InRange(-5.0, 5.0),
+                 InRange(-5.0, 5.0));
+
+FUZZ_TEST(CrossSectionFuzz, BooleanAssociativity)
+    .WithDomains(StarRadiiDomain(), StarRadiiDomain(), StarRadiiDomain(),
+                 InRange(-5.0, 5.0), InRange(-5.0, 5.0), InRange(-5.0, 5.0),
                  InRange(-5.0, 5.0));
 
 FUZZ_TEST(CrossSectionFuzz, SimplePositiveOffset)
