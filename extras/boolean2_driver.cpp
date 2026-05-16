@@ -2120,7 +2120,24 @@ inline void AppendManifoldDerivedCadCases(std::vector<CadCase>* cases) {
 inline void AppendManifoldDerivedCadCases(std::vector<CadCase>*) {}
 #endif
 
+inline std::vector<CadCase> GenerateCadCasesImpl();
+
+// Cache: the Manifold-derived cases need a fair amount of 3D work
+// (Menger sponge construction etc.). Cache them so `time --repeat N
+// cadcorpus` doesn't rebuild them every iteration.
+inline const std::vector<CadCase>& CachedCadCases() {
+  static const std::vector<CadCase> cases = GenerateCadCasesImpl();
+  return cases;
+}
+
 inline std::vector<CadCase> GenerateCadCases() {
+  // Return by value to preserve the existing API (callers that want
+  // to mutate or move out of the result). The cached cases are deep-
+  // copied; cheap relative to actually building the 3D Manifolds.
+  return CachedCadCases();
+}
+
+inline std::vector<CadCase> GenerateCadCasesImpl() {
   std::vector<CadCase> cases;
   cases.push_back({"overlapping boxes",
                    {Rect(-1.0, -0.7, 1.0, 0.7)},
