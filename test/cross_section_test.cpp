@@ -575,7 +575,7 @@ TEST(CrossSection, SubtractInvariantsTinyVsLargeStars) {
 //   shapes, not a tiny shape vs a needle. May share the off-axis
 //   T-junction root cause from iter#9 diagnosis, but the spike-
 //   collision geometry could be its own failure mode).
-TEST(CrossSection, DISABLED_SubtractInvariantsSpikyStars) {
+TEST(CrossSection, SubtractInvariantsSpikyStars) {
   auto star = [](const std::vector<double>& radii) {
     SimplePolygon ring;
     ring.reserve(radii.size());
