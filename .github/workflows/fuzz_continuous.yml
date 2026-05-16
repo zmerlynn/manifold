@@ -57,6 +57,7 @@ jobs:
           - IterateToFixedPointConverges
           - SubtractInvariants
           - BooleanCommutativity
+          - BooleanAssociativity
           - SimplePositiveOffset
           - OffsetExtrudeRoundTrip
           - ManifoldHoledExtrudeRoundTrip
