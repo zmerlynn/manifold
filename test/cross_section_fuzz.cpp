@@ -903,6 +903,34 @@ void BooleanDistributivity(const std::vector<double>& radiiA,
       << "distributivity: contour count differs";
 }
 
+// Scale invariance: area(f(scale(P, k))) == k^2 * area(f(P)).
+// Multiplying all coordinates by a positive scalar k scales area
+// quadratically. The boolean engine should produce a scaled result
+// for scaled input. Catches FP-precision cliffs at extreme scales
+// (eps inference, vertex merge, intersection compute).
+void ScaleInvariance(const std::vector<double>& radii, double scale) {
+  if (!std::isfinite(scale) || scale <= 0) return;
+  if (scale < 1e-4 || scale > 1e4) return;  // bound the domain
+
+  const manifold::SimplePolygon ring = StarPolygon(radii);
+  const manifold::CrossSection base(ring);
+  ExpectCrossSectionValid(base);
+  if (base.IsEmpty() || std::fabs(base.Area()) <= 1e-9) return;
+
+  manifold::SimplePolygon scaled;
+  scaled.reserve(ring.size());
+  for (const auto& v : ring) scaled.push_back({v.x * scale, v.y * scale});
+  const manifold::CrossSection scaledCs(scaled);
+  ExpectCrossSectionValid(scaledCs);
+
+  const double expectedArea = base.Area() * scale * scale;
+  const double tol = 1e-6 * (1.0 + std::fabs(expectedArea));
+  EXPECT_NEAR(scaledCs.Area(), expectedArea, tol)
+      << "area(scale(P, " << scale << ")) != " << scale << "^2 * area(P)";
+  EXPECT_EQ(scaledCs.NumContour(), base.NumContour())
+      << "contour count changed under scaling";
+}
+
 void SubtractInvariants(const std::vector<double>& radiiA,
                         const std::vector<double>& radiiB, double translateX,
                         double translateY) {
@@ -1421,6 +1449,9 @@ FUZZ_TEST(CrossSectionFuzz, BooleanDistributivity)
     .WithDomains(StarRadiiDomain(), StarRadiiDomain(), StarRadiiDomain(),
                  InRange(-5.0, 5.0), InRange(-5.0, 5.0), InRange(-5.0, 5.0),
                  InRange(-5.0, 5.0));
+
+FUZZ_TEST(CrossSectionFuzz, ScaleInvariance)
+    .WithDomains(StarRadiiDomain(), InRange(1e-4, 1e4));
 
 FUZZ_TEST(CrossSectionFuzz, SimplePositiveOffset)
     .WithDomains(SmallStarRadiiDomain(), InRange(0.05, 25.0),
