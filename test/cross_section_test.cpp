@@ -474,7 +474,7 @@ TEST(CrossSection, ManyPolygonsShareCenterVertex) {
 //   returns a polygon with area ~ input.Area() instead of expanding -
 //   effectively a no-op. Likely b2::Offset's normal/miter calc breaks
 //   on the near-zero edges produced by the +0.1 floor on tiny radii).
-TEST(CrossSection, DISABLED_OffsetPositiveOnExtremeRadiusStar) {
+TEST(CrossSection, OffsetPositiveOnExtremeRadiusStar) {
   const std::vector<double> radii = {
       0.,
       0.40098345505108085,
