@@ -381,7 +381,8 @@ void Diagnose(uint64_t seed, int kPow = 30, int n = 50) {
 
   const int beforeIntersections = static_cast<int>(merge.verts.size());
   std::vector<std::vector<int>> vertEdges;
-  auto diagPairs = CollectIntersectionPairs(edges, diagEdgeBoxes, diagBvh);
+  auto diagPairs =
+      CollectIntersectionPairs(edges, merge.verts, eps, diagEdgeBoxes, diagBvh);
   FindAndInsertIntersections(edges, &merge.verts, &lists, &vertEdges, eps,
                              diagEdgeBoxes, diagBvh, diagPairs);
   const int afterIntersections = static_cast<int>(merge.verts.size());
@@ -639,7 +640,8 @@ void Diagnose(uint64_t seed, int kPow = 30, int n = 50) {
     BVH e3Bvh = BVHBuildFromBoxes(e3Boxes);
     auto l3 = BuildEdgeVertLists(e3, m3.verts, eps, e3Boxes, e3Bvh);
     std::vector<std::vector<int>> ve3;
-    auto e3Pairs = CollectIntersectionPairs(e3, e3Boxes, e3Bvh);
+    auto e3Pairs =
+        CollectIntersectionPairs(e3, m3.verts, eps, e3Boxes, e3Bvh);
     FindAndInsertIntersections(e3, &m3.verts, &l3, &ve3, eps, e3Boxes, e3Bvh,
                                e3Pairs);
     // Structural re-merge (copy of the production code).
@@ -4033,7 +4035,8 @@ int main(int argc, char** argv) {
     std::cerr << "  near-vertex lists: " << p2_totalList
               << " total entries\n";
     std::vector<std::vector<int>> p2_ve;
-    auto p2_pairs = CollectIntersectionPairs(p2_e, p2_eBoxes, p2_bvh);
+    auto p2_pairs =
+        CollectIntersectionPairs(p2_e, p2_mrg.verts, eps, p2_eBoxes, p2_bvh);
     FindAndInsertIntersections(p2_e, &p2_mrg.verts, &p2_l, &p2_ve, eps,
                                p2_eBoxes, p2_bvh, p2_pairs);
     std::cerr << "  intersections: " << p2_mrg.verts.size()
