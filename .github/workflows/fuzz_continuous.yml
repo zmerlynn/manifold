@@ -1,0 +1,190 @@
+# Continuous fuzz on this fork. Public-repo Actions is free with no minute
+# budget, so this runs each CrossSectionFuzz target for ~50 min every hour,
+# parallelised across the 19 targets. Corpus accumulates between runs via
+# actions/cache. Reproducers from any failing run are uploaded as artifacts;
+# a deduplicated issue is filed against this same repo (never upstream).
+#
+# WHERE THIS LIVES: this file is intentionally NOT on the upstream-bound PR
+# branches. Keep it on a fork-only branch (default branch for the fork) so
+# it doesn't leak into PRs.
+
+name: fuzz-continuous
+
+on:
+  schedule:
+    # Hourly. Cron is best-effort; expect occasional skipped slots.
+    - cron: '0 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+  actions: read
+
+jobs:
+  fuzz:
+    name: ${{ matrix.target }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    # Per-target concurrency: don't kill an in-flight 50-min fuzz to launch
+    # the next scheduled run. If a slot overlaps, the new run waits.
+    # Lives at job scope (not workflow scope) so `matrix.target` resolves.
+    concurrency:
+      group: fuzz-continuous-${{ matrix.target }}
+      cancel-in-progress: false
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - BooleanRobustness
+          - OffsetRobustness
+          - ManifoldExtrudeRoundTrip
+          - ManifoldSimpleExtrudeRoundTrip
+          - BooleanExtrudeRoundTrip
+          - PrismBooleanMatchesCrossSection
+          - ManifoldTransformedExtrudeRoundTrip
+          - DecomposeComposeAndHull
+          - BatchBooleanSeparated
+          - DecomposedExtrusionsRecompose
+          - TranslatedExtrusionSliceMatchesCrossSection
+          - RotatedExtrusionSliceMatchesCrossSection
+          - HoledBooleanExtrudeRoundTrip
+          - WarpAffineEquivalence
+          - MirrorExtrudeRoundTrip
+          - SimpleBooleanIdentities
+          - SimplePositiveOffset
+          - OffsetExtrudeRoundTrip
+          - ManifoldHoledExtrudeRoundTrip
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install apt packages
+        uses: awalsh128/cache-apt-pkgs-action@v1.6.0
+        with:
+          packages: libgtest-dev clang cmake
+          version: 1
+
+      - name: Clone clipper2
+        uses: ./.github/actions/git-clone
+        with:
+          name: clipper2
+          url: https://github.com/AngusJohnson/Clipper2.git
+          rev: 46f639177fe418f9689e8ddb74f08a870c71f5b4
+
+      - name: Clone fuzztest
+        uses: ./.github/actions/git-clone
+        with:
+          name: fuzztest
+          url: https://github.com/google/fuzztest.git
+          rev: f1e26613f66997aa09d3026762e275de22b2daae
+
+      # Corpus accumulates across runs. Save under a run-specific key, restore
+      # from the most-recent matching prefix.
+      - name: Restore fuzz corpus
+        uses: actions/cache/restore@v4
+        with:
+          path: build/fuzz-corpus
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: |
+            fuzz-corpus-${{ matrix.target }}-
+
+      - name: Build (RelWithDebInfo + ASan)
+        run: |
+          cmake \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DMANIFOLD_STRICT=ON \
+            -DMANIFOLD_DEBUG=ON \
+            -DMANIFOLD_FUZZ=ON \
+            -DMANIFOLD_PYBIND=OFF \
+            -DCMAKE_CXX_COMPILER=clang++ \
+            -DMANIFOLD_CROSS_SECTION=ON \
+            -DMANIFOLD_CROSS_SECTION_BACKEND=boolean2 \
+            -DFETCHCONTENT_SOURCE_DIR_CLIPPER2=clipper2 \
+            -DFETCHCONTENT_SOURCE_DIR_FUZZTEST=fuzztest \
+            . -B build
+          # Request the cross_section_fuzz target explicitly. If CMake's
+          # `if(MANIFOLD_CROSS_SECTION)` block in test/CMakeLists.txt
+          # silently didn't add the target (it has happened in cross-
+          # repo configurations), the build fails loudly here rather
+          # than silently producing no binary.
+          ASAN_OPTIONS=detect_container_overflow=0 \
+            cmake --build build -j$(nproc) --target cross_section_fuzz
+
+      - name: Fuzz ${{ matrix.target }} (50 min)
+        id: fuzz
+        run: |
+          export ASAN_OPTIONS=detect_container_overflow=0:halt_on_error=0:abort_on_error=0
+          export UBSAN_OPTIONS=halt_on_error=0:print_stacktrace=0
+          ./build/test/cross_section_fuzz \
+            --corpus_database=build/fuzz-corpus \
+            --fuzz=CrossSectionFuzz.${{ matrix.target }} \
+            --fuzz_for=50m
+
+      # Always save the corpus (success or failure) so coverage carries forward.
+      - name: Save fuzz corpus
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: build/fuzz-corpus
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+
+      - name: Upload reproducer on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reproducer-${{ matrix.target }}-${{ github.run_id }}
+          path: |
+            build/fuzz-corpus/**/replay/*
+            build/fuzz-corpus/**/crash/*
+          if-no-files-found: warn
+          retention-days: 30
+
+      # Deduplicated issue filing. Hash the reproducer (or fall back to the
+      # target name) and only open an issue if one with that signature isn't
+      # already on the tracker. $GITHUB_REPOSITORY is always *this* repo, so
+      # this never touches upstream.
+      - name: File issue on novel failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+          repro=$(find build/fuzz-corpus -path '*/replay/*' -type f 2>/dev/null \
+                  | sort | head -1)
+          if [[ -n "$repro" && -s "$repro" ]]; then
+            sig=$(sha256sum "$repro" | cut -c1-16)
+          else
+            sig="${{ matrix.target }}-no-repro"
+          fi
+          title="fuzz: ${{ matrix.target }} ($sig)"
+          # Skip if an issue with this signature already exists.
+          existing=$(gh issue list --state all --search "in:title $sig" \
+                      --repo "$GITHUB_REPOSITORY" --json number,title 2>/dev/null \
+                      | jq -r ".[] | select(.title | contains(\"$sig\")) | .number" \
+                      | head -1)
+          if [[ -n "$existing" ]]; then
+            echo "Existing issue #$existing already covers signature $sig"
+            exit 0
+          fi
+          body=$(cat <<EOF
+          Auto-filed by \`fuzz-continuous\` workflow.
+
+          - Target: \`CrossSectionFuzz.${{ matrix.target }}\`
+          - Signature: \`$sig\`
+          - Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          - Reproducer artifact: \`reproducer-${{ matrix.target }}-${{ github.run_id }}\` (30-day retention)
+
+          Download the artifact, copy the reproducer file into your local checkout, and replay with:
+
+          \`\`\`
+          ./build/test/cross_section_fuzz \\
+            --gtest_filter='CrossSectionFuzz.${{ matrix.target }}' \\
+            --replay=<path-to-reproducer>
+          \`\`\`
+          EOF
+          )
+          gh issue create \
+            --title "$title" \
+            --body "$body" \
+            --repo "$GITHUB_REPOSITORY" \
+            || echo "issue create failed (likely a label/permissions hiccup); see workflow log"
