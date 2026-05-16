@@ -655,6 +655,35 @@ void SimpleBooleanIdentities(const std::vector<double>& radii) {
   EXPECT_TRUE(subtracted.IsEmpty());
 }
 
+// Stresses edge_vert_lists.h:177 apex-skip with `1e-4` collinear
+// escape. A triangle whose apex sits at perp distance `apexPerpDist`
+// to its base is combined with a thin crossing quad. If the apex-skip
+// path drops a legitimate apex/quad intersection on the base edge,
+// the union is no longer idempotent under duplicating the triangle.
+void ApexSkipNearLine(double apexPerpDist, double crossOffset) {
+  if (!std::isfinite(apexPerpDist) || !std::isfinite(crossOffset)) return;
+  if (apexPerpDist <= 0) return;
+
+  const manifold::SimplePolygon tri = {
+      {-1.0, 0.0}, {1.0, 0.0}, {0.0, apexPerpDist}};
+  const manifold::SimplePolygon quad = {{crossOffset - 0.05, -1.0},
+                                        {crossOffset + 0.05, -1.0},
+                                        {crossOffset + 0.05, 2.0},
+                                        {crossOffset - 0.05, 2.0}};
+
+  const manifold::Polygons inputAB{tri, quad};
+  const manifold::CrossSection cs(inputAB,
+                                  manifold::CrossSection::FillRule::NonZero);
+  ExpectCrossSectionValid(cs);
+
+  const manifold::Polygons inputABA{tri, quad, tri};
+  const manifold::CrossSection csDup(
+      inputABA, manifold::CrossSection::FillRule::NonZero);
+  ExpectCrossSectionValid(csDup);
+  EXPECT_NEAR(cs.Area(), csDup.Area(),
+              1e-6 * (1.0 + std::fabs(cs.Area())));
+}
+
 void SimplePositiveOffset(const std::vector<double>& radii, double delta,
                           manifold::CrossSection::JoinType joinType,
                           int circularSegments) {
@@ -1084,6 +1113,9 @@ FUZZ_TEST(CrossSectionFuzz, MirrorExtrudeRoundTrip)
 FUZZ_TEST(CrossSectionFuzz, SimpleBooleanIdentities)
     .WithDomains(StarRadiiDomain())
     .WithSeeds(StarSeeds);
+
+FUZZ_TEST(CrossSectionFuzz, ApexSkipNearLine)
+    .WithDomains(InRange(1e-15, 1e-1), InRange(-1.5, 1.5));
 
 FUZZ_TEST(CrossSectionFuzz, SimplePositiveOffset)
     .WithDomains(SmallStarRadiiDomain(), InRange(0.05, 25.0),

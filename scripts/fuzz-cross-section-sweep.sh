@@ -30,7 +30,7 @@ mkdir -p "$LOG_DIR" "$CORPUS"
 export ASAN_OPTIONS="${ASAN_OPTIONS:-detect_container_overflow=0:halt_on_error=0:abort_on_error=0}"
 export UBSAN_OPTIONS="${UBSAN_OPTIONS:-halt_on_error=0:print_stacktrace=0}"
 
-# 19 targets, hardcoded (matches .github/workflows/fuzz_continuous.yml
+# Targets are hardcoded (matches .github/workflows/fuzz_continuous.yml
 # matrix; keep in sync if a new FUZZ_TEST is added to
 # test/cross_section_fuzz.cpp).
 targets=(
@@ -50,6 +50,7 @@ targets=(
   CrossSectionFuzz.WarpAffineEquivalence
   CrossSectionFuzz.MirrorExtrudeRoundTrip
   CrossSectionFuzz.SimpleBooleanIdentities
+  CrossSectionFuzz.ApexSkipNearLine
   CrossSectionFuzz.SimplePositiveOffset
   CrossSectionFuzz.OffsetExtrudeRoundTrip
   CrossSectionFuzz.ManifoldHoledExtrudeRoundTrip
