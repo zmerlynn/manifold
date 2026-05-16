@@ -1,8 +1,9 @@
 # Continuous fuzz on this fork. Public-repo Actions is free with no minute
 # budget, so this runs each CrossSectionFuzz target for ~50 min every hour,
-# parallelised across the 19 targets. Corpus accumulates between runs via
-# actions/cache. Reproducers from any failing run are uploaded as artifacts;
-# a deduplicated issue is filed against this same repo (never upstream).
+# parallelised across the targets. Corpus accumulates between runs via
+# actions/cache. Reproducers from any failing run are uploaded as artifacts.
+# Failure notification is handled via the repo's email notifications - no
+# issues are filed.
 #
 # WHERE THIS LIVES: this file is intentionally NOT on the upstream-bound PR
 # branches. Keep it on a fork-only branch (default branch for the fork) so
@@ -18,7 +19,6 @@ on:
 
 permissions:
   contents: read
-  issues: write
   actions: read
 
 jobs:
@@ -52,6 +52,7 @@ jobs:
           - WarpAffineEquivalence
           - MirrorExtrudeRoundTrip
           - SimpleBooleanIdentities
+          - ApexSkipNearLine
           - SimplePositiveOffset
           - OffsetExtrudeRoundTrip
           - ManifoldHoledExtrudeRoundTrip
@@ -138,53 +139,3 @@ jobs:
             build/fuzz-corpus/**/crash/*
           if-no-files-found: warn
           retention-days: 30
-
-      # Deduplicated issue filing. Hash the reproducer (or fall back to the
-      # target name) and only open an issue if one with that signature isn't
-      # already on the tracker. $GITHUB_REPOSITORY is always *this* repo, so
-      # this never touches upstream.
-      - name: File issue on novel failure
-        if: failure()
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -uo pipefail
-          repro=$(find build/fuzz-corpus -path '*/replay/*' -type f 2>/dev/null \
-                  | sort | head -1)
-          if [[ -n "$repro" && -s "$repro" ]]; then
-            sig=$(sha256sum "$repro" | cut -c1-16)
-          else
-            sig="${{ matrix.target }}-no-repro"
-          fi
-          title="fuzz: ${{ matrix.target }} ($sig)"
-          # Skip if an issue with this signature already exists.
-          existing=$(gh issue list --state all --search "in:title $sig" \
-                      --repo "$GITHUB_REPOSITORY" --json number,title 2>/dev/null \
-                      | jq -r ".[] | select(.title | contains(\"$sig\")) | .number" \
-                      | head -1)
-          if [[ -n "$existing" ]]; then
-            echo "Existing issue #$existing already covers signature $sig"
-            exit 0
-          fi
-          body=$(cat <<EOF
-          Auto-filed by \`fuzz-continuous\` workflow.
-
-          - Target: \`CrossSectionFuzz.${{ matrix.target }}\`
-          - Signature: \`$sig\`
-          - Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          - Reproducer artifact: \`reproducer-${{ matrix.target }}-${{ github.run_id }}\` (30-day retention)
-
-          Download the artifact, copy the reproducer file into your local checkout, and replay with:
-
-          \`\`\`
-          ./build/test/cross_section_fuzz \\
-            --gtest_filter='CrossSectionFuzz.${{ matrix.target }}' \\
-            --replay=<path-to-reproducer>
-          \`\`\`
-          EOF
-          )
-          gh issue create \
-            --title "$title" \
-            --body "$body" \
-            --repo "$GITHUB_REPOSITORY" \
-            || echo "issue create failed (likely a label/permissions hiccup); see workflow log"
