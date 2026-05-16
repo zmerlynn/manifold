@@ -748,6 +748,36 @@ void ApexSkipNearLine(double apexPerpDist, double crossOffset) {
               1e-6 * (1.0 + std::fabs(cs.Area())));
 }
 
+// Large-coordinate translation invariance: a CrossSection
+// constructed at the origin and one constructed at large
+// translation t should agree on area and contour count. Catches FP-
+// precision cliffs in the boolean2 pipeline (eps inference, vertex
+// merge, intersection compute) when input coordinates are far from
+// the origin.
+void TranslationInvariance(const std::vector<double>& radii, double translateX,
+                           double translateY) {
+  if (!std::isfinite(translateX) || !std::isfinite(translateY)) return;
+
+  const manifold::SimplePolygon ring = StarPolygon(radii);
+  const manifold::CrossSection base(ring);
+  ExpectCrossSectionValid(base);
+  if (base.IsEmpty() || std::fabs(base.Area()) <= 1e-9) return;
+
+  manifold::SimplePolygon translated;
+  translated.reserve(ring.size());
+  for (const auto& v : ring) {
+    translated.push_back({v.x + translateX, v.y + translateY});
+  }
+  const manifold::CrossSection shifted(translated);
+  ExpectCrossSectionValid(shifted);
+
+  // Area and contour count are invariants of translation.
+  const double tol = 1e-6 * (1.0 + std::fabs(base.Area()) +
+                             std::fabs(translateX) + std::fabs(translateY));
+  EXPECT_NEAR(shifted.Area(), base.Area(), tol);
+  EXPECT_EQ(shifted.NumContour(), base.NumContour());
+}
+
 void SimplePositiveOffset(const std::vector<double>& radii, double delta,
                           manifold::CrossSection::JoinType joinType,
                           int circularSegments) {
@@ -1180,6 +1210,9 @@ FUZZ_TEST(CrossSectionFuzz, SimpleBooleanIdentities)
 
 FUZZ_TEST(CrossSectionFuzz, ApexSkipNearLine)
     .WithDomains(InRange(1e-15, 1e-1), InRange(-1.5, 1.5));
+
+FUZZ_TEST(CrossSectionFuzz, TranslationInvariance)
+    .WithDomains(StarRadiiDomain(), InRange(1e3, 1e9), InRange(1e3, 1e9));
 
 FUZZ_TEST(CrossSectionFuzz, SimplePositiveOffset)
     .WithDomains(SmallStarRadiiDomain(), InRange(0.05, 25.0),
