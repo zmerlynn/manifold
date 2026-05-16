@@ -564,6 +564,50 @@ TEST(CrossSection, SubtractInvariantsTinyVsLargeStars) {
       << "inclusion-exclusion violated";
 }
 
+// Seed: SubtractInvariants (2026-05-16 iteration #14)
+// Counterexample-hash: a7c02d027b57bf97
+// Suspected owner: pr/boolean2-core (two spiky stars at origin - A
+//   is 5-pointed with mixed magnitudes including two ~1000-radius
+//   spikes and a near-zero vertex; B is 4-pointed with three
+//   ~1000-scale spikes plus a near-zero vertex. One of the boolean
+//   algebraic invariants fails. Likely a different code path than
+//   the iter#6 tiny-vs-large needle case - this is two large spiky
+//   shapes, not a tiny shape vs a needle. May share the off-axis
+//   T-junction root cause from iter#9 diagnosis, but the spike-
+//   collision geometry could be its own failure mode).
+TEST(CrossSection, DISABLED_SubtractInvariantsSpikyStars) {
+  auto star = [](const std::vector<double>& radii) {
+    SimplePolygon ring;
+    ring.reserve(radii.size());
+    const int n = static_cast<int>(radii.size());
+    for (int i = 0; i < n; ++i) {
+      const double r = 0.1 + std::fabs(radii[i]);
+      const double theta = 2.0 * kPi * i / n;
+      ring.push_back({r * std::cos(theta), r * std::sin(theta)});
+    }
+    return ring;
+  };
+
+  const std::vector<double> radiiA = {1000., 886.10628147264833, 1000., 1., 0.};
+  const std::vector<double> radiiB = {1000., 827.10387617193078,
+                                      548.20533789242359, 0.};
+  const CrossSection a(star(radiiA));
+  const CrossSection b(star(radiiB));
+
+  const auto aMinusB = a - b;
+  const auto bMinusA = b - a;
+  const auto aIntersectB = a.Boolean(b, OpType::Intersect);
+  const auto aUnionB = a + b;
+
+  const double tol = 1e-6 * (1.0 + std::fabs(a.Area()) + std::fabs(b.Area()));
+  EXPECT_NEAR(aMinusB.Area() + aIntersectB.Area(), a.Area(), tol)
+      << "area(A - B) + area(A ∩ B) != area(A)";
+  EXPECT_NEAR(bMinusA.Area() + aIntersectB.Area(), b.Area(), tol)
+      << "area(B - A) + area(A ∩ B) != area(B)";
+  EXPECT_NEAR(aUnionB.Area(), a.Area() + b.Area() - aIntersectB.Area(), tol)
+      << "inclusion-exclusion violated";
+}
+
 TEST(CrossSection, NonFiniteInputReturnsEmpty) {
   const double inf = std::numeric_limits<double>::infinity();
   SimplePolygon bad = {{0.0, 0.0}, {1.0, 0.0}, {inf, 1.0}, {0.0, 1.0}};
