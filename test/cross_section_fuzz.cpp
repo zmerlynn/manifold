@@ -778,6 +778,50 @@ void TranslationInvariance(const std::vector<double>& radii, double translateX,
   EXPECT_EQ(shifted.NumContour(), base.NumContour());
 }
 
+// Subtract invariants: for any two 2D regions A and B,
+//   area(A - B) + area(A ∩ B) = area(A)
+//   area(B - A) + area(A ∩ B) = area(B)
+//   area(A ∪ B) = area(A) + area(B) - area(A ∩ B)
+// A pure algebra check for the 2D backend's boolean ops. Recovers
+// the subtract-side correctness coverage that PrismBooleanMatchesCrossSection
+// gave up when it had to skip 3D Project()/Slice() assertions for the
+// hole-producing Subtract op.
+void SubtractInvariants(const std::vector<double>& radiiA,
+                        const std::vector<double>& radiiB, double translateX,
+                        double translateY) {
+  if (!std::isfinite(translateX) || !std::isfinite(translateY)) return;
+
+  const manifold::CrossSection a(StarPolygon(radiiA));
+  const manifold::CrossSection b =
+      manifold::CrossSection(StarPolygon(radiiB)).Translate({translateX, translateY});
+  ExpectCrossSectionValid(a);
+  ExpectCrossSectionValid(b);
+  if (a.IsEmpty() || b.IsEmpty()) return;
+
+  const auto aMinusB = a - b;
+  const auto bMinusA = b - a;
+  const auto aIntersectB = a.Boolean(b, manifold::OpType::Intersect);
+  const auto aUnionB = a + b;
+  ExpectCrossSectionValid(aMinusB);
+  ExpectCrossSectionValid(bMinusA);
+  ExpectCrossSectionValid(aIntersectB);
+  ExpectCrossSectionValid(aUnionB);
+
+  const double tol = 1e-6 * (1.0 + std::fabs(a.Area()) + std::fabs(b.Area()));
+
+  // area(A - B) + area(A ∩ B) == area(A)
+  EXPECT_NEAR(aMinusB.Area() + aIntersectB.Area(), a.Area(), tol)
+      << "area(A - B) + area(A ∩ B) != area(A)";
+
+  // area(B - A) + area(A ∩ B) == area(B)
+  EXPECT_NEAR(bMinusA.Area() + aIntersectB.Area(), b.Area(), tol)
+      << "area(B - A) + area(A ∩ B) != area(B)";
+
+  // area(A ∪ B) == area(A) + area(B) - area(A ∩ B)
+  EXPECT_NEAR(aUnionB.Area(), a.Area() + b.Area() - aIntersectB.Area(), tol)
+      << "inclusion-exclusion violated";
+}
+
 // Iterate-to-fixed-point convergence: a random star polygon should
 // converge under iterate.h's fingerprint loop within a few iterations.
 // Smith's alpha-budget proves <=2 iterations with symbolic
@@ -1242,6 +1286,10 @@ FUZZ_TEST(CrossSectionFuzz, TranslationInvariance)
 
 FUZZ_TEST(CrossSectionFuzz, IterateToFixedPointConverges)
     .WithDomains(StarRadiiDomain());
+
+FUZZ_TEST(CrossSectionFuzz, SubtractInvariants)
+    .WithDomains(StarRadiiDomain(), StarRadiiDomain(), InRange(-5.0, 5.0),
+                 InRange(-5.0, 5.0));
 
 FUZZ_TEST(CrossSectionFuzz, SimplePositiveOffset)
     .WithDomains(SmallStarRadiiDomain(), InRange(0.05, 25.0),
