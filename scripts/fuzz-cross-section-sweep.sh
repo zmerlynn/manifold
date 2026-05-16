@@ -51,6 +51,7 @@ targets=(
   CrossSectionFuzz.MirrorExtrudeRoundTrip
   CrossSectionFuzz.SimpleBooleanIdentities
   CrossSectionFuzz.ApexSkipNearLine
+  CrossSectionFuzz.TranslationInvariance
   CrossSectionFuzz.SimplePositiveOffset
   CrossSectionFuzz.OffsetExtrudeRoundTrip
   CrossSectionFuzz.ManifoldHoledExtrudeRoundTrip
