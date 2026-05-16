@@ -54,6 +54,7 @@ targets=(
   CrossSectionFuzz.TranslationInvariance
   CrossSectionFuzz.IterateToFixedPointConverges
   CrossSectionFuzz.SubtractInvariants
+  CrossSectionFuzz.BooleanCommutativity
   CrossSectionFuzz.SimplePositiveOffset
   CrossSectionFuzz.OffsetExtrudeRoundTrip
   CrossSectionFuzz.ManifoldHoledExtrudeRoundTrip

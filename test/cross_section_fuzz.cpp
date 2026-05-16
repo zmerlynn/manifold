@@ -778,6 +778,41 @@ void TranslationInvariance(const std::vector<double>& radii, double translateX,
   EXPECT_EQ(shifted.NumContour(), base.NumContour());
 }
 
+// Boolean commutativity: A + B == B + A and A ∩ B == B ∩ A. The
+// op is mathematically symmetric, but boolean2's internal pipeline
+// distinguishes the two inputs (one is the "subject", one is the
+// "clip"). Order-dependent bugs in vertex merge, edge collapse, or
+// winding sign would show up as area or contour-count mismatches.
+void BooleanCommutativity(const std::vector<double>& radiiA,
+                          const std::vector<double>& radiiB,
+                          double translateX, double translateY) {
+  if (!std::isfinite(translateX) || !std::isfinite(translateY)) return;
+
+  const manifold::CrossSection a(StarPolygon(radiiA));
+  const manifold::CrossSection b =
+      manifold::CrossSection(StarPolygon(radiiB)).Translate({translateX, translateY});
+  if (a.IsEmpty() || b.IsEmpty()) return;
+
+  const auto unionAB = a + b;
+  const auto unionBA = b + a;
+  const auto intersectAB = a.Boolean(b, manifold::OpType::Intersect);
+  const auto intersectBA = b.Boolean(a, manifold::OpType::Intersect);
+  ExpectCrossSectionValid(unionAB);
+  ExpectCrossSectionValid(unionBA);
+  ExpectCrossSectionValid(intersectAB);
+  ExpectCrossSectionValid(intersectBA);
+
+  const double tol =
+      1e-6 * (1.0 + std::fabs(a.Area()) + std::fabs(b.Area()));
+  EXPECT_NEAR(unionAB.Area(), unionBA.Area(), tol) << "A + B != B + A";
+  EXPECT_NEAR(intersectAB.Area(), intersectBA.Area(), tol)
+      << "A ∩ B != B ∩ A";
+  EXPECT_EQ(unionAB.NumContour(), unionBA.NumContour())
+      << "A + B and B + A produce different contour counts";
+  EXPECT_EQ(intersectAB.NumContour(), intersectBA.NumContour())
+      << "A ∩ B and B ∩ A produce different contour counts";
+}
+
 // Subtract invariants: for any two 2D regions A and B,
 //   area(A - B) + area(A ∩ B) = area(A)
 //   area(B - A) + area(A ∩ B) = area(B)
@@ -1288,6 +1323,10 @@ FUZZ_TEST(CrossSectionFuzz, IterateToFixedPointConverges)
     .WithDomains(StarRadiiDomain());
 
 FUZZ_TEST(CrossSectionFuzz, SubtractInvariants)
+    .WithDomains(StarRadiiDomain(), StarRadiiDomain(), InRange(-5.0, 5.0),
+                 InRange(-5.0, 5.0));
+
+FUZZ_TEST(CrossSectionFuzz, BooleanCommutativity)
     .WithDomains(StarRadiiDomain(), StarRadiiDomain(), InRange(-5.0, 5.0),
                  InRange(-5.0, 5.0));
 
