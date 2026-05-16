@@ -53,6 +53,7 @@ jobs:
           - MirrorExtrudeRoundTrip
           - SimpleBooleanIdentities
           - ApexSkipNearLine
+          - TranslationInvariance
           - SimplePositiveOffset
           - OffsetExtrudeRoundTrip
           - ManifoldHoledExtrudeRoundTrip
