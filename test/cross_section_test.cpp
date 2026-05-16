@@ -519,6 +519,51 @@ TEST(CrossSection, DISABLED_OffsetPositiveOnExtremeRadiusStar) {
   EXPECT_GE(output.Area(), input.Area() - 1e-6 * (1.0 + input.Area()));
 }
 
+// Seed: SubtractInvariants (2026-05-16 iteration #6)
+// Counterexample-hash: a68ac82747b27394
+// Suspected owner: pr/boolean2-core (extreme magnitude mismatch
+//   between two star polygons - A is ~1e-9 scale, B is ~100 scale.
+//   At least one of the boolean algebraic invariants
+//   `area(A-B)+area(A∩B)=area(A)` etc. fails. Likely an eps-inference
+//   or vertex-merge cliff where A's tiny scale gets crushed by B's
+//   eps).
+TEST(CrossSection, DISABLED_SubtractInvariantsTinyVsLargeStars) {
+  auto star = [](const std::vector<double>& radii) {
+    SimplePolygon ring;
+    ring.reserve(radii.size());
+    const int n = static_cast<int>(radii.size());
+    for (int i = 0; i < n; ++i) {
+      const double r = 0.1 + std::fabs(radii[i]);
+      const double theta = 2.0 * kPi * i / n;
+      ring.push_back({r * std::cos(theta), r * std::sin(theta)});
+    }
+    return ring;
+  };
+
+  const std::vector<double> radiiA = {2.0371964671064575e-14,
+                                      1.814002251251902e-10, 0.,
+                                      2.1825088357767143e-09};
+  const std::vector<double> radiiB = {113.5978182908662, 0.,
+                                      114.34968677141997,
+                                      6.5076626333939721e-10};
+  const CrossSection a(star(radiiA));
+  const CrossSection b = CrossSection(star(radiiB))
+                             .Translate({0., 4.667562921730494e-33});
+
+  const auto aMinusB = a - b;
+  const auto bMinusA = b - a;
+  const auto aIntersectB = a.Boolean(b, OpType::Intersect);
+  const auto aUnionB = a + b;
+
+  const double tol = 1e-6 * (1.0 + std::fabs(a.Area()) + std::fabs(b.Area()));
+  EXPECT_NEAR(aMinusB.Area() + aIntersectB.Area(), a.Area(), tol)
+      << "area(A - B) + area(A ∩ B) != area(A)";
+  EXPECT_NEAR(bMinusA.Area() + aIntersectB.Area(), b.Area(), tol)
+      << "area(B - A) + area(A ∩ B) != area(B)";
+  EXPECT_NEAR(aUnionB.Area(), a.Area() + b.Area() - aIntersectB.Area(), tol)
+      << "inclusion-exclusion violated";
+}
+
 TEST(CrossSection, NonFiniteInputReturnsEmpty) {
   const double inf = std::numeric_limits<double>::infinity();
   SimplePolygon bad = {{0.0, 0.0}, {1.0, 0.0}, {inf, 1.0}, {0.0, 1.0}};
