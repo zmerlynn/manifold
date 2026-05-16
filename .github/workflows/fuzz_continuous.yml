@@ -54,6 +54,7 @@ jobs:
           - SimpleBooleanIdentities
           - ApexSkipNearLine
           - TranslationInvariance
+          - IterateToFixedPointConverges
           - SimplePositiveOffset
           - OffsetExtrudeRoundTrip
           - ManifoldHoledExtrudeRoundTrip
