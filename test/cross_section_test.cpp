@@ -417,6 +417,56 @@ TEST(CrossSection, TJunctionAtSharedEndpoint) {
   EXPECT_NEAR(csBR.Area(), 4.0 - 0.19, 1e-9);
 }
 
+// Audit follow-up: regression tests for boolean2 filters the post-
+// Sponge4 audit argued were correct but didn't have a targeted case.
+// Each test verifies a specific topology against a closed-form expected
+// result.
+
+// Audit target: canonical sub-edge multiplicity summing for collinear
+// overlapping edges. Two CCW rectangles share a collinear segment along
+// their boundary but not endpoints; the narrow phase must split A's
+// edge at B's endpoints, then Finalize must sum the contributing mults
+// correctly so the shared interior segment cancels and only the outer
+// "T" outline remains. Without correct mult summing the result would
+// drop the shared bottom strip entirely or carry a spurious interior
+// edge.
+TEST(CrossSection, CollinearSegmentOverlap) {
+  SimplePolygon A = {{0.0, 0.0}, {10.0, 0.0}, {10.0, 1.0}, {0.0, 1.0}};
+  SimplePolygon B = {{3.0, 0.0}, {7.0, 0.0}, {7.0, 2.0}, {3.0, 2.0}};
+
+  CrossSection cs(Polygons{A, B}, CrossSection::FillRule::NonZero);
+
+  EXPECT_EQ(cs.NumContour(), 1);
+  // A = 10, B = 8, overlap (4x1 strip on shared bottom) = 4, union = 14.
+  EXPECT_NEAR(cs.Area(), 14.0, 1e-9);
+}
+
+// Audit target: collinearity gate in CollectIntersectionPairs. N polygon
+// wedges all share the origin as a vertex; every pair shares that
+// endpoint. The gate must drop pairs that fan out at the center (no
+// T-junction possible) while letting through pairs that need their
+// non-shared endpoints checked. Result must be the inscribed regular
+// N-gon: one contour, area = N/2 * sin(2pi/N). If the gate over-drops
+// (filters something needed), interior wedge boundaries leak through;
+// if it under-drops (filters nothing), the test still passes but the
+// pre-1a057638 perf gain is gone.
+TEST(CrossSection, ManyPolygonsShareCenterVertex) {
+  constexpr int N = 8;
+  Polygons polys;
+  for (int i = 0; i < N; ++i) {
+    const double a1 = 2.0 * kPi * i / N;
+    const double a2 = 2.0 * kPi * (i + 1) / N;
+    polys.push_back({{0.0, 0.0},
+                     {std::cos(a1), std::sin(a1)},
+                     {std::cos(a2), std::sin(a2)}});
+  }
+  CrossSection cs(polys, CrossSection::FillRule::NonZero);
+
+  EXPECT_EQ(cs.NumContour(), 1);
+  const double expectedArea = 0.5 * N * std::sin(2.0 * kPi / N);
+  EXPECT_NEAR(cs.Area(), expectedArea, 1e-9);
+}
+
 TEST(CrossSection, NonFiniteInputReturnsEmpty) {
   const double inf = std::numeric_limits<double>::infinity();
   SimplePolygon bad = {{0.0, 0.0}, {1.0, 0.0}, {inf, 1.0}, {0.0, 1.0}};
