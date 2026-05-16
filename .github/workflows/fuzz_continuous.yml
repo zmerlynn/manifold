@@ -58,6 +58,7 @@ jobs:
           - SubtractInvariants
           - BooleanCommutativity
           - BooleanAssociativity
+          - BooleanDistributivity
           - SimplePositiveOffset
           - OffsetExtrudeRoundTrip
           - ManifoldHoledExtrudeRoundTrip
