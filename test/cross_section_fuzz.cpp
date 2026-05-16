@@ -864,6 +864,45 @@ void BooleanAssociativity(const std::vector<double>& radiiA,
       << "union associativity: contour count differs";
 }
 
+// Boolean distributivity: A ∩ (B ∪ C) == (A ∩ B) ∪ (A ∩ C).
+// Connects union and intersection through a non-trivial three-way
+// boolean expression. Order matters here (vs commutativity /
+// associativity which only reorder same-op terms) - distributivity
+// stresses the engine's handling of interleaved op types.
+void BooleanDistributivity(const std::vector<double>& radiiA,
+                           const std::vector<double>& radiiB,
+                           const std::vector<double>& radiiC, double tBx,
+                           double tBy, double tCx, double tCy) {
+  if (!std::isfinite(tBx) || !std::isfinite(tBy)) return;
+  if (!std::isfinite(tCx) || !std::isfinite(tCy)) return;
+
+  const manifold::CrossSection a(StarPolygon(radiiA));
+  const manifold::CrossSection b =
+      manifold::CrossSection(StarPolygon(radiiB)).Translate({tBx, tBy});
+  const manifold::CrossSection c =
+      manifold::CrossSection(StarPolygon(radiiC)).Translate({tCx, tCy});
+  if (a.IsEmpty() || b.IsEmpty() || c.IsEmpty()) return;
+
+  // Left side: A ∩ (B ∪ C)
+  const auto bUc = b + c;
+  const auto left = a.Boolean(bUc, manifold::OpType::Intersect);
+
+  // Right side: (A ∩ B) ∪ (A ∩ C)
+  const auto aIntB = a.Boolean(b, manifold::OpType::Intersect);
+  const auto aIntC = a.Boolean(c, manifold::OpType::Intersect);
+  const auto right = aIntB + aIntC;
+
+  ExpectCrossSectionValid(left);
+  ExpectCrossSectionValid(right);
+
+  const double tol = 1e-6 * (1.0 + std::fabs(a.Area()) + std::fabs(b.Area()) +
+                             std::fabs(c.Area()));
+  EXPECT_NEAR(left.Area(), right.Area(), tol)
+      << "A ∩ (B ∪ C) != (A ∩ B) ∪ (A ∩ C)";
+  EXPECT_EQ(left.NumContour(), right.NumContour())
+      << "distributivity: contour count differs";
+}
+
 void SubtractInvariants(const std::vector<double>& radiiA,
                         const std::vector<double>& radiiB, double translateX,
                         double translateY) {
@@ -1374,6 +1413,11 @@ FUZZ_TEST(CrossSectionFuzz, BooleanCommutativity)
                  InRange(-5.0, 5.0));
 
 FUZZ_TEST(CrossSectionFuzz, BooleanAssociativity)
+    .WithDomains(StarRadiiDomain(), StarRadiiDomain(), StarRadiiDomain(),
+                 InRange(-5.0, 5.0), InRange(-5.0, 5.0), InRange(-5.0, 5.0),
+                 InRange(-5.0, 5.0));
+
+FUZZ_TEST(CrossSectionFuzz, BooleanDistributivity)
     .WithDomains(StarRadiiDomain(), StarRadiiDomain(), StarRadiiDomain(),
                  InRange(-5.0, 5.0), InRange(-5.0, 5.0), InRange(-5.0, 5.0),
                  InRange(-5.0, 5.0));

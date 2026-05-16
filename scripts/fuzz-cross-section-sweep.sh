@@ -56,6 +56,7 @@ targets=(
   CrossSectionFuzz.SubtractInvariants
   CrossSectionFuzz.BooleanCommutativity
   CrossSectionFuzz.BooleanAssociativity
+  CrossSectionFuzz.BooleanDistributivity
   CrossSectionFuzz.SimplePositiveOffset
   CrossSectionFuzz.OffsetExtrudeRoundTrip
   CrossSectionFuzz.ManifoldHoledExtrudeRoundTrip
