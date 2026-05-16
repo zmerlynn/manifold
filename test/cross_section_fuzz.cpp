@@ -778,6 +778,32 @@ void TranslationInvariance(const std::vector<double>& radii, double translateX,
   EXPECT_EQ(shifted.NumContour(), base.NumContour());
 }
 
+// Iterate-to-fixed-point convergence: a random star polygon should
+// converge under iterate.h's fingerprint loop within a few iterations.
+// Smith's alpha-budget proves <=2 iterations with symbolic
+// intersections; production passes maxIter=2 and ignores the status.
+// This dimension exercises maxIter=10 and asserts the result is
+// either Converged or Cycled, never MaxedOut. A MaxedOut counterexample
+// is itself a regression seed - it means topology drifts past
+// iteration 10, which today would only show up as off-by-eps cliffs.
+void IterateToFixedPointConverges(const std::vector<double>& radii) {
+  const manifold::Polygons polys{StarPolygon(radii)};
+  const auto [verts, edges] = manifold::boolean2::PolygonsToInput(polys);
+  if (verts.empty()) return;
+  const double eps = manifold::boolean2::InferEps(polys, {});
+
+  int iters = -1;
+  manifold::boolean2::IterStatus status = manifold::boolean2::IterStatus::MaxedOut;
+  manifold::boolean2::IterateToFixedPoint(verts, edges, eps, /*maxIter=*/10,
+                                          &iters, &status);
+
+  EXPECT_NE(static_cast<int>(status),
+            static_cast<int>(manifold::boolean2::IterStatus::MaxedOut))
+      << "IterateToFixedPoint hit MaxedOut at iter=10 (production maxIter=2 "
+      << "would have produced different topology). Input is a regression "
+      << "seed for boolean2 iteration tail behavior.";
+}
+
 void SimplePositiveOffset(const std::vector<double>& radii, double delta,
                           manifold::CrossSection::JoinType joinType,
                           int circularSegments) {
@@ -1213,6 +1239,9 @@ FUZZ_TEST(CrossSectionFuzz, ApexSkipNearLine)
 
 FUZZ_TEST(CrossSectionFuzz, TranslationInvariance)
     .WithDomains(StarRadiiDomain(), InRange(1e3, 1e9), InRange(1e3, 1e9));
+
+FUZZ_TEST(CrossSectionFuzz, IterateToFixedPointConverges)
+    .WithDomains(StarRadiiDomain());
 
 FUZZ_TEST(CrossSectionFuzz, SimplePositiveOffset)
     .WithDomains(SmallStarRadiiDomain(), InRange(0.05, 25.0),
