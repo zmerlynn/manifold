@@ -2026,6 +2026,34 @@ inline Manifold GyroidPatch() {
       Box({-0.85, -0.85, -0.85}, {0.85, 0.85, 0.85}), 0.14);
 }
 
+// Menger sponge of depth `n`. Inlined here so the driver stays
+// standalone (no libsamples dependency). Same construction as
+// samples/src/menger_sponge.cpp.
+inline void MengerFractal(std::vector<Manifold>* holes, const Manifold& hole,
+                          double w, vec2 position, int depth, int maxDepth) {
+  w /= 3;
+  holes->push_back(hole.Scale({w, w, 1.0}).Translate(vec3(position, 0.0)));
+  if (depth == maxDepth) return;
+  const vec2 offsets[8] = {{-w, -w}, {-w, 0.0}, {-w, w}, {0.0, w},
+                            {w, w},   {w, 0.0},  {w, -w}, {0.0, -w}};
+  for (int i = 0; i < 8; ++i) {
+    MengerFractal(holes, hole, w, position + offsets[i], depth + 1, maxDepth);
+  }
+}
+
+inline Manifold MengerSponge(int n) {
+  Manifold result = Manifold::Cube(vec3(1.0), true);
+  std::vector<Manifold> holes;
+  MengerFractal(&holes, result, 1.0, {0.0, 0.0}, 1, n);
+  Manifold hole = Manifold::BatchBoolean(holes, OpType::Add);
+  result -= hole;
+  hole = hole.Rotate(90);
+  result -= hole;
+  hole = hole.Rotate(0, 0, 90);
+  result -= hole;
+  return result;
+}
+
 inline void AppendManifoldDerivedCadCases(std::vector<CadCase>* cases) {
   const Manifold sphere = Manifold::Sphere(0.72, 48);
   const Manifold drilled =
@@ -2068,6 +2096,25 @@ inline void AppendManifoldDerivedCadCases(std::vector<CadCase>* cases) {
   AddSlicePair(cases, "gyroid patch vs crossing cylinder", gyroid,
                crossingCylinder,
                {-0.36, -0.18, 0.0, 0.18, 0.36});
+
+  // Menger sponge cases: axis-aligned dense topology produced by
+  // recursive cube subtraction, plus an oblique cross-section. These
+  // mirror real Manifold CrossSection workloads where a cut-and-
+  // project of an axis-aligned model yields hundreds of loops and
+  // thousands of verts. Sphere here is sized to leave the sponge's
+  // fractal structure intact (so the subtract result is non-trivial),
+  // and the oblique slice uses a Rotate-then-Slice composition.
+  const Manifold sponge2 = MengerSponge(2);
+  const Manifold sponge3 = MengerSponge(3);
+  const Manifold spongeSphereSmall = Manifold::Sphere(0.3, 32);
+  AddProjectPair(cases, "menger sponge L2 vs sphere", sponge2, sphere);
+  AddProjectPair(cases, "menger sponge L3 vs sphere", sponge3, sphere);
+  AddCadCase(cases, "(menger sponge L3 - sphere) project vs circle",
+             (sponge3 - spongeSphereSmall).Project(),
+             {RegularPoly(96, 0.0, 0.0, 0.8)});
+  AddCadCase(cases, "menger sponge L3 oblique slice vs sphere slice",
+             sponge3.Rotate(15, 30, 45).Slice(0.0),
+             sphere.Slice(0.0));
 }
 #else
 inline void AppendManifoldDerivedCadCases(std::vector<CadCase>*) {}
