@@ -362,6 +362,61 @@ TEST(CrossSection, TranslatedSmallPolygonKeepsFeatures) {
   EXPECT_NEAR(size.y, 10.0, 1e-9);
 }
 
+// Regression test for the BR-cell hole pattern from Samples.Sponge4. Two
+// CCW polygons that share an endpoint AND form a T-junction at the
+// non-shared endpoint of one edge. Before the broad-phase / fused-pass
+// shared-endpoint filter fix, the (long, short) edge pair was dropped at
+// the broad phase, so the narrow phase never inserted the T-junction
+// vertex on the long edge. Canonical sub-edges came out with the wrong
+// multiplicities, the DCEL face traversal merged faces of different
+// windings, and small CW holes were silently dropped from the output.
+TEST(CrossSection, TJunctionAtSharedEndpoint) {
+  // Outer CCW unit square plus a smaller CCW square sharing the (0,0)
+  // corner. The outer's bottom edge (0,0)->(1,0) has the inner's
+  // (0.5,0) vertex on its interior; both share endpoint (0,0).
+  SimplePolygon outer = {{0.0, 0.0}, {1.0, 0.0}, {1.0, 1.0}, {0.0, 1.0}};
+  SimplePolygon inner = {{0.0, 0.0}, {0.5, 0.0}, {0.5, 0.5}, {0.0, 0.5}};
+
+  CrossSection cs(Polygons{outer, inner});
+  // Union with Positive fill rule: the inner CCW square is fully inside
+  // the outer, so the result is just the outer's area.
+  EXPECT_EQ(cs.NumContour(), 1);
+  EXPECT_NEAR(cs.Area(), 1.0, 1e-9);
+
+  // A more demanding case from the same family: a butterfly polygon with
+  // cancel-pair retraces (one CW lobe around a unit cell) combined with
+  // an adjacent CCW staircase polygon whose edge runs along the cell's
+  // boundary, creating a T-junction at a vertex shared with the
+  // butterfly. This is the minimal three-poly pattern that produced a
+  // missing hole in Samples.Sponge4 before the fix.
+  SimplePolygon hex = {{-1.0, -1.0}, {1.0, -1.0}, {1.0, 1.0}, {-1.0, 1.0}};
+  // CW butterfly enclosing the cell (-0.2, -0.2) .. (0.2, 0.2) with a
+  // cancel-pair retrace at (-0.5, 0.0)/(0.0, -0.5) to mimic the Sponge16
+  // shape. Net signed area is negative (a hole-bearing loop).
+  SimplePolygon butterfly = {
+      {-0.2, 0.0},  {-0.2, 0.2},  {-0.5, 0.2},  {-0.2, 0.2}, {0.0, 0.2},
+      {0.2, 0.2},   {0.2, 0.0},   {0.5, -0.2},  {0.2, -0.2}, {0.2, -0.5},
+      {0.2, -0.2},  {0.0, -0.2},  {-0.2, -0.2}};
+  // CCW staircase whose v6->v7 edge ((0.2, -0.2) -> (-0.2, -0.2)) is the
+  // butterfly's bottom edge, sharing both endpoints with butterfly
+  // sub-edges (-0.2, -0.2)..(0.0, -0.2)..(0.2, -0.2) and creating a
+  // T-junction at (0.0, -0.2).
+  SimplePolygon staircase = {{0.2, -0.2}, {-0.2, -0.2}, {-0.2, -0.4},
+                             {0.2, -0.4}};
+
+  CrossSection csBR(Polygons{hex, butterfly, staircase});
+  // The butterfly's full interior (cell 0.16 + SE detour triangle 0.03 =
+  // 0.19) is a connected CW hole. The CCW staircase below the cell is
+  // double-covered (winding 2: hex + staircase), so it stays filled.
+  // Expected: outer hex CCW + one CW hole at the butterfly's interior.
+  // Without the fix, the butterfly's edges along y=-0.2 (which share
+  // endpoints with the staircase's edge) miss the T-junction split at
+  // (0.0, -0.2), the canonical mults come out wrong, and the hole
+  // collapses or merges with neighboring faces.
+  EXPECT_EQ(csBR.NumContour(), 2);
+  EXPECT_NEAR(csBR.Area(), 4.0 - 0.19, 1e-9);
+}
+
 TEST(CrossSection, NonFiniteInputReturnsEmpty) {
   const double inf = std::numeric_limits<double>::infinity();
   SimplePolygon bad = {{0.0, 0.0}, {1.0, 0.0}, {inf, 1.0}, {0.0, 1.0}};
