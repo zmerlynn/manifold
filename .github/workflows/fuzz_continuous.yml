@@ -59,6 +59,7 @@ jobs:
           - BooleanCommutativity
           - BooleanAssociativity
           - BooleanDistributivity
+          - ScaleInvariance
           - SimplePositiveOffset
           - OffsetExtrudeRoundTrip
           - ManifoldHoledExtrudeRoundTrip
