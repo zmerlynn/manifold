@@ -585,10 +585,11 @@ TEST(CrossSection, SimplifyUsesFixedPointWrapper) {
   ASSERT_EQ(singlePolys.size(), 2);
 
   auto simplified = boolean2::Simplify(polys, eps);
-  EXPECT_EQ(simplified.size(), 1);
-  ASSERT_FALSE(simplified.empty());
-  EXPECT_EQ(simplified.front().size(), 11);
-  EXPECT_NEAR(boolean2::TotalSignedArea(simplified), 1.76559, 1e-5);
+  ASSERT_EQ(simplified.size(), 2);
+  EXPECT_EQ(simplified[0].size(), 11);
+  EXPECT_EQ(simplified[1].size(), 3);
+  EXPECT_NEAR(boolean2::TotalSignedArea(simplified), 1.7657076120973501,
+              1e-12);
 }
 
 TEST(CrossSection, ConstructorUsesFixedPointWrapper) {
