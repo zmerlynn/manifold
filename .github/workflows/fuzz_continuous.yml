@@ -93,10 +93,14 @@ jobs:
           restore-keys: |
             fuzz-corpus-${{ matrix.target }}-
 
-      - name: Build (RelWithDebInfo + ASan)
+      - name: Build (RelWithDebInfo + ASan + UBSan)
         run: |
           cmake \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_C_FLAGS="-fsanitize=address,undefined" \
+            -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined" \
+            -DCMAKE_SHARED_LINKER_FLAGS="-fsanitize=address,undefined" \
             -DMANIFOLD_STRICT=ON \
             -DMANIFOLD_DEBUG=ON \
             -DMANIFOLD_FUZZ=ON \
