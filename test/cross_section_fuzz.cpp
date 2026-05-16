@@ -12,8 +12,50 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// ---------------------------------------------------------------------
+// Build-config guardrails. These exist because we wasted an iteration
+// on 2026-05-16 chasing a "boolean2 Simplify idempotence cliff" that
+// was actually a Clipper2 cliff: the local fuzz binary had been built
+// with `-DMANIFOLD_CROSS_SECTION_BACKEND=clipper2` (the CMake default)
+// instead of boolean2. The fuzz targets in this TU assume:
+//   - boolean2 backend (cross_section_boolean2.cpp linked),
+//   - AddressSanitizer enabled,
+//   - UndefinedBehaviorSanitizer enabled.
+// If any of these is wrong, the build fails here. The boolean2 check
+// is a link-time fingerprint (see cross_section_boolean2.cpp).
+// ---------------------------------------------------------------------
+
+#if defined(__has_feature)
+#  if !__has_feature(address_sanitizer)
+#    error \
+        "cross_section_fuzz requires AddressSanitizer (-fsanitize=address). " \
+        "Reconfigure with MANIFOLD_FUZZ=ON or rebuild with the fuzz-asan preset."
+#  endif
+#  if !__has_feature(undefined_behavior_sanitizer)
+#    error \
+        "cross_section_fuzz requires UndefinedBehaviorSanitizer " \
+        "(-fsanitize=undefined). Rebuild with the fuzz-asan preset."
+#  endif
+#else
+#  if !defined(__SANITIZE_ADDRESS__)
+#    error \
+        "cross_section_fuzz requires AddressSanitizer; no sanitizer feature " \
+        "macros detected. Rebuild with the fuzz-asan preset."
+#  endif
+#endif
+
+// Backend fingerprint: defined only by cross_section_boolean2.cpp.
+// A Clipper2 build of the Manifold library has no definition and the
+// link below fails with `undefined reference to
+// ManifoldCrossSectionBackendIsBoolean2`. A misconfigured-but-linked
+// build (e.g. weak-symbol stub) still aborts at process start via the
+// constructor below.
+extern "C" int ManifoldCrossSectionBackendIsBoolean2();
+
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <map>
 #include <tuple>
 #include <utility>
@@ -29,6 +71,17 @@
 using namespace fuzztest;
 
 namespace {
+
+[[maybe_unused]] const int kCrossSectionFuzzBackendCheck = [] {
+  if (ManifoldCrossSectionBackendIsBoolean2() != 1) {
+    std::fprintf(stderr,
+                 "FATAL: cross_section_fuzz built against a non-boolean2 "
+                 "CrossSection backend (fingerprint != 1). Reconfigure with "
+                 "-DMANIFOLD_CROSS_SECTION_BACKEND=boolean2 and rebuild.\n");
+    std::abort();
+  }
+  return 0;
+}();
 
 using RawPoint = std::pair<double, double>;
 using RawRing = std::vector<RawPoint>;
