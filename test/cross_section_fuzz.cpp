@@ -1160,6 +1160,62 @@ void DecomposeRecomposeWithHoles(const std::vector<double>& outerRadii,
       << "Compose(Decompose(holed)) changed contour count";
 }
 
+// Offset round-trip on convex inputs: input.Offset(d, Miter).Offset(-d,
+// Miter) should return to the original area (and same contour count) for
+// delta small enough that the negative offset doesn't collapse features.
+// Miter-only because Square clips sharp corners flat (legitimately losing
+// area in the round-trip for triangles / sharp n-gons) and Round
+// introduces curvature-dependent area drift; both are properties of the
+// join type, not regressions. With miter_limit=2.0 and a regular n-gon
+// (exterior angle 2*pi/n), the miter never clips because
+// delta/sin(pi/n - pi/2) = delta/cos(pi/n) <= 2*delta when cos(pi/n) >=
+// 0.5, i.e. n >= 3. Bounds delta to a fraction of the inscribed radius
+// to keep the un-offset polygon from vanishing.
+void OffsetInverseConvex(int sides, double radius, double delta) {
+  if (!std::isfinite(delta)) return;
+  // n=3 (equilateral triangle) drifts ~0.35% on the boolean2 Offset
+  // round-trip even with Miter and well under miter_limit; captured as
+  // a separate regression seed on pr/boolean2-tests. Restrict the
+  // fuzz dim to n>=4 so it catches future regressions in less-sharp
+  // n-gon round-trips, not just rediscover the triangle case.
+  if (sides < 4 || sides > 32) return;
+
+  const double kPi = std::acos(-1.0);
+  const double r = 0.1 + std::fabs(radius);
+  // Inscribed radius for a regular n-gon = r * cos(pi/n). Keep |delta|
+  // safely below half the inscribed radius so the offset triangle
+  // doesn't collapse to a point.
+  const double inscribed = r * std::cos(kPi / sides);
+  if (std::fabs(delta) <= 1e-6) return;
+  if (std::fabs(delta) > 0.4 * inscribed) return;
+
+  const manifold::CrossSection input(RegularPolygon(sides, radius));
+  ExpectCrossSectionValid(input);
+  if (input.IsEmpty() || std::fabs(input.Area()) <= 1e-9) return;
+
+  const auto expanded =
+      input.Offset(delta, manifold::CrossSection::JoinType::Miter,
+                   /*miter_limit=*/2.0, /*circular=*/0);
+  ExpectCrossSectionValid(expanded);
+  if (expanded.IsEmpty()) return;
+
+  const auto roundTrip =
+      expanded.Offset(-delta, manifold::CrossSection::JoinType::Miter,
+                      /*miter_limit=*/2.0, /*circular=*/0);
+  ExpectCrossSectionValid(roundTrip);
+
+  // For convex Miter-join inputs the round-trip is exact in principle;
+  // FP drift accumulates so 1e-4 relative tol catches real bugs without
+  // false positives from arithmetic noise.
+  const double tol = 1e-4 * (1.0 + std::fabs(input.Area()));
+  EXPECT_NEAR(roundTrip.Area(), input.Area(), tol)
+      << "Offset(" << delta << ", Miter).Offset(" << -delta
+      << ", Miter) on " << sides << "-gon r=" << r
+      << " didn't round-trip area";
+  EXPECT_EQ(roundTrip.NumContour(), input.NumContour())
+      << "Offset round-trip changed contour count";
+}
+
 void SimplePositiveOffset(const std::vector<double>& radii, double delta,
                           manifold::CrossSection::JoinType joinType,
                           int circularSegments) {
@@ -1640,6 +1696,9 @@ FUZZ_TEST(CrossSectionFuzz, DoubleMirrorIdentity)
 FUZZ_TEST(CrossSectionFuzz, DecomposeRecomposeWithHoles)
     .WithDomains(SmallStarRadiiDomain(), SmallStarRadiiDomain(),
                  InRange(-5.0, 5.0), InRange(-5.0, 5.0));
+
+FUZZ_TEST(CrossSectionFuzz, OffsetInverseConvex)
+    .WithDomains(InRange(4, 32), InRange(0.05, 25.0), InRange(-10.0, 10.0));
 
 FUZZ_TEST(CrossSectionFuzz, SimplePositiveOffset)
     .WithDomains(SmallStarRadiiDomain(), InRange(0.05, 25.0),
