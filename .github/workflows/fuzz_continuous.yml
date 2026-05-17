@@ -12,6 +12,15 @@
 # new coverage-expanding input as one file per input in the positional
 # corpus_dir arg, so cache restore + save actually carry coverage forward.
 #
+# Parallelism: -DMANIFOLD_PAR=ON enables the TBB-parallelized boolean2
+# paths; -DMANIFOLD_USE_BUILTIN_TBB=ON pulls oneTBB v2022.3.0 from upstream
+# (system libtbb was built without sanitizer support); -DTBB_SANITIZE=
+# address makes oneTBB sanitizer-aware so ASan can see across fiber
+# switches without false positives. Adds ~5 min to the build step
+# (oneTBB FetchContent + compile), so total is ~10m build + 40m fuzz =
+# ~50m, comfortably under the 60m timeout. Validated locally on the
+# daemon clone (1 full 38-target cycle clean, no sanitizer complaints).
+#
 # Why 40 min and not 50 min: a 50-min fuzz plus ~5-min build was hitting the
 # job's timeout-minutes deadline, producing "cancelled" conclusions that look
 # identical to real cron-overlap kills and obscure whether each run actually
@@ -40,7 +49,7 @@ jobs:
   fuzz:
     name: ${{ matrix.target }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 55
+    timeout-minutes: 60
     # Per-target concurrency: don't kill an in-flight fuzz to launch the
     # next scheduled run. With --fuzz_for=40m + ~5m build, total job time
     # is ~45m, so overlaps should be rare in practice.
@@ -87,6 +96,7 @@ jobs:
           - BVHPairEnumerationMatchesBruteForce
           - CanonicalSubEdgeIdempotence
           - WindingFilterStarburstStress
+          - RemoveOverlapsDeterminismAcrossThreadCounts
           - SimplePositiveOffset
           - OffsetExtrudeRoundTrip
           - ManifoldHoledExtrudeRoundTrip
@@ -142,6 +152,9 @@ jobs:
             -DMANIFOLD_CROSS_SECTION=ON \
             -DMANIFOLD_CROSS_SECTION_BACKEND=boolean2 \
             -DFUZZTEST_COMPATIBILITY_MODE=libfuzzer \
+            -DMANIFOLD_PAR=ON \
+            -DMANIFOLD_USE_BUILTIN_TBB=ON \
+            -DTBB_SANITIZE=address \
             -DFETCHCONTENT_SOURCE_DIR_CLIPPER2=clipper2 \
             -DFETCHCONTENT_SOURCE_DIR_FUZZTEST=fuzztest \
             . -B build
