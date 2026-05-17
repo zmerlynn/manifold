@@ -1171,6 +1171,32 @@ void DecomposeRecomposeWithHoles(const std::vector<double>& outerRadii,
 // delta/sin(pi/n - pi/2) = delta/cos(pi/n) <= 2*delta when cos(pi/n) >=
 // 0.5, i.e. n >= 3. Bounds delta to a fraction of the inscribed radius
 // to keep the un-offset polygon from vanishing.
+
+// Hull idempotence: Hull(Hull(X)) == Hull(X). The convex hull of any
+// already-convex shape is itself, so applying Hull twice should be
+// indistinguishable from once. Catches vertex jitter, contour drift,
+// or area regression on the second hull pass.
+void HullIdempotence(const std::vector<double>& radii) {
+  const manifold::CrossSection input(StarPolygon(radii));
+  ExpectCrossSectionValid(input);
+  if (input.IsEmpty() || std::fabs(input.Area()) <= 1e-9) return;
+
+  const auto hull1 = input.Hull();
+  ExpectCrossSectionValid(hull1);
+  if (hull1.IsEmpty() || std::fabs(hull1.Area()) <= 1e-9) return;
+
+  const auto hull2 = hull1.Hull();
+  ExpectCrossSectionValid(hull2);
+
+  const double tol = 1e-6 * (1.0 + std::fabs(hull1.Area()));
+  EXPECT_NEAR(hull2.Area(), hull1.Area(), tol)
+      << "Hull(Hull(X)).Area() != Hull(X).Area()";
+  EXPECT_EQ(hull2.NumContour(), hull1.NumContour())
+      << "Hull(Hull(X)).NumContour() != Hull(X).NumContour()";
+  EXPECT_EQ(hull2.NumVert(), hull1.NumVert())
+      << "Hull(Hull(X)).NumVert() != Hull(X).NumVert()";
+}
+
 void OffsetInverseConvex(int sides, double radius, double delta) {
   if (!std::isfinite(delta)) return;
   // n=3 (equilateral triangle) drifts ~0.35% on the boolean2 Offset
@@ -1699,6 +1725,8 @@ FUZZ_TEST(CrossSectionFuzz, DecomposeRecomposeWithHoles)
 
 FUZZ_TEST(CrossSectionFuzz, OffsetInverseConvex)
     .WithDomains(InRange(4, 32), InRange(0.05, 25.0), InRange(-10.0, 10.0));
+
+FUZZ_TEST(CrossSectionFuzz, HullIdempotence).WithDomains(StarRadiiDomain());
 
 FUZZ_TEST(CrossSectionFuzz, SimplePositiveOffset)
     .WithDomains(SmallStarRadiiDomain(), InRange(0.05, 25.0),
