@@ -86,6 +86,7 @@ jobs:
           - VertexMergeIdempotence
           - BVHPairEnumerationMatchesBruteForce
           - CanonicalSubEdgeIdempotence
+          - WindingFilterStarburstStress
           - SimplePositiveOffset
           - OffsetExtrudeRoundTrip
           - ManifoldHoledExtrudeRoundTrip
