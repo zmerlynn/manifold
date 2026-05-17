@@ -868,7 +868,7 @@ TEST(CrossSection, BooleanCommutativityVeryMixedStars) {
 //   each with one dominant radius (~33 and ~36) and the rest very
 //   small. Inclusion-exclusion violated by ~8 absolute on a∪b≈10.
 //   Verified against post-68cbade7 binary).
-TEST(CrossSection, DISABLED_SubtractInvariantsDominantSpikeStars) {
+TEST(CrossSection, SubtractInvariantsDominantSpikeStars) {
   auto star = [](const std::vector<double>& radii) {
     SimplePolygon ring;
     const int n = static_cast<int>(radii.size());
