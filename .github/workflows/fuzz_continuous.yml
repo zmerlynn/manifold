@@ -61,6 +61,9 @@ jobs:
           - BooleanDistributivity
           - ScaleInvariance
           - RotationInvariance
+          - OffsetIdentityAtZero
+          - EmptyIdentities
+          - DoubleMirrorIdentity
           - SimplePositiveOffset
           - OffsetExtrudeRoundTrip
           - ManifoldHoledExtrudeRoundTrip
