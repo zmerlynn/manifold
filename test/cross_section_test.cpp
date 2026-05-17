@@ -717,7 +717,7 @@ TEST(CrossSection, BooleanCommutativityMixedScaleStars) {
 //   ~73 spike and tiny radii). area(b - a) + area(a ∩ b) is off
 //   by ~234 from b.Area() (~788). Different geometry from prior
 //   Subtract seeds.
-TEST(CrossSection, DISABLED_SubtractInvariantsTwoNonzeroVsNeedle) {
+TEST(CrossSection, SubtractInvariantsTwoNonzeroVsNeedle) {
   auto star = [](const std::vector<double>& radii) {
     SimplePolygon ring;
     const int n = static_cast<int>(radii.size());
