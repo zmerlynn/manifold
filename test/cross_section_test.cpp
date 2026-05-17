@@ -1016,15 +1016,12 @@ TEST(CrossSection, BooleanAssociativityTinyStars) {
 // Counterexample-hash: f186158d2284d4c9
 // Suspected owner: pr/boolean2-backend-wiring (CrossSection::Offset on
 //   boolean2 backend, src/cross_section/cross_section_boolean2.cpp).
-//   Regular triangle, Miter join well within miter_limit=2.0; the
-//   Offset(d).Offset(-d) round-trip drifts -0.35% in area in a way
-//   that's scale-invariant (same percentage at r=0.15, r=1.5, r=15).
-//   n>=4 has zero drift (verified probe), so the bug is specific to
-//   the 60-degree corner geometry of the equilateral triangle, not
-//   FP precision. Likely a sign or angle-bisector error in the
-//   boolean2 Offset path that only surfaces for 60-degree exterior
-//   angles.
-TEST(CrossSection, DISABLED_OffsetInverseTriangleMiter) {
+//   Regular triangle, Miter join exactly on the miter_limit=2.0
+//   threshold; the Offset(d).Offset(-d) round-trip drifts -0.35% in area
+//   in a way that's scale-invariant (same percentage at r=0.15, r=1.5,
+//   r=15). n>=4 has zero drift (verified probe), so the bug is specific
+//   to the miter-limit boundary of the equilateral triangle.
+TEST(CrossSection, OffsetInverseTriangleMiter) {
   // Equilateral triangle inscribed in r=0.15 (effective radius via the
   // 0.1 + |radius| convention used in cross_section_fuzz).
   SimplePolygon ring;
@@ -1043,11 +1040,9 @@ TEST(CrossSection, DISABLED_OffsetInverseTriangleMiter) {
       -delta, CrossSection::JoinType::Miter, /*miter_limit=*/2.0,
       /*circularSegments=*/0);
 
-  // For Miter join with miter_limit=2.0 well above the actual miter
-  // length on a 60-degree exterior angle (delta/sin(60deg) ~= 1.155*delta),
-  // the round-trip should be exact modulo machine epsilon. Observed:
-  // 0.357% absolute drift. n>=4 round-trips to FP precision; this is
-  // triangle-specific.
+  // For Miter join with miter_limit=2.0 exactly at the equilateral triangle
+  // threshold, equality should still take the miter path. Observed:
+  // 0.357% absolute drift when rounded normals spuriously square the join.
   const double tol = 1e-4 * (1.0 + std::fabs(input.Area()));
   EXPECT_NEAR(roundTrip.Area(), input.Area(), tol)
       << "Triangle Miter Offset round-trip drifted by "
