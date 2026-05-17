@@ -224,6 +224,20 @@ manifold::Manifold ApplyBoolean(const manifold::Manifold& a,
   return a + b;
 }
 
+// WARNING: this target has been observed to *hang* (infinite loop in
+// boolean2 on a specific mutated input). Producer's sweep on
+// 2026-05-17 against the post-743a75b7-pre-68cbade7 binary froze
+// after corpus_size=256 / fuzz_time=1m22s with CPU pinned but no
+// log progress. Could not isolate the exact input (PRNG-driven
+// mutation, not in saved corpus); the subsequent fixes (68cbade7
+// "Keep winding seed rays inside narrow faces" and later) may have
+// resolved it. If you see this target hang again:
+//   1. Note the wall time / corpus_size at the freeze.
+//   2. `gdb -p <fuzz pid> --batch -ex "thread apply all bt"` to
+//      capture the stack.
+//   3. Re-run with smaller `--fuzz_for` to narrow the input.
+//   4. Once isolated, seed as a regression on pr/boolean2-tests
+//      and remove this warning.
 void BooleanRobustness(const RawPolygons& rawA, const RawPolygons& rawB,
                        manifold::OpType op) {
   const manifold::Polygons aPolys = ToPolygons(rawA);
