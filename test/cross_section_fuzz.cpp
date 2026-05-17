@@ -62,6 +62,7 @@ extern "C" int ManifoldCrossSectionBackendIsBoolean2();
 #include <vector>
 
 #include "../src/cross_section/boolean2/boolean2.h"
+#include "../src/cross_section/boolean2/vertex_merge.h"
 #include "fuzztest/fuzztest.h"
 #include "gtest/gtest.h"
 #include "manifold/common.h"
@@ -1110,6 +1111,40 @@ void IterateToFixedPointConverges(const std::vector<double>& radii) {
       << "seed for boolean2 iteration tail behavior.";
 }
 
+// Structural-coverage dim targeting boolean2/vertex_merge.h. Property:
+// MergeVerts is idempotent. Once a set of vertices has been merged at
+// eps, re-merging the centroids should produce no further clustering
+// (centroid placement keeps clusters > eps apart). A non-idempotent
+// merge would mean topology oscillates between iterations and the
+// fixed-point loop would never converge cleanly. Catches off-by-eps
+// errors in vertex_merge's broad-phase pair collection or the
+// disjoint-set tie-break.
+void VertexMergeIdempotence(const std::vector<double>& xs,
+                            const std::vector<double>& ys, double logEps) {
+  if (xs.size() != ys.size()) return;
+  if (xs.empty() || xs.size() > 256) return;
+  if (!std::isfinite(logEps)) return;
+
+  const double eps = std::pow(10.0, logEps);
+  if (!std::isfinite(eps) || eps <= 0.0) return;
+
+  std::vector<manifold::vec2> verts;
+  verts.reserve(xs.size());
+  for (size_t i = 0; i < xs.size(); ++i) {
+    if (!std::isfinite(xs[i]) || !std::isfinite(ys[i])) return;
+    verts.push_back({xs[i], ys[i]});
+  }
+
+  const auto m1 = manifold::boolean2::MergeVerts(verts, eps);
+  if (m1.verts.empty()) return;
+
+  const auto m2 = manifold::boolean2::MergeVerts(m1.verts, eps);
+  EXPECT_EQ(m2.verts.size(), m1.verts.size())
+      << "MergeVerts not idempotent: pass1 produced " << m1.verts.size()
+      << " verts, pass2 produced " << m2.verts.size()
+      << " (n=" << xs.size() << ", eps=" << eps << ")";
+}
+
 // Decompose/Compose round-trip on a HOLED CrossSection. The existing
 // DecomposeComposeAndHull covers separated stars (no negative-orientation
 // rings), which doesn't exercise hole containment in the decompose
@@ -1727,6 +1762,15 @@ FUZZ_TEST(CrossSectionFuzz, OffsetInverseConvex)
     .WithDomains(InRange(4, 32), InRange(0.05, 25.0), InRange(-10.0, 10.0));
 
 FUZZ_TEST(CrossSectionFuzz, HullIdempotence).WithDomains(StarRadiiDomain());
+
+FUZZ_TEST(CrossSectionFuzz, VertexMergeIdempotence)
+    .WithDomains(VectorOf(InRange(-1000.0, 1000.0))
+                     .WithMinSize(2)
+                     .WithMaxSize(256),
+                 VectorOf(InRange(-1000.0, 1000.0))
+                     .WithMinSize(2)
+                     .WithMaxSize(256),
+                 InRange(-12.0, -2.0));
 
 FUZZ_TEST(CrossSectionFuzz, SimplePositiveOffset)
     .WithDomains(SmallStarRadiiDomain(), InRange(0.05, 25.0),
