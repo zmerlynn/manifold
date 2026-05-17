@@ -787,7 +787,7 @@ TEST(CrossSection, PrismNearIdenticalTrianglesAdd) {
 //   so the asymmetry is in the union's binary-vs-batch path.
 //   Translations are all near-zero (~1e-35 to 1e-28); the trigger
 //   is the radii distribution, not translation).
-TEST(CrossSection, DISABLED_BooleanAssociativityUnionMixedTriples) {
+TEST(CrossSection, BooleanAssociativityUnionMixedTriples) {
   auto star = [](const std::vector<double>& radii) {
     SimplePolygon ring;
     const int n = static_cast<int>(radii.size());
