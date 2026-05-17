@@ -917,7 +917,7 @@ TEST(CrossSection, SubtractInvariantsDominantSpikeStars) {
 //   PrismNearIdenticalTrianglesAdd seed which had radii differing
 //   by 6.88e-13; this one has a ~0.4% radius difference. Verified
 //   against post-68cbade7 binary.).
-TEST(CrossSection, DISABLED_PrismCloseRadiiTrianglesAdd) {
+TEST(CrossSection, PrismCloseRadiiTrianglesAdd) {
   auto regular = [](int sides, double radius) {
     SimplePolygon ring;
     const double r = 0.1 + std::fabs(radius);
