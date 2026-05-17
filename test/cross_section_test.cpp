@@ -617,7 +617,7 @@ TEST(CrossSection, SubtractInvariantsSpikyStars) {
 //   iter#6/#14 needle/spiky-star seeds; the consumer's `bb4533c2`
 //   winding-seed fix didn't cover this case. Reproduces via direct
 //   call with these exact args).
-TEST(CrossSection, DISABLED_SubtractInvariantsLeakySparseStar) {
+TEST(CrossSection, SubtractInvariantsLeakySparseStar) {
   auto star = [](const std::vector<double>& radii) {
     SimplePolygon ring;
     ring.reserve(radii.size());
