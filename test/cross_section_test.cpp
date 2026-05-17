@@ -741,6 +741,49 @@ TEST(CrossSection, DISABLED_PrismNearIdenticalTrianglesAdd) {
   EXPECT_NEAR(result.Volume(), expected.Area() * h, 1e-5 * tolScale * h);
 }
 
+// Seed: BooleanAssociativity (2026-05-17 local sweep on post-743a75b7
+// binary)
+// Counterexample-hash: 39c5c204f2936291
+// Suspected owner: pr/boolean2-core (three 4-vertex stars with
+//   mixed magnitudes; (A∪B)∪C = 2.994 but A∪(B∪C) = 5.472 - off
+//   by 2.48. Intersection associativity is fine (matches to 3e-17),
+//   so the asymmetry is in the union's binary-vs-batch path.
+//   Translations are all near-zero (~1e-35 to 1e-28); the trigger
+//   is the radii distribution, not translation).
+TEST(CrossSection, DISABLED_BooleanAssociativityUnionMixedTriples) {
+  auto star = [](const std::vector<double>& radii) {
+    SimplePolygon ring;
+    const int n = static_cast<int>(radii.size());
+    for (int i = 0; i < n; ++i) {
+      const double r = 0.1 + std::fabs(radii[i]);
+      const double theta = 2.0 * kPi * i / n;
+      ring.push_back({r * std::cos(theta), r * std::sin(theta)});
+    }
+    return ring;
+  };
+  const std::vector<double> rA = {24.575460587300253,
+                                  2.4572617728922851e-10,
+                                  3.3952718785303559e-06, 0.};
+  const std::vector<double> rB = {29.731318514644453,
+                                  1.5729051003875837e-06,
+                                  0.0082858661009423962, 0.};
+  const std::vector<double> rC = {0., 0., 6.5474426075871467e-16,
+                                  2.9296729904240054e-06};
+  const CrossSection a(star(rA));
+  const CrossSection b = CrossSection(star(rB))
+                             .Translate({-9.1863209962415243e-35,
+                                         -9.8444830049208569e-28});
+  const CrossSection c = CrossSection(star(rC))
+                             .Translate({-6.0489837474564476e-29, 0.});
+
+  const auto ab_c = (a + b) + c;
+  const auto a_bc = a + (b + c);
+  const double tol = 1e-6 * (1.0 + std::fabs(a.Area()) + std::fabs(b.Area()) +
+                             std::fabs(c.Area()));
+  EXPECT_NEAR(ab_c.Area(), a_bc.Area(), tol)
+      << "(A ∪ B) ∪ C != A ∪ (B ∪ C)";
+}
+
 TEST(CrossSection, NonFiniteInputReturnsEmpty) {
   const double inf = std::numeric_limits<double>::infinity();
   SimplePolygon bad = {{0.0, 0.0}, {1.0, 0.0}, {inf, 1.0}, {0.0, 1.0}};
