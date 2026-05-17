@@ -68,6 +68,7 @@ targets=(
   CrossSectionFuzz.HullIdempotence
   CrossSectionFuzz.VertexMergeIdempotence
   CrossSectionFuzz.BVHPairEnumerationMatchesBruteForce
+  CrossSectionFuzz.CanonicalSubEdgeIdempotence
   CrossSectionFuzz.SimplePositiveOffset
   CrossSectionFuzz.OffsetExtrudeRoundTrip
   CrossSectionFuzz.ManifoldHoledExtrudeRoundTrip
