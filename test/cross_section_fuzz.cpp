@@ -63,6 +63,7 @@ extern "C" int ManifoldCrossSectionBackendIsBoolean2();
 
 #include "../src/cross_section/boolean2/boolean2.h"
 #include "../src/cross_section/boolean2/bvh.h"
+#include "../src/cross_section/boolean2/canonicalize.h"
 #include "../src/cross_section/boolean2/vertex_merge.h"
 #include "fuzztest/fuzztest.h"
 #include "gtest/gtest.h"
@@ -1112,6 +1113,39 @@ void IterateToFixedPointConverges(const std::vector<double>& radii) {
       << "seed for boolean2 iteration tail behavior.";
 }
 
+// Structural-coverage dim targeting boolean2/canonicalize.h. Property:
+// CanonicalSubEdges::Finalize() is idempotent. After one Finalize, the
+// edges are sorted by (vMin, vMax), consecutive duplicates are merged
+// by summing mults, and zero-sum entries are dropped. A second
+// Finalize sees no consecutive duplicates and no zero-sum entries, so
+// it should output an identical vector. Catches sort-instability bugs
+// or merge-loop off-by-one errors that would let zero-sum entries
+// leak through.
+void CanonicalSubEdgeIdempotence(const std::vector<int>& v0s,
+                                 const std::vector<int>& v1s,
+                                 const std::vector<int>& mults) {
+  if (v0s.size() != v1s.size() || v0s.size() != mults.size()) return;
+  if (v0s.empty() || v0s.size() > 256) return;
+
+  manifold::boolean2::CanonicalSubEdges sub;
+  for (size_t i = 0; i < v0s.size(); ++i) {
+    sub.Add(v0s[i], v1s[i], mults[i]);
+  }
+  sub.Finalize();
+  const auto firstPass = sub.edges;
+
+  sub.Finalize();  // second pass; should be a no-op.
+
+  ASSERT_EQ(sub.edges.size(), firstPass.size())
+      << "Finalize() not idempotent: size changed from " << firstPass.size()
+      << " to " << sub.edges.size();
+  for (size_t i = 0; i < sub.edges.size(); ++i) {
+    EXPECT_EQ(sub.edges[i].vMin, firstPass[i].vMin) << "at i=" << i;
+    EXPECT_EQ(sub.edges[i].vMax, firstPass[i].vMax) << "at i=" << i;
+    EXPECT_EQ(sub.edges[i].mult, firstPass[i].mult) << "at i=" << i;
+  }
+}
+
 // Structural-coverage dim targeting boolean2/bvh.h. Property:
 // the BVH's pair enumeration matches a brute-force O(N^2) reference,
 // exactly. Builds a BVH from N box centers (eps-padded points), runs
@@ -1830,6 +1864,11 @@ FUZZ_TEST(CrossSectionFuzz, BVHPairEnumerationMatchesBruteForce)
                      .WithMinSize(2)
                      .WithMaxSize(200),
                  InRange(-6.0, -1.0));
+
+FUZZ_TEST(CrossSectionFuzz, CanonicalSubEdgeIdempotence)
+    .WithDomains(VectorOf(InRange(0, 100)).WithMinSize(1).WithMaxSize(256),
+                 VectorOf(InRange(0, 100)).WithMinSize(1).WithMaxSize(256),
+                 VectorOf(InRange(-100, 100)).WithMinSize(1).WithMaxSize(256));
 
 FUZZ_TEST(CrossSectionFuzz, SimplePositiveOffset)
     .WithDomains(SmallStarRadiiDomain(), InRange(0.05, 25.0),
