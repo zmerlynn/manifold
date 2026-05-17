@@ -84,6 +84,7 @@ jobs:
           - OffsetInverseConvex
           - HullIdempotence
           - VertexMergeIdempotence
+          - BVHPairEnumerationMatchesBruteForce
           - SimplePositiveOffset
           - OffsetExtrudeRoundTrip
           - ManifoldHoledExtrudeRoundTrip
