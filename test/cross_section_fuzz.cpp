@@ -984,6 +984,56 @@ void OffsetIdentityAtZero(const std::vector<double>& radii,
       << "Offset(0) changed contour count";
 }
 
+// Empty identities: A + empty == A, A ∩ empty == empty, A - empty
+// == A. Exercises the boolean engine's handling of empty inputs.
+// Catches null-pointer / empty-vector edge cases that don't surface
+// in the standard fuzz targets (which generate non-trivial inputs).
+void EmptyIdentities(const std::vector<double>& radii) {
+  const manifold::CrossSection a(StarPolygon(radii));
+  ExpectCrossSectionValid(a);
+  if (a.IsEmpty() || std::fabs(a.Area()) <= 1e-9) return;
+  const manifold::CrossSection e;
+  ASSERT_TRUE(e.IsEmpty());
+
+  const auto aUnionE = a + e;
+  const auto eUnionA = e + a;
+  const auto aIntE = a.Boolean(e, manifold::OpType::Intersect);
+  const auto aMinusE = a - e;
+  ExpectCrossSectionValid(aUnionE);
+  ExpectCrossSectionValid(eUnionA);
+  ExpectCrossSectionValid(aIntE);
+  ExpectCrossSectionValid(aMinusE);
+
+  const double tol = 1e-6 * (1.0 + std::fabs(a.Area()));
+  EXPECT_NEAR(aUnionE.Area(), a.Area(), tol) << "A + empty != A";
+  EXPECT_NEAR(eUnionA.Area(), a.Area(), tol) << "empty + A != A";
+  EXPECT_TRUE(aIntE.IsEmpty()) << "A ∩ empty is non-empty";
+  EXPECT_NEAR(aMinusE.Area(), a.Area(), tol) << "A - empty != A";
+}
+
+// Double mirror: A.Mirror(axis).Mirror(axis) == A. Mirror is its
+// own inverse along any axis. Catches sign-flip or axis-handling
+// bugs in the transform path.
+void DoubleMirrorIdentity(const std::vector<double>& radii, double axisX,
+                          double axisY) {
+  if (!std::isfinite(axisX) || !std::isfinite(axisY)) return;
+  if (std::fabs(axisX) + std::fabs(axisY) < 1e-9) return;  // zero axis
+
+  const manifold::CrossSection a(StarPolygon(radii));
+  ExpectCrossSectionValid(a);
+  if (a.IsEmpty() || std::fabs(a.Area()) <= 1e-9) return;
+
+  const manifold::vec2 axis{axisX, axisY};
+  const auto twice = a.Mirror(axis).Mirror(axis);
+  ExpectCrossSectionValid(twice);
+
+  const double tol = 1e-6 * (1.0 + std::fabs(a.Area()));
+  EXPECT_NEAR(twice.Area(), a.Area(), tol)
+      << "Mirror(axis).Mirror(axis) changed area";
+  EXPECT_EQ(twice.NumContour(), a.NumContour())
+      << "Mirror.Mirror changed contour count";
+}
+
 void SubtractInvariants(const std::vector<double>& radiiA,
                         const std::vector<double>& radiiB, double translateX,
                         double translateY) {
@@ -1515,6 +1565,13 @@ FUZZ_TEST(CrossSectionFuzz, OffsetIdentityAtZero)
                             manifold::CrossSection::JoinType::Round,
                             manifold::CrossSection::JoinType::Miter,
                             manifold::CrossSection::JoinType::Bevel}));
+
+FUZZ_TEST(CrossSectionFuzz, EmptyIdentities)
+    .WithDomains(StarRadiiDomain());
+
+FUZZ_TEST(CrossSectionFuzz, DoubleMirrorIdentity)
+    .WithDomains(StarRadiiDomain(), InRange(-10.0, 10.0),
+                 InRange(-10.0, 10.0));
 
 FUZZ_TEST(CrossSectionFuzz, SimplePositiveOffset)
     .WithDomains(SmallStarRadiiDomain(), InRange(0.05, 25.0),

@@ -60,6 +60,8 @@ targets=(
   CrossSectionFuzz.ScaleInvariance
   CrossSectionFuzz.RotationInvariance
   CrossSectionFuzz.OffsetIdentityAtZero
+  CrossSectionFuzz.EmptyIdentities
+  CrossSectionFuzz.DoubleMirrorIdentity
   CrossSectionFuzz.SimplePositiveOffset
   CrossSectionFuzz.OffsetExtrudeRoundTrip
   CrossSectionFuzz.ManifoldHoledExtrudeRoundTrip
