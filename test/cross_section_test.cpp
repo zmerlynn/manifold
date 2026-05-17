@@ -756,7 +756,7 @@ TEST(CrossSection, DISABLED_SubtractInvariantsTwoNonzeroVsNeedle) {
 //   Volume check fails by ~0.26 absolute on h=5; the iter#2
 //   narrowing of Prism only skipped Project/Slice for Subtract,
 //   not the Volume check which catches this).
-TEST(CrossSection, DISABLED_PrismNearIdenticalTrianglesAdd) {
+TEST(CrossSection, PrismNearIdenticalTrianglesAdd) {
   auto regular = [](int sides, double radius) {
     SimplePolygon ring;
     const double r = 0.1 + std::fabs(radius);
