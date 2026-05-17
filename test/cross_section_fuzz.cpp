@@ -62,6 +62,7 @@ extern "C" int ManifoldCrossSectionBackendIsBoolean2();
 #include <vector>
 
 #include "../src/cross_section/boolean2/boolean2.h"
+#include "../src/cross_section/boolean2/bvh.h"
 #include "../src/cross_section/boolean2/vertex_merge.h"
 #include "fuzztest/fuzztest.h"
 #include "gtest/gtest.h"
@@ -1111,6 +1112,55 @@ void IterateToFixedPointConverges(const std::vector<double>& radii) {
       << "seed for boolean2 iteration tail behavior.";
 }
 
+// Structural-coverage dim targeting boolean2/bvh.h. Property:
+// the BVH's pair enumeration matches a brute-force O(N^2) reference,
+// exactly. Builds a BVH from N box centers (eps-padded points), runs
+// `CollidePairs` (the production broad-phase entry point) against the
+// same box set as queries, then verifies the discovered pairs equal
+// the brute-force overlap set as sorted lists. Catches BVH miss bugs
+// (a real pair skipped near bbox boundaries) and false-positive bugs
+// (the BVH reporting pairs that don't actually overlap).
+void BVHPairEnumerationMatchesBruteForce(const std::vector<double>& xs,
+                                         const std::vector<double>& ys,
+                                         double logEps) {
+  if (xs.size() != ys.size()) return;
+  if (xs.size() < 2 || xs.size() > 200) return;
+  if (!std::isfinite(logEps)) return;
+  const double eps = std::pow(10.0, logEps);
+  if (!std::isfinite(eps) || eps <= 0.0) return;
+
+  std::vector<manifold::boolean2::Box2> boxes;
+  boxes.reserve(xs.size());
+  for (size_t i = 0; i < xs.size(); ++i) {
+    if (!std::isfinite(xs[i]) || !std::isfinite(ys[i])) return;
+    boxes.push_back(manifold::boolean2::BoxOf2DPoint({xs[i], ys[i]}, eps));
+  }
+
+  const auto bvh = manifold::boolean2::BVHBuildFromBoxes(boxes);
+
+  std::vector<std::pair<int, int>> bvhPairs;
+  manifold::boolean2::CollidePairs(
+      bvh, boxes,
+      [&](int qi, int origLeafIdx) { bvhPairs.emplace_back(qi, origLeafIdx); });
+  std::sort(bvhPairs.begin(), bvhPairs.end());
+
+  std::vector<std::pair<int, int>> bfPairs;
+  const int n = static_cast<int>(boxes.size());
+  for (int i = 0; i < n; ++i) {
+    for (int j = 0; j < n; ++j) {
+      if (boxes[i].DoesOverlap(boxes[j])) bfPairs.emplace_back(i, j);
+    }
+  }
+  std::sort(bfPairs.begin(), bfPairs.end());
+
+  EXPECT_EQ(bvhPairs.size(), bfPairs.size())
+      << "BVH found " << bvhPairs.size() << " pairs, brute force found "
+      << bfPairs.size() << " (n=" << n << ", eps=" << eps << ")";
+  EXPECT_EQ(bvhPairs, bfPairs)
+      << "BVH pair set differs from brute force (n=" << n << ", eps=" << eps
+      << ")";
+}
+
 // Structural-coverage dim targeting boolean2/vertex_merge.h. Property:
 // MergeVerts is idempotent. Once a set of vertices has been merged at
 // eps, re-merging the centroids should produce no further clustering
@@ -1771,6 +1821,15 @@ FUZZ_TEST(CrossSectionFuzz, VertexMergeIdempotence)
                      .WithMinSize(2)
                      .WithMaxSize(256),
                  InRange(-12.0, -2.0));
+
+FUZZ_TEST(CrossSectionFuzz, BVHPairEnumerationMatchesBruteForce)
+    .WithDomains(VectorOf(InRange(-100.0, 100.0))
+                     .WithMinSize(2)
+                     .WithMaxSize(200),
+                 VectorOf(InRange(-100.0, 100.0))
+                     .WithMinSize(2)
+                     .WithMaxSize(200),
+                 InRange(-6.0, -1.0));
 
 FUZZ_TEST(CrossSectionFuzz, SimplePositiveOffset)
     .WithDomains(SmallStarRadiiDomain(), InRange(0.05, 25.0),
