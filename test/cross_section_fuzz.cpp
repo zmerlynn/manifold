@@ -961,6 +961,29 @@ void RotationInvariance(const std::vector<double>& radii, double thetaRadians) {
       << "contour count changed under rotation";
 }
 
+// Offset(0) is identity: input.Offset(0.0, anyJoin) == input.
+// A trivial-delta sanity check. Offset's polygon-vert-walk should
+// produce identical output when no expansion is requested. Catches
+// edge-case bugs in the offset entry where delta=0 takes a wrong
+// branch (e.g. dividing by delta, or skipping the join-corner
+// generation entirely).
+void OffsetIdentityAtZero(const std::vector<double>& radii,
+                          manifold::CrossSection::JoinType joinType) {
+  const manifold::CrossSection input(StarPolygon(radii));
+  ExpectCrossSectionValid(input);
+  if (input.IsEmpty() || std::fabs(input.Area()) <= 1e-9) return;
+
+  const auto output =
+      input.Offset(0.0, joinType, /*miter_limit=*/2.0, /*segments=*/0);
+  ExpectCrossSectionValid(output);
+
+  const double tol = 1e-6 * (1.0 + std::fabs(input.Area()));
+  EXPECT_NEAR(output.Area(), input.Area(), tol)
+      << "Offset(0, " << static_cast<int>(joinType) << ") changed area";
+  EXPECT_EQ(output.NumContour(), input.NumContour())
+      << "Offset(0) changed contour count";
+}
+
 void SubtractInvariants(const std::vector<double>& radiiA,
                         const std::vector<double>& radiiB, double translateX,
                         double translateY) {
@@ -1485,6 +1508,13 @@ FUZZ_TEST(CrossSectionFuzz, ScaleInvariance)
 
 FUZZ_TEST(CrossSectionFuzz, RotationInvariance)
     .WithDomains(StarRadiiDomain(), InRange(0.0, 6.2831853071795862));
+
+FUZZ_TEST(CrossSectionFuzz, OffsetIdentityAtZero)
+    .WithDomains(StarRadiiDomain(),
+                 ElementOf({manifold::CrossSection::JoinType::Square,
+                            manifold::CrossSection::JoinType::Round,
+                            manifold::CrossSection::JoinType::Miter,
+                            manifold::CrossSection::JoinType::Bevel}));
 
 FUZZ_TEST(CrossSectionFuzz, SimplePositiveOffset)
     .WithDomains(SmallStarRadiiDomain(), InRange(0.05, 25.0),
