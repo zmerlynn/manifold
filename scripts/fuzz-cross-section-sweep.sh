@@ -23,7 +23,8 @@ BINARY="${CROSS_SECTION_FUZZ_BINARY:-./build/codex-fuzz-ubsan-debug-local/test/c
 CORPUS="${FUZZ_CORPUS:-./build/fuzz-corpus}"
 STAMP="${FUZZ_STAMP:-$(date +%Y-%m-%d)}"
 LOG_DIR="${FUZZ_LOG_DIR:-/tmp/fuzz-log-${STAMP}}"
-FUZZ_PER="${FUZZ_PER:-3m}"
+# libFuzzer wants seconds, not "3m"-style. Default 180 = 3 min.
+FUZZ_PER_SECONDS="${FUZZ_PER_SECONDS:-180}"
 
 mkdir -p "$LOG_DIR" "$CORPUS"
 
@@ -84,15 +85,25 @@ fi
 
 echo "Sweep config:"
 echo "  binary:    $BINARY"
-echo "  corpus:    $CORPUS"
+echo "  corpus:    $CORPUS (per-target subdirs)"
 echo "  log dir:   $LOG_DIR"
-echo "  per-target: $FUZZ_PER"
+echo "  per-target: ${FUZZ_PER_SECONDS}s"
 echo "  targets:   ${#targets[@]}"
 echo
 
+# libFuzzer invocation: positional corpus dir per target (accumulates
+# across runs), -max_total_time in seconds, -artifact_prefix per target.
+# Matches the CI pipeline's per-target corpus layout so we can share
+# corpus across local and CI (in principle - they don't actually swap
+# corpora today, but the format is the same).
 for t in "${targets[@]}"; do
   echo "==> $t ($(date +%H:%M:%S))"
-  "$BINARY" --corpus_database="$CORPUS" --fuzz="$t" --fuzz_for="$FUZZ_PER" \
+  mkdir -p "$CORPUS/$t" "$LOG_DIR/$t-artifacts"
+  "$BINARY" --fuzz="$t" \
+    "$CORPUS/$t" \
+    -max_total_time="$FUZZ_PER_SECONDS" \
+    -timeout=60 \
+    -artifact_prefix="$LOG_DIR/$t-artifacts/" \
     > "$LOG_DIR/$t.log" 2>&1
   echo "<== $t exit=$? ($(date +%H:%M:%S))"
 done
