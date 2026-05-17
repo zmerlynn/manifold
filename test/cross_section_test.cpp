@@ -618,7 +618,7 @@ TEST(CrossSection, SubtractInvariantsSpikyStars) {
 //   The boolean engine treats one input as "subject" and one as
 //   "clip"; an order-dependent bug in vertex merge or winding sign
 //   would surface here).
-TEST(CrossSection, DISABLED_BooleanCommutativityMixedScaleStars) {
+TEST(CrossSection, BooleanCommutativityMixedScaleStars) {
   const std::vector<double> radiiA = {
       3.0969192681814191e-32, 2.3071236813515518e-31, 2.353005480384586e-24,
       115.24729490924352,     83.850539440722784,     4.3348536506605848,
