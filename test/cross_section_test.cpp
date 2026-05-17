@@ -608,6 +608,57 @@ TEST(CrossSection, SubtractInvariantsSpikyStars) {
       << "inclusion-exclusion violated";
 }
 
+// Seed: BooleanCommutativity (2026-05-17 CI fuzz, run 25975407735)
+// Counterexample-hash: c4c1f5a6ca197fa8
+// Suspected owner: pr/boolean2-core (asymmetric handling of two
+//   inputs in the boolean engine - A+B and B+A produce different
+//   results. A is an 11-pointed star with mixed magnitudes
+//   (~115 down to ~1e-32); B is a 6-pointed star with mixed
+//   magnitudes (~96 down to ~1e-53); translation (-0.72, -4.58).
+//   The boolean engine treats one input as "subject" and one as
+//   "clip"; an order-dependent bug in vertex merge or winding sign
+//   would surface here).
+TEST(CrossSection, DISABLED_BooleanCommutativityMixedScaleStars) {
+  const std::vector<double> radiiA = {
+      3.0969192681814191e-32, 2.3071236813515518e-31, 2.353005480384586e-24,
+      115.24729490924352,     83.850539440722784,     4.3348536506605848,
+      3.0129653594607548,     3.1208956318387746,     4.4747952332988792,
+      51.973983183682101,     5.99364665010221e-15};
+  const std::vector<double> radiiB = {3.9905161863280855e-53,
+                                      0.,
+                                      96.331001430191975,
+                                      0.,
+                                      0.43952001502476951,
+                                      48.319452987958854};
+  auto star = [](const std::vector<double>& radii) {
+    SimplePolygon ring;
+    ring.reserve(radii.size());
+    const int n = static_cast<int>(radii.size());
+    for (int i = 0; i < n; ++i) {
+      const double r = 0.1 + std::fabs(radii[i]);
+      const double theta = 2.0 * kPi * i / n;
+      ring.push_back({r * std::cos(theta), r * std::sin(theta)});
+    }
+    return ring;
+  };
+
+  const CrossSection a(star(radiiA));
+  const CrossSection b = CrossSection(star(radiiB))
+                             .Translate({-0.72134106089064531,
+                                         -4.5808240251267858});
+
+  const auto aPlusB = a + b;
+  const auto bPlusA = b + a;
+  const auto aIntB = a.Boolean(b, OpType::Intersect);
+  const auto bIntA = b.Boolean(a, OpType::Intersect);
+
+  const double tol = 1e-6 * (1.0 + std::fabs(a.Area()) + std::fabs(b.Area()));
+  EXPECT_NEAR(aPlusB.Area(), bPlusA.Area(), tol) << "A + B != B + A";
+  EXPECT_NEAR(aIntB.Area(), bIntA.Area(), tol) << "A ∩ B != B ∩ A";
+  EXPECT_EQ(aPlusB.NumContour(), bPlusA.NumContour());
+  EXPECT_EQ(aIntB.NumContour(), bIntA.NumContour());
+}
+
 TEST(CrossSection, NonFiniteInputReturnsEmpty) {
   const double inf = std::numeric_limits<double>::infinity();
   SimplePolygon bad = {{0.0, 0.0}, {1.0, 0.0}, {inf, 1.0}, {0.0, 1.0}};
