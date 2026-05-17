@@ -828,7 +828,7 @@ TEST(CrossSection, BooleanAssociativityUnionMixedTriples) {
 //   to O(55), translated by (-0.36, 2.83). A+B = 11.12 but B+A =
 //   72.75 - off by ~62. Different inputs from
 //   DISABLED_BooleanCommutativityMixedScaleStars).
-TEST(CrossSection, DISABLED_BooleanCommutativityVeryMixedStars) {
+TEST(CrossSection, BooleanCommutativityVeryMixedStars) {
   auto star = [](const std::vector<double>& radii) {
     SimplePolygon ring;
     const int n = static_cast<int>(radii.size());
