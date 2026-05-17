@@ -1,9 +1,17 @@
 # Continuous fuzz on this fork. Public-repo Actions is free with no minute
-# budget, so this runs each CrossSectionFuzz target for ~50 min every hour,
+# budget, so this runs each CrossSectionFuzz target for ~40 min every hour,
 # parallelised across the targets. Corpus accumulates between runs via
 # actions/cache. Reproducers from any failing run are uploaded as artifacts.
 # Failure notification is handled via the repo's email notifications - no
 # issues are filed.
+#
+# Why 40 min and not 50 min: a 50-min fuzz plus ~5-min build was hitting the
+# job's timeout-minutes deadline, producing "cancelled" conclusions that look
+# identical to real cron-overlap kills and obscure whether each run actually
+# completed or got killed. 40 min leaves ~10 min of slack before the timeout
+# and ~15 min before the next hourly cron, so every run terminates cleanly
+# under its own --fuzz_for and the conclusion (success / failure / cancelled)
+# accurately reflects what happened.
 #
 # WHERE THIS LIVES: this file is intentionally NOT on the upstream-bound PR
 # branches. Keep it on a fork-only branch (default branch for the fork) so
@@ -26,8 +34,9 @@ jobs:
     name: ${{ matrix.target }}
     runs-on: ubuntu-24.04
     timeout-minutes: 55
-    # Per-target concurrency: don't kill an in-flight 50-min fuzz to launch
-    # the next scheduled run. If a slot overlaps, the new run waits.
+    # Per-target concurrency: don't kill an in-flight fuzz to launch the
+    # next scheduled run. With --fuzz_for=40m + ~5m build, total job time
+    # is ~45m, so overlaps should be rare in practice.
     # Lives at job scope (not workflow scope) so `matrix.target` resolves.
     concurrency:
       group: fuzz-continuous-${{ matrix.target }}
@@ -126,7 +135,7 @@ jobs:
           ASAN_OPTIONS=detect_container_overflow=0 \
             cmake --build build -j$(nproc) --target cross_section_fuzz
 
-      - name: Fuzz ${{ matrix.target }} (50 min)
+      - name: Fuzz ${{ matrix.target }} (40 min)
         id: fuzz
         run: |
           export ASAN_OPTIONS=detect_container_overflow=0:halt_on_error=0:abort_on_error=0
@@ -134,7 +143,7 @@ jobs:
           ./build/test/cross_section_fuzz \
             --corpus_database=build/fuzz-corpus \
             --fuzz=CrossSectionFuzz.${{ matrix.target }} \
-            --fuzz_for=50m
+            --fuzz_for=40m
 
       # Always save the corpus (success or failure) so coverage carries forward.
       - name: Save fuzz corpus
