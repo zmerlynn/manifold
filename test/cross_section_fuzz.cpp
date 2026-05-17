@@ -66,6 +66,10 @@ extern "C" int ManifoldCrossSectionBackendIsBoolean2();
 #include "../src/cross_section/boolean2/canonicalize.h"
 #include "../src/cross_section/boolean2/vertex_merge.h"
 #include "fuzztest/fuzztest.h"
+
+#if defined(MANIFOLD_PAR) && MANIFOLD_PAR == 1
+#include <tbb/global_control.h>
+#endif
 #include "gtest/gtest.h"
 #include "manifold/common.h"
 #include "manifold/cross_section.h"
@@ -1113,6 +1117,57 @@ void IterateToFixedPointConverges(const std::vector<double>& radii) {
       << "seed for boolean2 iteration tail behavior.";
 }
 
+#if defined(MANIFOLD_PAR) && MANIFOLD_PAR == 1
+// Structural-coverage dim targeting boolean2's TBB-parallelized paths.
+// Property: FillByRule produces byte-identical output regardless of the
+// thread count TBB is configured to use. Two runs of the same input
+// under different `tbb::global_control(max_allowed_parallelism, N)`
+// settings should produce identical Polygons (same rings, same vert
+// counts, same coordinates).
+//
+// Catches accidental thread-local non-determinism: reduce-into-shared-
+// state races, intermediate-sort tie-breaks that depend on visit order,
+// pair-collection ordering that depends on which worker found them
+// first. Boolean2 was designed to be deterministic (see
+// vertex_merge.h's stable-sort + lex-ascending tie-break for the
+// disjoint-set roots), this dim is the regression guard.
+//
+// Only compiled when MANIFOLD_PAR == 1 (parallel build). Builds without
+// TBB skip this dim entirely.
+void RemoveOverlapsDeterminismAcrossThreadCounts(
+    const std::vector<double>& radii) {
+  if (radii.size() < 3 || radii.size() > 64) return;
+  const manifold::Polygons input{StarPolygon(radii)};
+
+  manifold::Polygons r1, r4;
+  {
+    tbb::global_control gc(tbb::global_control::max_allowed_parallelism, 1);
+    r1 = manifold::boolean2::FillByRule(
+        input, manifold::boolean2::WindRule::NonZero);
+  }
+  {
+    tbb::global_control gc(tbb::global_control::max_allowed_parallelism, 4);
+    r4 = manifold::boolean2::FillByRule(
+        input, manifold::boolean2::WindRule::NonZero);
+  }
+
+  ASSERT_EQ(r1.size(), r4.size())
+      << "ring count differs across thread counts: 1-thread="
+      << r1.size() << " 4-thread=" << r4.size();
+  for (size_t i = 0; i < r1.size(); ++i) {
+    ASSERT_EQ(r1[i].size(), r4[i].size())
+        << "ring " << i << " vert count differs across thread counts: 1-thread="
+        << r1[i].size() << " 4-thread=" << r4[i].size();
+    for (size_t j = 0; j < r1[i].size(); ++j) {
+      EXPECT_EQ(r1[i][j].x, r4[i][j].x)
+          << "ring " << i << " vert " << j << " x differs across thread counts";
+      EXPECT_EQ(r1[i][j].y, r4[i][j].y)
+          << "ring " << i << " vert " << j << " y differs across thread counts";
+    }
+  }
+}
+#endif  // MANIFOLD_PAR == 1
+
 // Structural-coverage dim targeting boolean2/winding_filter.h
 // (688 lines, biggest backend file). Property: a starburst of N thin
 // rotated strips passing through the origin produces a topologically-
@@ -1922,6 +1977,11 @@ FUZZ_TEST(CrossSectionFuzz, CanonicalSubEdgeIdempotence)
 
 FUZZ_TEST(CrossSectionFuzz, WindingFilterStarburstStress)
     .WithDomains(InRange(2, 32), InRange(0.01, 2.0 * 3.14159), InRange(0.001, 1.0));
+
+#if defined(MANIFOLD_PAR) && MANIFOLD_PAR == 1
+FUZZ_TEST(CrossSectionFuzz, RemoveOverlapsDeterminismAcrossThreadCounts)
+    .WithDomains(StarRadiiDomain());
+#endif
 
 FUZZ_TEST(CrossSectionFuzz, SimplePositiveOffset)
     .WithDomains(SmallStarRadiiDomain(), InRange(0.05, 25.0),
