@@ -862,6 +862,156 @@ TEST(CrossSection, BooleanCommutativityVeryMixedStars) {
   EXPECT_EQ(aPlusB.NumContour(), bPlusA.NumContour());
 }
 
+// Seed: SubtractInvariants (2026-05-17 CI run 25979228195)
+// Counterexample-hash: 340510df5dd776fd
+// Suspected owner: pr/boolean2-core (34-vert star vs 20-vert star
+//   each with one dominant radius (~33 and ~36) and the rest very
+//   small. Inclusion-exclusion violated by ~8 absolute on a∪b≈10.
+//   Verified against post-68cbade7 binary).
+TEST(CrossSection, DISABLED_SubtractInvariantsDominantSpikeStars) {
+  auto star = [](const std::vector<double>& radii) {
+    SimplePolygon ring;
+    const int n = static_cast<int>(radii.size());
+    for (int i = 0; i < n; ++i) {
+      const double r = 0.1 + std::fabs(radii[i]);
+      const double theta = 2.0 * kPi * i / n;
+      ring.push_back({r * std::cos(theta), r * std::sin(theta)});
+    }
+    return ring;
+  };
+  const std::vector<double> rA = {
+      0.15588462038906103, 0.00015361176400222398, 5.8511202761938412e-16,
+      3.3009196314697135e-10, 2.7199740700330746e-09, 4.690497141269639e-14,
+      8.9922571322790269e-10, 6.3553011716417212e-16, 4.2872009761335588e-18,
+      5.6483346599537904e-17, 3.479258338980731e-12, 9.9500479914355979e-14,
+      1.822663758661907e-10, 3.7366088533519133e-05, 7.6137290475474603e-12,
+      1.5917667211519553e-08, 1.3293803091881353e-06, 6.5804393417497265e-09,
+      0.0015777855119048808, 3.5317048943785664e-07, 1.353313563107637e-09,
+      1.1788667553671715e-05, 0.00014847370669519226, 1.509263403954591e-11,
+      6.5516568176598574e-10, 3.8749326674543751e-07, 3.450117114134831e-06,
+      8.3840226251340948e-08, 3.0175612629932874e-07, 33.778786246753299,
+      0.033251289695133752, 0., 0., 1.5817601023378236};
+  const std::vector<double> rB = {
+      3.910135632588194e-07, 1.0064704530951155e-13, 2.0158855952179934e-14,
+      1.4165380430901347e-21, 3.6148752792123783e-11, 1.3306453783491879e-10,
+      2.3794160990202857e-13, 4.0821728496033454e-14, 4.6816579341479393e-18,
+      1.7855060689360453e-17, 2.4858744170474308e-10, 1.5313588823631113e-11,
+      6.6960358868004941e-08, 2.1802650917628242e-10, 5.5611296920831909e-13,
+      1.9586931478995027e-08, 0., 36.09032519236748, 0.,
+      7.5123873966542927e-05};
+  const CrossSection a(star(rA));
+  const CrossSection b = CrossSection(star(rB))
+                             .Translate({0.72140998591309213, 0.});
+  const auto aIb = a.Boolean(b, OpType::Intersect);
+  const auto aUb = a + b;
+  const double tol = 1e-6 * (1.0 + std::fabs(a.Area()) + std::fabs(b.Area()));
+  EXPECT_NEAR(aUb.Area(), a.Area() + b.Area() - aIb.Area(), tol)
+      << "inclusion-exclusion violated";
+}
+
+// Seed: PrismBooleanMatchesCrossSection (2026-05-17 CI run 25979228195)
+// Counterexample-hash: 2bda468cc57be581
+// Suspected owner: pr/boolean2-core (two equilateral triangles
+//   with circumradii 1.675 vs 1.669, op=Add. Volume check fails by
+//   ~20 absolute on h=5. Different from the iter#28
+//   PrismNearIdenticalTrianglesAdd seed which had radii differing
+//   by 6.88e-13; this one has a ~0.4% radius difference. Verified
+//   against post-68cbade7 binary.).
+TEST(CrossSection, DISABLED_PrismCloseRadiiTrianglesAdd) {
+  auto regular = [](int sides, double radius) {
+    SimplePolygon ring;
+    const double r = 0.1 + std::fabs(radius);
+    for (int i = 0; i < sides; ++i) {
+      const double th = 2.0 * kPi * i / sides;
+      ring.push_back({r * std::cos(th), r * std::sin(th)});
+    }
+    return ring;
+  };
+  const CrossSection a(regular(3, 1.6750962039134867));
+  const CrossSection b(regular(3, 1.6691810932888278));
+  const auto expected = a + b;
+  const double h = 5.0;
+  const auto solidA = Manifold::Extrude(a.ToPolygons(), h);
+  const auto solidB = Manifold::Extrude(b.ToPolygons(), h);
+  const auto result = solidA + solidB;
+  const double tolScale = 1.0 + std::fabs(a.Area()) + std::fabs(b.Area()) +
+                          std::fabs(expected.Area());
+  EXPECT_NEAR(result.Volume(), expected.Area() * h, 1e-5 * tolScale * h);
+}
+
+// Seed: BooleanDistributivity (2026-05-17 CI run 25979228195)
+// Counterexample-hash: 7532e050f1386752
+// Suspected owner: pr/boolean2-core (three 4-vertex stars with all
+//   near-zero radii. A∩(B∪C) returns 0 but (A∩B)∪(A∩C) returns
+//   0.02 - off by 0.02. Tiny inputs near eps; the distributivity
+//   path may have lost a contour during simplification. Verified
+//   against post-68cbade7 binary).
+TEST(CrossSection, DISABLED_BooleanDistributivityTinyStars) {
+  auto star = [](const std::vector<double>& radii) {
+    SimplePolygon ring;
+    const int n = static_cast<int>(radii.size());
+    for (int i = 0; i < n; ++i) {
+      const double r = 0.1 + std::fabs(radii[i]);
+      const double theta = 2.0 * kPi * i / n;
+      ring.push_back({r * std::cos(theta), r * std::sin(theta)});
+    }
+    return ring;
+  };
+  const std::vector<double> rA = {0., 0., 0., 0.};
+  const std::vector<double> rB = {0., 0., 0., 2.6526376418441693e-13};
+  const std::vector<double> rC = {5.8033140339376039e-12,
+                                  4.8677534136980153e-13, 0., 0.};
+  const CrossSection a(star(rA));
+  const CrossSection b = CrossSection(star(rB)).Translate({0., 0.});
+  const CrossSection c = CrossSection(star(rC))
+                             .Translate({-2.4305117516652688e-13, 0.});
+  const auto bUc = b + c;
+  const auto left = a.Boolean(bUc, OpType::Intersect);
+  const auto aIb = a.Boolean(b, OpType::Intersect);
+  const auto aIc = a.Boolean(c, OpType::Intersect);
+  const auto right = aIb + aIc;
+  const double tol = 1e-6 * (1.0 + std::fabs(a.Area()) + std::fabs(b.Area()) +
+                             std::fabs(c.Area()));
+  EXPECT_NEAR(left.Area(), right.Area(), tol)
+      << "A ∩ (B ∪ C) != (A ∩ B) ∪ (A ∩ C)";
+}
+
+// Seed: BooleanAssociativity (2026-05-17 CI run 25979228195)
+// Counterexample-hash: 4b2f604bfb3900e9
+// Suspected owner: pr/boolean2-core (three 4-vertex stars with
+//   near-zero radii. (A∪B)∪C = 0.04 but A∪(B∪C) = 0.02 - the
+//   second form drops one unit of area, likely a contour-merge
+//   bug. Distinct from
+//   iter#30 BooleanAssociativityUnionMixedTriples seed which had
+//   larger radii. Verified against post-68cbade7 binary).
+TEST(CrossSection, DISABLED_BooleanAssociativityTinyStars) {
+  auto star = [](const std::vector<double>& radii) {
+    SimplePolygon ring;
+    const int n = static_cast<int>(radii.size());
+    for (int i = 0; i < n; ++i) {
+      const double r = 0.1 + std::fabs(radii[i]);
+      const double theta = 2.0 * kPi * i / n;
+      ring.push_back({r * std::cos(theta), r * std::sin(theta)});
+    }
+    return ring;
+  };
+  const std::vector<double> rA = {0., 0., 0., 2.9078938473355343e-13};
+  const std::vector<double> rB = {1.4795645772678251e-12,
+                                  2.4342935254638573e-13,
+                                  1.4800031437954507e-12,
+                                  1.1368244372782033e-305};
+  const std::vector<double> rC = {0., 0., 0., 0.};
+  const CrossSection a(star(rA));
+  const CrossSection b = CrossSection(star(rB)).Translate({0., 0.});
+  const CrossSection c(star(rC));
+  const auto ab_c = (a + b) + c;
+  const auto a_bc = a + (b + c);
+  const double tol = 1e-6 * (1.0 + std::fabs(a.Area()) + std::fabs(b.Area()) +
+                             std::fabs(c.Area()));
+  EXPECT_NEAR(ab_c.Area(), a_bc.Area(), tol)
+      << "(A ∪ B) ∪ C != A ∪ (B ∪ C)";
+}
+
 TEST(CrossSection, NonFiniteInputReturnsEmpty) {
   const double inf = std::numeric_limits<double>::infinity();
   SimplePolygon bad = {{0.0, 0.0}, {1.0, 0.0}, {inf, 1.0}, {0.0, 1.0}};
