@@ -80,6 +80,10 @@ jobs:
           - OffsetIdentityAtZero
           - EmptyIdentities
           - DoubleMirrorIdentity
+          - DecomposeRecomposeWithHoles
+          - OffsetInverseConvex
+          - HullIdempotence
+          - VertexMergeIdempotence
           - SimplePositiveOffset
           - OffsetExtrudeRoundTrip
           - ManifoldHoledExtrudeRoundTrip
