@@ -63,6 +63,7 @@ targets=(
   CrossSectionFuzz.EmptyIdentities
   CrossSectionFuzz.DoubleMirrorIdentity
   CrossSectionFuzz.DecomposeRecomposeWithHoles
+  CrossSectionFuzz.OffsetInverseConvex
   CrossSectionFuzz.SimplePositiveOffset
   CrossSectionFuzz.OffsetExtrudeRoundTrip
   CrossSectionFuzz.ManifoldHoledExtrudeRoundTrip
