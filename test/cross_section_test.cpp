@@ -710,6 +710,37 @@ TEST(CrossSection, BooleanCommutativityMixedScaleStars) {
   EXPECT_EQ(aIntB.NumContour(), bIntA.NumContour());
 }
 
+// Seed: PrismBooleanMatchesCrossSection (2026-05-17 CI run 25976076740)
+// Counterexample-hash: 74a5b06eb5c583d8
+// Suspected owner: pr/boolean2-core (two equilateral triangles with
+//   circumradii 0.1 and 0.1 + 6.88e-13, op=Add. The union should
+//   be essentially one triangle. Volume check fails by ~0.26
+//   absolute on h=5; the iter#2 narrowing of Prism only skipped
+//   Project/Slice for Subtract, not the Volume check which catches
+//   this Add case). Verified to reproduce after consumer's
+//   743a75b7 winding-seed stability fix.
+TEST(CrossSection, DISABLED_PrismNearIdenticalTrianglesAdd) {
+  auto regular = [](int sides, double radius) {
+    SimplePolygon ring;
+    const double r = 0.1 + std::fabs(radius);
+    for (int i = 0; i < sides; ++i) {
+      const double th = 2.0 * kPi * i / sides;
+      ring.push_back({r * std::cos(th), r * std::sin(th)});
+    }
+    return ring;
+  };
+  const CrossSection a(regular(3, 0.10000000000000001));
+  const CrossSection b(regular(3, 0.10000000000068791));
+  const auto expected = a + b;
+  const double h = 5.0;
+  const auto solidA = Manifold::Extrude(a.ToPolygons(), h);
+  const auto solidB = Manifold::Extrude(b.ToPolygons(), h);
+  const auto result = solidA + solidB;
+  const double tolScale = 1.0 + std::fabs(a.Area()) + std::fabs(b.Area()) +
+                          std::fabs(expected.Area());
+  EXPECT_NEAR(result.Volume(), expected.Area() * h, 1e-5 * tolScale * h);
+}
+
 TEST(CrossSection, NonFiniteInputReturnsEmpty) {
   const double inf = std::numeric_limits<double>::infinity();
   SimplePolygon bad = {{0.0, 0.0}, {1.0, 0.0}, {inf, 1.0}, {0.0, 1.0}};
