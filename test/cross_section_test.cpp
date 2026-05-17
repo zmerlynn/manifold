@@ -710,15 +710,52 @@ TEST(CrossSection, BooleanCommutativityMixedScaleStars) {
   EXPECT_EQ(aIntB.NumContour(), bIntA.NumContour());
 }
 
+// Seed: SubtractInvariants (2026-05-17 CI run 25976076740)
+// Counterexample-hash: 4e5ca8dc9060f53e
+// Suspected owner: pr/boolean2-core (19-vertex sparse star with
+//   only 2 nonzero radii (~39, ~21) vs 4-pointed star with one
+//   ~73 spike and tiny radii). area(b - a) + area(a ∩ b) is off
+//   by ~234 from b.Area() (~788). Different geometry from prior
+//   Subtract seeds.
+TEST(CrossSection, DISABLED_SubtractInvariantsTwoNonzeroVsNeedle) {
+  auto star = [](const std::vector<double>& radii) {
+    SimplePolygon ring;
+    const int n = static_cast<int>(radii.size());
+    for (int i = 0; i < n; ++i) {
+      const double r = 0.1 + std::fabs(radii[i]);
+      const double theta = 2.0 * kPi * i / n;
+      ring.push_back({r * std::cos(theta), r * std::sin(theta)});
+    }
+    return ring;
+  };
+  const std::vector<double> radiiA = {
+      0., 39.150613710409736, 0., 21.472413919643575, 0., 0.,
+      0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0.,
+      3.237760857312173e-24};
+  const std::vector<double> radiiB = {72.814105930277677,
+                                      21.384583693573447,
+                                      1.6644635543899127e-243,
+                                      1.6688953794582528e-229};
+  const CrossSection a(star(radiiA));
+  const CrossSection b(star(radiiB));
+  const auto aMinusB = a - b;
+  const auto bMinusA = b - a;
+  const auto aIntersectB = a.Boolean(b, OpType::Intersect);
+  const auto aUnionB = a + b;
+  const double tol = 1e-6 * (1.0 + std::fabs(a.Area()) + std::fabs(b.Area()));
+  EXPECT_NEAR(aMinusB.Area() + aIntersectB.Area(), a.Area(), tol);
+  EXPECT_NEAR(bMinusA.Area() + aIntersectB.Area(), b.Area(), tol);
+  EXPECT_NEAR(aUnionB.Area(), a.Area() + b.Area() - aIntersectB.Area(), tol);
+}
+
 // Seed: PrismBooleanMatchesCrossSection (2026-05-17 CI run 25976076740)
 // Counterexample-hash: 74a5b06eb5c583d8
 // Suspected owner: pr/boolean2-core (two equilateral triangles with
-//   circumradii 0.1 and 0.1 + 6.88e-13, op=Add. The union should
-//   be essentially one triangle. Volume check fails by ~0.26
-//   absolute on h=5; the iter#2 narrowing of Prism only skipped
-//   Project/Slice for Subtract, not the Volume check which catches
-//   this Add case). Verified to reproduce after consumer's
-//   743a75b7 winding-seed stability fix.
+//   circumradii 0.1 and 0.1+6.88e-13, op=Add. Two near-IDENTICAL
+//   triangles - the union should be essentially one triangle.
+//   Volume check fails by ~0.26 absolute on h=5; the iter#2
+//   narrowing of Prism only skipped Project/Slice for Subtract,
+//   not the Volume check which catches this).
 TEST(CrossSection, DISABLED_PrismNearIdenticalTrianglesAdd) {
   auto regular = [](int sides, double radius) {
     SimplePolygon ring;
@@ -782,6 +819,47 @@ TEST(CrossSection, DISABLED_BooleanAssociativityUnionMixedTriples) {
                              std::fabs(c.Area()));
   EXPECT_NEAR(ab_c.Area(), a_bc.Area(), tol)
       << "(A ∪ B) ∪ C != A ∪ (B ∪ C)";
+}
+
+// Seed: BooleanCommutativity (2026-05-17 CI run 25976076740)
+// Counterexample-hash: 570252c8cf569aa4
+// Suspected owner: pr/boolean2-core (11-vertex star vs 12-vertex
+//   star both with extreme-magnitude radii ranging from O(1e-40)
+//   to O(55), translated by (-0.36, 2.83). A+B = 11.12 but B+A =
+//   72.75 - off by ~62. Different inputs from
+//   DISABLED_BooleanCommutativityMixedScaleStars).
+TEST(CrossSection, DISABLED_BooleanCommutativityVeryMixedStars) {
+  auto star = [](const std::vector<double>& radii) {
+    SimplePolygon ring;
+    const int n = static_cast<int>(radii.size());
+    for (int i = 0; i < n; ++i) {
+      const double r = 0.1 + std::fabs(radii[i]);
+      const double theta = 2.0 * kPi * i / n;
+      ring.push_back({r * std::cos(theta), r * std::sin(theta)});
+    }
+    return ring;
+  };
+  const std::vector<double> radiiA = {
+      5.5755616189085049e-09, 55.713117722084,
+      0.24425911685471227,    12.355613962816753,
+      3.2696445771376686e-21, 7.7223346956456043e-27,
+      9.1566312909847612e-29, 1.1757300951916251e-32,
+      7.5589164688107744e-40, 2.1073720366622818e-34,
+      4.7311936525798036e-23};
+  const std::vector<double> radiiB = {
+      0., 55.263016827250659, 0., 2.1568234275576556e-26,
+      4.3751784176513804e-26, 3.0217717245002794e-34, 0., 0., 0.,
+      5.2142580450244983e-22, 6.1161686141794186e-15,
+      2.8398350775198264};
+  const CrossSection a(star(radiiA));
+  const CrossSection b = CrossSection(star(radiiB))
+                             .Translate({-0.35827067719250716,
+                                         2.8298129605573439});
+  const auto aPlusB = a + b;
+  const auto bPlusA = b + a;
+  const double tol = 1e-6 * (1.0 + std::fabs(a.Area()) + std::fabs(b.Area()));
+  EXPECT_NEAR(aPlusB.Area(), bPlusA.Area(), tol) << "A + B != B + A";
+  EXPECT_EQ(aPlusB.NumContour(), bPlusA.NumContour());
 }
 
 TEST(CrossSection, NonFiniteInputReturnsEmpty) {
