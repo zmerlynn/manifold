@@ -1110,6 +1110,56 @@ void IterateToFixedPointConverges(const std::vector<double>& radii) {
       << "seed for boolean2 iteration tail behavior.";
 }
 
+// Decompose/Compose round-trip on a HOLED CrossSection. The existing
+// DecomposeComposeAndHull covers separated stars (no negative-orientation
+// rings), which doesn't exercise hole containment in the decompose
+// path. Build a holed shape via outer - inner_translated_subtract, then
+// Decompose -> Compose and assert area + NumContour preservation.
+void DecomposeRecomposeWithHoles(const std::vector<double>& outerRadii,
+                                 const std::vector<double>& holeRadii,
+                                 double holeOffsetX, double holeOffsetY) {
+  if (!std::isfinite(holeOffsetX) || !std::isfinite(holeOffsetY)) return;
+
+  const manifold::CrossSection outer(StarPolygon(outerRadii));
+  const manifold::CrossSection hole =
+      manifold::CrossSection(StarPolygon(holeRadii))
+          .Translate({holeOffsetX, holeOffsetY});
+  ExpectCrossSectionValid(outer);
+  ExpectCrossSectionValid(hole);
+  if (outer.IsEmpty() || hole.IsEmpty()) return;
+  if (std::fabs(outer.Area()) <= 1e-9) return;
+
+  const auto holed = outer - hole;
+  ExpectCrossSectionValid(holed);
+  if (holed.IsEmpty()) return;
+  // Need actual multi-ring topology for this dim. If the hole missed
+  // or completely swallowed the outer, skip.
+  if (holed.NumContour() < 2) return;
+
+  const auto components = holed.Decompose();
+  EXPECT_FALSE(components.empty());
+
+  double componentArea = 0.0;
+  size_t componentContourSum = 0;
+  for (const auto& component : components) {
+    ExpectCrossSectionValid(component);
+    componentArea += component.Area();
+    componentContourSum += component.NumContour();
+  }
+  const double tol = 1e-6 * (1.0 + std::fabs(holed.Area()));
+  EXPECT_NEAR(componentArea, holed.Area(), tol)
+      << "Decompose lost area on holed input";
+  EXPECT_EQ(componentContourSum, holed.NumContour())
+      << "Decompose split or merged contours unexpectedly";
+
+  const auto recomposed = manifold::CrossSection::Compose(components);
+  ExpectCrossSectionValid(recomposed);
+  EXPECT_NEAR(recomposed.Area(), holed.Area(), tol)
+      << "Compose(Decompose(holed)) changed area";
+  EXPECT_EQ(recomposed.NumContour(), holed.NumContour())
+      << "Compose(Decompose(holed)) changed contour count";
+}
+
 void SimplePositiveOffset(const std::vector<double>& radii, double delta,
                           manifold::CrossSection::JoinType joinType,
                           int circularSegments) {
@@ -1586,6 +1636,10 @@ FUZZ_TEST(CrossSectionFuzz, EmptyIdentities)
 FUZZ_TEST(CrossSectionFuzz, DoubleMirrorIdentity)
     .WithDomains(StarRadiiDomain(), InRange(-10.0, 10.0),
                  InRange(-10.0, 10.0));
+
+FUZZ_TEST(CrossSectionFuzz, DecomposeRecomposeWithHoles)
+    .WithDomains(SmallStarRadiiDomain(), SmallStarRadiiDomain(),
+                 InRange(-5.0, 5.0), InRange(-5.0, 5.0));
 
 FUZZ_TEST(CrossSectionFuzz, SimplePositiveOffset)
     .WithDomains(SmallStarRadiiDomain(), InRange(0.05, 25.0),
