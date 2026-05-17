@@ -608,6 +608,57 @@ TEST(CrossSection, SubtractInvariantsSpikyStars) {
       << "inclusion-exclusion violated";
 }
 
+// Seed: SubtractInvariants (2026-05-17 local sweep)
+// Counterexample-hash: a1de309b23c81d31
+// Suspected owner: pr/boolean2-core (17-vertex star with most
+//   radii zero collapsed to 0.1, plus a 4-pointed star with one
+//   ~112 spike). area(b - a) + area(a ∩ b) = 402.04, b.Area() =
+//   634.18 - 232 units of area leak. Different geometry from the
+//   iter#6/#14 needle/spiky-star seeds; the consumer's `bb4533c2`
+//   winding-seed fix didn't cover this case. Reproduces via direct
+//   call with these exact args).
+TEST(CrossSection, DISABLED_SubtractInvariantsLeakySparseStar) {
+  auto star = [](const std::vector<double>& radii) {
+    SimplePolygon ring;
+    ring.reserve(radii.size());
+    const int n = static_cast<int>(radii.size());
+    for (int i = 0; i < n; ++i) {
+      const double r = 0.1 + std::fabs(radii[i]);
+      const double theta = 2.0 * kPi * i / n;
+      ring.push_back({r * std::cos(theta), r * std::sin(theta)});
+    }
+    return ring;
+  };
+
+  const std::vector<double> radiiA = {
+      627.11994612906153, 0.11978140887764367, 601.04982226530046,
+      102.31660501134466, 2.1549912703437601,  0.,
+      0.,                 0.,                  0.,
+      0.,                 0.,                  0.,
+      0.,                 0.,                  0.,
+      0.,                 0.};
+  const std::vector<double> radiiB = {112.00504648760347,
+                                      4.3823848227606392,
+                                      1.2795858846899296e-07,
+                                      6.7216166802304542};
+  const CrossSection a(star(radiiA));
+  const CrossSection b = CrossSection(star(radiiB))
+                             .Translate({-2.7193614970785894e-29, 0.});
+
+  const auto aMinusB = a - b;
+  const auto bMinusA = b - a;
+  const auto aIntersectB = a.Boolean(b, OpType::Intersect);
+  const auto aUnionB = a + b;
+
+  const double tol = 1e-6 * (1.0 + std::fabs(a.Area()) + std::fabs(b.Area()));
+  EXPECT_NEAR(aMinusB.Area() + aIntersectB.Area(), a.Area(), tol)
+      << "area(A - B) + area(A ∩ B) != area(A)";
+  EXPECT_NEAR(bMinusA.Area() + aIntersectB.Area(), b.Area(), tol)
+      << "area(B - A) + area(A ∩ B) != area(B)";
+  EXPECT_NEAR(aUnionB.Area(), a.Area() + b.Area() - aIntersectB.Area(), tol)
+      << "inclusion-exclusion violated";
+}
+
 // Seed: BooleanCommutativity (2026-05-17 CI fuzz, run 25975407735)
 // Counterexample-hash: c4c1f5a6ca197fa8
 // Suspected owner: pr/boolean2-core (asymmetric handling of two
