@@ -931,6 +931,36 @@ void ScaleInvariance(const std::vector<double>& radii, double scale) {
       << "contour count changed under scaling";
 }
 
+// Rotation invariance: area(rotate(P, theta)) == area(P) for any
+// angle theta. Rotation preserves area exactly in continuous math;
+// FP precision should hold the area to within a tight relative
+// tolerance. Catches angle-sensitive choices in eps inference or
+// vertex merge that bias one orientation over another.
+void RotationInvariance(const std::vector<double>& radii, double thetaRadians) {
+  if (!std::isfinite(thetaRadians)) return;
+
+  const manifold::SimplePolygon ring = StarPolygon(radii);
+  const manifold::CrossSection base(ring);
+  ExpectCrossSectionValid(base);
+  if (base.IsEmpty() || std::fabs(base.Area()) <= 1e-9) return;
+
+  const double c = std::cos(thetaRadians);
+  const double s = std::sin(thetaRadians);
+  manifold::SimplePolygon rotated;
+  rotated.reserve(ring.size());
+  for (const auto& v : ring) {
+    rotated.push_back({c * v.x - s * v.y, s * v.x + c * v.y});
+  }
+  const manifold::CrossSection rotatedCs(rotated);
+  ExpectCrossSectionValid(rotatedCs);
+
+  const double tol = 1e-6 * (1.0 + std::fabs(base.Area()));
+  EXPECT_NEAR(rotatedCs.Area(), base.Area(), tol)
+      << "area changed under rotation by " << thetaRadians << " radians";
+  EXPECT_EQ(rotatedCs.NumContour(), base.NumContour())
+      << "contour count changed under rotation";
+}
+
 void SubtractInvariants(const std::vector<double>& radiiA,
                         const std::vector<double>& radiiB, double translateX,
                         double translateY) {
@@ -1452,6 +1482,9 @@ FUZZ_TEST(CrossSectionFuzz, BooleanDistributivity)
 
 FUZZ_TEST(CrossSectionFuzz, ScaleInvariance)
     .WithDomains(StarRadiiDomain(), InRange(1e-4, 1e4));
+
+FUZZ_TEST(CrossSectionFuzz, RotationInvariance)
+    .WithDomains(StarRadiiDomain(), InRange(0.0, 6.2831853071795862));
 
 FUZZ_TEST(CrossSectionFuzz, SimplePositiveOffset)
     .WithDomains(SmallStarRadiiDomain(), InRange(0.05, 25.0),

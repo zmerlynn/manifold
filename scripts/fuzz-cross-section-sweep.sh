@@ -58,6 +58,7 @@ targets=(
   CrossSectionFuzz.BooleanAssociativity
   CrossSectionFuzz.BooleanDistributivity
   CrossSectionFuzz.ScaleInvariance
+  CrossSectionFuzz.RotationInvariance
   CrossSectionFuzz.SimplePositiveOffset
   CrossSectionFuzz.OffsetExtrudeRoundTrip
   CrossSectionFuzz.ManifoldHoledExtrudeRoundTrip
