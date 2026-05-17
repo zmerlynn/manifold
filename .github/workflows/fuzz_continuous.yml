@@ -5,13 +5,20 @@
 # Failure notification is handled via the repo's email notifications - no
 # issues are filed.
 #
+# Fuzz engine: FuzzTest's libFuzzer compatibility mode
+# (-DFUZZTEST_COMPATIBILITY_MODE=libfuzzer). FuzzTest's own engine doesn't
+# persist its in-memory corpus to disk, which made the actions/cache save
+# step a no-op (build/fuzz-corpus stayed empty). libFuzzer writes every
+# new coverage-expanding input as one file per input in the positional
+# corpus_dir arg, so cache restore + save actually carry coverage forward.
+#
 # Why 40 min and not 50 min: a 50-min fuzz plus ~5-min build was hitting the
 # job's timeout-minutes deadline, producing "cancelled" conclusions that look
 # identical to real cron-overlap kills and obscure whether each run actually
 # completed or got killed. 40 min leaves ~10 min of slack before the timeout
 # and ~15 min before the next hourly cron, so every run terminates cleanly
-# under its own --fuzz_for and the conclusion (success / failure / cancelled)
-# accurately reflects what happened.
+# under its own -max_total_time and the conclusion (success / failure /
+# cancelled) accurately reflects what happened.
 #
 # WHERE THIS LIVES: this file is intentionally NOT on the upstream-bound PR
 # branches. Keep it on a fork-only branch (default branch for the fork) so
@@ -99,17 +106,19 @@ jobs:
           url: https://github.com/google/fuzztest.git
           rev: f1e26613f66997aa09d3026762e275de22b2daae
 
-      # Corpus accumulates across runs. Save under a run-specific key, restore
-      # from the most-recent matching prefix.
+      # Corpus accumulates across runs as one-file-per-input (libFuzzer
+      # format). Save under a run-specific key, restore from the most-
+      # recent matching prefix. Per-target path so each fuzzer owns its
+      # own corpus directory.
       - name: Restore fuzz corpus
         uses: actions/cache/restore@v4
         with:
-          path: build/fuzz-corpus
+          path: build/fuzz-corpus/${{ matrix.target }}
           key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
           restore-keys: |
             fuzz-corpus-${{ matrix.target }}-
 
-      - name: Build (RelWithDebInfo + ASan + UBSan)
+      - name: Build (RelWithDebInfo + ASan + UBSan + libFuzzer-compat)
         run: |
           cmake \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo \
@@ -121,9 +130,11 @@ jobs:
             -DMANIFOLD_DEBUG=ON \
             -DMANIFOLD_FUZZ=ON \
             -DMANIFOLD_PYBIND=OFF \
+            -DCMAKE_C_COMPILER=clang \
             -DCMAKE_CXX_COMPILER=clang++ \
             -DMANIFOLD_CROSS_SECTION=ON \
             -DMANIFOLD_CROSS_SECTION_BACKEND=boolean2 \
+            -DFUZZTEST_COMPATIBILITY_MODE=libfuzzer \
             -DFETCHCONTENT_SOURCE_DIR_CLIPPER2=clipper2 \
             -DFETCHCONTENT_SOURCE_DIR_FUZZTEST=fuzztest \
             . -B build
@@ -140,17 +151,26 @@ jobs:
         run: |
           export ASAN_OPTIONS=detect_container_overflow=0:halt_on_error=0:abort_on_error=0
           export UBSAN_OPTIONS=halt_on_error=0:print_stacktrace=0
+          mkdir -p build/fuzz-corpus/${{ matrix.target }}
+          mkdir -p build/fuzz-artifacts/${{ matrix.target }}
+          # libFuzzer-compat invocation. Positional arg is the corpus
+          # dir (read at startup, written as new coverage-expanding
+          # inputs are discovered). -artifact_prefix is where crash
+          # inputs land. --fuzz= selects which FUZZ_TEST in this binary.
           ./build/test/cross_section_fuzz \
-            --corpus_database=build/fuzz-corpus \
             --fuzz=CrossSectionFuzz.${{ matrix.target }} \
-            --fuzz_for=40m
+            build/fuzz-corpus/${{ matrix.target }} \
+            -max_total_time=2400 \
+            -timeout=60 \
+            -artifact_prefix=build/fuzz-artifacts/${{ matrix.target }}/ \
+            -print_final_stats=1
 
       # Always save the corpus (success or failure) so coverage carries forward.
       - name: Save fuzz corpus
         if: always()
         uses: actions/cache/save@v4
         with:
-          path: build/fuzz-corpus
+          path: build/fuzz-corpus/${{ matrix.target }}
           key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
 
       - name: Upload reproducer on failure
@@ -159,7 +179,9 @@ jobs:
         with:
           name: reproducer-${{ matrix.target }}-${{ github.run_id }}
           path: |
-            build/fuzz-corpus/**/replay/*
-            build/fuzz-corpus/**/crash/*
+            build/fuzz-artifacts/${{ matrix.target }}/crash-*
+            build/fuzz-artifacts/${{ matrix.target }}/oom-*
+            build/fuzz-artifacts/${{ matrix.target }}/timeout-*
+            build/fuzz-artifacts/${{ matrix.target }}/leak-*
           if-no-files-found: warn
           retention-days: 30
