@@ -1113,6 +1113,56 @@ void IterateToFixedPointConverges(const std::vector<double>& radii) {
       << "seed for boolean2 iteration tail behavior.";
 }
 
+// Structural-coverage dim targeting boolean2/winding_filter.h
+// (688 lines, biggest backend file). Property: a starburst of N thin
+// rotated strips passing through the origin produces a topologically-
+// valid CrossSection. The origin is a high-degree vertex where 4*N
+// halfedges meet; this stresses the angular-sort path at
+// winding_filter.h:306 (the std::sort with the buckets-then-cross-
+// product tie-breaker) much harder than the typical convex-polygon
+// degree-2 vertex. Assertion: self-union is area-preserving (X+X==X
+// modulo arithmetic noise), which would fail if winding_filter
+// produced wrong face cycles for the starburst topology.
+void WindingFilterStarburstStress(int numStrips, double angleSpread,
+                                  double stripWidth) {
+  if (numStrips < 2 || numStrips > 32) return;
+  if (!std::isfinite(angleSpread) || !std::isfinite(stripWidth)) return;
+  if (stripWidth < 1e-3 || stripWidth > 1.0) return;
+  if (angleSpread <= 0 || angleSpread > 2.0 * std::acos(-1.0)) return;
+
+  manifold::Polygons strips;
+  for (int i = 0; i < numStrips; ++i) {
+    const double angle = angleSpread * i / numStrips;
+    const double cosA = std::cos(angle), sinA = std::sin(angle);
+    // Thin strip along the rotated x-axis, half-length 10, half-width
+    // stripWidth, CCW orientation.
+    manifold::SimplePolygon rect = {
+        {10.0 * cosA - stripWidth * sinA, 10.0 * sinA + stripWidth * cosA},
+        {-10.0 * cosA - stripWidth * sinA, -10.0 * sinA + stripWidth * cosA},
+        {-10.0 * cosA + stripWidth * sinA, -10.0 * sinA - stripWidth * cosA},
+        {10.0 * cosA + stripWidth * sinA, 10.0 * sinA - stripWidth * cosA}};
+    strips.push_back(rect);
+  }
+  const manifold::CrossSection cs(strips,
+                                  manifold::CrossSection::FillRule::NonZero);
+  ExpectCrossSectionValid(cs);
+  if (cs.IsEmpty() || std::fabs(cs.Area()) <= 1e-9) return;
+
+  EXPECT_TRUE(std::isfinite(cs.Area()));
+  EXPECT_GT(cs.Area(), 0);
+
+  // Self-union idempotence on the starburst. If winding_filter's
+  // angular sort drops halfedges at the high-degree origin vertex,
+  // doubled.Area() would differ from cs.Area() (sometimes by a small
+  // fraction = lost faces, sometimes by a sign).
+  const auto doubled = cs + cs;
+  ExpectCrossSectionValid(doubled);
+  const double tol = 1e-5 * (1.0 + std::fabs(cs.Area()));
+  EXPECT_NEAR(doubled.Area(), cs.Area(), tol)
+      << "(X + X).Area() != X.Area() on starburst input n=" << numStrips
+      << " spread=" << angleSpread << " width=" << stripWidth;
+}
+
 // Structural-coverage dim targeting boolean2/canonicalize.h. Property:
 // CanonicalSubEdges::Finalize() is idempotent. After one Finalize, the
 // edges are sorted by (vMin, vMax), consecutive duplicates are merged
@@ -1869,6 +1919,9 @@ FUZZ_TEST(CrossSectionFuzz, CanonicalSubEdgeIdempotence)
     .WithDomains(VectorOf(InRange(0, 100)).WithMinSize(1).WithMaxSize(256),
                  VectorOf(InRange(0, 100)).WithMinSize(1).WithMaxSize(256),
                  VectorOf(InRange(-100, 100)).WithMinSize(1).WithMaxSize(256));
+
+FUZZ_TEST(CrossSectionFuzz, WindingFilterStarburstStress)
+    .WithDomains(InRange(2, 32), InRange(0.01, 2.0 * 3.14159), InRange(0.001, 1.0));
 
 FUZZ_TEST(CrossSectionFuzz, SimplePositiveOffset)
     .WithDomains(SmallStarRadiiDomain(), InRange(0.05, 25.0),
