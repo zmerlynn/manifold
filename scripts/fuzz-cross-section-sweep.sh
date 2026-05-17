@@ -66,6 +66,7 @@ targets=(
   CrossSectionFuzz.DecomposeRecomposeWithHoles
   CrossSectionFuzz.OffsetInverseConvex
   CrossSectionFuzz.HullIdempotence
+  CrossSectionFuzz.VertexMergeIdempotence
   CrossSectionFuzz.SimplePositiveOffset
   CrossSectionFuzz.OffsetExtrudeRoundTrip
   CrossSectionFuzz.ManifoldHoledExtrudeRoundTrip
