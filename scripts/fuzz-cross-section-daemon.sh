@@ -57,6 +57,11 @@ TRACK_BRANCH="${FUZZ_DAEMON_BRANCH:-pr/cross-section-fuzz}"
 BUILD_DIR="${FUZZ_DAEMON_BUILD_DIR:-build/daemon}"
 CORPUS_DIR="${FUZZ_DAEMON_CORPUS_DIR:-build/fuzz-corpus}"
 FUZZ_PER_SECONDS="${FUZZ_PER_SECONDS:-180}"
+# How many fuzz targets to run concurrently. Each libFuzzer process is
+# single-threaded but accounts for ~500 MB RSS, so we cap below nproc
+# if you want to reserve a core for the producer / system. Defaults to
+# nproc since the typical box has cores to spare.
+PARALLEL_JOBS="${FUZZ_DAEMON_JOBS:-$(nproc)}"
 PAUSE_FILE="${FUZZ_DAEMON_PAUSE:-/tmp/fuzz-daemon-pause}"
 PID_FILE="${FUZZ_DAEMON_PID:-/tmp/fuzz-daemon.pid}"
 LOG_BASE="${FUZZ_DAEMON_LOG_BASE:-/tmp/fuzz-daemon}"
@@ -97,6 +102,7 @@ log "  branch:      $TRACK_BRANCH"
 log "  build dir:   $BUILD_DIR"
 log "  corpus dir:  $CORPUS_DIR (per-target subdirs)"
 log "  per target:  ${FUZZ_PER_SECONDS}s"
+log "  parallel:    $PARALLEL_JOBS jobs"
 log "  pause flag:  $PAUSE_FILE"
 log "  pid:         $$ (recorded in $PID_FILE)"
 
@@ -141,8 +147,15 @@ while :; do
   log_dir="$LOG_BASE/$(date +%Y-%m-%d)"
   mkdir -p "$log_dir"
 
-  for t in "${targets[@]}"; do
-    while_paused
+  # Each target runs in its own subshell so multiple can execute in
+  # parallel. Per-target corpus dirs and log files don't collide. The
+  # pause check is inside the subshell so a touch of $PAUSE_FILE
+  # stalls *new* targets in the pool; targets already mid-fuzz finish
+  # their 180s budget naturally (libFuzzer doesn't take signals well
+  # mid-run, so we don't try to interrupt).
+  run_one_target() {
+    local t="$1"
+    while [[ -e "$PAUSE_FILE" ]]; do sleep 30; done
     mkdir -p "$CORPUS_DIR/$t" "$log_dir/$t-artifacts"
     log "cycle $cycle: ==> $t"
     "$binary" --fuzz="$t" \
@@ -151,13 +164,27 @@ while :; do
       -timeout=60 \
       -artifact_prefix="$log_dir/$t-artifacts/" \
       > "$log_dir/$t.log" 2>&1
-    rc=$?
+    local rc=$?
     if [[ $rc -ne 0 ]]; then
       log "cycle $cycle: <== $t exit=$rc (likely BUG FOUND; see $log_dir/$t.log)"
     else
       log "cycle $cycle: <== $t exit=0"
     fi
+  }
+
+  # Job pool: launch up to PARALLEL_JOBS in flight; as one finishes,
+  # the next target from the list starts. Uses `wait -n` (bash 4.3+)
+  # for "wait for any one to finish" semantics.
+  running=0
+  for t in "${targets[@]}"; do
+    run_one_target "$t" &
+    running=$((running + 1))
+    if (( running >= PARALLEL_JOBS )); then
+      wait -n
+      running=$((running - 1))
+    fi
   done
+  wait  # drain remaining
 
   log "cycle $cycle: completed all ${#targets[@]} targets"
 done
