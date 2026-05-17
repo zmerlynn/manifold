@@ -984,7 +984,7 @@ TEST(CrossSection, BooleanDistributivityTinyStars) {
 //   bug. Distinct from
 //   iter#30 BooleanAssociativityUnionMixedTriples seed which had
 //   larger radii. Verified against post-68cbade7 binary).
-TEST(CrossSection, DISABLED_BooleanAssociativityTinyStars) {
+TEST(CrossSection, BooleanAssociativityTinyStars) {
   auto star = [](const std::vector<double>& radii) {
     SimplePolygon ring;
     const int n = static_cast<int>(radii.size());
