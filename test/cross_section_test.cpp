@@ -946,7 +946,7 @@ TEST(CrossSection, PrismCloseRadiiTrianglesAdd) {
 //   0.02 - off by 0.02. Tiny inputs near eps; the distributivity
 //   path may have lost a contour during simplification. Verified
 //   against post-68cbade7 binary).
-TEST(CrossSection, DISABLED_BooleanDistributivityTinyStars) {
+TEST(CrossSection, BooleanDistributivityTinyStars) {
   auto star = [](const std::vector<double>& radii) {
     SimplePolygon ring;
     const int n = static_cast<int>(radii.size());
