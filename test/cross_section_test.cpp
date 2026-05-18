@@ -1109,6 +1109,59 @@ TEST(CrossSection, DecomposeRecomposeOuterStarWithSmallHole) {
   EXPECT_EQ(recomposed.NumContour(), holed.NumContour());
 }
 
+// Seed: BooleanCommutativity (2026-05-18 CI run 26006574818)
+// Counterexample-hash: 68e22a523aa8d6a5
+// Suspected owner: pr/boolean2-core (A+B and B+A produce different
+//   contour counts: A+B has 14, B+A has 13. Order-dependent
+//   commutativity violation: depending on which input is "subject"
+//   vs "clip", one contour appears/vanishes. Input shapes are
+//   adversarial - 42-vertex star A with extreme magnitudes
+//   (mix of 0, 1, 1000) vs 33-vertex star B with mostly small
+//   radii plus a few in the 700-900 range, translated by
+//   (1.71, -0.50). Likely a vertex-merge or sort tie-break path
+//   that depends on input order rather than canonical position).
+TEST(CrossSection, DISABLED_BooleanCommutativityExtremeMagStars) {
+  auto star = [](const std::vector<double>& radii) {
+    SimplePolygon ring;
+    const int n = static_cast<int>(radii.size());
+    for (int i = 0; i < n; ++i) {
+      const double r = 0.1 + std::fabs(radii[i]);
+      const double th = 2.0 * kPi * i / n;
+      ring.push_back({r * std::cos(th), r * std::sin(th)});
+    }
+    return ring;
+  };
+  const std::vector<double> radiiA = {
+      849.58267006542974, 1000., 1., 1000., 0., 0., 1., 0., 0.,
+      673.91660850339099, 641.26963903267847, 0.84355834285842513, 0., 0.,
+      0., 0., 0., 0., 633.12578243694929, 52.949291739509349,
+      596.41353494815576, 659.59815503253992, 907.85583546669454,
+      2.3971527824334933, 0., 744.77799184771879, 0., 668.48707869911436,
+      436.35135227432249, 0., 0., 0., 1000., 0., 938.50101700824371,
+      84.188304887665581, 470.75422504731279, 89.810808608112893,
+      992.99533690532235, 152.76119378800999, 1000., 0.};
+  const std::vector<double> radiiB = {
+      681.1551582487607, 1., 226.83285963348141, 25.271695356113401,
+      903.10565859434519, 25.271695356113401, 27.294237080468665,
+      205.64018204902527, 708.55499051253935, 934.95934725410712,
+      597.99208744386829, 937.31857430425612, 1., 3.0503172192082628, 1.,
+      1., 1000., 1000., 1., 1., 901.26525729886407, 1., 1000.,
+      1.6267135216510802, 449.23493668120602, 449.23493668120602,
+      3.1828449559882372, 6.9538585160876147, 1.7485381697954843,
+      696.88681861119551, 1., 183.08811014255667, 1.};
+  const CrossSection a(star(radiiA));
+  const CrossSection b = CrossSection(star(radiiB))
+                             .Translate({1.7126290778198534,
+                                         -0.5023590407011973});
+  const auto aPlusB = a + b;
+  const auto bPlusA = b + a;
+  const double tol = 1e-6 * (1.0 + std::fabs(a.Area()) + std::fabs(b.Area()));
+  EXPECT_NEAR(aPlusB.Area(), bPlusA.Area(), tol) << "A + B != B + A";
+  EXPECT_EQ(aPlusB.NumContour(), bPlusA.NumContour())
+      << "A + B and B + A produce different contour counts: "
+      << aPlusB.NumContour() << " vs " << bPlusA.NumContour();
+}
+
 TEST(CrossSection, NonFiniteInputReturnsEmpty) {
   const double inf = std::numeric_limits<double>::infinity();
   SimplePolygon bad = {{0.0, 0.0}, {1.0, 0.0}, {inf, 1.0}, {0.0, 1.0}};
