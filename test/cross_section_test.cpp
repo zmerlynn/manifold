@@ -1109,6 +1109,69 @@ TEST(CrossSection, DecomposeRecomposeOuterStarWithSmallHole) {
   EXPECT_EQ(recomposed.NumContour(), holed.NumContour());
 }
 
+// Seed: DecomposeRecomposeWithHoles (2026-05-18 CI run 26015239869)
+// Counterexample-hash: 663debcfef9c9d1e
+// Suspected owner: pr/boolean2-core (same Decompose area-conservation
+//   class as DecomposeRecomposeOuterStarWithSmallHole but a distinct
+//   counterexample. 5-vertex outer star (radii skewed: 48.55, 5.05,
+//   1, 1, 50 - one large spike) minus a 5-vertex inner star
+//   (radii 1, 3.75, 0.573, 1, 0) translated by (0, 1.0012).
+//   componentArea=1304.5424 but holed.Area()=1304.5751, diff 0.0327
+//   exceeds tol 0.0013. Decompose drops a chunk of hole-adjacent
+//   area rather than the entire hole this time. Possible: when the
+//   hole is near-tangent to the outer (the 1.0012 offset puts it
+//   very close to an outer edge), face classification miscategorizes
+//   a sliver that gets dropped on the decompose path).
+TEST(CrossSection, DISABLED_DecomposeRecomposeNearTangentSmallHole) {
+  auto star = [](const std::vector<double>& radii) {
+    SimplePolygon ring;
+    const int n = static_cast<int>(radii.size());
+    for (int i = 0; i < n; ++i) {
+      const double r = 0.1 + std::fabs(radii[i]);
+      const double th = 2.0 * kPi * i / n;
+      ring.push_back({r * std::cos(th), r * std::sin(th)});
+    }
+    return ring;
+  };
+  // Match the fuzz target's exact construction (outer - hole) so the
+  // reproducer goes through the same Boolean Subtract -> Decompose
+  // path that fuzzing exercised.
+  const std::vector<double> outerRadii = {
+      48.55001516665169, 5.0536385110757127, 1., 1., 50.};
+  const std::vector<double> holeRadii = {
+      1., 3.7464608085566375, 0.57299724595371804, 1., 0.};
+  const CrossSection outer(star(outerRadii));
+  const CrossSection hole = CrossSection(star(holeRadii))
+                                .Translate({-0., 1.0011960822937693});
+  const auto holed = outer - hole;
+  ASSERT_FALSE(holed.IsEmpty());
+  ASSERT_GE(holed.NumContour(), 2u)
+      << "expected outer + hole, got NumContour=" << holed.NumContour();
+  const double holedArea = holed.Area();
+
+  const auto components = holed.Decompose();
+  ASSERT_FALSE(components.empty());
+
+  double componentArea = 0.0;
+  size_t componentContourSum = 0;
+  for (const auto& c : components) {
+    componentArea += c.Area();
+    componentContourSum += c.NumContour();
+  }
+  const double tol = 1e-6 * (1.0 + std::fabs(holedArea));
+  EXPECT_NEAR(componentArea, holedArea, tol)
+      << "Decompose lost area on holed input: sum(components.Area)="
+      << componentArea << " vs holed.Area()=" << holedArea;
+  EXPECT_EQ(componentContourSum, holed.NumContour())
+      << "Decompose split or merged contours unexpectedly";
+
+  const auto recomposed = CrossSection::Compose(components);
+  EXPECT_NEAR(recomposed.Area(), holedArea, tol)
+      << "Compose(Decompose(holed)) changed area";
+  EXPECT_EQ(recomposed.NumContour(), holed.NumContour())
+      << "Compose(Decompose(holed)) changed contour count";
+}
+
 // Seed: BooleanCommutativity (2026-05-18 CI run 26006574818)
 // Counterexample-hash: 68e22a523aa8d6a5
 // Suspected owner: pr/boolean2-core (A+B and B+A produce different
