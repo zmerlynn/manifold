@@ -65,6 +65,7 @@ extern "C" int ManifoldCrossSectionBackendIsBoolean2();
 #include "../src/cross_section/boolean2/bvh.h"
 #include "../src/cross_section/boolean2/canonicalize.h"
 #include "../src/cross_section/boolean2/iterate.h"
+#include "../src/cross_section/boolean2/predicates.h"
 #include "../src/cross_section/boolean2/vertex_merge.h"
 #include "fuzztest/fuzztest.h"
 
@@ -1335,6 +1336,78 @@ void VertexMergeIdempotence(const std::vector<double>& xs,
       << " (n=" << xs.size() << ", eps=" << eps << ")";
 }
 
+// Structural-coverage dim targeting boolean2/predicates.h (the
+// low-level geometric primitives: SignedArea, CCW, IntersectSegments,
+// EpsilonFromScale). These primitives have zero direct test coverage
+// today; bugs here propagate silently into every higher-level
+// pipeline. Asserts three algebraic identities they must satisfy:
+//
+//   1. SignedArea(reverse(loop)) == -SignedArea(loop). Reversing a
+//      simple polygon's vertex order flips winding sign, so signed
+//      area negates exactly.
+//   2. CCW(a, b, c) == -CCW(a, c, b). Swapping the last two args
+//      flips orientation. Holds for any nonzero CCW return (the
+//      collinear case returns 0 from both, satisfying the identity).
+//   3. IntersectSegments(a0, a1, b0, b1) and IntersectSegments(b0, b1,
+//      a0, a1) must agree on intersection existence and (when hit) on
+//      the intersection point within FP noise.
+void PredicatesIdentities(const std::vector<double>& radii) {
+  if (radii.size() < 4) return;
+  const manifold::SimplePolygon loop = StarPolygon(radii);
+  if (loop.size() < 4) return;
+  const double area = manifold::boolean2::SignedArea(loop);
+  if (!std::isfinite(area)) return;
+
+  // 1. SignedArea sign-flips under loop reversal.
+  manifold::SimplePolygon reversed(loop.rbegin(), loop.rend());
+  const double areaRev = manifold::boolean2::SignedArea(reversed);
+  ASSERT_TRUE(std::isfinite(areaRev));
+  const double areaTol = 1e-9 * (1.0 + std::fabs(area));
+  EXPECT_NEAR(area, -areaRev, areaTol)
+      << "SignedArea(reverse(loop)) != -SignedArea(loop): "
+      << area << " vs " << -areaRev;
+
+  // 2. CCW(a, b, c) == -CCW(a, c, b) for every consecutive triple.
+  const double maxCoord = std::max({std::fabs(loop.front().x),
+                                    std::fabs(loop.front().y), 1.0});
+  const double eps = manifold::boolean2::EpsilonFromScale(maxCoord);
+  for (size_t i = 0; i + 2 < loop.size(); ++i) {
+    const int abc = manifold::boolean2::CCW(loop[i], loop[i + 1],
+                                            loop[i + 2], eps);
+    const int acb = manifold::boolean2::CCW(loop[i], loop[i + 2],
+                                            loop[i + 1], eps);
+    EXPECT_EQ(abc, -acb)
+        << "CCW antisymmetry violated at i=" << i << ": CCW(a,b,c)="
+        << abc << " CCW(a,c,b)=" << acb;
+  }
+
+  // 3. IntersectSegments is order-symmetric in the segment pair.
+  // Pair every edge with the edge two steps later (so they share no
+  // endpoint), bounded to avoid quadratic blowup on long inputs.
+  const size_t pairLimit = std::min<size_t>(loop.size(), 16);
+  for (size_t i = 0; i + 1 < pairLimit; ++i) {
+    const size_t j = i + 2;
+    if (j + 1 >= loop.size()) break;
+    if (j + 1 == loop.size() && i == 0) continue;  // shared endpoint
+    manifold::vec2 outAB, outBA;
+    const bool hitAB = manifold::boolean2::IntersectSegments(
+        loop[i], loop[i + 1], loop[j], loop[j + 1], eps, &outAB);
+    const bool hitBA = manifold::boolean2::IntersectSegments(
+        loop[j], loop[j + 1], loop[i], loop[i + 1], eps, &outBA);
+    EXPECT_EQ(hitAB, hitBA)
+        << "IntersectSegments not order-symmetric at (i,j)=("
+        << i << "," << j << ")";
+    if (hitAB && hitBA) {
+      const double pTol = 1e-7 * (1.0 + std::max(std::fabs(outAB.x),
+                                                 std::fabs(outAB.y)));
+      EXPECT_NEAR(outAB.x, outBA.x, pTol)
+          << "IntersectSegments point X differs by swap";
+      EXPECT_NEAR(outAB.y, outBA.y, pTol)
+          << "IntersectSegments point Y differs by swap";
+    }
+  }
+}
+
 // Decompose/Compose round-trip on a HOLED CrossSection. The existing
 // DecomposeComposeAndHull covers separated stars (no negative-orientation
 // rings), which doesn't exercise hole containment in the decompose
@@ -1978,6 +2051,9 @@ FUZZ_TEST(CrossSectionFuzz, CanonicalSubEdgeIdempotence)
 
 FUZZ_TEST(CrossSectionFuzz, WindingFilterStarburstStress)
     .WithDomains(InRange(2, 32), InRange(0.01, 2.0 * 3.14159), InRange(0.001, 1.0));
+
+FUZZ_TEST(CrossSectionFuzz, PredicatesIdentities)
+    .WithDomains(StarRadiiDomain());
 
 #if defined(MANIFOLD_PAR) && MANIFOLD_PAR == 1
 FUZZ_TEST(CrossSectionFuzz, RemoveOverlapsDeterminismAcrossThreadCounts)
