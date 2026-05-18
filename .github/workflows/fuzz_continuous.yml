@@ -96,6 +96,7 @@ jobs:
           - BVHPairEnumerationMatchesBruteForce
           - CanonicalSubEdgeIdempotence
           - WindingFilterStarburstStress
+          - PredicatesIdentities
           - RemoveOverlapsDeterminismAcrossThreadCounts
           - SimplePositiveOffset
           - OffsetExtrudeRoundTrip
