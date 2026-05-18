@@ -70,6 +70,7 @@ targets=(
   CrossSectionFuzz.BVHPairEnumerationMatchesBruteForce
   CrossSectionFuzz.CanonicalSubEdgeIdempotence
   CrossSectionFuzz.WindingFilterStarburstStress
+  CrossSectionFuzz.PredicatesIdentities
   CrossSectionFuzz.SimplePositiveOffset
   CrossSectionFuzz.OffsetExtrudeRoundTrip
   CrossSectionFuzz.ManifoldHoledExtrudeRoundTrip
