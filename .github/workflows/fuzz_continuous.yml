@@ -97,6 +97,7 @@ jobs:
           - CanonicalSubEdgeIdempotence
           - WindingFilterStarburstStress
           - PredicatesIdentities
+          - FillRuleAllCCWIdentities
           - RemoveOverlapsDeterminismAcrossThreadCounts
           - SimplePositiveOffset
           - OffsetExtrudeRoundTrip
