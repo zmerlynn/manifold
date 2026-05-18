@@ -1062,7 +1062,7 @@ TEST(CrossSection, OffsetInverseTriangleMiter) {
 //   a full-outer result, losing 0.3 area worth of hole. Area
 //   conservation invariant violated; bidirectional Decompose/Compose
 //   should be the identity on multi-ring inputs).
-TEST(CrossSection, DISABLED_DecomposeRecomposeOuterStarWithSmallHole) {
+TEST(CrossSection, DecomposeRecomposeOuterStarWithSmallHole) {
   auto star = [](const std::vector<double>& radii) {
     SimplePolygon ring;
     const int n = static_cast<int>(radii.size());
