@@ -1120,7 +1120,7 @@ TEST(CrossSection, DecomposeRecomposeOuterStarWithSmallHole) {
 //   radii plus a few in the 700-900 range, translated by
 //   (1.71, -0.50). Likely a vertex-merge or sort tie-break path
 //   that depends on input order rather than canonical position).
-TEST(CrossSection, DISABLED_BooleanCommutativityExtremeMagStars) {
+TEST(CrossSection, BooleanCommutativityExtremeMagStars) {
   auto star = [](const std::vector<double>& radii) {
     SimplePolygon ring;
     const int n = static_cast<int>(radii.size());
