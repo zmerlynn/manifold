@@ -71,6 +71,7 @@ targets=(
   CrossSectionFuzz.CanonicalSubEdgeIdempotence
   CrossSectionFuzz.WindingFilterStarburstStress
   CrossSectionFuzz.PredicatesIdentities
+  CrossSectionFuzz.FillRuleAllCCWIdentities
   CrossSectionFuzz.SimplePositiveOffset
   CrossSectionFuzz.OffsetExtrudeRoundTrip
   CrossSectionFuzz.ManifoldHoledExtrudeRoundTrip

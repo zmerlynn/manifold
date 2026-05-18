@@ -1408,6 +1408,65 @@ void PredicatesIdentities(const std::vector<double>& radii) {
   }
 }
 
+// FillRule consistency on all-CCW inputs. The four FillRules
+// (EvenOdd, NonZero, Positive, Negative) are independent winding-count
+// predicates applied at the end of the boolean2 pipeline (via
+// winding_filter.cpp). On inputs where every loop is CCW (winding +1)
+// the rules have algebraic relationships that hold exactly:
+//
+//   - NonZero and Positive are equivalent: all sub-region winding
+//     counts are >= 0, so "winding != 0" iff "winding > 0". Their
+//     output regions, areas, and contour counts must match.
+//   - Negative is empty: no sub-region has negative winding.
+//
+// (EvenOdd is intentionally different on overlapping inputs and is
+// not asserted here.)
+//
+// This targets the rule-predicate dispatch in winding_filter, which
+// has separate code paths per rule even though the input topology
+// is identical. A bug in the Positive predicate, for example, could
+// drop a face that NonZero keeps.
+void FillRuleAllCCWIdentities(const std::vector<double>& radiiA,
+                              const std::vector<double>& radiiB,
+                              double translateX, double translateY) {
+  if (!std::isfinite(translateX) || !std::isfinite(translateY)) return;
+  if (radiiA.size() < 4 || radiiB.size() < 4) return;
+
+  // Build two CCW star polygons; translate the second to (maybe) overlap.
+  manifold::SimplePolygon a = StarPolygon(radiiA);
+  manifold::SimplePolygon b = StarPolygon(radiiB);
+  for (auto& p : b) {
+    p.x += translateX;
+    p.y += translateY;
+  }
+  manifold::Polygons loops{a, b};
+
+  const manifold::CrossSection nz(
+      loops, manifold::CrossSection::FillRule::NonZero);
+  const manifold::CrossSection pos(
+      loops, manifold::CrossSection::FillRule::Positive);
+  const manifold::CrossSection neg(
+      loops, manifold::CrossSection::FillRule::Negative);
+
+  ExpectCrossSectionValid(nz);
+  ExpectCrossSectionValid(pos);
+  ExpectCrossSectionValid(neg);
+
+  // NonZero and Positive must agree exactly on all-CCW input.
+  const double tol = 1e-6 * (1.0 + std::fabs(nz.Area()));
+  EXPECT_NEAR(nz.Area(), pos.Area(), tol)
+      << "NonZero and Positive areas diverge on all-CCW input: "
+      << "NonZero=" << nz.Area() << " Positive=" << pos.Area();
+  EXPECT_EQ(nz.NumContour(), pos.NumContour())
+      << "NonZero and Positive contour counts diverge on all-CCW input: "
+      << "NonZero=" << nz.NumContour() << " Positive=" << pos.NumContour();
+
+  // Negative must be empty on all-CCW input.
+  EXPECT_TRUE(neg.IsEmpty())
+      << "Negative produced a non-empty CrossSection on all-CCW input: "
+      << "NumContour=" << neg.NumContour() << " Area=" << neg.Area();
+}
+
 // Decompose/Compose round-trip on a HOLED CrossSection. The existing
 // DecomposeComposeAndHull covers separated stars (no negative-orientation
 // rings), which doesn't exercise hole containment in the decompose
@@ -2054,6 +2113,10 @@ FUZZ_TEST(CrossSectionFuzz, WindingFilterStarburstStress)
 
 FUZZ_TEST(CrossSectionFuzz, PredicatesIdentities)
     .WithDomains(StarRadiiDomain());
+
+FUZZ_TEST(CrossSectionFuzz, FillRuleAllCCWIdentities)
+    .WithDomains(StarRadiiDomain(), StarRadiiDomain(), InRange(-5.0, 5.0),
+                 InRange(-5.0, 5.0));
 
 #if defined(MANIFOLD_PAR) && MANIFOLD_PAR == 1
 FUZZ_TEST(CrossSectionFuzz, RemoveOverlapsDeterminismAcrossThreadCounts)
