@@ -1050,6 +1050,65 @@ TEST(CrossSection, OffsetInverseTriangleMiter) {
   EXPECT_EQ(roundTrip.NumContour(), input.NumContour());
 }
 
+// Seed: DecomposeRecomposeWithHoles (2026-05-18 daemon find)
+// Counterexample-hash: a33524d9c3e6fb10
+// Suspected owner: pr/boolean2-core (CrossSection::Decompose path,
+//   most likely the containment/face-classification step that picks
+//   which rings to emit per component. An 8-vertex star outer with
+//   a small translated hole produces a 2-contour CrossSection
+//   (NumContour=2: outer+hole, Area=911.40 = 911.70 outer - 0.30
+//   hole). Decompose returns 1 component whose Area=911.70 and
+//   NumContour=1 - the hole is silently dropped. Compose then gives
+//   a full-outer result, losing 0.3 area worth of hole. Area
+//   conservation invariant violated; bidirectional Decompose/Compose
+//   should be the identity on multi-ring inputs).
+TEST(CrossSection, DISABLED_DecomposeRecomposeOuterStarWithSmallHole) {
+  auto star = [](const std::vector<double>& radii) {
+    SimplePolygon ring;
+    const int n = static_cast<int>(radii.size());
+    for (int i = 0; i < n; ++i) {
+      const double r = 0.1 + std::fabs(radii[i]);
+      const double th = 2.0 * kPi * i / n;
+      ring.push_back({r * std::cos(th), r * std::sin(th)});
+    }
+    return ring;
+  };
+  const std::vector<double> outerRadii = {
+      1., 1., 1., 50., 50., 0., 3.987798525003551, 1.};
+  const std::vector<double> holeRadii = {0., 0., 1.,
+                                         0.29444504003509697};
+  const CrossSection outer(star(outerRadii));
+  const CrossSection hole =
+      CrossSection(star(holeRadii)).Translate({0., 1.});
+  const auto holed = outer - hole;
+  ASSERT_EQ(holed.NumContour(), 2u);  // sanity: subtract produced
+                                      // outer + hole
+  const double holedArea = holed.Area();
+
+  const auto components = holed.Decompose();
+  ASSERT_FALSE(components.empty());
+
+  double componentArea = 0.0;
+  size_t componentContourSum = 0;
+  for (const auto& component : components) {
+    componentArea += component.Area();
+    componentContourSum += component.NumContour();
+  }
+  const double tol = 1e-6 * (1.0 + std::fabs(holedArea));
+  EXPECT_NEAR(componentArea, holedArea, tol)
+      << "Decompose lost area on holed input: "
+      << "sum(components.Area)=" << componentArea
+      << " vs holed.Area()=" << holedArea;
+  EXPECT_EQ(componentContourSum, holed.NumContour())
+      << "Decompose lost contours on holed input: "
+      << "sum(components.NumContour)=" << componentContourSum
+      << " vs holed.NumContour()=" << holed.NumContour();
+
+  const auto recomposed = CrossSection::Compose(components);
+  EXPECT_NEAR(recomposed.Area(), holedArea, tol);
+  EXPECT_EQ(recomposed.NumContour(), holed.NumContour());
+}
+
 TEST(CrossSection, NonFiniteInputReturnsEmpty) {
   const double inf = std::numeric_limits<double>::infinity();
   SimplePolygon bad = {{0.0, 0.0}, {1.0, 0.0}, {inf, 1.0}, {0.0, 1.0}};
