@@ -1122,7 +1122,7 @@ TEST(CrossSection, DecomposeRecomposeOuterStarWithSmallHole) {
 //   hole is near-tangent to the outer (the 1.0012 offset puts it
 //   very close to an outer edge), face classification miscategorizes
 //   a sliver that gets dropped on the decompose path).
-TEST(CrossSection, DISABLED_DecomposeRecomposeNearTangentSmallHole) {
+TEST(CrossSection, DecomposeRecomposeNearTangentSmallHole) {
   auto star = [](const std::vector<double>& radii) {
     SimplePolygon ring;
     const int n = static_cast<int>(radii.size());
