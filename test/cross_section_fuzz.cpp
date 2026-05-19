@@ -1467,6 +1467,70 @@ void FillRuleAllCCWIdentities(const std::vector<double>& radiiA,
       << "NumContour=" << neg.NumContour() << " Area=" << neg.Area();
 }
 
+// CrossSection(Polygons) constructor order invariance. Given a list
+// of input loops, the constructor classifies each as outer or inner
+// based on containment and merges them into a single CrossSection.
+// That classification must be invariant to input-list order: a loop's
+// outer/inner status depends only on its containment relationship to
+// the others, not on its position in the input vector. If the
+// containment analysis is order-sensitive (e.g. a flag that flips
+// when seen "first"), reordering would produce a different result.
+//
+// Sibling property to BooleanCommutativity: that one tests the binary
+// boolean entry points; this one tests the unary multi-loop ingestion
+// path. Targets boolean2::Boolean2D / its containment pre-step.
+void InputLoopOrderInvariance(const std::vector<double>& radiiA,
+                              const std::vector<double>& radiiB,
+                              const std::vector<double>& radiiC,
+                              double txA, double tyA, double txB, double tyB,
+                              double txC, double tyC) {
+  if (!std::isfinite(txA) || !std::isfinite(tyA)) return;
+  if (!std::isfinite(txB) || !std::isfinite(tyB)) return;
+  if (!std::isfinite(txC) || !std::isfinite(tyC)) return;
+  if (radiiA.size() < 4 || radiiB.size() < 4 || radiiC.size() < 4) return;
+
+  auto translate = [](manifold::SimplePolygon p, double tx, double ty) {
+    for (auto& v : p) {
+      v.x += tx;
+      v.y += ty;
+    }
+    return p;
+  };
+
+  manifold::SimplePolygon a = translate(StarPolygon(radiiA), txA, tyA);
+  manifold::SimplePolygon b = translate(StarPolygon(radiiB), txB, tyB);
+  manifold::SimplePolygon c = translate(StarPolygon(radiiC), txC, tyC);
+
+  // Build the canonical (a, b, c) ordering and three permutations.
+  // 6 permutations would be exhaustive but quadratic in cost; 3 is
+  // enough to detect order-sensitivity (any non-identity permutation
+  // exercises a different code path through the containment scan).
+  const manifold::CrossSection abc(manifold::Polygons{a, b, c});
+  const manifold::CrossSection bca(manifold::Polygons{b, c, a});
+  const manifold::CrossSection cab(manifold::Polygons{c, a, b});
+  ExpectCrossSectionValid(abc);
+  ExpectCrossSectionValid(bca);
+  ExpectCrossSectionValid(cab);
+
+  // Skip degenerate inputs where everything collapsed. Order
+  // invariance on an empty result is trivially satisfied.
+  if (abc.IsEmpty() && bca.IsEmpty() && cab.IsEmpty()) return;
+
+  const double tol = 1e-6 * (1.0 + std::fabs(abc.Area()));
+  EXPECT_NEAR(abc.Area(), bca.Area(), tol)
+      << "Order (a,b,c) vs (b,c,a) areas differ: "
+      << abc.Area() << " vs " << bca.Area();
+  EXPECT_NEAR(abc.Area(), cab.Area(), tol)
+      << "Order (a,b,c) vs (c,a,b) areas differ: "
+      << abc.Area() << " vs " << cab.Area();
+  EXPECT_EQ(abc.NumContour(), bca.NumContour())
+      << "Order (a,b,c) vs (b,c,a) contour counts differ: "
+      << abc.NumContour() << " vs " << bca.NumContour();
+  EXPECT_EQ(abc.NumContour(), cab.NumContour())
+      << "Order (a,b,c) vs (c,a,b) contour counts differ: "
+      << abc.NumContour() << " vs " << cab.NumContour();
+}
+
 // Decompose/Compose round-trip on a HOLED CrossSection. The existing
 // DecomposeComposeAndHull covers separated stars (no negative-orientation
 // rings), which doesn't exercise hole containment in the decompose
@@ -2117,6 +2181,12 @@ FUZZ_TEST(CrossSectionFuzz, PredicatesIdentities)
 FUZZ_TEST(CrossSectionFuzz, FillRuleAllCCWIdentities)
     .WithDomains(StarRadiiDomain(), StarRadiiDomain(), InRange(-5.0, 5.0),
                  InRange(-5.0, 5.0));
+
+FUZZ_TEST(CrossSectionFuzz, InputLoopOrderInvariance)
+    .WithDomains(StarRadiiDomain(), StarRadiiDomain(), StarRadiiDomain(),
+                 InRange(-5.0, 5.0), InRange(-5.0, 5.0),
+                 InRange(-5.0, 5.0), InRange(-5.0, 5.0),
+                 InRange(-5.0, 5.0), InRange(-5.0, 5.0));
 
 #if defined(MANIFOLD_PAR) && MANIFOLD_PAR == 1
 FUZZ_TEST(CrossSectionFuzz, RemoveOverlapsDeterminismAcrossThreadCounts)

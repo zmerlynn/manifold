@@ -72,6 +72,7 @@ targets=(
   CrossSectionFuzz.WindingFilterStarburstStress
   CrossSectionFuzz.PredicatesIdentities
   CrossSectionFuzz.FillRuleAllCCWIdentities
+  CrossSectionFuzz.InputLoopOrderInvariance
   CrossSectionFuzz.SimplePositiveOffset
   CrossSectionFuzz.OffsetExtrudeRoundTrip
   CrossSectionFuzz.ManifoldHoledExtrudeRoundTrip
