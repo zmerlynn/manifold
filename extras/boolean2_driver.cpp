@@ -82,14 +82,14 @@
 #include <atomic>
 #include <cassert>
 #include <chrono>
+#include <climits>
 #include <cmath>
 #include <cstdint>
-#include <iostream>
-#include <climits>
 #include <cstring>
 #include <fstream>
-#include <iomanip>
 #include <functional>
+#include <iomanip>
+#include <iostream>
 #include <limits>
 #include <map>
 #include <numeric>
@@ -112,17 +112,17 @@
 #include "manifold/manifold.h"
 #endif
 
-#include "cross_section/boolean2/predicates.h"
+#include "cross_section/boolean2/boolean2.h"
 #include "cross_section/boolean2/bvh.h"
-#include "cross_section/boolean2/vertex_merge.h"
+#include "cross_section/boolean2/canonicalize.h"
+#include "cross_section/boolean2/driver.h"
 #include "cross_section/boolean2/edge_vert_lists.h"
 #include "cross_section/boolean2/intersections.h"
-#include "cross_section/boolean2/canonicalize.h"
-#include "cross_section/boolean2/winding_filter.h"
-#include "cross_section/boolean2/driver.h"
-#include "cross_section/boolean2/boolean2.h"
 #include "cross_section/boolean2/iterate.h"
 #include "cross_section/boolean2/offset.h"
+#include "cross_section/boolean2/predicates.h"
+#include "cross_section/boolean2/vertex_merge.h"
+#include "cross_section/boolean2/winding_filter.h"
 
 namespace manifold {
 namespace boolean2 {
@@ -369,11 +369,13 @@ void Diagnose(uint64_t seed, int kPow = 30, int n = 50) {
 
   std::vector<Box2> diagEdgeBoxes(edges.size());
   for (size_t i = 0; i < edges.size(); ++i)
-    diagEdgeBoxes[i] = BoxOf2DEdge(merge.verts[edges[i].v0],
-                                   merge.verts[edges[i].v1], eps);
+    diagEdgeBoxes[i] =
+        BoxOf2DEdge(merge.verts[edges[i].v0], merge.verts[edges[i].v1], eps);
   BVH diagBvh = BVHBuildFromBoxes(diagEdgeBoxes);
+  auto diagPairs =
+      CollectIntersectionPairs(edges, merge.verts, eps, diagEdgeBoxes, diagBvh);
   auto lists =
-      BuildEdgeVertLists(edges, merge.verts, eps, diagEdgeBoxes, diagBvh);
+      BuildEdgeVertListsFromEdgePairs(edges, merge.verts, eps, diagPairs);
   size_t totalListSize = 0;
   for (const auto& l : lists) totalListSize += l.size();
   std::cerr << "After near-vertex indexing: " << totalListSize
@@ -381,14 +383,11 @@ void Diagnose(uint64_t seed, int kPow = 30, int n = 50) {
 
   const int beforeIntersections = static_cast<int>(merge.verts.size());
   std::vector<std::vector<int>> vertEdges;
-  auto diagPairs =
-      CollectIntersectionPairs(edges, merge.verts, eps, diagEdgeBoxes, diagBvh);
   FindAndInsertIntersections(edges, &merge.verts, &lists, &vertEdges, eps,
                              diagEdgeBoxes, diagBvh, diagPairs);
   const int afterIntersections = static_cast<int>(merge.verts.size());
-  std::cerr << "After intersections: " << merge.verts.size()
-            << " verts (added " << (afterIntersections - beforeIntersections)
-            << ")\n";
+  std::cerr << "After intersections: " << merge.verts.size() << " verts (added "
+            << (afterIntersections - beforeIntersections) << ")\n";
 
   // Structural merge is omitted here: production
   // RemoveOverlaps2D uses union-find over verts that share a parent edge
@@ -448,8 +447,8 @@ void Diagnose(uint64_t seed, int kPow = 30, int n = 50) {
       }
     }
   }
-  std::cerr << "Total imbalanced vertices after canonicalization: "
-            << badCount << "\n";
+  std::cerr << "Total imbalanced vertices after canonicalization: " << badCount
+            << "\n";
 
   // Now also run the winding filter and check balance again.
   auto out = FilterByWindingDCEL(canon, merge.verts);
@@ -487,8 +486,8 @@ void Diagnose(uint64_t seed, int kPow = 30, int n = 50) {
       }
     }
   }
-  std::cerr << "Total imbalanced vertices after winding filter: "
-            << outBadCount << "\n";
+  std::cerr << "Total imbalanced vertices after winding filter: " << outBadCount
+            << "\n";
 
   // Deep dive on first imbalanced vertex: dump winding decisions for every
   // canonical sub-edge touching it, including the wL/wR values.
@@ -532,9 +531,9 @@ void Diagnose(uint64_t seed, int kPow = 30, int n = 50) {
       int wL = CastWindingRay(leftPt, canon, merge.verts);
       int wR = CastWindingRay(rightPt, canon, merge.verts);
       std::cerr << "  sub-edge (" << edge.vMin << "," << edge.vMax
-                << ") mult=" << edge.mult << " | mid=(" << mid.x - offset
-                << "," << mid.y - offset << ") perp=(" << perp.x << ","
-                << perp.y << ") | wL=" << wL << " wR=" << wR
+                << ") mult=" << edge.mult << " | mid=(" << mid.x - offset << ","
+                << mid.y - offset << ") perp=(" << perp.x << "," << perp.y
+                << ") | wL=" << wL << " wR=" << wR
                 << (((wL > 0) != (wR > 0)) ? " => KEPT" : " => DROPPED")
                 << "\n";
     }
@@ -556,16 +555,16 @@ void Diagnose(uint64_t seed, int kPow = 30, int n = 50) {
   std::cerr << "\n=== IterateToFixedPoint ===\n";
   int iters = 0;
   IterStatus iterStatus = IterStatus::Converged;
-  auto rIter = IterateToFixedPoint(vIn, eIn, eps, /*maxIter=*/8, &iters,
-                                   &iterStatus);
+  auto rIter =
+      IterateToFixedPoint(vIn, eIn, eps, /*maxIter=*/8, &iters, &iterStatus);
   const char* statusStr =
       iterStatus == IterStatus::Converged
           ? "Converged"
           : (iterStatus == IterStatus::Cycled ? "Cycled" : "MaxedOut");
   std::cerr << "Iters: " << iters << " status: " << statusStr << "\n";
   std::cerr << "Iterated result: " << rIter.verts.size() << " verts, "
-            << rIter.edges.size() << " edges, numMergedVerts="
-            << rIter.numMergedVerts << "\n";
+            << rIter.edges.size()
+            << " edges, numMergedVerts=" << rIter.numMergedVerts << "\n";
 
   // Check topology validity on the iterated result with composed remap.
   bool iterValid = CheckTopologicalValidity(rIter, eIn, rIter.inputRemap,
@@ -581,8 +580,8 @@ void Diagnose(uint64_t seed, int kPow = 30, int n = 50) {
                                              pass1.numMergedVerts);
   std::cerr << "Pass 1 verts=" << pass1.verts.size()
             << " edges=" << pass1.edges.size()
-            << " numMergedVerts=" << pass1.numMergedVerts << " valid="
-            << (pass1Valid ? "YES" : "NO") << "\n";
+            << " numMergedVerts=" << pass1.numMergedVerts
+            << " valid=" << (pass1Valid ? "YES" : "NO") << "\n";
 
   // Find imbalanced verts and dump their canonical sub-edge environment.
   if (!pass1Valid) {
@@ -601,9 +600,7 @@ void Diagnose(uint64_t seed, int kPow = 30, int n = 50) {
       act[oe.v1] -= oe.mult;
     }
     for (int v = 0; v < (int)pass1.verts.size(); ++v) {
-      int target = (v < pass1.numMergedVerts)
-                       ? (exp.count(v) ? exp[v] : 0)
-                       : 0;
+      int target = (v < pass1.numMergedVerts) ? (exp.count(v) ? exp[v] : 0) : 0;
       int actual = act.count(v) ? act[v] : 0;
       if (actual != target) {
         const vec2 p = pass1.verts[v];
@@ -635,13 +632,11 @@ void Diagnose(uint64_t seed, int kPow = 30, int n = 50) {
     auto e3 = RemapAndCollapse(eIn, m3.remap);
     std::vector<Box2> e3Boxes(e3.size());
     for (size_t i = 0; i < e3.size(); ++i)
-      e3Boxes[i] =
-          BoxOf2DEdge(m3.verts[e3[i].v0], m3.verts[e3[i].v1], eps);
+      e3Boxes[i] = BoxOf2DEdge(m3.verts[e3[i].v0], m3.verts[e3[i].v1], eps);
     BVH e3Bvh = BVHBuildFromBoxes(e3Boxes);
-    auto l3 = BuildEdgeVertLists(e3, m3.verts, eps, e3Boxes, e3Bvh);
+    auto e3Pairs = CollectIntersectionPairs(e3, m3.verts, eps, e3Boxes, e3Bvh);
+    auto l3 = BuildEdgeVertListsFromEdgePairs(e3, m3.verts, eps, e3Pairs);
     std::vector<std::vector<int>> ve3;
-    auto e3Pairs =
-        CollectIntersectionPairs(e3, m3.verts, eps, e3Boxes, e3Bvh);
     FindAndInsertIntersections(e3, &m3.verts, &l3, &ve3, eps, e3Boxes, e3Bvh,
                                e3Pairs);
     // Structural re-merge (copy of the production code).
@@ -653,7 +648,11 @@ void Diagnose(uint64_t seed, int kPow = 30, int n = 50) {
         for (size_t b = a + 1; b < m3.verts.size(); ++b) {
           if (b >= ve3.size() || ve3[b].empty()) continue;
           bool shared = false;
-          for (int e : ve3[a]) if (VESetContains(ve3[b], e)) { shared = true; break; }
+          for (int e : ve3[a])
+            if (VESetContains(ve3[b], e)) {
+              shared = true;
+              break;
+            }
           if (!shared) continue;
           vec2 d = m3.verts[b] - m3.verts[a];
           if (dot(d, d) > mergeThresh2) continue;
@@ -677,7 +676,10 @@ void Diagnose(uint64_t seed, int kPow = 30, int n = 50) {
         std::vector<int> rmp(m3.verts.size());
         for (size_t i = 0; i < m3.verts.size(); ++i)
           rmp[i] = rootToNew[uf.find((int)i)];
-        for (auto& ed : e3) { ed.v0 = rmp[ed.v0]; ed.v1 = rmp[ed.v1]; }
+        for (auto& ed : e3) {
+          ed.v0 = rmp[ed.v0];
+          ed.v1 = rmp[ed.v1];
+        }
         for (auto& list : l3) {
           for (auto& v : list) v = rmp[v];
           list.erase(std::unique(list.begin(), list.end()), list.end());
@@ -686,8 +688,7 @@ void Diagnose(uint64_t seed, int kPow = 30, int n = 50) {
       }
     }
     auto canon = Canonicalize(e3, l3);
-    std::cerr << "  canonical sub-edges: "
-              << canon.edges.size() << "\n";
+    std::cerr << "  canonical sub-edges: " << canon.edges.size() << "\n";
 
     // For each imbalanced vert, dump every canonical edge touching it and
     // the winding filter's verdict.
@@ -715,7 +716,10 @@ void Diagnose(uint64_t seed, int kPow = 30, int n = 50) {
         int wL = CastWindingRay(lpt, canon, m3.verts);
         int wR = CastWindingRay(rpt, canon, m3.verts);
         bool keep = (wL > 0) != (wR > 0);
-        if (keep) ++kept; else ++dropped;
+        if (keep)
+          ++kept;
+        else
+          ++dropped;
         std::cerr << "    (" << cedge.vMin << "↔" << cedge.vMax
                   << ") mult=" << cedge.mult << " wL=" << wL << " wR=" << wR
                   << (keep ? " KEEP" : " DROP") << " other.pos=("
@@ -773,8 +777,8 @@ namespace boolean2 {
 struct CorpusEntry {
   std::string name;
   manifold::Polygons polys;
-  double eps;          // -1 if not specified in file (caller infers)
-  int expected_tris;   // triangulation triangle count (informational)
+  double eps;         // -1 if not specified in file (caller infers)
+  int expected_tris;  // triangulation triangle count (informational)
 };
 
 inline std::vector<CorpusEntry> LoadCorpus(const std::string& path) {
@@ -813,10 +817,10 @@ inline void RunCorpus(const std::string& path) {
   int total = 0;
   int topo_ok = 0;
   int topo_fail = 0;
-  int area_preserved = 0;     // |drift| < 1%
-  int area_drifted = 0;       // 1% <= |drift| < 10%
-  int area_collapsed = 0;     // |drift| >= 10%
-  int area_input_zero = 0;    // input had zero net area
+  int area_preserved = 0;   // |drift| < 1%
+  int area_drifted = 0;     // 1% <= |drift| < 10%
+  int area_collapsed = 0;   // |drift| >= 10%
+  int area_input_zero = 0;  // input had zero net area
   std::vector<std::tuple<std::string, double>> driftList;
   for (const auto& entry : entries) {
     ++total;
@@ -827,10 +831,12 @@ inline void RunCorpus(const std::string& path) {
     // run the project's CheckTopologicalValidity.
     auto [v, e] = PolygonsToInput(entry.polys);
     auto r = RemoveOverlaps2D(v, e, eps);
-    bool topoOk = CheckTopologicalValidity(r, e, r.inputRemap,
-                                           r.numMergedVerts);
-    if (topoOk) ++topo_ok;
-    else ++topo_fail;
+    bool topoOk =
+        CheckTopologicalValidity(r, e, r.inputRemap, r.numMergedVerts);
+    if (topoOk)
+      ++topo_ok;
+    else
+      ++topo_fail;
     const double inArea = std::fabs(TotalSignedArea(entry.polys));
     const double outArea = std::fabs(TotalSignedArea(out));
     if (inArea < 1e-12) {
@@ -853,8 +859,7 @@ inline void RunCorpus(const std::string& path) {
   std::cout << "  Topology INVALID: " << topo_fail << " / " << total << "\n";
   std::cout << "  Area preserved (drift < 1%):       " << area_preserved
             << "\n";
-  std::cout << "  Area drifted   (1% <= drift < 10%): " << area_drifted
-            << "\n";
+  std::cout << "  Area drifted   (1% <= drift < 10%): " << area_drifted << "\n";
   std::cout << "  Area collapsed (drift >= 10%):       " << area_collapsed
             << "\n";
   std::cout << "  Input had zero net area: " << area_input_zero
@@ -945,7 +950,10 @@ inline manifold::SimplePolygon ParseClipper2PolyLine(const std::string& line) {
   for (char c : line) {
     if (c == ',' || std::isspace(static_cast<unsigned char>(c))) {
       if (!buf.empty()) {
-        try { nums.push_back(std::stod(buf)); } catch (...) {}
+        try {
+          nums.push_back(std::stod(buf));
+        } catch (...) {
+        }
         buf.clear();
       }
     } else {
@@ -953,7 +961,10 @@ inline manifold::SimplePolygon ParseClipper2PolyLine(const std::string& line) {
     }
   }
   if (!buf.empty()) {
-    try { nums.push_back(std::stod(buf)); } catch (...) {}
+    try {
+      nums.push_back(std::stod(buf));
+    } catch (...) {
+    }
   }
   for (size_t i = 0; i + 1 < nums.size(); i += 2) {
     poly.push_back({nums[i], nums[i + 1]});
@@ -999,22 +1010,48 @@ inline std::vector<Clipper2Case> LoadClipper2Cases(const std::string& path) {
       cur.caption = line.substr(8);
       // Strip leading whitespace and trailing dot.
       size_t p = 0;
-      while (p < cur.caption.size() && std::isspace(static_cast<unsigned char>(cur.caption[p]))) ++p;
+      while (p < cur.caption.size() &&
+             std::isspace(static_cast<unsigned char>(cur.caption[p])))
+        ++p;
       cur.caption = cur.caption.substr(p);
       cur.n = std::atoi(cur.caption.c_str());
       continue;
     }
     if (!inCase) continue;
-    if (starts("CLIPTYPE:")) { cur.cliptype = line.substr(9); auto p = cur.cliptype.find_first_not_of(" \t"); cur.cliptype = (p == std::string::npos) ? "" : cur.cliptype.substr(p); continue; }
-    if (starts("FILLRULE:")) { cur.fillrule = line.substr(9); auto p = cur.fillrule.find_first_not_of(" \t"); cur.fillrule = (p == std::string::npos) ? "" : cur.fillrule.substr(p); continue; }
-    if (starts("SOL_AREA:")) { cur.solArea = std::stod(line.substr(9)); continue; }
-    if (starts("SOL_COUNT:")) { cur.solCount = std::atoi(line.c_str() + 10); continue; }
-    if (line == "SUBJECTS" || line == "SUBJECTS_OPEN") { sec = Section::Subjects; continue; }
-    if (line == "CLIPS" || line == "CLIPS_OPEN") { sec = Section::Clips; continue; }
+    if (starts("CLIPTYPE:")) {
+      cur.cliptype = line.substr(9);
+      auto p = cur.cliptype.find_first_not_of(" \t");
+      cur.cliptype = (p == std::string::npos) ? "" : cur.cliptype.substr(p);
+      continue;
+    }
+    if (starts("FILLRULE:")) {
+      cur.fillrule = line.substr(9);
+      auto p = cur.fillrule.find_first_not_of(" \t");
+      cur.fillrule = (p == std::string::npos) ? "" : cur.fillrule.substr(p);
+      continue;
+    }
+    if (starts("SOL_AREA:")) {
+      cur.solArea = std::stod(line.substr(9));
+      continue;
+    }
+    if (starts("SOL_COUNT:")) {
+      cur.solCount = std::atoi(line.c_str() + 10);
+      continue;
+    }
+    if (line == "SUBJECTS" || line == "SUBJECTS_OPEN") {
+      sec = Section::Subjects;
+      continue;
+    }
+    if (line == "CLIPS" || line == "CLIPS_OPEN") {
+      sec = Section::Clips;
+      continue;
+    }
     auto poly = ParseClipper2PolyLine(line);
     if (poly.size() >= 3) {
-      if (sec == Section::Clips) cur.clips.push_back(std::move(poly));
-      else cur.subjects.push_back(std::move(poly));
+      if (sec == Section::Clips)
+        cur.clips.push_back(std::move(poly));
+      else
+        cur.subjects.push_back(std::move(poly));
     }
   }
   flush();
@@ -1087,8 +1124,8 @@ inline manifold::Polygons RunClipper2Case(const Clipper2Case& c,
 
 inline void RunClipper2Corpus(const std::string& path) {
   auto cases = LoadClipper2Cases(path);
-  std::cout << "=== Clipper2 corpus: " << cases.size() << " cases from "
-            << path << " ===\n\n";
+  std::cout << "=== Clipper2 corpus: " << cases.size() << " cases from " << path
+            << " ===\n\n";
   // Per-case TSV (case_n, op, fillrule, structure, sol_area, output_area)
   // is written to /tmp/clipper2_proto_areas.tsv so the per-case area can
   // be diffed against Clipper2's own current output. SOL_AREA in the
@@ -1099,11 +1136,11 @@ inline void RunClipper2Corpus(const std::string& path) {
   int total = 0;
   int run = 0, unsupported = 0;
   int topoOk = 0, topoFail = 0;
-  int areaPreserved = 0;     // < 1% of SOL_AREA
-  int areaDrifted = 0;       // 1% .. 10%
-  int areaCollapsed = 0;     // > 10% (or zero output where SOL_AREA > 0)
-  int solSkipped = 0;        // SOL_AREA <= 0 (no oracle)
-  int outZeroOk = 0;         // SOL_AREA == 0 and we returned ~0 area
+  int areaPreserved = 0;  // < 1% of SOL_AREA
+  int areaDrifted = 0;    // 1% .. 10%
+  int areaCollapsed = 0;  // > 10% (or zero output where SOL_AREA > 0)
+  int solSkipped = 0;     // SOL_AREA <= 0 (no oracle)
+  int outZeroOk = 0;      // SOL_AREA == 0 and we returned ~0 area
   std::vector<std::tuple<int, std::string, double, double, double>> drifters;
   // (case_n, descriptor, drift_pct, outArea, solArea)
   for (const auto& c : cases) {
@@ -1129,22 +1166,24 @@ inline void RunClipper2Corpus(const std::string& path) {
     {
       const double outArea = std::fabs(TotalSignedArea(out));
       tsv << c.n << '\t' << c.cliptype << '\t' << c.fillrule << '\t'
-          << (c.clips.empty() ? "subonly" : "subclip") << '\t'
-          << c.solArea << '\t' << outArea << '\n';
+          << (c.clips.empty() ? "subonly" : "subclip") << '\t' << c.solArea
+          << '\t' << outArea << '\n';
     }
 
     // Topology check on the output polygons (treat as a fresh input).
     auto [v, e] = PolygonsToInput(out);
     if (!v.empty()) {
       auto r2 = RemoveOverlaps2D(v, e, eps);
-      bool topo = CheckTopologicalValidity(r2, e, r2.inputRemap,
-                                           r2.numMergedVerts);
+      bool topo =
+          CheckTopologicalValidity(r2, e, r2.inputRemap, r2.numMergedVerts);
       // For a valid output, re-running RemoveOverlaps2D should be a no-op
       // (idempotent under sub-eps drift). Topology failure here flags
       // either an invalid output or a corner case the pipeline mishandles
       // when fed back its own result.
-      if (topo) ++topoOk;
-      else ++topoFail;
+      if (topo)
+        ++topoOk;
+      else
+        ++topoFail;
     } else {
       // Empty output: only "valid" when SOL_AREA == 0 or unsupported.
       ++topoOk;
@@ -1154,11 +1193,16 @@ inline void RunClipper2Corpus(const std::string& path) {
     if (c.solArea < 0) {
       ++solSkipped;
     } else if (c.solArea == 0.0) {
-      if (outArea < 1.0) ++outZeroOk;
-      else { ++areaCollapsed; drifters.emplace_back(c.n, desc, outArea, outArea, c.solArea); }
+      if (outArea < 1.0)
+        ++outZeroOk;
+      else {
+        ++areaCollapsed;
+        drifters.emplace_back(c.n, desc, outArea, outArea, c.solArea);
+      }
     } else {
       const double drift = std::fabs(outArea - c.solArea) / c.solArea;
-      if (drift < 0.01) ++areaPreserved;
+      if (drift < 0.01)
+        ++areaPreserved;
       else if (drift < 0.10) {
         ++areaDrifted;
         drifters.emplace_back(c.n, desc, drift, outArea, c.solArea);
@@ -1188,8 +1232,8 @@ inline void RunClipper2Corpus(const std::string& path) {
     std::cout << "\n  Drift cases (worst first, up to 30):\n";
     for (size_t i = 0; i < drifters.size() && i < 30; ++i) {
       auto& [n, desc, drift, outA, solA] = drifters[i];
-      std::cout << "    #" << n << "  " << desc
-                << "  drift=" << (drift * 100.0) << "%"
+      std::cout << "    #" << n << "  " << desc << "  drift=" << (drift * 100.0)
+                << "%"
                 << "  out=" << outA << "  sol=" << solA << "\n";
     }
   }
@@ -1252,12 +1296,16 @@ struct JsonParser {
   }
   bool match(char c) {
     skipWs();
-    if (i < s.size() && s[i] == c) { ++i; return true; }
+    if (i < s.size() && s[i] == c) {
+      ++i;
+      return true;
+    }
     return false;
   }
   void expect(char c) {
-    if (!match(c)) throw std::runtime_error(
-        std::string("expected '") + c + "' at " + std::to_string(i));
+    if (!match(c))
+      throw std::runtime_error(std::string("expected '") + c + "' at " +
+                               std::to_string(i));
   }
   JsonValue parseValue() {
     skipWs();
@@ -1271,7 +1319,8 @@ struct JsonParser {
     return parseNumber();
   }
   JsonValue parseObject() {
-    JsonValue v; v.kind = JsonValue::Object;
+    JsonValue v;
+    v.kind = JsonValue::Object;
     expect('{');
     skipWs();
     if (match('}')) return v;
@@ -1287,7 +1336,8 @@ struct JsonParser {
     return v;
   }
   JsonValue parseArray() {
-    JsonValue v; v.kind = JsonValue::Array;
+    JsonValue v;
+    v.kind = JsonValue::Array;
     expect('[');
     skipWs();
     if (match(']')) return v;
@@ -1301,39 +1351,57 @@ struct JsonParser {
     return v;
   }
   JsonValue parseString() {
-    JsonValue v; v.kind = JsonValue::String;
+    JsonValue v;
+    v.kind = JsonValue::String;
     expect('"');
     while (i < s.size() && s[i] != '"') {
       if (s[i] == '\\' && i + 1 < s.size()) {
         char n = s[i + 1];
-        if (n == '"' || n == '\\') { v.str.push_back(n); i += 2; continue; }
-        v.str.push_back(s[i]); ++i;
+        if (n == '"' || n == '\\') {
+          v.str.push_back(n);
+          i += 2;
+          continue;
+        }
+        v.str.push_back(s[i]);
+        ++i;
       } else {
-        v.str.push_back(s[i]); ++i;
+        v.str.push_back(s[i]);
+        ++i;
       }
     }
     expect('"');
     return v;
   }
   JsonValue parseBool() {
-    JsonValue v; v.kind = JsonValue::Bool;
-    if (s.compare(i, 4, "true") == 0) { v.b = true; i += 4; }
-    else if (s.compare(i, 5, "false") == 0) { v.b = false; i += 5; }
-    else throw std::runtime_error("bad bool");
+    JsonValue v;
+    v.kind = JsonValue::Bool;
+    if (s.compare(i, 4, "true") == 0) {
+      v.b = true;
+      i += 4;
+    } else if (s.compare(i, 5, "false") == 0) {
+      v.b = false;
+      i += 5;
+    } else
+      throw std::runtime_error("bad bool");
     return v;
   }
   JsonValue parseNull() {
-    JsonValue v; v.kind = JsonValue::Null;
-    if (s.compare(i, 4, "null") == 0) { i += 4; return v; }
+    JsonValue v;
+    v.kind = JsonValue::Null;
+    if (s.compare(i, 4, "null") == 0) {
+      i += 4;
+      return v;
+    }
     throw std::runtime_error("bad null");
   }
   JsonValue parseNumber() {
-    JsonValue v; v.kind = JsonValue::Number;
+    JsonValue v;
+    v.kind = JsonValue::Number;
     size_t start = i;
     if (s[i] == '-' || s[i] == '+') ++i;
-    while (i < s.size() && (std::isdigit(static_cast<unsigned char>(s[i])) ||
-                            s[i] == '.' || s[i] == 'e' || s[i] == 'E' ||
-                            s[i] == '-' || s[i] == '+'))
+    while (i < s.size() &&
+           (std::isdigit(static_cast<unsigned char>(s[i])) || s[i] == '.' ||
+            s[i] == 'e' || s[i] == 'E' || s[i] == '-' || s[i] == '+'))
       ++i;
     v.num = std::stod(s.substr(start, i - start));
     return v;
@@ -1343,7 +1411,8 @@ struct JsonParser {
 inline JsonValue ParseJsonFile(const std::string& path) {
   std::ifstream in(path);
   if (!in) throw std::runtime_error("open: " + path);
-  std::ostringstream oss; oss << in.rdbuf();
+  std::ostringstream oss;
+  oss << in.rdbuf();
   std::string text = oss.str();
   JsonParser p(text);
   return p.parseValue();
@@ -1386,8 +1455,7 @@ inline std::vector<manifold::Polygons> ExtractFeatureGeometry(
   auto parseRing = [](const JsonValue& ring) {
     manifold::SimplePolygon out;
     for (const auto& pt : ring.arr) {
-      if (pt.arr.size() >= 2)
-        out.push_back({pt.arr[0].num, pt.arr[1].num});
+      if (pt.arr.size() >= 2) out.push_back({pt.arr[0].num, pt.arr[1].num});
     }
     // Drop the closing duplicate vertex if present (RFC 7946 requires it).
     if (out.size() >= 2 && out.front().x == out.back().x &&
@@ -1515,7 +1583,8 @@ inline std::vector<MfogelCase> LoadMfogelCorpus(const std::string& dir) {
           for (auto& r : flat) exp.push_back(std::move(r));
         }
         c.expected[op] = std::move(exp);
-      } catch (...) {}
+      } catch (...) {
+      }
     }
     cases.push_back(std::move(c));
   }
@@ -1546,7 +1615,10 @@ inline manifold::Polygons RunMfogelOp(const MfogelCase& c,
   if (c.features.empty()) return {};
   std::vector<manifold::Polygons> filled;
   for (const auto& f : c.features) {
-    if (f.empty()) { filled.push_back({}); continue; }
+    if (f.empty()) {
+      filled.push_back({});
+      continue;
+    }
     filled.push_back(FillUnderRule(f, "NONZERO", eps));
   }
   if (op == "all") return filled[0];
@@ -1612,8 +1684,8 @@ inline void RunMfogelCorpus(const std::string& dir) {
   int totalOps = 0;
   int topoOk = 0, topoFail = 0;
   int areaPreserved = 0, areaDrifted = 0, areaCollapsed = 0;
-  int oracleEmptyOk = 0;          // expected = 0 area, we returned ~0
-  int oracleEmptyFail = 0;        // expected = 0, we returned non-zero
+  int oracleEmptyOk = 0;    // expected = 0 area, we returned ~0
+  int oracleEmptyFail = 0;  // expected = 0, we returned non-zero
   std::vector<std::tuple<std::string, std::string, double, double, double>>
       drifters;
   for (const auto& c : cases) {
@@ -1635,21 +1707,28 @@ inline void RunMfogelCorpus(const std::string& dir) {
       auto [v, e] = PolygonsToInput(out);
       if (!v.empty()) {
         auto r2 = RemoveOverlaps2D(v, e, eps);
-        bool topo = CheckTopologicalValidity(r2, e, r2.inputRemap,
-                                             r2.numMergedVerts);
-        if (topo) ++topoOk;
-        else ++topoFail;
+        bool topo =
+            CheckTopologicalValidity(r2, e, r2.inputRemap, r2.numMergedVerts);
+        if (topo)
+          ++topoOk;
+        else
+          ++topoFail;
       } else {
         ++topoOk;
       }
       const double outA = std::fabs(TotalSignedArea(out));
       const double expA = std::fabs(TotalSignedArea(expected));
       if (expA < 1e-9) {
-        if (outA < 1e-9) ++oracleEmptyOk;
-        else { ++oracleEmptyFail; drifters.emplace_back(c.name, op, outA, outA, 0.0); }
+        if (outA < 1e-9)
+          ++oracleEmptyOk;
+        else {
+          ++oracleEmptyFail;
+          drifters.emplace_back(c.name, op, outA, outA, 0.0);
+        }
       } else {
         const double drift = std::fabs(outA - expA) / expA;
-        if (drift < 0.01) ++areaPreserved;
+        if (drift < 0.01)
+          ++areaPreserved;
         else if (drift < 0.10) {
           ++areaDrifted;
           drifters.emplace_back(c.name, op, drift, outA, expA);
@@ -1777,8 +1856,10 @@ inline std::vector<JtsCase> LoadJtsCorpus(const std::string& path) {
         ring.push_back({x, y});
       }
       if (ring.size() >= 3) {
-        if (readingA) cur.a.push_back(std::move(ring));
-        else cur.b.push_back(std::move(ring));
+        if (readingA)
+          cur.a.push_back(std::move(ring));
+        else
+          cur.b.push_back(std::move(ring));
       }
       --ringsRemaining;
       continue;
@@ -1790,7 +1871,10 @@ inline std::vector<JtsCase> LoadJtsCorpus(const std::string& path) {
       inCase = true;
       ss >> cur.n >> cur.op >> cur.source;
       double v;
-      if (ss >> v) { cur.expected = v; cur.hasExpected = true; }
+      if (ss >> v) {
+        cur.expected = v;
+        cur.hasExpected = true;
+      }
     } else if (token == "A") {
       ss >> ringsRemaining;
       readingA = true;
@@ -1806,8 +1890,8 @@ inline std::vector<JtsCase> LoadJtsCorpus(const std::string& path) {
 
 inline void RunJtsCorpus(const std::string& path) {
   auto cases = LoadJtsCorpus(path);
-  std::cout << "=== JTS overlay corpus: " << cases.size()
-            << " cases from " << path << " ===\n\n";
+  std::cout << "=== JTS overlay corpus: " << cases.size() << " cases from "
+            << path << " ===\n\n";
   size_t areaTests = 0, unionAreaTests = 0, skipped = 0;
   size_t topoOk = 0, topoFail = 0;
   size_t invariantHeld = 0;
@@ -1830,14 +1914,19 @@ inline void RunJtsCorpus(const std::string& path) {
         auto [v, e] = PolygonsToInput(fa);
         if (!v.empty()) {
           auto r2 = RemoveOverlaps2D(v, e, eps);
-          if (CheckTopologicalValidity(r2, e, r2.inputRemap,
-                                       r2.numMergedVerts)) ++topoOk;
-          else ++topoFail;
-        } else ++topoOk;
+          if (CheckTopologicalValidity(r2, e, r2.inputRemap, r2.numMergedVerts))
+            ++topoOk;
+          else
+            ++topoFail;
+        } else
+          ++topoOk;
         const double a = std::fabs(TotalSignedArea(fa));
         if (c.hasExpected && c.expected > 0) {
           double drift = std::fabs(a - c.expected) / c.expected;
-          if (drift < 0.01) ++unionAreaOk; else ++unionAreaDrift;
+          if (drift < 0.01)
+            ++unionAreaOk;
+          else
+            ++unionAreaDrift;
         } else {
           ++unionAreaOk;
         }
@@ -1848,9 +1937,12 @@ inline void RunJtsCorpus(const std::string& path) {
       const double Aa = std::fabs(TotalSignedArea(fa));
       const double Ab = std::fabs(TotalSignedArea(fb));
       manifold::Polygons unionAB, interAB;
-      if (fa.empty()) unionAB = fb;
-      else if (fb.empty()) unionAB = fa;
-      else unionAB = Boolean2D(fa, fb, OpType::Add, eps);
+      if (fa.empty())
+        unionAB = fb;
+      else if (fb.empty())
+        unionAB = fa;
+      else
+        unionAB = Boolean2D(fa, fb, OpType::Add, eps);
       if (!fa.empty() && !fb.empty())
         interAB = Boolean2D(fa, fb, OpType::Intersect, eps);
       const double Au = std::fabs(TotalSignedArea(unionAB));
@@ -1858,16 +1950,20 @@ inline void RunJtsCorpus(const std::string& path) {
       auto [v, e] = PolygonsToInput(unionAB);
       if (!v.empty()) {
         auto r2 = RemoveOverlaps2D(v, e, eps);
-        if (CheckTopologicalValidity(r2, e, r2.inputRemap,
-                                     r2.numMergedVerts)) ++topoOk;
-        else ++topoFail;
-      } else ++topoOk;
+        if (CheckTopologicalValidity(r2, e, r2.inputRemap, r2.numMergedVerts))
+          ++topoOk;
+        else
+          ++topoFail;
+      } else
+        ++topoOk;
       const double lhs = Au + Ai;
       const double rhs = Aa + Ab;
       const double scale = std::max(rhs, 1e-12);
       const double drift = std::fabs(lhs - rhs) / scale;
-      if (drift < 1e-9) ++invariantHeld;
-      else if (drift < 0.01) ++invariantDriftSmall;
+      if (drift < 1e-9)
+        ++invariantHeld;
+      else if (drift < 0.01)
+        ++invariantDriftSmall;
       else {
         ++invariantDriftLarge;
         drifters.emplace_back(c.source, drift, Au, Ai, rhs);
@@ -1882,8 +1978,8 @@ inline void RunJtsCorpus(const std::string& path) {
   std::cout << "  Skipped (other ops):   " << skipped << "\n\n";
   std::cout << "  Topology valid:   " << topoOk << "\n";
   std::cout << "  Topology INVALID: " << topoFail << "\n\n";
-  std::cout << "  Invariant holds (drift < 1e-9):  " << invariantHeld
-            << " / " << areaTests << "\n";
+  std::cout << "  Invariant holds (drift < 1e-9):  " << invariantHeld << " / "
+            << areaTests << "\n";
   std::cout << "  Invariant near-holds (< 1%):     " << invariantDriftSmall
             << " / " << areaTests << "\n";
   std::cout << "  Invariant violated (>= 1%):      " << invariantDriftLarge
@@ -1902,8 +1998,7 @@ inline void RunJtsCorpus(const std::string& path) {
     std::cout << "\n  Invariant violators (worst first, up to 20):\n";
     for (size_t i = 0; i < drifters.size() && i < 20; ++i) {
       auto& [src, drift, Au, Ai, rhs] = drifters[i];
-      std::cout << "    " << src
-                << "  drift=" << (drift * 100.0) << "%"
+      std::cout << "    " << src << "  drift=" << (drift * 100.0) << "%"
                 << "  A∪B=" << Au << "  A∩B=" << Ai << "  |A|+|B|=" << rhs
                 << "\n";
     }
@@ -1958,9 +2053,14 @@ inline manifold::SimplePolygon RadialPart(int n, double cx, double cy,
 inline manifold::SimplePolygon NotchedRect(double x0, double y0, double x1,
                                            double y1, double notch) {
   const double mx = 0.5 * (x0 + x1);
-  return {{x0, y0}, {x1, y0}, {x1, y1}, {mx + notch, y1},
-          {mx + notch, y1 - notch}, {mx - notch, y1 - notch},
-          {mx - notch, y1}, {x0, y1}};
+  return {{x0, y0},
+          {x1, y0},
+          {x1, y1},
+          {mx + notch, y1},
+          {mx + notch, y1 - notch},
+          {mx - notch, y1 - notch},
+          {mx - notch, y1},
+          {x0, y1}};
 }
 
 inline manifold::Polygons Frame(double outer, double inner) {
@@ -2013,8 +2113,8 @@ inline Manifold SlottedBlock() {
 }
 
 inline Manifold TwistedStarPrism(int n, double phase) {
-  return Manifold::Extrude({RadialPart(n, 0.0, 0.0, 0.42, 0.78, phase)},
-                           1.2, 10, 35.0, {0.72, 1.08})
+  return Manifold::Extrude({RadialPart(n, 0.0, 0.0, 0.42, 0.78, phase)}, 1.2,
+                           10, 35.0, {0.72, 1.08})
       .Translate({0.0, 0.0, -0.6});
 }
 
@@ -2037,7 +2137,7 @@ inline void MengerFractal(std::vector<Manifold>* holes, const Manifold& hole,
   holes->push_back(hole.Scale({w, w, 1.0}).Translate(vec3(position, 0.0)));
   if (depth == maxDepth) return;
   const vec2 offsets[8] = {{-w, -w}, {-w, 0.0}, {-w, w}, {0.0, w},
-                            {w, w},   {w, 0.0},  {w, -w}, {0.0, -w}};
+                           {w, w},   {w, 0.0},  {w, -w}, {0.0, -w}};
   for (int i = 0; i < 8; ++i) {
     MengerFractal(holes, hole, w, position + offsets[i], depth + 1, maxDepth);
   }
@@ -2078,9 +2178,9 @@ inline void AppendManifoldDerivedCadCases(std::vector<CadCase>* cases) {
                {-0.32, -0.12, 0.12, 0.32});
 
   const Manifold starA = TwistedStarPrism(72, 0.0);
-  const Manifold starB =
-      TwistedStarPrism(96, M_PI / 11.0).Rotate(0, 0, 18).Translate(
-          {0.14, -0.08, 0.0});
+  const Manifold starB = TwistedStarPrism(96, M_PI / 11.0)
+                             .Rotate(0, 0, 18)
+                             .Translate({0.14, -0.08, 0.0});
   AddProjectPair(cases, "twisted radial prisms", starA, starB);
   AddSlicePair(cases, "twisted radial prisms", starA, starB,
                {-0.42, -0.18, 0.0, 0.18, 0.42});
@@ -2096,8 +2196,7 @@ inline void AppendManifoldDerivedCadCases(std::vector<CadCase>* cases) {
   AddProjectPair(cases, "gyroid patch vs sphere", gyroid,
                  sphere.Translate({0.05, -0.04, 0.0}));
   AddSlicePair(cases, "gyroid patch vs crossing cylinder", gyroid,
-               crossingCylinder,
-               {-0.36, -0.18, 0.0, 0.18, 0.36});
+               crossingCylinder, {-0.36, -0.18, 0.0, 0.18, 0.36});
 
   // Menger sponge cases: axis-aligned dense topology produced by
   // recursive cube subtraction, plus an oblique cross-section. These
@@ -2115,8 +2214,7 @@ inline void AppendManifoldDerivedCadCases(std::vector<CadCase>* cases) {
              (sponge3 - spongeSphereSmall).Project(),
              {RegularPoly(96, 0.0, 0.0, 0.8)});
   AddCadCase(cases, "menger sponge L3 oblique slice vs sphere slice",
-             sponge3.Rotate(15, 30, 45).Slice(0.0),
-             sphere.Slice(0.0));
+             sponge3.Rotate(15, 30, 45).Slice(0.0), sphere.Slice(0.0));
 }
 #else
 inline void AppendManifoldDerivedCadCases(std::vector<CadCase>*) {}
@@ -2155,8 +2253,8 @@ inline std::vector<CadCase> GenerateCadCasesImpl() {
                      {RadialPart(n, -0.1, 0.0, 0.65, 1.15)},
                      {RadialPart(n, 0.18, 0.05, 0.55, 1.05, M_PI / n)}});
   }
-  cases.push_back({"frame vs bar", Frame(1.2, 0.45),
-                   {Rect(-1.5, -0.25, 1.5, 0.25)}});
+  cases.push_back(
+      {"frame vs bar", Frame(1.2, 0.45), {Rect(-1.5, -0.25, 1.5, 0.25)}});
   AppendManifoldDerivedCadCases(&cases);
   return cases;
 }
@@ -2292,8 +2390,8 @@ inline void TimeOneUnion(const manifold::Polygons& a,
     ours = OutEdgesToPolygons(r.verts, r.edges);
   }
   auto t1 = Clock::now();
-  totals->oursNs += std::chrono::duration_cast<std::chrono::nanoseconds>(
-                        t1 - t0).count();
+  totals->oursNs +=
+      std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count();
   if (ours.empty()) ++totals->oursDrops;
 
   // Clipper2 Clipper64 (native int64 API; what CrossSection is targeting
@@ -2310,37 +2408,38 @@ inline void TimeOneUnion(const manifold::Polygons& a,
   clip.Execute(Clipper2Lib::ClipType::Union, Clipper2Lib::FillRule::NonZero,
                sol);
   auto t3 = Clock::now();
-  totals->clipperNs += std::chrono::duration_cast<std::chrono::nanoseconds>(
-                           t3 - t2).count();
+  totals->clipperNs +=
+      std::chrono::duration_cast<std::chrono::nanoseconds>(t3 - t2).count();
   if (sol.empty()) ++totals->clipperDrops;
   ++totals->cases;
 }
 
 inline void ReportBench(const std::string& label, const BenchTotals& t) {
   auto fmt = [](int64_t ns) {
-    std::ostringstream o; o.setf(std::ios::fixed); o.precision(3);
+    std::ostringstream o;
+    o.setf(std::ios::fixed);
+    o.precision(3);
     o << ns * 1e-6 << " ms";
     return o.str();
   };
   std::cout << "  " << label << ":\n";
   std::cout << "    cases:        " << t.cases << "\n";
-  std::cout << "    boolean2:    " << fmt(t.oursNs)
-            << " (" << (t.cases ? t.oursNs / t.cases / 1000.0 : 0)
-            << " µs/case avg)";
+  std::cout << "    boolean2:    " << fmt(t.oursNs) << " ("
+            << (t.cases ? t.oursNs / t.cases / 1000.0 : 0) << " µs/case avg)";
   if (t.oursDrops) std::cout << "  drops=" << t.oursDrops;
   std::cout << "\n";
-  std::cout << "    Clipper2 :    " << fmt(t.clipperNs)
-            << " (" << (t.cases ? t.clipperNs / t.cases / 1000.0 : 0)
+  std::cout << "    Clipper2 :    " << fmt(t.clipperNs) << " ("
+            << (t.cases ? t.clipperNs / t.cases / 1000.0 : 0)
             << " µs/case avg)";
   if (t.clipperDrops) std::cout << "  drops=" << t.clipperDrops;
   std::cout << "\n";
   if (t.clipperNs > 0) {
     const double ratio = static_cast<double>(t.oursNs) / t.clipperNs;
     std::cout << "    ratio:        ";
-    std::cout.setf(std::ios::fixed); std::cout.precision(2);
+    std::cout.setf(std::ios::fixed);
+    std::cout.precision(2);
     std::cout << ratio << "x  ("
-              << (ratio < 1 ? "boolean2 faster" : "Clipper2 faster")
-              << ")\n";
+              << (ratio < 1 ? "boolean2 faster" : "Clipper2 faster") << ")\n";
     std::cout.unsetf(std::ios::fixed);
   }
 }
@@ -2375,11 +2474,11 @@ inline void TimeOneOffset(const manifold::Polygons& subjects, double delta,
                           double arcTol, BenchTotals* totals) {
   using Clock = std::chrono::steady_clock;
   auto t0 = Clock::now();
-  auto ours = manifold::boolean2::Offset(subjects, delta, jt, miterLimit,
-                                         arcTol);
+  auto ours =
+      manifold::boolean2::Offset(subjects, delta, jt, miterLimit, arcTol);
   auto t1 = Clock::now();
-  totals->oursNs += std::chrono::duration_cast<std::chrono::nanoseconds>(
-                        t1 - t0).count();
+  totals->oursNs +=
+      std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count();
   if (ours.empty()) ++totals->oursDrops;
 #ifdef BOOLEAN2_WITH_CLIPPER2
   auto s64 = ToPaths64(subjects);
@@ -2399,12 +2498,11 @@ inline void TimeOneOffset(const manifold::Polygons& subjects, double delta,
       break;
   }
   auto t2 = Clock::now();
-  auto sol =
-      Clipper2Lib::InflatePaths(s64, delta, cjt, Clipper2Lib::EndType::Polygon,
-                                miterLimit, arcTol);
+  auto sol = Clipper2Lib::InflatePaths(
+      s64, delta, cjt, Clipper2Lib::EndType::Polygon, miterLimit, arcTol);
   auto t3 = Clock::now();
-  totals->clipperNs += std::chrono::duration_cast<std::chrono::nanoseconds>(
-                           t3 - t2).count();
+  totals->clipperNs +=
+      std::chrono::duration_cast<std::chrono::nanoseconds>(t3 - t2).count();
   if (sol.empty()) ++totals->clipperDrops;
 #endif
   ++totals->cases;
@@ -2514,8 +2612,8 @@ inline void RunVsClipper2_ManifoldCorpus(const std::string& path) {
     Clipper2Lib::Clipper64 clip;
     clip.AddSubject(a2);
     Clipper2Lib::Paths64 sol;
-    clip.Execute(Clipper2Lib::ClipType::Union,
-                 Clipper2Lib::FillRule::Positive, sol);
+    clip.Execute(Clipper2Lib::ClipType::Union, Clipper2Lib::FillRule::Positive,
+                 sol);
     const bool oursEmpty = ours.empty();
     const bool theirsEmpty = sol.empty();
     double oursArea = 0.0;
@@ -2552,7 +2650,8 @@ inline void RunVsClipper2_ManifoldCorpus(const std::string& path) {
               << "  ours=" << ours.size() << "/" << oursArea
               << " theirs=" << sol.size() << "/" << theirsArea << "\n";
   }
-  std::cout << "  pass=" << pass << " fail=" << (oursEmptyTheyNot + theirsEmptyOursNot + areaMismatch)
+  std::cout << "  pass=" << pass << " fail="
+            << (oursEmptyTheyNot + theirsEmptyOursNot + areaMismatch)
             << " (ours_empty=" << oursEmptyTheyNot
             << " theirs_empty=" << theirsEmptyOursNot
             << " area_mismatch=" << areaMismatch << ")\n";
@@ -2589,17 +2688,17 @@ inline std::string CorpusPath(const std::string& primary,
 inline void RunVsClipper2(const std::string& which) {
   std::cout << "=== boolean2 vs Clipper2 head-to-head ===\n\n";
   if (which == "all" || which == "clipper2") {
-    RunVsClipper2_Clipper2Corpus(CorpusPath(
-        "test/polygons/clipper2_polygons.txt",
-        "build/_deps/clipper2-src/Tests/Polygons.txt"));
+    RunVsClipper2_Clipper2Corpus(
+        CorpusPath("test/polygons/clipper2_polygons.txt",
+                   "build/_deps/clipper2-src/Tests/Polygons.txt"));
   }
   if (which == "all" || which == "cad") {
     RunVsClipper2_CadCorpus();
   }
   if (which == "all" || which == "offsets") {
-    RunVsClipper2_OffsetsCorpus(CorpusPath(
-        "test/polygons/clipper2_offsets.txt",
-        "build/_deps/clipper2-src/Tests/Offsets.txt"));
+    RunVsClipper2_OffsetsCorpus(
+        CorpusPath("test/polygons/clipper2_offsets.txt",
+                   "build/_deps/clipper2-src/Tests/Offsets.txt"));
   }
   if (which == "all" || which == "jts") {
     RunVsClipper2_JtsCorpus("test/polygons/jts_overlay_corpus.txt");
@@ -2642,7 +2741,8 @@ inline void RunJtsDropDiag(const std::string& path) {
           edges.push_back({base + i, base + ((i + 1) % n), 1});
       }
     };
-    append(A); append(B);
+    append(A);
+    append(B);
     manifold::Polygons ours;
     if (!verts.empty()) {
       auto r = RemoveOverlaps2D(verts, edges, eps, /*debug=*/false,
@@ -2671,14 +2771,18 @@ inline void RunJtsDropDiag(const std::string& path) {
       for (const auto& p : sol) clipArea += Clipper2Lib::Area(p);
       // Total input vert/edge count for size context.
       int totalVerts = 0, totalRings = 0;
-      for (const auto& p : A) { totalVerts += p.size(); ++totalRings; }
-      for (const auto& p : B) { totalVerts += p.size(); ++totalRings; }
+      for (const auto& p : A) {
+        totalVerts += p.size();
+        ++totalRings;
+      }
+      for (const auto& p : B) {
+        totalVerts += p.size();
+        ++totalRings;
+      }
       std::cout << "OURS-DROP case=" << c.n << " op=" << c.op
-                << " src=" << c.source
-                << " A.rings=" << A.size() << " B.rings=" << B.size()
-                << " verts=" << totalVerts
-                << " eps=" << eps
-                << " clipperArea=" << clipArea << "\n";
+                << " src=" << c.source << " A.rings=" << A.size()
+                << " B.rings=" << B.size() << " verts=" << totalVerts
+                << " eps=" << eps << " clipperArea=" << clipArea << "\n";
     }
     if (!oursEmpty && theirsEmpty) {
       ++theirEmptyOursNot;
@@ -2721,13 +2825,14 @@ void DeepFuzz(int seedsPerCell) {
   const std::vector<int> kPows = {10, 20, 30, 35, 40, 45, 49};
   const std::vector<int> sizes = {8, 20, 50, 100};
   std::cout << "=== DeepFuzz: " << seedsPerCell << " seeds × " << sizes.size()
-            << " sizes × " << kPows.size() << " kPow = "
-            << (seedsPerCell * sizes.size() * kPows.size()) << " cases ===\n";
+            << " sizes × " << kPows.size()
+            << " kPow = " << (seedsPerCell * sizes.size() * kPows.size())
+            << " cases ===\n";
 
   int total = 0;
   int firstPassFail = 0;
-  int convergedPassValid = 0;     // converged result: topo valid
-  int convergedPassInvalid = 0;   // converged result: topo invalid
+  int convergedPassValid = 0;    // converged result: topo valid
+  int convergedPassInvalid = 0;  // converged result: topo invalid
   // Polygons-API regularization counter. Each fuzz case is run through
   // both the lower-level pipeline (counts every retained sub-edge) and
   // the public Simplify (regularizes via OutEdgesToPolygons, dropping
@@ -2736,12 +2841,12 @@ void DeepFuzz(int seedsPerCell) {
   // behavior. We track the rate as a regularization-frequency stat
   // rather than as a "mismatch" (it isn't a bug), and as a tripwire
   // for any future drift in regularization behavior.
-  int regUnchanged = 0;       // post-regularization edge count == lower-level
-  int regDropped = 0;         // dropped one or more zero-area lens loops
+  int regUnchanged = 0;  // post-regularization edge count == lower-level
+  int regDropped = 0;    // dropped one or more zero-area lens loops
   std::map<int, int> iterDist;
   int iterGE2 = 0;
-  int iterGE2_topo_match = 0;     // pass1 == pass2 at eps quantum
-  int iterGE2_fine_match = 0;     // pass1 == pass2 at eps/100 quantum
+  int iterGE2_topo_match = 0;  // pass1 == pass2 at eps quantum
+  int iterGE2_fine_match = 0;  // pass1 == pass2 at eps/100 quantum
   int iterGE2_topo_diff = 0;
   int iterGE2_pass1_invalid = 0;  // iter≥2 cases where pass 1 was wrong
   int iterGE2_pass1_valid = 0;    // iter≥2 cases where pass 1 was already valid
@@ -2759,10 +2864,10 @@ void DeepFuzz(int seedsPerCell) {
   // (per the design doc's quantitative oracle recommendation). Catches
   // thin-polygon-style collapses where iteration empties a non-empty
   // pass-1 output, which topology balance alone misses.
-  int area_pass1_nonzero = 0;       // pass-1 had a measurable area
-  int area_drift_over_1pct = 0;     // > 1% drift between pass 1 and converged
-  int area_drift_over_10pct = 0;    // > 10% drift (typically a collapse)
-  double area_drift_max = 0.0;      // largest fractional drift seen
+  int area_pass1_nonzero = 0;     // pass-1 had a measurable area
+  int area_drift_over_1pct = 0;   // > 1% drift between pass 1 and converged
+  int area_drift_over_10pct = 0;  // > 10% drift (typically a collapse)
+  double area_drift_max = 0.0;    // largest fractional drift seen
   std::vector<std::tuple<int, int, uint64_t, double>> areaDriftList;
   std::vector<std::tuple<int, int, uint64_t>> topoMismatch;
   std::vector<std::tuple<int, int, uint64_t, int>> convergedInvalidList;
@@ -2828,8 +2933,8 @@ void DeepFuzz(int seedsPerCell) {
         ++iterDist[iters];
         // Note: rIter.inputRemap is the LAST iteration's remap, not the
         // composed original->final. The fuzz inputs are random topological
-        // polygons where vertex merging produces an identity remap (no input verts
-        // merge), so this is OK here.
+        // polygons where vertex merging produces an identity remap (no input
+        // verts merge), so this is OK here.
         const bool convergedValid = CheckTopologicalValidity(
             rIter, e, rIter.inputRemap, rIter.numMergedVerts);
         if (convergedValid) {
@@ -2838,12 +2943,11 @@ void DeepFuzz(int seedsPerCell) {
         } else {
           ++convergedPassInvalid;
           convergedInvalidList.emplace_back(kPow, n,
-                                            static_cast<uint64_t>(seed),
-                                            iters);
+                                            static_cast<uint64_t>(seed), iters);
           if (pass1Valid) {
             ++iter_degraded;
-            degradedList.emplace_back(kPow, n,
-                                      static_cast<uint64_t>(seed), iters);
+            degradedList.emplace_back(kPow, n, static_cast<uint64_t>(seed),
+                                      iters);
           } else {
             ++pass1_invalid_unfixed;
           }
@@ -2866,8 +2970,8 @@ void DeepFuzz(int seedsPerCell) {
           if (drift > area_drift_max) area_drift_max = drift;
           if (drift > 0.01) {
             ++area_drift_over_1pct;
-            areaDriftList.emplace_back(kPow, n,
-                                       static_cast<uint64_t>(seed), drift);
+            areaDriftList.emplace_back(kPow, n, static_cast<uint64_t>(seed),
+                                       drift);
           }
           if (drift > 0.10) ++area_drift_over_10pct;
         }
@@ -2887,8 +2991,7 @@ void DeepFuzz(int seedsPerCell) {
           if (!pass1.edges.empty()) ++pass1_nonempty;
           if (!pass1.edges.empty() && pass2.edges.empty()) {
             ++pass2_collapsed;
-            geomCollapseList.emplace_back(kPow, n,
-                                          static_cast<uint64_t>(seed));
+            geomCollapseList.emplace_back(kPow, n, static_cast<uint64_t>(seed));
           }
           const auto fp1_fine = FingerprintAt(pass1, eps * 0.01);
           const auto fp2_fine = FingerprintAt(pass2, eps * 0.01);
@@ -2899,8 +3002,7 @@ void DeepFuzz(int seedsPerCell) {
             ++iterGE2_topo_match;
           else {
             ++iterGE2_topo_diff;
-            topoMismatch.emplace_back(kPow, n,
-                                      static_cast<uint64_t>(seed));
+            topoMismatch.emplace_back(kPow, n, static_cast<uint64_t>(seed));
           }
         }
       }
@@ -2969,7 +3071,8 @@ void DeepFuzz(int seedsPerCell) {
     }
   }
   if (!degradedList.empty()) {
-    std::cout << "\n  DEGRADED cases (pass 1 valid, iteration broke it; first 20):\n";
+    std::cout
+        << "\n  DEGRADED cases (pass 1 valid, iteration broke it; first 20):\n";
     for (size_t i = 0; i < degradedList.size() && i < 20; ++i) {
       auto [kp, nn, sd, it] = degradedList[i];
       std::cout << "    kPow=" << kp << " n=" << nn << " seed=" << sd
@@ -3062,10 +3165,14 @@ inline manifold::SimplePolygon RandomSimpleStar(int n, uint64_t seed) {
 
 inline const char* JtName(JoinType jt) {
   switch (jt) {
-    case JoinType::Round: return "Round";
-    case JoinType::Miter: return "Miter";
-    case JoinType::Bevel: return "Bevel";
-    case JoinType::Square: return "Square";
+    case JoinType::Round:
+      return "Round";
+    case JoinType::Miter:
+      return "Miter";
+    case JoinType::Bevel:
+      return "Bevel";
+    case JoinType::Square:
+      return "Square";
   }
   return "?";
 }
@@ -3131,8 +3238,8 @@ void OffsetCase(int kPow, int n, uint64_t seed64, JoinType jt,
   auto raw = offset_detail::OffsetContour(ring, delta, jt, 2.0, 0.0);
   Polygons rawPolys;
   if (raw.size() >= 3) rawPolys.push_back(raw);
-  const double eps = rawPolys.empty() ? EpsilonFromScale(scale)
-                                      : InferEps(rawPolys, {});
+  const double eps =
+      rawPolys.empty() ? EpsilonFromScale(scale) : InferEps(rawPolys, {});
   auto rawNonZero = FillByRule(rawPolys, WindRule::NonZero, eps);
   auto rawPositive = FillByRule(rawPolys, WindRule::Add, eps);
   auto rawNegative = FillByRule(rawPolys, WindRule::Negative, eps);
@@ -3156,9 +3263,9 @@ void OffsetCase(int kPow, int n, uint64_t seed64, JoinType jt,
             << " verts=" << PolygonsToInput(out).first.size()
             << " area=" << TotalSignedArea(out) << "\n";
 #ifdef BOOLEAN2_WITH_CLIPPER2
-  auto clip = Clipper2Lib::InflatePaths(
-      ToPathsD(in), delta, ToClipperJoin(jt), Clipper2Lib::EndType::Polygon,
-      2.0, 0.0);
+  auto clip =
+      Clipper2Lib::InflatePaths(ToPathsD(in), delta, ToClipperJoin(jt),
+                                Clipper2Lib::EndType::Polygon, 2.0, 0.0);
   std::cout << "  Clipper2D: paths=" << clip.size()
             << " area=" << ClipperAreaD(clip) << "\n";
 #endif
@@ -3174,10 +3281,10 @@ void OffsetFuzz(int seedsPerCell) {
   const int totalCells = static_cast<int>(kPows.size() * sizes.size() *
                                           deltaFracs.size() * jts.size());
   const int totalCases = totalCells * seedsPerCell;
-  std::cout << "=== OffsetFuzz: " << seedsPerCell << " seeds x "
-            << kPows.size() << " kPow x " << sizes.size() << " size x "
-            << deltaFracs.size() << " deltaFrac x " << jts.size()
-            << " jt = " << totalCases << " cases ===\n";
+  std::cout << "=== OffsetFuzz: " << seedsPerCell << " seeds x " << kPows.size()
+            << " kPow x " << sizes.size() << " size x " << deltaFracs.size()
+            << " deltaFrac x " << jts.size() << " jt = " << totalCases
+            << " cases ===\n";
 
   int total = 0;
   int nonFinite = 0;
@@ -3228,8 +3335,8 @@ void OffsetFuzz(int seedsPerCell) {
             if (anyNonFinite) {
               ++nonFinite;
               if (nonFiniteList.size() < 10)
-                nonFiniteList.emplace_back(kPow, n, seed64, static_cast<int>(jt),
-                                           deltaFrac);
+                nonFiniteList.emplace_back(kPow, n, seed64,
+                                           static_cast<int>(jt), deltaFrac);
               continue;
             }
             // Area-bound: post-offset bbox dimensions are bounded by the
@@ -3237,9 +3344,8 @@ void OffsetFuzz(int seedsPerCell) {
             // 4x slack for join geometry and FP jitter; this catches wild
             // runaway without rejecting valid large round/miter offsets.
             const double absDelta = std::fabs(delta);
-            const double maxExpected =
-                4.0 * (bboxWidth + 2.0 * absDelta) *
-                (bboxHeight + 2.0 * absDelta);
+            const double maxExpected = 4.0 * (bboxWidth + 2.0 * absDelta) *
+                                       (bboxHeight + 2.0 * absDelta);
             if (std::fabs(outArea) > maxExpected) {
               ++areaRunaway;
               if (areaList.size() < 10)
@@ -3255,8 +3361,8 @@ void OffsetFuzz(int seedsPerCell) {
                                             r2.numMergedVerts)) {
                 ++topologyInvalid;
                 if (topoList.size() < 10)
-                  topoList.emplace_back(kPow, n, seed64,
-                                        static_cast<int>(jt), deltaFrac);
+                  topoList.emplace_back(kPow, n, seed64, static_cast<int>(jt),
+                                        deltaFrac);
                 continue;
               }
             }
@@ -3305,8 +3411,8 @@ void OffsetFuzz(int seedsPerCell) {
     std::cout << "\n  " << label << " (first " << list.size() << "):\n";
     for (const auto& [kp, nn, sd, jti, df] : list) {
       std::cout << "    kPow=" << kp << " n=" << nn << " seed=" << sd
-                << " jt=" << JtName(static_cast<JT>(jti))
-                << " deltaFrac=" << df << "\n";
+                << " jt=" << JtName(static_cast<JT>(jti)) << " deltaFrac=" << df
+                << "\n";
     }
   };
   dumpList("non-finite cases", nonFiniteList);
@@ -3389,22 +3495,19 @@ int main(int argc, char** argv) {
     return 0;
   }
   if (argc > 1 && std::string(argv[1]) == "corpus") {
-    const std::string path = (argc > 2)
-                                  ? argv[2]
-                                  : "test/polygons/polygon_corpus.txt";
+    const std::string path =
+        (argc > 2) ? argv[2] : "test/polygons/polygon_corpus.txt";
     RunCorpus(path);
     return 0;
   }
   if (argc > 1 && std::string(argv[1]) == "clipper2corpus") {
-    std::string path =
-        "build/_deps/clipper2-src/Tests/Polygons.txt";
+    std::string path = "build/_deps/clipper2-src/Tests/Polygons.txt";
     if (argc > 2) path = argv[2];
     RunClipper2Corpus(path);
     return 0;
   }
   if (argc > 1 && std::string(argv[1]) == "mfogelcorpus") {
-    std::string dir =
-        "build/_deps/mfogel-polygon-clipping-src/test/end-to-end";
+    std::string dir = "build/_deps/mfogel-polygon-clipping-src/test/end-to-end";
     if (argc > 2) dir = argv[2];
     RunMfogelCorpus(dir);
     return 0;
@@ -3426,7 +3529,8 @@ int main(int argc, char** argv) {
     return 0;
   }
   if (argc > 1 && std::string(argv[1]) == "jtsdrops") {
-    std::string path = (argc > 2) ? argv[2] : "test/polygons/jts_overlay_corpus.txt";
+    std::string path =
+        (argc > 2) ? argv[2] : "test/polygons/jts_overlay_corpus.txt";
     RunJtsDropDiag(path);
     return 0;
   }
@@ -3441,25 +3545,33 @@ int main(int argc, char** argv) {
       if (c.n != targetCase) continue;
       std::cout << "=== JTS case " << c.n << " ===\n";
       std::cout << "  op=" << c.op << " src=" << c.source << "\n";
-      std::cout << "  A.rings=" << c.a.size() << " B.rings=" << c.b.size() << "\n";
+      std::cout << "  A.rings=" << c.a.size() << " B.rings=" << c.b.size()
+                << "\n";
       double xMin = 1e300, yMin = 1e300, xMax = -1e300, yMax = -1e300;
       int totalVerts = 0;
       auto bound = [&](const manifold::Polygons& polys) {
         for (const auto& loop : polys) {
           totalVerts += loop.size();
           for (const auto& v : loop) {
-            xMin = std::min(xMin, v.x); yMin = std::min(yMin, v.y);
-            xMax = std::max(xMax, v.x); yMax = std::max(yMax, v.y);
+            xMin = std::min(xMin, v.x);
+            yMin = std::min(yMin, v.y);
+            xMax = std::max(xMax, v.x);
+            yMax = std::max(yMax, v.y);
           }
         }
       };
-      bound(c.a); bound(c.b);
+      bound(c.a);
+      bound(c.b);
       const double eps = InferEps(c.a, c.b);
-      std::cout << "  bbox: x=[" << xMin << ".." << xMax << "] y=[" << yMin << ".." << yMax << "]\n";
+      std::cout << "  bbox: x=[" << xMin << ".." << xMax << "] y=[" << yMin
+                << ".." << yMax << "]\n";
       std::cout << "  total verts: " << totalVerts << " eps: " << eps << "\n";
       // Run our pipeline with debug=true.
       const manifold::Polygons& A = c.a;
-      const manifold::Polygons& B = (c.op == "overlayAreaTest" || c.op == "overlayareatest") ? c.b : manifold::Polygons{};
+      const manifold::Polygons& B =
+          (c.op == "overlayAreaTest" || c.op == "overlayareatest")
+              ? c.b
+              : manifold::Polygons{};
       std::vector<vec2> verts;
       std::vector<EdgeM> edges;
       auto append = [&](const manifold::Polygons& polys) {
@@ -3472,12 +3584,15 @@ int main(int argc, char** argv) {
             edges.push_back({base + i, base + ((i + 1) % n), 1});
         }
       };
-      append(A); append(B);
-      std::cout << "  Pipeline input: " << verts.size() << " verts, " << edges.size() << " edges\n";
+      append(A);
+      append(B);
+      std::cout << "  Pipeline input: " << verts.size() << " verts, "
+                << edges.size() << " edges\n";
       auto r = RemoveOverlaps2D(verts, edges, eps, /*debug=*/true,
                                 [](int w) { return w != 0; });
       auto out = OutEdgesToPolygons(r.verts, r.edges);
-      std::cout << "  Pipeline output: " << r.verts.size() << " verts, " << r.edges.size() << " edges, " << out.size() << " polygons\n";
+      std::cout << "  Pipeline output: " << r.verts.size() << " verts, "
+                << r.edges.size() << " edges, " << out.size() << " polygons\n";
       // Clipper2 reference for comparison.
       auto a2 = ToPaths64(A);
       auto b2 = ToPaths64(B);
@@ -3485,9 +3600,12 @@ int main(int argc, char** argv) {
       clip.AddSubject(a2);
       if (!B.empty()) clip.AddClip(b2);
       Clipper2Lib::Paths64 sol;
-      clip.Execute(Clipper2Lib::ClipType::Union, Clipper2Lib::FillRule::NonZero, sol);
-      double clipArea = 0; for (const auto& p : sol) clipArea += Clipper2Lib::Area(p);
-      std::cout << "  Clipper2 output: " << sol.size() << " paths, area=" << clipArea << "\n";
+      clip.Execute(Clipper2Lib::ClipType::Union, Clipper2Lib::FillRule::NonZero,
+                   sol);
+      double clipArea = 0;
+      for (const auto& p : sol) clipArea += Clipper2Lib::Area(p);
+      std::cout << "  Clipper2 output: " << sol.size()
+                << " paths, area=" << clipArea << "\n";
       return 0;
     }
     std::cerr << "Case " << targetCase << " not found\n";
@@ -3536,8 +3654,8 @@ int main(int argc, char** argv) {
         for (size_t i = 0; i < l.size(); ++i) {
           const auto& a = l[i];
           const auto& b = l[(i + 1) % l.size()];
-          oursArea += 0.5 *
-              ((a.x - r0.x) * (b.y - r0.y) - (b.x - r0.x) * (a.y - r0.y));
+          oursArea +=
+              0.5 * ((a.x - r0.x) * (b.y - r0.y) - (b.x - r0.x) * (a.y - r0.y));
         }
       }
       auto a2 = ToPaths64(sub);
@@ -3549,10 +3667,9 @@ int main(int argc, char** argv) {
       double clipArea = 0;
       for (const auto& p : sol) clipArea += Clipper2Lib::Area(p);
       clipArea /= (kPaths64Scale * kPaths64Scale);
-      std::cout << "picks=" << picks.size() << " ours=" << out.size()
-                << "/" << std::setprecision(8) << oursArea
-                << " theirs=" << sol.size() << "/" << clipArea
-                << " diff=" << (oursArea - clipArea)
+      std::cout << "picks=" << picks.size() << " ours=" << out.size() << "/"
+                << std::setprecision(8) << oursArea << " theirs=" << sol.size()
+                << "/" << clipArea << " diff=" << (oursArea - clipArea)
                 << (std::fabs(oursArea - clipArea) > 1e-6 ? " DIFFER" : "")
                 << "\n";
       if (std::getenv("BOOLEAN2_DUMP_OUT")) {
@@ -3564,7 +3681,7 @@ int main(int argc, char** argv) {
             const auto& p = l[i];
             const auto& q = l[(i + 1) % l.size()];
             a += 0.5 *
-                ((p.x - r0.x) * (q.y - r0.y) - (q.x - r0.x) * (p.y - r0.y));
+                 ((p.x - r0.x) * (q.y - r0.y) - (q.x - r0.x) * (p.y - r0.y));
           }
           return a;
         };
@@ -3575,7 +3692,8 @@ int main(int argc, char** argv) {
         }
         std::cout << "THEIRS (" << sol.size() << "):\n";
         for (size_t i = 0; i < sol.size(); ++i) {
-          double a = Clipper2Lib::Area(sol[i]) / (kPaths64Scale * kPaths64Scale);
+          double a =
+              Clipper2Lib::Area(sol[i]) / (kPaths64Scale * kPaths64Scale);
           std::cout << "  poly " << i << " verts=" << sol[i].size()
                     << " area=" << a << "\n";
         }
@@ -3626,8 +3744,8 @@ int main(int argc, char** argv) {
         for (size_t i = 0; i < l.size(); ++i) {
           const auto& a = l[i];
           const auto& b = l[(i + 1) % l.size()];
-          oursArea += 0.5 *
-              ((a.x - r0.x) * (b.y - r0.y) - (b.x - r0.x) * (a.y - r0.y));
+          oursArea +=
+              0.5 * ((a.x - r0.x) * (b.y - r0.y) - (b.x - r0.x) * (a.y - r0.y));
         }
       }
       auto a2 = ToPaths64(sub);
@@ -3643,8 +3761,8 @@ int main(int argc, char** argv) {
       std::cout << "rings=[" << skip << "," << end << ") n=" << (end - skip)
                 << " ours=" << out.size() << "/" << std::setprecision(8)
                 << oursArea << " theirs=" << sol.size() << "/" << clipArea
-                << " diff=" << diff
-                << (std::fabs(diff) > 1e-6 ? " DIFFER" : "") << "\n";
+                << " diff=" << diff << (std::fabs(diff) > 1e-6 ? " DIFFER" : "")
+                << "\n";
       return 0;
     }
     std::cerr << "Case " << targetCase << " not found\n";
@@ -3721,8 +3839,8 @@ int main(int argc, char** argv) {
         for (size_t i = 0; i < l.size(); ++i) {
           const auto& a = l[i];
           const auto& b = l[(i + 1) % l.size()];
-          iterArea += 0.5 *
-              ((a.x - r0.x) * (b.y - r0.y) - (b.x - r0.x) * (a.y - r0.y));
+          iterArea +=
+              0.5 * ((a.x - r0.x) * (b.y - r0.y) - (b.x - r0.x) * (a.y - r0.y));
         }
       }
       std::cout << "  IterateToFixedPoint(maxIter=5): " << outIter.size()
@@ -3749,8 +3867,8 @@ int main(int argc, char** argv) {
         for (size_t i = 0; i < l.size(); ++i) {
           const auto& p = l[i];
           const auto& q = l[(i + 1) % l.size()];
-          a += 0.5 *
-              ((p.x - r0.x) * (q.y - r0.y) - (q.x - r0.x) * (p.y - r0.y));
+          a +=
+              0.5 * ((p.x - r0.x) * (q.y - r0.y) - (q.x - r0.x) * (p.y - r0.y));
         }
         return a;
       };
@@ -3775,8 +3893,10 @@ int main(int argc, char** argv) {
         std::map<std::string, std::pair<int, int>> b;  // (cw, ccw)
         for (double a : v) {
           auto& p = b[histBin(a)];
-          if (a < 0) ++p.first;
-          else ++p.second;
+          if (a < 0)
+            ++p.first;
+          else
+            ++p.second;
         }
         for (auto& [k, p] : b) {
           std::cout << "    bin=" << k << " cw=" << p.first
@@ -3789,11 +3909,15 @@ int main(int argc, char** argv) {
       histogram(theirsAreas);
       // Print outer ring area to ~17 digits to see if it diverges.
       double oursOuter = 0, theirsOuter = 0;
-      for (double a : oursAreas) if (a > 0) oursOuter += a;
-      for (double a : theirsAreas) if (a > 0) theirsOuter += a;
+      for (double a : oursAreas)
+        if (a > 0) oursOuter += a;
+      for (double a : theirsAreas)
+        if (a > 0) theirsOuter += a;
       double oursHoles = 0, theirsHoles = 0;
-      for (double a : oursAreas) if (a < 0) oursHoles += a;
-      for (double a : theirsAreas) if (a < 0) theirsHoles += a;
+      for (double a : oursAreas)
+        if (a < 0) oursHoles += a;
+      for (double a : theirsAreas)
+        if (a < 0) theirsHoles += a;
       std::cout << "  positives sum  ours=" << std::setprecision(17)
                 << oursOuter << "  theirs=" << theirsOuter << "\n";
       std::cout << "  negatives sum  ours=" << oursHoles
@@ -3848,18 +3972,27 @@ int main(int argc, char** argv) {
         int seeds = (argc > arg + 1) ? std::atoi(argv[arg + 1]) : 50;
         OffsetFuzz(seeds);
       } else if (sub == "corpus") {
-        const std::string p = (argc > arg + 1) ? argv[arg + 1] : "test/polygons/polygon_corpus.txt";
+        const std::string p = (argc > arg + 1)
+                                  ? argv[arg + 1]
+                                  : "test/polygons/polygon_corpus.txt";
         RunCorpus(p);
       } else if (sub == "clipper2corpus") {
-        const std::string p = (argc > arg + 1) ? argv[arg + 1]
-          : std::string("build/_deps/clipper2-src/Tests/Polygons.txt");
+        const std::string p =
+            (argc > arg + 1)
+                ? argv[arg + 1]
+                : std::string("build/_deps/clipper2-src/Tests/Polygons.txt");
         RunClipper2Corpus(p);
       } else if (sub == "mfogelcorpus") {
-        const std::string p = (argc > arg + 1) ? argv[arg + 1]
-          : std::string("build/_deps/mfogel-polygon-clipping-src/test/end-to-end");
+        const std::string p =
+            (argc > arg + 1) ? argv[arg + 1]
+                             : std::string(
+                                   "build/_deps/mfogel-polygon-clipping-src/"
+                                   "test/end-to-end");
         RunMfogelCorpus(p);
       } else if (sub == "jtscorpus") {
-        const std::string p = (argc > arg + 1) ? argv[arg + 1] : "test/polygons/jts_overlay_corpus.txt";
+        const std::string p = (argc > arg + 1)
+                                  ? argv[arg + 1]
+                                  : "test/polygons/jts_overlay_corpus.txt";
         RunJtsCorpus(p);
       } else if (sub == "cadcorpus") {
         RunCadCorpus();
@@ -3872,7 +4005,8 @@ int main(int argc, char** argv) {
     std::cout.rdbuf(oldCout);
     const auto wallEnd = std::chrono::steady_clock::now();
     const int64_t wallNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
-        wallEnd - wallStart).count();
+                               wallEnd - wallStart)
+                               .count();
     const auto& P = GlobalPhases();
     const int64_t total = P.totalNs.load();
     const int64_t cases = P.cases.load();
@@ -3888,7 +4022,8 @@ int main(int argc, char** argv) {
       return o.str();
     };
     std::cout << "=== timing: " << sub << " ===\n";
-    if (repeats > 1) std::cout << "  Repeats:                 " << repeats << "\n";
+    if (repeats > 1)
+      std::cout << "  Repeats:                 " << repeats << "\n";
     std::cout << "  Wall (driver+pipeline): " << fmt(wallNs) << "\n";
     std::cout << "  Pipeline only (sum):    " << fmt(total) << "\n";
     std::cout << "  RemoveOverlaps2D calls: " << cases << "\n";
@@ -3897,37 +4032,35 @@ int main(int argc, char** argv) {
     }
     std::cout << "\n  Per-phase breakdown (% of pipeline total):\n";
     auto row = [&](const char* name, int64_t ns) {
-      std::cout << "    " << std::left << std::setw(28) << name
-                << std::right << std::setw(12) << fmt(ns)
-                << "  " << std::setw(6);
+      std::cout << "    " << std::left << std::setw(28) << name << std::right
+                << std::setw(12) << fmt(ns) << "  " << std::setw(6);
       std::cout.setf(std::ios::fixed);
       std::cout.precision(2);
       std::cout << pct(ns) << "%\n";
       std::cout.unsetf(std::ios::fixed);
     };
-    row("vertex merge",                P.mergeNs.load());
-    row("edge collapse",               P.remapNs.load());
-    row("near-vertex indexing",        P.buildListsNs.load());
-    row("intersection insertion",      P.findIxNs.load());
-    row("structural re-merge",         P.restructNs.load());
-    row("canonicalization",            P.canonNs.load());
-    row("winding filter",              P.filterDcelNs.load());
+    row("vertex merge", P.mergeNs.load());
+    row("edge collapse", P.remapNs.load());
+    row("near-vertex indexing", P.buildListsNs.load());
+    row("intersection insertion", P.findIxNs.load());
+    row("structural re-merge", P.restructNs.load());
+    row("canonicalization", P.canonNs.load());
+    row("winding filter", P.filterDcelNs.load());
     std::cout << "\n  Sub-phase breakdown (% of pipeline total):\n";
-    row("  merge BVH build",            P.mergeBvhBuildNs.load());
-    row("  merge BVH self-collide",     P.mergeCollideNs.load());
-    row("  shared edge BVH build",      P.bvhBuildNs.load());
-    row("  broad candidate work",       P.broadPairWorkNs.load());
-    row("  edge-vertex lists",          P.edgeVertListsNs.load());
-    row("  intersection broad",         P.intersectionBroadNs.load());
-    row("  intersection narrow",        P.intersectionNarrowNs.load());
-    row("  intersection propagation",   P.intersectionPropagationNs.load());
+    row("  merge BVH build", P.mergeBvhBuildNs.load());
+    row("  merge BVH self-collide", P.mergeCollideNs.load());
+    row("  shared edge BVH build", P.bvhBuildNs.load());
+    row("  broad candidate work", P.broadPairWorkNs.load());
+    row("  edge-vertex lists", P.edgeVertListsNs.load());
+    row("  intersection broad", P.intersectionBroadNs.load());
+    row("  intersection narrow", P.intersectionNarrowNs.load());
+    row("  intersection propagation", P.intersectionPropagationNs.load());
     const int64_t evCand = P.edgeVertCandidates.load();
     if (evCand > 0) {
       std::cout << "\n  Edge-vertex candidate breakdown:\n";
       auto crow = [&](const char* name, int64_t count) {
-        std::cout << "    " << std::left << std::setw(28) << name
-                  << std::right << std::setw(12) << count
-                  << "  " << std::setw(6);
+        std::cout << "    " << std::left << std::setw(28) << name << std::right
+                  << std::setw(12) << count << "  " << std::setw(6);
         std::cout.setf(std::ios::fixed);
         std::cout.precision(2);
         std::cout << (count * 100.0 / evCand) << "%\n";
@@ -3963,8 +4096,8 @@ int main(int argc, char** argv) {
     if (propCalls > 0) {
       std::cout << "\n  Intersection propagation shape:\n";
       std::cout << "    calls=" << propCalls
-                << " skippedNoNearDup="
-                << P.propagationSkippedNoNearDup.load() << "\n";
+                << " skippedNoNearDup=" << P.propagationSkippedNoNearDup.load()
+                << "\n";
     }
     return 0;
   }
@@ -3987,14 +4120,13 @@ int main(int argc, char** argv) {
         p.x += offset;
         p.y += offset;
       }
-    std::vector<EdgeM> e = {{0, 1, 1}, {1, 2, 1}, {2, 3, 1},
-                            {3, 4, 1}, {4, 0, 1}};
+    std::vector<EdgeM> e = {
+        {0, 1, 1}, {1, 2, 1}, {2, 3, 1}, {3, 4, 1}, {4, 0, 1}};
     auto r = RemoveOverlaps2D(v, e, EpsilonFromScale(scale));
     std::cerr << "Pentagon (kPow=" << kPow << "): " << r.verts.size()
               << " verts, " << r.edges.size() << " edges\n";
     for (const auto& oe : r.edges) {
-      std::cerr << "  " << oe.v0 << "→" << oe.v1 << " mult=" << oe.mult
-                << "\n";
+      std::cerr << "  " << oe.v0 << "→" << oe.v1 << " mult=" << oe.mult << "\n";
     }
     return 0;
   }
@@ -4013,8 +4145,7 @@ int main(int argc, char** argv) {
     std::cerr << "--- pass 1 ---\n";
     auto pass1 = RemoveOverlaps2D(vIn, eIn, eps, /*debug=*/true);
     std::vector<EdgeM> p2in;
-    for (const auto& oe : pass1.edges)
-      p2in.push_back({oe.v0, oe.v1, oe.mult});
+    for (const auto& oe : pass1.edges) p2in.push_back({oe.v0, oe.v1, oe.mult});
     std::cerr << "--- pass 2 (input: " << pass1.verts.size() << " verts, "
               << p2in.size() << " edges) ---\n";
     // Manually run pass 2's pipeline to see where edges disappear.
@@ -4026,21 +4157,20 @@ int main(int argc, char** argv) {
               << " edges\n";
     std::vector<Box2> p2_eBoxes(p2_e.size());
     for (size_t i = 0; i < p2_e.size(); ++i)
-      p2_eBoxes[i] = BoxOf2DEdge(p2_mrg.verts[p2_e[i].v0],
-                                 p2_mrg.verts[p2_e[i].v1], eps);
+      p2_eBoxes[i] =
+          BoxOf2DEdge(p2_mrg.verts[p2_e[i].v0], p2_mrg.verts[p2_e[i].v1], eps);
     BVH p2_bvh = BVHBuildFromBoxes(p2_eBoxes);
-    auto p2_l = BuildEdgeVertLists(p2_e, p2_mrg.verts, eps, p2_eBoxes, p2_bvh);
-    int p2_totalList = 0;
-    for (auto& l : p2_l) p2_totalList += l.size();
-    std::cerr << "  near-vertex lists: " << p2_totalList
-              << " total entries\n";
-    std::vector<std::vector<int>> p2_ve;
     auto p2_pairs =
         CollectIntersectionPairs(p2_e, p2_mrg.verts, eps, p2_eBoxes, p2_bvh);
+    auto p2_l =
+        BuildEdgeVertListsFromEdgePairs(p2_e, p2_mrg.verts, eps, p2_pairs);
+    int p2_totalList = 0;
+    for (auto& l : p2_l) p2_totalList += l.size();
+    std::cerr << "  near-vertex lists: " << p2_totalList << " total entries\n";
+    std::vector<std::vector<int>> p2_ve;
     FindAndInsertIntersections(p2_e, &p2_mrg.verts, &p2_l, &p2_ve, eps,
                                p2_eBoxes, p2_bvh, p2_pairs);
-    std::cerr << "  intersections: " << p2_mrg.verts.size()
-              << " verts after\n";
+    std::cerr << "  intersections: " << p2_mrg.verts.size() << " verts after\n";
     auto p2_canon = Canonicalize(p2_e, p2_l);
     std::cerr << "  canonicalization: " << p2_canon.edges.size()
               << " sub-edges\n";
@@ -4118,10 +4248,10 @@ int main(int argc, char** argv) {
       return s;
     };
     std::cout << "=== Boolean2D: two overlapping squares ===\n";
-    std::cout << "  Add:       " << add.size() << " loop(s), "
-              << edgeCount(add) << " edges\n";
-    std::cout << "  Subtract:  " << sub.size() << " loop(s), "
-              << edgeCount(sub) << " edges\n";
+    std::cout << "  Add:       " << add.size() << " loop(s), " << edgeCount(add)
+              << " edges\n";
+    std::cout << "  Subtract:  " << sub.size() << " loop(s), " << edgeCount(sub)
+              << " edges\n";
     std::cout << "  Intersect: " << isec.size() << " loop(s), "
               << edgeCount(isec) << " edges\n";
     bool ok = !add.empty() && !sub.empty() && !isec.empty() &&
@@ -4146,10 +4276,9 @@ int main(int argc, char** argv) {
         {0, 1, 1}, {1, 2, 1}, {2, 3, 1}, {3, 0, 1},  // A
         {4, 5, 1}, {5, 6, 1}, {6, 7, 1}, {7, 4, 1},  // B
     };
-    auto r = RunCase(
-        {"Two axis-aligned squares overlapping (L-shape union)", v, e,
-         EpsilonFromScale(3.0)},
-        &allPass);
+    auto r = RunCase({"Two axis-aligned squares overlapping (L-shape union)", v,
+                      e, EpsilonFromScale(3.0)},
+                     &allPass);
     if (!CheckIdempotence(r, EpsilonFromScale(3.0))) allPass = false;
     // Expected union: single L-shaped loop with 8 boundary verts and
     // total area 4 + 4 − 1 = 7. Intersection insertion must detect the two
@@ -4161,8 +4290,8 @@ int main(int argc, char** argv) {
     for (const auto& l : out) totalEdges += l.size();
     bool shapeOk = (out.size() == 1 && totalEdges == 8);
     std::cout << "  Polygons union: " << out.size() << " loop(s), "
-              << totalEdges << " edges, "
-              << (shapeOk ? "PASS" : "FAIL") << "\n";
+              << totalEdges << " edges, " << (shapeOk ? "PASS" : "FAIL")
+              << "\n";
     if (!shapeOk) allPass = false;
     std::cout << std::endl;
   }
@@ -4177,8 +4306,8 @@ int main(int argc, char** argv) {
   // perpendicular, and the Intersect winding rule was untested against
   // axis-aligned perpendicular crossings until this case.
   {
-    manifold::Polygons a = {{{0, 0}, {2, 0}, {2, 2}, {0, 2}}};   // CCW
-    manifold::Polygons b = {{{1, 1}, {3, 1}, {3, 3}, {1, 3}}};   // CCW
+    manifold::Polygons a = {{{0, 0}, {2, 0}, {2, 2}, {0, 2}}};  // CCW
+    manifold::Polygons b = {{{1, 1}, {3, 1}, {3, 3}, {1, 3}}};  // CCW
     const double eps = EpsilonFromScale(3.0);
     auto add = Boolean2D(a, b, OpType::Add, eps);
     auto sub = Boolean2D(a, b, OpType::Subtract, eps);
@@ -4192,8 +4321,8 @@ int main(int argc, char** argv) {
     // Add: 4 + 4 - 1 = 7.  Subtract: 4 - 1 = 3.  Intersect: 1.
     // Xor (symmetric difference): (A | B) - (A & B) = 7 - 1 = 6.
     auto near = [](double a, double b) { return std::fabs(a - b) < 1e-9; };
-    bool ok = near(areaAdd, 7.0) && near(areaSub, 3.0) &&
-              near(areaIsec, 1.0) && near(areaXor, 6.0);
+    bool ok = near(areaAdd, 7.0) && near(areaSub, 3.0) && near(areaIsec, 1.0) &&
+              near(areaXor, 6.0);
     std::cout << "=== Boolean2D area regression: diagonal squares ===\n";
     std::cout << "  Add area:       " << areaAdd << " (expect 7)\n";
     std::cout << "  Subtract area:  " << areaSub << " (expect 3)\n";
@@ -4246,8 +4375,8 @@ int main(int argc, char** argv) {
   {
     std::cout << "=== Polygons API: square with hole ===" << std::endl;
     manifold::Polygons in = {
-        {{0, 0}, {4, 0}, {4, 4}, {0, 4}},          // outer CCW
-        {{1, 1}, {1, 3}, {3, 3}, {3, 1}},          // inner CW (hole)
+        {{0, 0}, {4, 0}, {4, 4}, {0, 4}},  // outer CCW
+        {{1, 1}, {1, 3}, {3, 3}, {3, 1}},  // inner CW (hole)
     };
     auto out = Simplify(in, EpsilonFromScale(4.0));
     // Expect two loops (outer + hole) with 4 verts each.
@@ -4278,8 +4407,8 @@ int main(int argc, char** argv) {
   {
     std::cout << "=== Polygons API: two disjoint squares ===" << std::endl;
     manifold::Polygons in = {
-        {{0, 0}, {1, 0}, {1, 1}, {0, 1}},          // square A (CCW)
-        {{2, 0}, {3, 0}, {3, 1}, {2, 1}},          // square B (CCW)
+        {{0, 0}, {1, 0}, {1, 1}, {0, 1}},  // square A (CCW)
+        {{2, 0}, {3, 0}, {3, 1}, {2, 1}},  // square B (CCW)
     };
     auto out = Simplify(in, EpsilonFromScale(3.0));
     bool ok = (out.size() == 2 && out[0].size() == 4 && out[1].size() == 4);
@@ -4303,10 +4432,9 @@ int main(int argc, char** argv) {
   // algorithm's correct output is empty (balance 0). So we accept
   // those as observational and only fail closed-input cases.
   enum class NMExpect { ClosedTopo, OpenObservational };
-  auto runNonManifold = [&allPass](
-                            const char* name, const std::vector<vec2>& v,
-                            const std::vector<EdgeM>& e, double eps,
-                            const char* expectation, NMExpect mode) {
+  auto runNonManifold = [&allPass](const char* name, const std::vector<vec2>& v,
+                                   const std::vector<EdgeM>& e, double eps,
+                                   const char* expectation, NMExpect mode) {
     std::cout << "=== Non-manifold: " << name << " ===" << std::endl;
     std::cout << "  Input: " << v.size() << " verts, " << e.size() << " edges, "
               << "expectation: " << expectation << std::endl;
@@ -4334,8 +4462,7 @@ int main(int argc, char** argv) {
     std::vector<vec2> v = {{0, 0}, {1, 1}, {2, 0}, {3, 1}};
     std::vector<EdgeM> e = {{0, 1, 1}, {1, 2, 1}, {2, 3, 1}};
     runNonManifold("open polyline (Z-zigzag)", v, e, EpsilonFromScale(3.0),
-                   "empty (no enclosed region)",
-                   NMExpect::OpenObservational);
+                   "empty (no enclosed region)", NMExpect::OpenObservational);
   }
 
   // (2) Two polygons touching at a single vertex (kissing corner).
@@ -4380,8 +4507,7 @@ int main(int argc, char** argv) {
     std::vector<vec2> v = {{0, 0}, {1, 0}, {0, 1}, {-1, 0}};
     std::vector<EdgeM> e = {{0, 1, 1}, {0, 2, 1}, {0, 3, 1}};
     runNonManifold("T-junction (degree-3 dangling)", v, e,
-                   EpsilonFromScale(1.0), "empty",
-                   NMExpect::OpenObservational);
+                   EpsilonFromScale(1.0), "empty", NMExpect::OpenObservational);
   }
 
   // (5) Open polyline crossing itself (figure-8 missing the closing
@@ -4395,9 +4521,10 @@ int main(int argc, char** argv) {
     // collapses them, turning the input into a *closed* bowtie. So
     // this case actually exercises the closed bowtie path, not an
     // open-polyline path. The topology check applies.
-    runNonManifold("polyline w/ duplicate-position endpoints (=> closed bowtie)",
-                   v, e, EpsilonFromScale(2.0), "1 triangle (= bowtie lobe)",
-                   NMExpect::ClosedTopo);
+    runNonManifold(
+        "polyline w/ duplicate-position endpoints (=> closed bowtie)", v, e,
+        EpsilonFromScale(2.0), "1 triangle (= bowtie lobe)",
+        NMExpect::ClosedTopo);
   }
 
   // (6) Degenerate triangle: three collinear verts (zero-area input).
@@ -4429,8 +4556,8 @@ int main(int argc, char** argv) {
   // fixed-point pass picks up any leftover near-duplicates. Open
   // input → empty output (no enclosed region).
   {
-    std::vector<vec2> v = {{-1, 0},     {1, 0},      {0, -1},     {0, 1},
-                           {-0.7, -0.7}, {0.7, 0.7},  {-0.7, 0.7}, {0.7, -0.7}};
+    std::vector<vec2> v = {{-1, 0},      {1, 0},     {0, -1},     {0, 1},
+                           {-0.7, -0.7}, {0.7, 0.7}, {-0.7, 0.7}, {0.7, -0.7}};
     std::vector<EdgeM> e = {{0, 1, 1}, {2, 3, 1}, {4, 5, 1}, {6, 7, 1}};
     runNonManifold("4 segments concurrent at origin (asterisk)", v, e,
                    EpsilonFromScale(1.0), "empty (open input)",
@@ -4594,8 +4721,8 @@ int main(int argc, char** argv) {
         // Topological validity on the iterated result. NOTE: rIter.inputRemap
         // is the LAST iteration's input->output remap, not the composed
         // original->final. Works for the random-topology displaced inputs
-        // here because vertex merging produces an identity remap when no input verts
-        // merge (true for these inputs); a production version of
+        // here because vertex merging produces an identity remap when no input
+        // verts merge (true for these inputs); a production version of
         // IterateToFixedPoint should compose remaps across iterations.
         if (!CheckTopologicalValidity(rIter, e, rIter.inputRemap,
                                       rIter.numMergedVerts)) {
