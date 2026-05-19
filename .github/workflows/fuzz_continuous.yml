@@ -21,13 +21,14 @@
 # ~50m, comfortably under the 60m timeout. Validated locally on the
 # daemon clone (1 full 38-target cycle clean, no sanitizer complaints).
 #
-# Why 40 min and not 50 min: a 50-min fuzz plus ~5-min build was hitting the
-# job's timeout-minutes deadline, producing "cancelled" conclusions that look
-# identical to real cron-overlap kills and obscure whether each run actually
-# completed or got killed. 40 min leaves ~10 min of slack before the timeout
-# and ~15 min before the next hourly cron, so every run terminates cleanly
-# under its own -max_total_time and the conclusion (success / failure /
-# cancelled) accurately reflects what happened.
+# Why 35 min and not 40+: with 40m fuzz + 5-8m build + 2-3m setup we ended
+# up at 45-48m per job - inside the 60m timeout-minutes, but the slack
+# against the next hourly cron was only 12-15m. Add cron jitter (GitHub
+# best-effort can slip 5-10m) and a single job that runs 50m starves the
+# next run's same-target job of its per-target concurrency.group slot.
+# That kicks off a queue cascade where runs pile up 3-4 deep. 35 min fuzz
+# + 8m build = 43m total, leaves 17m clear slack each hour, so the
+# pipeline self-equilibrates after one cron cycle.
 #
 # WHERE THIS LIVES: this file is intentionally NOT on the upstream-bound PR
 # branches. Keep it on a fork-only branch (default branch for the fork) so
@@ -182,7 +183,7 @@ jobs:
           ./build/test/cross_section_fuzz \
             --fuzz=CrossSectionFuzz.${{ matrix.target }} \
             build/fuzz-corpus/${{ matrix.target }} \
-            -max_total_time=2400 \
+            -max_total_time=2100 \
             -timeout=60 \
             -artifact_prefix=build/fuzz-artifacts/${{ matrix.target }}/ \
             -print_final_stats=1
