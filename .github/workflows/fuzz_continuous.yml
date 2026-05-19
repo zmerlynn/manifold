@@ -100,6 +100,7 @@ jobs:
           - PredicatesIdentities
           - FillRuleAllCCWIdentities
           - InputLoopOrderInvariance
+          - LargeEdgeCountSelfUnion
           - RemoveOverlapsDeterminismAcrossThreadCounts
           - SimplePositiveOffset
           - OffsetExtrudeRoundTrip
