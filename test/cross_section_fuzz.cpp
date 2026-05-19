@@ -26,22 +26,22 @@
 // ---------------------------------------------------------------------
 
 #if defined(__has_feature)
-#  if !__has_feature(address_sanitizer)
-#    error \
-        "cross_section_fuzz requires AddressSanitizer (-fsanitize=address). " \
+#if !__has_feature(address_sanitizer)
+#error \
+    "cross_section_fuzz requires AddressSanitizer (-fsanitize=address). " \
         "Reconfigure with MANIFOLD_FUZZ=ON or rebuild with the fuzz-asan preset."
-#  endif
-#  if !__has_feature(undefined_behavior_sanitizer)
-#    error \
-        "cross_section_fuzz requires UndefinedBehaviorSanitizer " \
+#endif
+#if !__has_feature(undefined_behavior_sanitizer)
+#error \
+    "cross_section_fuzz requires UndefinedBehaviorSanitizer " \
         "(-fsanitize=undefined). Rebuild with the fuzz-asan preset."
-#  endif
+#endif
 #else
-#  if !defined(__SANITIZE_ADDRESS__)
-#    error \
-        "cross_section_fuzz requires AddressSanitizer; no sanitizer feature " \
+#if !defined(__SANITIZE_ADDRESS__)
+#error \
+    "cross_section_fuzz requires AddressSanitizer; no sanitizer feature " \
         "macros detected. Rebuild with the fuzz-asan preset."
-#  endif
+#endif
 #endif
 
 // Backend fingerprint: defined only by cross_section_boolean2.cpp.
@@ -764,11 +764,10 @@ void ApexSkipNearLine(double apexPerpDist, double crossOffset) {
   ExpectCrossSectionValid(cs);
 
   const manifold::Polygons inputABA{tri, quad, tri};
-  const manifold::CrossSection csDup(
-      inputABA, manifold::CrossSection::FillRule::NonZero);
+  const manifold::CrossSection csDup(inputABA,
+                                     manifold::CrossSection::FillRule::NonZero);
   ExpectCrossSectionValid(csDup);
-  EXPECT_NEAR(cs.Area(), csDup.Area(),
-              1e-6 * (1.0 + std::fabs(cs.Area())));
+  EXPECT_NEAR(cs.Area(), csDup.Area(), 1e-6 * (1.0 + std::fabs(cs.Area())));
 }
 
 // Large-coordinate translation invariance: a CrossSection
@@ -807,13 +806,13 @@ void TranslationInvariance(const std::vector<double>& radii, double translateX,
 // "clip"). Order-dependent bugs in vertex merge, edge collapse, or
 // winding sign would show up as area or contour-count mismatches.
 void BooleanCommutativity(const std::vector<double>& radiiA,
-                          const std::vector<double>& radiiB,
-                          double translateX, double translateY) {
+                          const std::vector<double>& radiiB, double translateX,
+                          double translateY) {
   if (!std::isfinite(translateX) || !std::isfinite(translateY)) return;
 
   const manifold::CrossSection a(StarPolygon(radiiA));
-  const manifold::CrossSection b =
-      manifold::CrossSection(StarPolygon(radiiB)).Translate({translateX, translateY});
+  const manifold::CrossSection b = manifold::CrossSection(StarPolygon(radiiB))
+                                       .Translate({translateX, translateY});
   if (a.IsEmpty() || b.IsEmpty()) return;
 
   const auto unionAB = a + b;
@@ -825,11 +824,9 @@ void BooleanCommutativity(const std::vector<double>& radiiA,
   ExpectCrossSectionValid(intersectAB);
   ExpectCrossSectionValid(intersectBA);
 
-  const double tol =
-      1e-6 * (1.0 + std::fabs(a.Area()) + std::fabs(b.Area()));
+  const double tol = 1e-6 * (1.0 + std::fabs(a.Area()) + std::fabs(b.Area()));
   EXPECT_NEAR(unionAB.Area(), unionBA.Area(), tol) << "A + B != B + A";
-  EXPECT_NEAR(intersectAB.Area(), intersectBA.Area(), tol)
-      << "A ∩ B != B ∩ A";
+  EXPECT_NEAR(intersectAB.Area(), intersectBA.Area(), tol) << "A ∩ B != B ∩ A";
   EXPECT_EQ(unionAB.NumContour(), unionBA.NumContour())
       << "A + B and B + A produce different contour counts";
   EXPECT_EQ(intersectAB.NumContour(), intersectBA.NumContour())
@@ -879,8 +876,7 @@ void BooleanAssociativity(const std::vector<double>& radiiA,
 
   const double tol = 1e-6 * (1.0 + std::fabs(a.Area()) + std::fabs(b.Area()) +
                              std::fabs(c.Area()));
-  EXPECT_NEAR(ab_c.Area(), a_bc.Area(), tol)
-      << "(A ∪ B) ∪ C != A ∪ (B ∪ C)";
+  EXPECT_NEAR(ab_c.Area(), a_bc.Area(), tol) << "(A ∪ B) ∪ C != A ∪ (B ∪ C)";
   EXPECT_NEAR(aIntB_C.Area(), a_IntBC.Area(), tol)
       << "(A ∩ B) ∩ C != A ∩ (B ∩ C)";
   EXPECT_EQ(ab_c.NumContour(), a_bc.NumContour())
@@ -1063,8 +1059,8 @@ void SubtractInvariants(const std::vector<double>& radiiA,
   if (!std::isfinite(translateX) || !std::isfinite(translateY)) return;
 
   const manifold::CrossSection a(StarPolygon(radiiA));
-  const manifold::CrossSection b =
-      manifold::CrossSection(StarPolygon(radiiB)).Translate({translateX, translateY});
+  const manifold::CrossSection b = manifold::CrossSection(StarPolygon(radiiB))
+                                       .Translate({translateX, translateY});
   ExpectCrossSectionValid(a);
   ExpectCrossSectionValid(b);
   if (a.IsEmpty() || b.IsEmpty()) return;
@@ -1108,7 +1104,8 @@ void IterateToFixedPointConverges(const std::vector<double>& radii) {
   const double eps = manifold::boolean2::InferEps(polys, {});
 
   int iters = -1;
-  manifold::boolean2::IterStatus status = manifold::boolean2::IterStatus::MaxedOut;
+  manifold::boolean2::IterStatus status =
+      manifold::boolean2::IterStatus::MaxedOut;
   manifold::boolean2::IterateToFixedPoint(verts, edges, eps, /*maxIter=*/10,
                                           &iters, &status);
 
@@ -1144,22 +1141,23 @@ void RemoveOverlapsDeterminismAcrossThreadCounts(
   manifold::Polygons r1, r4;
   {
     tbb::global_control gc(tbb::global_control::max_allowed_parallelism, 1);
-    r1 = manifold::boolean2::FillByRule(
-        input, manifold::boolean2::WindRule::NonZero);
+    r1 = manifold::boolean2::FillByRule(input,
+                                        manifold::boolean2::WindRule::NonZero);
   }
   {
     tbb::global_control gc(tbb::global_control::max_allowed_parallelism, 4);
-    r4 = manifold::boolean2::FillByRule(
-        input, manifold::boolean2::WindRule::NonZero);
+    r4 = manifold::boolean2::FillByRule(input,
+                                        manifold::boolean2::WindRule::NonZero);
   }
 
   ASSERT_EQ(r1.size(), r4.size())
-      << "ring count differs across thread counts: 1-thread="
-      << r1.size() << " 4-thread=" << r4.size();
+      << "ring count differs across thread counts: 1-thread=" << r1.size()
+      << " 4-thread=" << r4.size();
   for (size_t i = 0; i < r1.size(); ++i) {
     ASSERT_EQ(r1[i].size(), r4[i].size())
-        << "ring " << i << " vert count differs across thread counts: 1-thread="
-        << r1[i].size() << " 4-thread=" << r4[i].size();
+        << "ring " << i
+        << " vert count differs across thread counts: 1-thread=" << r1[i].size()
+        << " 4-thread=" << r4[i].size();
     for (size_t j = 0; j < r1[i].size(); ++j) {
       EXPECT_EQ(r1[i][j].x, r4[i][j].x)
           << "ring " << i << " vert " << j << " x differs across thread counts";
@@ -1280,9 +1278,9 @@ void BVHPairEnumerationMatchesBruteForce(const std::vector<double>& xs,
   const auto bvh = manifold::boolean2::BVHBuildFromBoxes(boxes);
 
   std::vector<std::pair<int, int>> bvhPairs;
-  manifold::boolean2::CollidePairs(
-      bvh, boxes,
-      [&](int qi, int origLeafIdx) { bvhPairs.emplace_back(qi, origLeafIdx); });
+  manifold::boolean2::CollidePairs(bvh, boxes, [&](int qi, int origLeafIdx) {
+    bvhPairs.emplace_back(qi, origLeafIdx);
+  });
   std::sort(bvhPairs.begin(), bvhPairs.end());
 
   std::vector<std::pair<int, int>> bfPairs;
@@ -1332,8 +1330,8 @@ void VertexMergeIdempotence(const std::vector<double>& xs,
   const auto m2 = manifold::boolean2::MergeVerts(m1.verts, eps);
   EXPECT_EQ(m2.verts.size(), m1.verts.size())
       << "MergeVerts not idempotent: pass1 produced " << m1.verts.size()
-      << " verts, pass2 produced " << m2.verts.size()
-      << " (n=" << xs.size() << ", eps=" << eps << ")";
+      << " verts, pass2 produced " << m2.verts.size() << " (n=" << xs.size()
+      << ", eps=" << eps << ")";
 }
 
 // Structural-coverage dim targeting boolean2/predicates.h (the
@@ -1364,21 +1362,20 @@ void PredicatesIdentities(const std::vector<double>& radii) {
   ASSERT_TRUE(std::isfinite(areaRev));
   const double areaTol = 1e-9 * (1.0 + std::fabs(area));
   EXPECT_NEAR(area, -areaRev, areaTol)
-      << "SignedArea(reverse(loop)) != -SignedArea(loop): "
-      << area << " vs " << -areaRev;
+      << "SignedArea(reverse(loop)) != -SignedArea(loop): " << area << " vs "
+      << -areaRev;
 
   // 2. CCW(a, b, c) == -CCW(a, c, b) for every consecutive triple.
-  const double maxCoord = std::max({std::fabs(loop.front().x),
-                                    std::fabs(loop.front().y), 1.0});
+  const double maxCoord =
+      std::max({std::fabs(loop.front().x), std::fabs(loop.front().y), 1.0});
   const double eps = manifold::boolean2::EpsilonFromScale(maxCoord);
   for (size_t i = 0; i + 2 < loop.size(); ++i) {
-    const int abc = manifold::boolean2::CCW(loop[i], loop[i + 1],
-                                            loop[i + 2], eps);
-    const int acb = manifold::boolean2::CCW(loop[i], loop[i + 2],
-                                            loop[i + 1], eps);
-    EXPECT_EQ(abc, -acb)
-        << "CCW antisymmetry violated at i=" << i << ": CCW(a,b,c)="
-        << abc << " CCW(a,c,b)=" << acb;
+    const int abc =
+        manifold::boolean2::CCW(loop[i], loop[i + 1], loop[i + 2], eps);
+    const int acb =
+        manifold::boolean2::CCW(loop[i], loop[i + 2], loop[i + 1], eps);
+    EXPECT_EQ(abc, -acb) << "CCW antisymmetry violated at i=" << i
+                         << ": CCW(a,b,c)=" << abc << " CCW(a,c,b)=" << acb;
   }
 
   // 3. IntersectSegments is order-symmetric in the segment pair.
@@ -1395,11 +1392,11 @@ void PredicatesIdentities(const std::vector<double>& radii) {
     const bool hitBA = manifold::boolean2::IntersectSegments(
         loop[j], loop[j + 1], loop[i], loop[i + 1], eps, &outBA);
     EXPECT_EQ(hitAB, hitBA)
-        << "IntersectSegments not order-symmetric at (i,j)=("
-        << i << "," << j << ")";
+        << "IntersectSegments not order-symmetric at (i,j)=(" << i << "," << j
+        << ")";
     if (hitAB && hitBA) {
-      const double pTol = 1e-7 * (1.0 + std::max(std::fabs(outAB.x),
-                                                 std::fabs(outAB.y)));
+      const double pTol =
+          1e-7 * (1.0 + std::max(std::fabs(outAB.x), std::fabs(outAB.y)));
       EXPECT_NEAR(outAB.x, outBA.x, pTol)
           << "IntersectSegments point X differs by swap";
       EXPECT_NEAR(outAB.y, outBA.y, pTol)
@@ -1441,12 +1438,12 @@ void FillRuleAllCCWIdentities(const std::vector<double>& radiiA,
   }
   manifold::Polygons loops{a, b};
 
-  const manifold::CrossSection nz(
-      loops, manifold::CrossSection::FillRule::NonZero);
-  const manifold::CrossSection pos(
-      loops, manifold::CrossSection::FillRule::Positive);
-  const manifold::CrossSection neg(
-      loops, manifold::CrossSection::FillRule::Negative);
+  const manifold::CrossSection nz(loops,
+                                  manifold::CrossSection::FillRule::NonZero);
+  const manifold::CrossSection pos(loops,
+                                   manifold::CrossSection::FillRule::Positive);
+  const manifold::CrossSection neg(loops,
+                                   manifold::CrossSection::FillRule::Negative);
 
   ExpectCrossSectionValid(nz);
   ExpectCrossSectionValid(pos);
@@ -1481,9 +1478,9 @@ void FillRuleAllCCWIdentities(const std::vector<double>& radiiA,
 // path. Targets boolean2::Boolean2D / its containment pre-step.
 void InputLoopOrderInvariance(const std::vector<double>& radiiA,
                               const std::vector<double>& radiiB,
-                              const std::vector<double>& radiiC,
-                              double txA, double tyA, double txB, double tyB,
-                              double txC, double tyC) {
+                              const std::vector<double>& radiiC, double txA,
+                              double tyA, double txB, double tyB, double txC,
+                              double tyC) {
   if (!std::isfinite(txA) || !std::isfinite(tyA)) return;
   if (!std::isfinite(txB) || !std::isfinite(tyB)) return;
   if (!std::isfinite(txC) || !std::isfinite(tyC)) return;
@@ -1518,17 +1515,51 @@ void InputLoopOrderInvariance(const std::vector<double>& radiiA,
 
   const double tol = 1e-6 * (1.0 + std::fabs(abc.Area()));
   EXPECT_NEAR(abc.Area(), bca.Area(), tol)
-      << "Order (a,b,c) vs (b,c,a) areas differ: "
-      << abc.Area() << " vs " << bca.Area();
+      << "Order (a,b,c) vs (b,c,a) areas differ: " << abc.Area() << " vs "
+      << bca.Area();
   EXPECT_NEAR(abc.Area(), cab.Area(), tol)
-      << "Order (a,b,c) vs (c,a,b) areas differ: "
-      << abc.Area() << " vs " << cab.Area();
+      << "Order (a,b,c) vs (c,a,b) areas differ: " << abc.Area() << " vs "
+      << cab.Area();
   EXPECT_EQ(abc.NumContour(), bca.NumContour())
-      << "Order (a,b,c) vs (b,c,a) contour counts differ: "
-      << abc.NumContour() << " vs " << bca.NumContour();
+      << "Order (a,b,c) vs (b,c,a) contour counts differ: " << abc.NumContour()
+      << " vs " << bca.NumContour();
   EXPECT_EQ(abc.NumContour(), cab.NumContour())
-      << "Order (a,b,c) vs (c,a,b) contour counts differ: "
-      << abc.NumContour() << " vs " << cab.NumContour();
+      << "Order (a,b,c) vs (c,a,b) contour counts differ: " << abc.NumContour()
+      << " vs " << cab.NumContour();
+}
+
+// Coverage-targeted dim: exercise the parallel-BVH-walk branch of
+// CollectIntersectionPairs in boolean2/intersections.cpp. That branch
+// is gated by `nE >= kEdgeBvhThreshold` (=256), but the existing
+// fuzz domain (StarRadiiDomain bounded at 48 vertices, i.e. 48 edges)
+// never reaches it. Found via llvm-cov audit 2026-05-19: lines
+// 205-222 of intersections.cpp showed 0 hits across all 41 prior
+// dims' corpora.
+//
+// Property: self-union is area-preserving (X + X == X). Cheap to
+// check, holds for any well-formed input, and forces both
+// CollectIntersectionPairs and the downstream pipeline through the
+// large-input branch. With radii.size() >= 256 a single star has
+// 256+ edges; the boolean op then sees 512+ edges (subject + clip).
+void LargeEdgeCountSelfUnion(const std::vector<double>& radii) {
+  if (radii.size() < 256) return;
+  const manifold::CrossSection input(StarPolygon(radii));
+  ExpectCrossSectionValid(input);
+  if (input.IsEmpty()) return;
+  const double area = input.Area();
+  if (!std::isfinite(area) || std::fabs(area) <= 1e-9) return;
+
+  const auto doubled = input + input;
+  ExpectCrossSectionValid(doubled);
+
+  const double tol = 1e-6 * (1.0 + std::fabs(area));
+  EXPECT_NEAR(doubled.Area(), area, tol)
+      << "Self-union changed area on large-edge-count input: "
+      << "X.Area()=" << area << " (X+X).Area()=" << doubled.Area();
+  EXPECT_EQ(doubled.NumContour(), input.NumContour())
+      << "Self-union changed contour count on large-edge-count input: "
+      << "X.NumContour()=" << input.NumContour()
+      << " (X+X).NumContour()=" << doubled.NumContour();
 }
 
 // Decompose/Compose round-trip on a HOLED CrossSection. The existing
@@ -1656,9 +1687,8 @@ void OffsetInverseConvex(int sides, double radius, double delta) {
   // false positives from arithmetic noise.
   const double tol = 1e-4 * (1.0 + std::fabs(input.Area()));
   EXPECT_NEAR(roundTrip.Area(), input.Area(), tol)
-      << "Offset(" << delta << ", Miter).Offset(" << -delta
-      << ", Miter) on " << sides << "-gon r=" << r
-      << " didn't round-trip area";
+      << "Offset(" << delta << ", Miter).Offset(" << -delta << ", Miter) on "
+      << sides << "-gon r=" << r << " didn't round-trip area";
   EXPECT_EQ(roundTrip.NumContour(), input.NumContour())
       << "Offset round-trip changed contour count";
 }
@@ -2133,12 +2163,10 @@ FUZZ_TEST(CrossSectionFuzz, OffsetIdentityAtZero)
                             manifold::CrossSection::JoinType::Miter,
                             manifold::CrossSection::JoinType::Bevel}));
 
-FUZZ_TEST(CrossSectionFuzz, EmptyIdentities)
-    .WithDomains(StarRadiiDomain());
+FUZZ_TEST(CrossSectionFuzz, EmptyIdentities).WithDomains(StarRadiiDomain());
 
 FUZZ_TEST(CrossSectionFuzz, DoubleMirrorIdentity)
-    .WithDomains(StarRadiiDomain(), InRange(-10.0, 10.0),
-                 InRange(-10.0, 10.0));
+    .WithDomains(StarRadiiDomain(), InRange(-10.0, 10.0), InRange(-10.0, 10.0));
 
 FUZZ_TEST(CrossSectionFuzz, DecomposeRecomposeWithHoles)
     .WithDomains(SmallStarRadiiDomain(), SmallStarRadiiDomain(),
@@ -2150,22 +2178,16 @@ FUZZ_TEST(CrossSectionFuzz, OffsetInverseConvex)
 FUZZ_TEST(CrossSectionFuzz, HullIdempotence).WithDomains(StarRadiiDomain());
 
 FUZZ_TEST(CrossSectionFuzz, VertexMergeIdempotence)
-    .WithDomains(VectorOf(InRange(-1000.0, 1000.0))
-                     .WithMinSize(2)
-                     .WithMaxSize(256),
-                 VectorOf(InRange(-1000.0, 1000.0))
-                     .WithMinSize(2)
-                     .WithMaxSize(256),
-                 InRange(-12.0, -2.0));
+    .WithDomains(
+        VectorOf(InRange(-1000.0, 1000.0)).WithMinSize(2).WithMaxSize(256),
+        VectorOf(InRange(-1000.0, 1000.0)).WithMinSize(2).WithMaxSize(256),
+        InRange(-12.0, -2.0));
 
 FUZZ_TEST(CrossSectionFuzz, BVHPairEnumerationMatchesBruteForce)
-    .WithDomains(VectorOf(InRange(-100.0, 100.0))
-                     .WithMinSize(2)
-                     .WithMaxSize(200),
-                 VectorOf(InRange(-100.0, 100.0))
-                     .WithMinSize(2)
-                     .WithMaxSize(200),
-                 InRange(-6.0, -1.0));
+    .WithDomains(
+        VectorOf(InRange(-100.0, 100.0)).WithMinSize(2).WithMaxSize(200),
+        VectorOf(InRange(-100.0, 100.0)).WithMinSize(2).WithMaxSize(200),
+        InRange(-6.0, -1.0));
 
 FUZZ_TEST(CrossSectionFuzz, CanonicalSubEdgeIdempotence)
     .WithDomains(VectorOf(InRange(0, 100)).WithMinSize(1).WithMaxSize(256),
@@ -2173,7 +2195,8 @@ FUZZ_TEST(CrossSectionFuzz, CanonicalSubEdgeIdempotence)
                  VectorOf(InRange(-100, 100)).WithMinSize(1).WithMaxSize(256));
 
 FUZZ_TEST(CrossSectionFuzz, WindingFilterStarburstStress)
-    .WithDomains(InRange(2, 32), InRange(0.01, 2.0 * 3.14159), InRange(0.001, 1.0));
+    .WithDomains(InRange(2, 32), InRange(0.01, 2.0 * 3.14159),
+                 InRange(0.001, 1.0));
 
 FUZZ_TEST(CrossSectionFuzz, PredicatesIdentities)
     .WithDomains(StarRadiiDomain());
@@ -2184,9 +2207,12 @@ FUZZ_TEST(CrossSectionFuzz, FillRuleAllCCWIdentities)
 
 FUZZ_TEST(CrossSectionFuzz, InputLoopOrderInvariance)
     .WithDomains(StarRadiiDomain(), StarRadiiDomain(), StarRadiiDomain(),
-                 InRange(-5.0, 5.0), InRange(-5.0, 5.0),
-                 InRange(-5.0, 5.0), InRange(-5.0, 5.0),
-                 InRange(-5.0, 5.0), InRange(-5.0, 5.0));
+                 InRange(-5.0, 5.0), InRange(-5.0, 5.0), InRange(-5.0, 5.0),
+                 InRange(-5.0, 5.0), InRange(-5.0, 5.0), InRange(-5.0, 5.0));
+
+FUZZ_TEST(CrossSectionFuzz, LargeEdgeCountSelfUnion)
+    .WithDomains(
+        VectorOf(InRange(0.0, 1000.0)).WithMinSize(256).WithMaxSize(512));
 
 #if defined(MANIFOLD_PAR) && MANIFOLD_PAR == 1
 FUZZ_TEST(CrossSectionFuzz, RemoveOverlapsDeterminismAcrossThreadCounts)
