@@ -73,6 +73,7 @@ targets=(
   CrossSectionFuzz.PredicatesIdentities
   CrossSectionFuzz.FillRuleAllCCWIdentities
   CrossSectionFuzz.InputLoopOrderInvariance
+  CrossSectionFuzz.LargeEdgeCountSelfUnion
   CrossSectionFuzz.SimplePositiveOffset
   CrossSectionFuzz.OffsetExtrudeRoundTrip
   CrossSectionFuzz.ManifoldHoledExtrudeRoundTrip
