@@ -99,6 +99,7 @@ jobs:
           - WindingFilterStarburstStress
           - PredicatesIdentities
           - FillRuleAllCCWIdentities
+          - InputLoopOrderInvariance
           - RemoveOverlapsDeterminismAcrossThreadCounts
           - SimplePositiveOffset
           - OffsetExtrudeRoundTrip
