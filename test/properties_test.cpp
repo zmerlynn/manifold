@@ -151,6 +151,28 @@ TEST(Properties, CalculateNormals) {
   EXPECT_EQ(numBad2, 0);
 }
 
+TEST(Properties, CalculateNormalsBooleanSeam) {
+  Manifold sphere = Manifold::Sphere(10, 64);
+  Manifold cut = sphere - sphere.Translate({10, 10, 10});
+  MeshGL out = cut.CalculateNormals().GetMeshGL();
+  const vec3 center = {10, 10, 10};
+
+  for (size_t run = 0; run < out.runOriginalID.size(); ++run) {
+    for (size_t t3 = out.runIndex[run]; t3 < out.runIndex[run + 1]; ++t3) {
+      const int v = out.triVerts[t3];
+      const int np = out.numProp;
+      const auto posGL = out.GetVertPos(v);
+      const vec3 pos = {posGL.x, posGL.y, posGL.z};
+      const vec3 normal = {out.vertProperties[np * v + 3],
+                           out.vertProperties[np * v + 4],
+                           out.vertProperties[np * v + 5]};
+      const vec3 expected =
+          out.Backside(run) ? -la::normalize(pos - center) : la::normalize(pos);
+      EXPECT_GT(dot(normal, expected), 0.99);
+    }
+  }
+}
+
 TEST(Properties, Coplanar) {
   Manifold peg = Manifold::Cube({1, 1, 2}).Translate({1, 1, 0}).AsOriginal();
   const size_t pegID = peg.OriginalID();

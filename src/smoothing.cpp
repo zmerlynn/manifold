@@ -476,7 +476,9 @@ void Manifold::Impl::SetNormals(int normalIdx, double minSharpAngle) {
     const int tri2 = pair / 3;
     const double dihedral =
         degrees(AngleBetween(faceNormal_[tri1], faceNormal_[tri2]));
-    if (dihedral > minSharpAngle) {
+    if (dihedral > minSharpAngle ||
+        meshRelation_.triRef[tri1].meshID !=
+            meshRelation_.triRef[tri2].meshID) {
       ++vertNumSharp[halfedge_.Start(e)];
       ++vertNumSharp[halfedge_.End(e)];
     } else {
@@ -575,6 +577,8 @@ void Manifold::Impl::SetNormals(int normalIdx, double minSharpAngle) {
       const double dihedral =
           degrees(AngleBetween(faceNormal_[face], faceNormal_[prevFace]));
       if (dihedral > minSharpAngle ||
+          meshRelation_.triRef[face].meshID !=
+              meshRelation_.triRef[prevFace].meshID ||
           triIsFlatFace[face] != triIsFlatFace[prevFace] ||
           (triIsFlatFace[face] && triIsFlatFace[prevFace] &&
            !meshRelation_.triRef[face].SameFace(
@@ -618,6 +622,8 @@ void Manifold::Impl::SetNormals(int normalIdx, double minSharpAngle) {
           const double dihedral = degrees(
               AngleBetween(faceNormal_[here.face], faceNormal_[next.face]));
           if (dihedral > minSharpAngle ||
+              meshRelation_.triRef[here.face].meshID !=
+                  meshRelation_.triRef[next.face].meshID ||
               triIsFlatFace[here.face] != triIsFlatFace[next.face] ||
               (triIsFlatFace[here.face] && triIsFlatFace[next.face] &&
                !meshRelation_.triRef[here.face].SameFace(
@@ -627,15 +633,9 @@ void Manifold::Impl::SetNormals(int normalIdx, double minSharpAngle) {
           }
           groups.push_back(normals.size() - 1);
           if (std::isfinite(next.normalizedEdge.x)) {
-            // Boolean subtractee triangles keep their original winding but
-            // have faceNormal_ negated, so the edge-cross points opposite to
-            // faceNormal_ there - flip to keep the accumulation outward-from-
-            // result.
-            vec3 dir = SafeNormalize(
-                la::cross(next.normalizedEdge, here.normalizedEdge));
-            if (la::dot(dir, faceNormal_[next.face]) < 0) dir = -dir;
             normals.back() +=
-                dir * AngleBetween(here.normalizedEdge, next.normalizedEdge);
+                faceNormal_[next.face] *
+                AngleBetween(here.normalizedEdge, next.normalizedEdge);
           } else {
             next.normalizedEdge = here.normalizedEdge;
           }
