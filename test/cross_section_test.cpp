@@ -393,16 +393,16 @@ TEST(CrossSection, TJunctionAtSharedEndpoint) {
   // CW butterfly enclosing the cell (-0.2, -0.2) .. (0.2, 0.2) with a
   // cancel-pair retrace at (-0.5, 0.0)/(0.0, -0.5) to mimic the Sponge16
   // shape. Net signed area is negative (a hole-bearing loop).
-  SimplePolygon butterfly = {
-      {-0.2, 0.0},  {-0.2, 0.2},  {-0.5, 0.2},  {-0.2, 0.2}, {0.0, 0.2},
-      {0.2, 0.2},   {0.2, 0.0},   {0.5, -0.2},  {0.2, -0.2}, {0.2, -0.5},
-      {0.2, -0.2},  {0.0, -0.2},  {-0.2, -0.2}};
+  SimplePolygon butterfly = {{-0.2, 0.0}, {-0.2, 0.2}, {-0.5, 0.2}, {-0.2, 0.2},
+                             {0.0, 0.2},  {0.2, 0.2},  {0.2, 0.0},  {0.5, -0.2},
+                             {0.2, -0.2}, {0.2, -0.5}, {0.2, -0.2}, {0.0, -0.2},
+                             {-0.2, -0.2}};
   // CCW staircase whose v6->v7 edge ((0.2, -0.2) -> (-0.2, -0.2)) is the
   // butterfly's bottom edge, sharing both endpoints with butterfly
   // sub-edges (-0.2, -0.2)..(0.0, -0.2)..(0.2, -0.2) and creating a
   // T-junction at (0.0, -0.2).
-  SimplePolygon staircase = {{0.2, -0.2}, {-0.2, -0.2}, {-0.2, -0.4},
-                             {0.2, -0.4}};
+  SimplePolygon staircase = {
+      {0.2, -0.2}, {-0.2, -0.2}, {-0.2, -0.4}, {0.2, -0.4}};
 
   CrossSection csBR(Polygons{hex, butterfly, staircase});
   // The butterfly's full interior (cell 0.16 + SE detour triangle 0.03 =
@@ -475,27 +475,26 @@ TEST(CrossSection, ManyPolygonsShareCenterVertex) {
 //   effectively a no-op. Likely b2::Offset's normal/miter calc breaks
 //   on the near-zero edges produced by the +0.1 floor on tiny radii).
 TEST(CrossSection, OffsetPositiveOnExtremeRadiusStar) {
-  const std::vector<double> radii = {
-      0.,
-      0.40098345505108085,
-      4.7498113621644447e-99,
-      3.7120810186334277,
-      8.8389852354367608,
-      7.8626648130962875e-111,
-      0.37816850000826657,
-      0.,
-      2.0448856906274785e-158,
-      0.,
-      0.2582179499017509,
-      0.,
-      7.224596115948677e-174,
-      0.,
-      0.21952411055214244,
-      0.,
-      9.550952284653982e-128,
-      0.18006645730017631,
-      0.,
-      3.9220883255587997e-118};
+  const std::vector<double> radii = {0.,
+                                     0.40098345505108085,
+                                     4.7498113621644447e-99,
+                                     3.7120810186334277,
+                                     8.8389852354367608,
+                                     7.8626648130962875e-111,
+                                     0.37816850000826657,
+                                     0.,
+                                     2.0448856906274785e-158,
+                                     0.,
+                                     0.2582179499017509,
+                                     0.,
+                                     7.224596115948677e-174,
+                                     0.,
+                                     0.21952411055214244,
+                                     0.,
+                                     9.550952284653982e-128,
+                                     0.18006645730017631,
+                                     0.,
+                                     3.9220883255587997e-118};
   SimplePolygon ring;
   ring.reserve(radii.size());
   const int n = static_cast<int>(radii.size());
@@ -509,9 +508,8 @@ TEST(CrossSection, OffsetPositiveOnExtremeRadiusStar) {
   ASSERT_GT(std::fabs(input.Area()), 1e-9);
 
   const double delta = 7.2097955766145416;
-  const auto output =
-      input.Offset(delta, CrossSection::JoinType::Bevel,
-                   /*miter_limit=*/2.0, /*circularSegments=*/0);
+  const auto output = input.Offset(delta, CrossSection::JoinType::Bevel,
+                                   /*miter_limit=*/2.0, /*circularSegments=*/0);
   EXPECT_FALSE(output.IsEmpty());
   // A positive offset on a non-self-intersecting ring should always
   // grow the area. Observed locally: output.Area() ~= input.Area(),
@@ -543,12 +541,11 @@ TEST(CrossSection, SubtractInvariantsTinyVsLargeStars) {
   const std::vector<double> radiiA = {2.0371964671064575e-14,
                                       1.814002251251902e-10, 0.,
                                       2.1825088357767143e-09};
-  const std::vector<double> radiiB = {113.5978182908662, 0.,
-                                      114.34968677141997,
+  const std::vector<double> radiiB = {113.5978182908662, 0., 114.34968677141997,
                                       6.5076626333939721e-10};
   const CrossSection a(star(radiiA));
-  const CrossSection b = CrossSection(star(radiiB))
-                             .Translate({0., 4.667562921730494e-33});
+  const CrossSection b =
+      CrossSection(star(radiiB)).Translate({0., 4.667562921730494e-33});
 
   const auto aMinusB = a - b;
   const auto bMinusA = b - a;
@@ -630,20 +627,29 @@ TEST(CrossSection, SubtractInvariantsLeakySparseStar) {
     return ring;
   };
 
-  const std::vector<double> radiiA = {
-      627.11994612906153, 0.11978140887764367, 601.04982226530046,
-      102.31660501134466, 2.1549912703437601,  0.,
-      0.,                 0.,                  0.,
-      0.,                 0.,                  0.,
-      0.,                 0.,                  0.,
-      0.,                 0.};
-  const std::vector<double> radiiB = {112.00504648760347,
-                                      4.3823848227606392,
+  const std::vector<double> radiiA = {627.11994612906153,
+                                      0.11978140887764367,
+                                      601.04982226530046,
+                                      102.31660501134466,
+                                      2.1549912703437601,
+                                      0.,
+                                      0.,
+                                      0.,
+                                      0.,
+                                      0.,
+                                      0.,
+                                      0.,
+                                      0.,
+                                      0.,
+                                      0.,
+                                      0.,
+                                      0.};
+  const std::vector<double> radiiB = {112.00504648760347, 4.3823848227606392,
                                       1.2795858846899296e-07,
                                       6.7216166802304542};
   const CrossSection a(star(radiiA));
-  const CrossSection b = CrossSection(star(radiiB))
-                             .Translate({-2.7193614970785894e-29, 0.});
+  const CrossSection b =
+      CrossSection(star(radiiB)).Translate({-2.7193614970785894e-29, 0.});
 
   const auto aMinusB = a - b;
   const auto bMinusA = b - a;
@@ -675,12 +681,9 @@ TEST(CrossSection, BooleanCommutativityMixedScaleStars) {
       115.24729490924352,     83.850539440722784,     4.3348536506605848,
       3.0129653594607548,     3.1208956318387746,     4.4747952332988792,
       51.973983183682101,     5.99364665010221e-15};
-  const std::vector<double> radiiB = {3.9905161863280855e-53,
-                                      0.,
-                                      96.331001430191975,
-                                      0.,
-                                      0.43952001502476951,
-                                      48.319452987958854};
+  const std::vector<double> radiiB = {
+      3.9905161863280855e-53, 0., 96.331001430191975, 0., 0.43952001502476951,
+      48.319452987958854};
   auto star = [](const std::vector<double>& radii) {
     SimplePolygon ring;
     ring.reserve(radii.size());
@@ -694,9 +697,9 @@ TEST(CrossSection, BooleanCommutativityMixedScaleStars) {
   };
 
   const CrossSection a(star(radiiA));
-  const CrossSection b = CrossSection(star(radiiB))
-                             .Translate({-0.72134106089064531,
-                                         -4.5808240251267858});
+  const CrossSection b =
+      CrossSection(star(radiiB))
+          .Translate({-0.72134106089064531, -4.5808240251267858});
 
   const auto aPlusB = a + b;
   const auto bPlusA = b + a;
@@ -728,12 +731,26 @@ TEST(CrossSection, SubtractInvariantsTwoNonzeroVsNeedle) {
     }
     return ring;
   };
-  const std::vector<double> radiiA = {
-      0., 39.150613710409736, 0., 21.472413919643575, 0., 0.,
-      0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0.,
-      3.237760857312173e-24};
-  const std::vector<double> radiiB = {72.814105930277677,
-                                      21.384583693573447,
+  const std::vector<double> radiiA = {0.,
+                                      39.150613710409736,
+                                      0.,
+                                      21.472413919643575,
+                                      0.,
+                                      0.,
+                                      0.,
+                                      0.,
+                                      0.,
+                                      0.,
+                                      0.,
+                                      0.,
+                                      0.,
+                                      0.,
+                                      0.,
+                                      0.,
+                                      0.,
+                                      0.,
+                                      3.237760857312173e-24};
+  const std::vector<double> radiiB = {72.814105930277677, 21.384583693573447,
                                       1.6644635543899127e-243,
                                       1.6688953794582528e-229};
   const CrossSection a(star(radiiA));
@@ -798,27 +815,23 @@ TEST(CrossSection, BooleanAssociativityUnionMixedTriples) {
     }
     return ring;
   };
-  const std::vector<double> rA = {24.575460587300253,
-                                  2.4572617728922851e-10,
+  const std::vector<double> rA = {24.575460587300253, 2.4572617728922851e-10,
                                   3.3952718785303559e-06, 0.};
-  const std::vector<double> rB = {29.731318514644453,
-                                  1.5729051003875837e-06,
+  const std::vector<double> rB = {29.731318514644453, 1.5729051003875837e-06,
                                   0.0082858661009423962, 0.};
   const std::vector<double> rC = {0., 0., 6.5474426075871467e-16,
                                   2.9296729904240054e-06};
   const CrossSection a(star(rA));
-  const CrossSection b = CrossSection(star(rB))
-                             .Translate({-9.1863209962415243e-35,
-                                         -9.8444830049208569e-28});
-  const CrossSection c = CrossSection(star(rC))
-                             .Translate({-6.0489837474564476e-29, 0.});
+  const CrossSection b = CrossSection(star(rB)).Translate(
+      {-9.1863209962415243e-35, -9.8444830049208569e-28});
+  const CrossSection c =
+      CrossSection(star(rC)).Translate({-6.0489837474564476e-29, 0.});
 
   const auto ab_c = (a + b) + c;
   const auto a_bc = a + (b + c);
   const double tol = 1e-6 * (1.0 + std::fabs(a.Area()) + std::fabs(b.Area()) +
                              std::fabs(c.Area()));
-  EXPECT_NEAR(ab_c.Area(), a_bc.Area(), tol)
-      << "(A ∪ B) ∪ C != A ∪ (B ∪ C)";
+  EXPECT_NEAR(ab_c.Area(), a_bc.Area(), tol) << "(A ∪ B) ∪ C != A ∪ (B ∪ C)";
 }
 
 // Seed: BooleanCommutativity (2026-05-17 CI run 25976076740)
@@ -840,21 +853,26 @@ TEST(CrossSection, BooleanCommutativityVeryMixedStars) {
     return ring;
   };
   const std::vector<double> radiiA = {
-      5.5755616189085049e-09, 55.713117722084,
-      0.24425911685471227,    12.355613962816753,
-      3.2696445771376686e-21, 7.7223346956456043e-27,
-      9.1566312909847612e-29, 1.1757300951916251e-32,
-      7.5589164688107744e-40, 2.1073720366622818e-34,
-      4.7311936525798036e-23};
-  const std::vector<double> radiiB = {
-      0., 55.263016827250659, 0., 2.1568234275576556e-26,
-      4.3751784176513804e-26, 3.0217717245002794e-34, 0., 0., 0.,
-      5.2142580450244983e-22, 6.1161686141794186e-15,
-      2.8398350775198264};
+      5.5755616189085049e-09, 55.713117722084,        0.24425911685471227,
+      12.355613962816753,     3.2696445771376686e-21, 7.7223346956456043e-27,
+      9.1566312909847612e-29, 1.1757300951916251e-32, 7.5589164688107744e-40,
+      2.1073720366622818e-34, 4.7311936525798036e-23};
+  const std::vector<double> radiiB = {0.,
+                                      55.263016827250659,
+                                      0.,
+                                      2.1568234275576556e-26,
+                                      4.3751784176513804e-26,
+                                      3.0217717245002794e-34,
+                                      0.,
+                                      0.,
+                                      0.,
+                                      5.2142580450244983e-22,
+                                      6.1161686141794186e-15,
+                                      2.8398350775198264};
   const CrossSection a(star(radiiA));
-  const CrossSection b = CrossSection(star(radiiB))
-                             .Translate({-0.35827067719250716,
-                                         2.8298129605573439});
+  const CrossSection b =
+      CrossSection(star(radiiB))
+          .Translate({-0.35827067719250716, 2.8298129605573439});
   const auto aPlusB = a + b;
   const auto bPlusA = b + a;
   const double tol = 1e-6 * (1.0 + std::fabs(a.Area()) + std::fabs(b.Area()));
@@ -879,29 +897,63 @@ TEST(CrossSection, SubtractInvariantsDominantSpikeStars) {
     }
     return ring;
   };
-  const std::vector<double> rA = {
-      0.15588462038906103, 0.00015361176400222398, 5.8511202761938412e-16,
-      3.3009196314697135e-10, 2.7199740700330746e-09, 4.690497141269639e-14,
-      8.9922571322790269e-10, 6.3553011716417212e-16, 4.2872009761335588e-18,
-      5.6483346599537904e-17, 3.479258338980731e-12, 9.9500479914355979e-14,
-      1.822663758661907e-10, 3.7366088533519133e-05, 7.6137290475474603e-12,
-      1.5917667211519553e-08, 1.3293803091881353e-06, 6.5804393417497265e-09,
-      0.0015777855119048808, 3.5317048943785664e-07, 1.353313563107637e-09,
-      1.1788667553671715e-05, 0.00014847370669519226, 1.509263403954591e-11,
-      6.5516568176598574e-10, 3.8749326674543751e-07, 3.450117114134831e-06,
-      8.3840226251340948e-08, 3.0175612629932874e-07, 33.778786246753299,
-      0.033251289695133752, 0., 0., 1.5817601023378236};
-  const std::vector<double> rB = {
-      3.910135632588194e-07, 1.0064704530951155e-13, 2.0158855952179934e-14,
-      1.4165380430901347e-21, 3.6148752792123783e-11, 1.3306453783491879e-10,
-      2.3794160990202857e-13, 4.0821728496033454e-14, 4.6816579341479393e-18,
-      1.7855060689360453e-17, 2.4858744170474308e-10, 1.5313588823631113e-11,
-      6.6960358868004941e-08, 2.1802650917628242e-10, 5.5611296920831909e-13,
-      1.9586931478995027e-08, 0., 36.09032519236748, 0.,
-      7.5123873966542927e-05};
+  const std::vector<double> rA = {0.15588462038906103,
+                                  0.00015361176400222398,
+                                  5.8511202761938412e-16,
+                                  3.3009196314697135e-10,
+                                  2.7199740700330746e-09,
+                                  4.690497141269639e-14,
+                                  8.9922571322790269e-10,
+                                  6.3553011716417212e-16,
+                                  4.2872009761335588e-18,
+                                  5.6483346599537904e-17,
+                                  3.479258338980731e-12,
+                                  9.9500479914355979e-14,
+                                  1.822663758661907e-10,
+                                  3.7366088533519133e-05,
+                                  7.6137290475474603e-12,
+                                  1.5917667211519553e-08,
+                                  1.3293803091881353e-06,
+                                  6.5804393417497265e-09,
+                                  0.0015777855119048808,
+                                  3.5317048943785664e-07,
+                                  1.353313563107637e-09,
+                                  1.1788667553671715e-05,
+                                  0.00014847370669519226,
+                                  1.509263403954591e-11,
+                                  6.5516568176598574e-10,
+                                  3.8749326674543751e-07,
+                                  3.450117114134831e-06,
+                                  8.3840226251340948e-08,
+                                  3.0175612629932874e-07,
+                                  33.778786246753299,
+                                  0.033251289695133752,
+                                  0.,
+                                  0.,
+                                  1.5817601023378236};
+  const std::vector<double> rB = {3.910135632588194e-07,
+                                  1.0064704530951155e-13,
+                                  2.0158855952179934e-14,
+                                  1.4165380430901347e-21,
+                                  3.6148752792123783e-11,
+                                  1.3306453783491879e-10,
+                                  2.3794160990202857e-13,
+                                  4.0821728496033454e-14,
+                                  4.6816579341479393e-18,
+                                  1.7855060689360453e-17,
+                                  2.4858744170474308e-10,
+                                  1.5313588823631113e-11,
+                                  6.6960358868004941e-08,
+                                  2.1802650917628242e-10,
+                                  5.5611296920831909e-13,
+                                  1.9586931478995027e-08,
+                                  0.,
+                                  36.09032519236748,
+                                  0.,
+                                  7.5123873966542927e-05};
   const CrossSection a(star(rA));
-  const CrossSection b = CrossSection(star(rB))
-                             .Translate({0.72140998591309213, 0.});
+  const CrossSection b =
+      CrossSection(star(rB)).Translate({0.72140998591309213, 0.});
   const auto aIb = a.Boolean(b, OpType::Intersect);
   const auto aUb = a + b;
   const double tol = 1e-6 * (1.0 + std::fabs(a.Area()) + std::fabs(b.Area()));
@@ -963,8 +1015,8 @@ TEST(CrossSection, BooleanDistributivityTinyStars) {
                                   4.8677534136980153e-13, 0., 0.};
   const CrossSection a(star(rA));
   const CrossSection b = CrossSection(star(rB)).Translate({0., 0.});
-  const CrossSection c = CrossSection(star(rC))
-                             .Translate({-2.4305117516652688e-13, 0.});
+  const CrossSection c =
+      CrossSection(star(rC)).Translate({-2.4305117516652688e-13, 0.});
   const auto bUc = b + c;
   const auto left = a.Boolean(bUc, OpType::Intersect);
   const auto aIb = a.Boolean(b, OpType::Intersect);
@@ -996,10 +1048,9 @@ TEST(CrossSection, BooleanAssociativityTinyStars) {
     return ring;
   };
   const std::vector<double> rA = {0., 0., 0., 2.9078938473355343e-13};
-  const std::vector<double> rB = {1.4795645772678251e-12,
-                                  2.4342935254638573e-13,
-                                  1.4800031437954507e-12,
-                                  1.1368244372782033e-305};
+  const std::vector<double> rB = {
+      1.4795645772678251e-12, 2.4342935254638573e-13, 1.4800031437954507e-12,
+      1.1368244372782033e-305};
   const std::vector<double> rC = {0., 0., 0., 0.};
   const CrossSection a(star(rA));
   const CrossSection b = CrossSection(star(rB)).Translate({0., 0.});
@@ -1008,8 +1059,7 @@ TEST(CrossSection, BooleanAssociativityTinyStars) {
   const auto a_bc = a + (b + c);
   const double tol = 1e-6 * (1.0 + std::fabs(a.Area()) + std::fabs(b.Area()) +
                              std::fabs(c.Area()));
-  EXPECT_NEAR(ab_c.Area(), a_bc.Area(), tol)
-      << "(A ∪ B) ∪ C != A ∪ (B ∪ C)";
+  EXPECT_NEAR(ab_c.Area(), a_bc.Area(), tol) << "(A ∪ B) ∪ C != A ∪ (B ∪ C)";
 }
 
 // Seed: OffsetInverseConvex (2026-05-17 local smoke during /loop iter)
@@ -1033,12 +1083,12 @@ TEST(CrossSection, OffsetInverseTriangleMiter) {
   const CrossSection input(ring);
   const double delta = -0.0094938192047002799;
 
-  const auto expanded = input.Offset(
-      delta, CrossSection::JoinType::Miter, /*miter_limit=*/2.0,
-      /*circularSegments=*/0);
-  const auto roundTrip = expanded.Offset(
-      -delta, CrossSection::JoinType::Miter, /*miter_limit=*/2.0,
-      /*circularSegments=*/0);
+  const auto expanded =
+      input.Offset(delta, CrossSection::JoinType::Miter, /*miter_limit=*/2.0,
+                   /*circularSegments=*/0);
+  const auto roundTrip = expanded.Offset(-delta, CrossSection::JoinType::Miter,
+                                         /*miter_limit=*/2.0,
+                                         /*circularSegments=*/0);
 
   // For Miter join with miter_limit=2.0 exactly at the equilateral triangle
   // threshold, equality should still take the miter path. Observed:
@@ -1075,11 +1125,9 @@ TEST(CrossSection, DecomposeRecomposeOuterStarWithSmallHole) {
   };
   const std::vector<double> outerRadii = {
       1., 1., 1., 50., 50., 0., 3.987798525003551, 1.};
-  const std::vector<double> holeRadii = {0., 0., 1.,
-                                         0.29444504003509697};
+  const std::vector<double> holeRadii = {0., 0., 1., 0.29444504003509697};
   const CrossSection outer(star(outerRadii));
-  const CrossSection hole =
-      CrossSection(star(holeRadii)).Translate({0., 1.});
+  const CrossSection hole = CrossSection(star(holeRadii)).Translate({0., 1.});
   const auto holed = outer - hole;
   ASSERT_EQ(holed.NumContour(), 2u);  // sanity: subtract produced
                                       // outer + hole
@@ -1136,13 +1184,13 @@ TEST(CrossSection, DecomposeRecomposeNearTangentSmallHole) {
   // Match the fuzz target's exact construction (outer - hole) so the
   // reproducer goes through the same Boolean Subtract -> Decompose
   // path that fuzzing exercised.
-  const std::vector<double> outerRadii = {
-      48.55001516665169, 5.0536385110757127, 1., 1., 50.};
-  const std::vector<double> holeRadii = {
-      1., 3.7464608085566375, 0.57299724595371804, 1., 0.};
+  const std::vector<double> outerRadii = {48.55001516665169, 5.0536385110757127,
+                                          1., 1., 50.};
+  const std::vector<double> holeRadii = {1., 3.7464608085566375,
+                                         0.57299724595371804, 1., 0.};
   const CrossSection outer(star(outerRadii));
-  const CrossSection hole = CrossSection(star(holeRadii))
-                                .Translate({-0., 1.0011960822937693});
+  const CrossSection hole =
+      CrossSection(star(holeRadii)).Translate({-0., 1.0011960822937693});
   const auto holed = outer - hole;
   ASSERT_FALSE(holed.IsEmpty());
   ASSERT_GE(holed.NumContour(), 2u)
@@ -1172,6 +1220,179 @@ TEST(CrossSection, DecomposeRecomposeNearTangentSmallHole) {
       << "Compose(Decompose(holed)) changed contour count";
 }
 
+// Seed: BooleanDistributivity (2026-05-20 daemon find on post-cleanup tip)
+// Counterexample-hash: 659ec969e064893e
+// Suspected owner: pr/boolean2-core (left side `A ∩ (B ∪ C)` has
+//   NumContour=24, right side `(A ∩ B) ∪ (A ∩ C)` has NumContour=23.
+//   Off-by-one in contour decomposition. Inputs are three mid-size
+//   stars (34/46/48 verts) with extreme-magnitude radii (mix of 0,
+//   1, 1000-ish) and translations in [-2.4, 3.9] x [-1.0, 2.4].
+//   Likely the interleaved Union+Intersect path produces or drops
+//   a contour relative to the (Intersect, Intersect, Union)
+//   ordering. Related to but distinct from previously-drained
+//   BooleanCommutativity / BooleanAssociativity classes).
+TEST(CrossSection, DISABLED_BooleanDistributivityExtremeMagStars) {
+  auto star = [](const std::vector<double>& radii) {
+    SimplePolygon ring;
+    const int n = static_cast<int>(radii.size());
+    for (int i = 0; i < n; ++i) {
+      const double r = 0.1 + std::fabs(radii[i]);
+      const double th = 2.0 * kPi * i / n;
+      ring.push_back({r * std::cos(th), r * std::sin(th)});
+    }
+    return ring;
+  };
+  const std::vector<double> radiiA = {22.40352672886273,
+                                      1000.,
+                                      1.930469114705216,
+                                      1000.,
+                                      995.07901723564635,
+                                      450.42497103653432,
+                                      1.,
+                                      1000.,
+                                      442.67830885450564,
+                                      974.26213405728731,
+                                      762.40083808845225,
+                                      375.22374612076686,
+                                      311.70408869554416,
+                                      4.6596927406080066,
+                                      1000.,
+                                      993.53293688808651,
+                                      545.61942022366179,
+                                      902.87869535025561,
+                                      857.23036058152354,
+                                      1.,
+                                      997.14305195601548,
+                                      998.81543502854458,
+                                      4.287799655231888,
+                                      1.9578049801330417,
+                                      212.99717518614997,
+                                      539.98252283023282,
+                                      814.2147123777587,
+                                      6.4135462648884491,
+                                      386.69166945488905,
+                                      642.25190405836315,
+                                      671.02238904111891,
+                                      1000.,
+                                      0.,
+                                      959.32882825167917};
+  const std::vector<double> radiiB = {596.78699570023025,
+                                      0.,
+                                      0.,
+                                      4.8215130310908281,
+                                      134.35969768300723,
+                                      514.84369184653679,
+                                      514.84369184653679,
+                                      514.84369184653679,
+                                      134.35969768300723,
+                                      134.35969768300723,
+                                      1000.,
+                                      1.,
+                                      1000.,
+                                      0.,
+                                      926.29500965174145,
+                                      0.,
+                                      134.35969768300723,
+                                      0.90493025476122824,
+                                      95.854999537523781,
+                                      1000.,
+                                      0.,
+                                      0.,
+                                      460.32237309958083,
+                                      2.9791218075989327,
+                                      30.186663600739344,
+                                      1.,
+                                      5.732788180417673,
+                                      487.77994489187455,
+                                      1.,
+                                      639.36782925291504,
+                                      1.,
+                                      1.,
+                                      405.85342012592389,
+                                      405.85342012592389,
+                                      405.85342012592389,
+                                      706.56289376450047,
+                                      405.85342012592389,
+                                      405.85342012592389,
+                                      1.,
+                                      1.,
+                                      872.8336783186561,
+                                      5.1830997334306659,
+                                      313.84753596061228,
+                                      3.3318960586713984,
+                                      22.317598513501498,
+                                      4.1956604335614083};
+  const std::vector<double> radiiC = {279.68331311398725,
+                                      670.56312431772176,
+                                      812.15251441725718,
+                                      1000.,
+                                      0.,
+                                      996.64035079388486,
+                                      1.,
+                                      1000.,
+                                      1.,
+                                      146.36259356992105,
+                                      1000.,
+                                      1.2440205144455736,
+                                      2.4903214421341642,
+                                      558.11442117895865,
+                                      667.56514527125182,
+                                      601.28991029625661,
+                                      0.,
+                                      0.,
+                                      1.,
+                                      485.29900078511309,
+                                      205.35289543499823,
+                                      1.,
+                                      1.,
+                                      999.13575735403208,
+                                      0.,
+                                      343.12355139003932,
+                                      124.51182502694519,
+                                      0.44553220583928932,
+                                      512.45895098827191,
+                                      2.5455428684940777,
+                                      0.,
+                                      1000.,
+                                      1000.,
+                                      0.,
+                                      595.63567011806413,
+                                      2.5851695628219766,
+                                      3.2720224325713057,
+                                      354.45821723238265,
+                                      4.2476895774067867,
+                                      956.03225557664916,
+                                      0.,
+                                      1000.,
+                                      0.,
+                                      98.799661756610732,
+                                      0.,
+                                      619.55626420041142,
+                                      0.,
+                                      999.86711403007541};
+  const CrossSection a(star(radiiA));
+  const CrossSection b =
+      CrossSection(star(radiiB))
+          .Translate({3.4425093025001434, -0.89018350575014171});
+  const CrossSection c =
+      CrossSection(star(radiiC))
+          .Translate({3.8936971336588151, 2.3137657561842939});
+
+  const auto bUc = b + c;
+  const auto left = a.Boolean(bUc, OpType::Intersect);
+  const auto aIntB = a.Boolean(b, OpType::Intersect);
+  const auto aIntC = a.Boolean(c, OpType::Intersect);
+  const auto right = aIntB + aIntC;
+
+  const double tol = 1e-6 * (1.0 + std::fabs(a.Area()) + std::fabs(b.Area()) +
+                             std::fabs(c.Area()));
+  EXPECT_NEAR(left.Area(), right.Area(), tol)
+      << "A ∩ (B ∪ C) != (A ∩ B) ∪ (A ∩ C)";
+  EXPECT_EQ(left.NumContour(), right.NumContour())
+      << "distributivity: contour count differs: left=" << left.NumContour()
+      << " right=" << right.NumContour();
+}
+
 // Seed: BooleanCommutativity (2026-05-18 CI run 26006574818)
 // Counterexample-hash: 68e22a523aa8d6a5
 // Suspected owner: pr/boolean2-core (A+B and B+A produce different
@@ -1194,28 +1415,85 @@ TEST(CrossSection, BooleanCommutativityExtremeMagStars) {
     }
     return ring;
   };
-  const std::vector<double> radiiA = {
-      849.58267006542974, 1000., 1., 1000., 0., 0., 1., 0., 0.,
-      673.91660850339099, 641.26963903267847, 0.84355834285842513, 0., 0.,
-      0., 0., 0., 0., 633.12578243694929, 52.949291739509349,
-      596.41353494815576, 659.59815503253992, 907.85583546669454,
-      2.3971527824334933, 0., 744.77799184771879, 0., 668.48707869911436,
-      436.35135227432249, 0., 0., 0., 1000., 0., 938.50101700824371,
-      84.188304887665581, 470.75422504731279, 89.810808608112893,
-      992.99533690532235, 152.76119378800999, 1000., 0.};
-  const std::vector<double> radiiB = {
-      681.1551582487607, 1., 226.83285963348141, 25.271695356113401,
-      903.10565859434519, 25.271695356113401, 27.294237080468665,
-      205.64018204902527, 708.55499051253935, 934.95934725410712,
-      597.99208744386829, 937.31857430425612, 1., 3.0503172192082628, 1.,
-      1., 1000., 1000., 1., 1., 901.26525729886407, 1., 1000.,
-      1.6267135216510802, 449.23493668120602, 449.23493668120602,
-      3.1828449559882372, 6.9538585160876147, 1.7485381697954843,
-      696.88681861119551, 1., 183.08811014255667, 1.};
+  const std::vector<double> radiiA = {849.58267006542974,
+                                      1000.,
+                                      1.,
+                                      1000.,
+                                      0.,
+                                      0.,
+                                      1.,
+                                      0.,
+                                      0.,
+                                      673.91660850339099,
+                                      641.26963903267847,
+                                      0.84355834285842513,
+                                      0.,
+                                      0.,
+                                      0.,
+                                      0.,
+                                      0.,
+                                      0.,
+                                      633.12578243694929,
+                                      52.949291739509349,
+                                      596.41353494815576,
+                                      659.59815503253992,
+                                      907.85583546669454,
+                                      2.3971527824334933,
+                                      0.,
+                                      744.77799184771879,
+                                      0.,
+                                      668.48707869911436,
+                                      436.35135227432249,
+                                      0.,
+                                      0.,
+                                      0.,
+                                      1000.,
+                                      0.,
+                                      938.50101700824371,
+                                      84.188304887665581,
+                                      470.75422504731279,
+                                      89.810808608112893,
+                                      992.99533690532235,
+                                      152.76119378800999,
+                                      1000.,
+                                      0.};
+  const std::vector<double> radiiB = {681.1551582487607,
+                                      1.,
+                                      226.83285963348141,
+                                      25.271695356113401,
+                                      903.10565859434519,
+                                      25.271695356113401,
+                                      27.294237080468665,
+                                      205.64018204902527,
+                                      708.55499051253935,
+                                      934.95934725410712,
+                                      597.99208744386829,
+                                      937.31857430425612,
+                                      1.,
+                                      3.0503172192082628,
+                                      1.,
+                                      1.,
+                                      1000.,
+                                      1000.,
+                                      1.,
+                                      1.,
+                                      901.26525729886407,
+                                      1.,
+                                      1000.,
+                                      1.6267135216510802,
+                                      449.23493668120602,
+                                      449.23493668120602,
+                                      3.1828449559882372,
+                                      6.9538585160876147,
+                                      1.7485381697954843,
+                                      696.88681861119551,
+                                      1.,
+                                      183.08811014255667,
+                                      1.};
   const CrossSection a(star(radiiA));
-  const CrossSection b = CrossSection(star(radiiB))
-                             .Translate({1.7126290778198534,
-                                         -0.5023590407011973});
+  const CrossSection b =
+      CrossSection(star(radiiB))
+          .Translate({1.7126290778198534, -0.5023590407011973});
   const auto aPlusB = a + b;
   const auto bPlusA = b + a;
   const double tol = 1e-6 * (1.0 + std::fabs(a.Area()) + std::fabs(b.Area()));
@@ -1249,8 +1527,7 @@ TEST(CrossSection, SimplifyUsesFixedPointWrapper) {
   ASSERT_EQ(simplified.size(), 2);
   EXPECT_EQ(simplified[0].size(), 11);
   EXPECT_EQ(simplified[1].size(), 3);
-  EXPECT_NEAR(boolean2::TotalSignedArea(simplified), 1.7657076120973501,
-              1e-12);
+  EXPECT_NEAR(boolean2::TotalSignedArea(simplified), 1.7657076120973501, 1e-12);
 }
 
 TEST(CrossSection, ConstructorUsesFixedPointWrapper) {
