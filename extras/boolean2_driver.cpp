@@ -372,8 +372,9 @@ void Diagnose(uint64_t seed, int kPow = 30, int n = 50) {
     diagEdgeBoxes[i] =
         BoxOf2DEdge(merge.verts[edges[i].v0], merge.verts[edges[i].v1], eps);
   BVH diagBvh = BVHBuildFromBoxes(diagEdgeBoxes);
-  auto diagPairs =
-      CollectIntersectionPairs(edges, merge.verts, eps, diagEdgeBoxes, diagBvh);
+  std::vector<std::pair<int, int>> diagPairs;
+  CollectIntersectionPairs(edges, merge.verts, eps, diagEdgeBoxes, diagBvh,
+                           &diagPairs);
   auto lists =
       BuildEdgeVertListsFromEdgePairs(edges, merge.verts, eps, diagPairs);
   size_t totalListSize = 0;
@@ -397,7 +398,8 @@ void Diagnose(uint64_t seed, int kPow = 30, int n = 50) {
   std::cerr << "After structural re-merge: skipped (production uses "
                "structural merge; see RemoveOverlaps2D)\n";
 
-  auto canon = Canonicalize(edges, lists);
+  CanonicalSubEdges canon;
+  Canonicalize(edges, lists, &canon);
   std::cerr << "After canonicalization: " << canon.edges.size()
             << " sub-edges (after multiplicity collapse)\n";
 
@@ -634,7 +636,8 @@ void Diagnose(uint64_t seed, int kPow = 30, int n = 50) {
     for (size_t i = 0; i < e3.size(); ++i)
       e3Boxes[i] = BoxOf2DEdge(m3.verts[e3[i].v0], m3.verts[e3[i].v1], eps);
     BVH e3Bvh = BVHBuildFromBoxes(e3Boxes);
-    auto e3Pairs = CollectIntersectionPairs(e3, m3.verts, eps, e3Boxes, e3Bvh);
+    std::vector<std::pair<int, int>> e3Pairs;
+    CollectIntersectionPairs(e3, m3.verts, eps, e3Boxes, e3Bvh, &e3Pairs);
     auto l3 = BuildEdgeVertListsFromEdgePairs(e3, m3.verts, eps, e3Pairs);
     std::vector<std::vector<int>> ve3;
     FindAndInsertIntersections(e3, &m3.verts, &l3, &ve3, eps, e3Boxes, e3Bvh,
@@ -687,7 +690,8 @@ void Diagnose(uint64_t seed, int kPow = 30, int n = 50) {
         m3.verts = std::move(nv);
       }
     }
-    auto canon = Canonicalize(e3, l3);
+    CanonicalSubEdges canon;
+    Canonicalize(e3, l3, &canon);
     std::cerr << "  canonical sub-edges: " << canon.edges.size() << "\n";
 
     // For each imbalanced vert, dump every canonical edge touching it and
@@ -2995,8 +2999,8 @@ void DeepFuzz(int seedsPerCell) {
           }
           const auto fp1_fine = FingerprintAt(pass1, eps * 0.01);
           const auto fp2_fine = FingerprintAt(pass2, eps * 0.01);
-          const auto fp1_topo = CoarseFingerprint(pass1, eps);
-          const auto fp2_topo = CoarseFingerprint(pass2, eps);
+          const auto fp1_topo = FingerprintAt(pass1, eps);
+          const auto fp2_topo = FingerprintAt(pass2, eps);
           if (fp1_fine == fp2_fine) ++iterGE2_fine_match;
           if (fp1_topo == fp2_topo)
             ++iterGE2_topo_match;
@@ -4160,8 +4164,9 @@ int main(int argc, char** argv) {
       p2_eBoxes[i] =
           BoxOf2DEdge(p2_mrg.verts[p2_e[i].v0], p2_mrg.verts[p2_e[i].v1], eps);
     BVH p2_bvh = BVHBuildFromBoxes(p2_eBoxes);
-    auto p2_pairs =
-        CollectIntersectionPairs(p2_e, p2_mrg.verts, eps, p2_eBoxes, p2_bvh);
+    std::vector<std::pair<int, int>> p2_pairs;
+    CollectIntersectionPairs(p2_e, p2_mrg.verts, eps, p2_eBoxes, p2_bvh,
+                             &p2_pairs);
     auto p2_l =
         BuildEdgeVertListsFromEdgePairs(p2_e, p2_mrg.verts, eps, p2_pairs);
     int p2_totalList = 0;
@@ -4171,7 +4176,8 @@ int main(int argc, char** argv) {
     FindAndInsertIntersections(p2_e, &p2_mrg.verts, &p2_l, &p2_ve, eps,
                                p2_eBoxes, p2_bvh, p2_pairs);
     std::cerr << "  intersections: " << p2_mrg.verts.size() << " verts after\n";
-    auto p2_canon = Canonicalize(p2_e, p2_l);
+    CanonicalSubEdges p2_canon;
+    Canonicalize(p2_e, p2_l, &p2_canon);
     std::cerr << "  canonicalization: " << p2_canon.edges.size()
               << " sub-edges\n";
 
