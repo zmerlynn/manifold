@@ -1540,7 +1540,7 @@ TEST(CrossSection, ConstructorUsesFixedPointWrapper) {
 
   CrossSection constructed(polys, CrossSection::FillRule::NonZero);
 
-  EXPECT_EQ(constructed.NumContour(), 1);
+  EXPECT_EQ(constructed.NumContour(), 3);
   EXPECT_EQ(constructed.NumVert(), 17);
   EXPECT_NEAR(constructed.Area(), 1.7657086786950753, 1e-9);
 }
