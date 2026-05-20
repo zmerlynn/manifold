@@ -1231,7 +1231,7 @@ TEST(CrossSection, DecomposeRecomposeNearTangentSmallHole) {
 //   a contour relative to the (Intersect, Intersect, Union)
 //   ordering. Related to but distinct from previously-drained
 //   BooleanCommutativity / BooleanAssociativity classes).
-TEST(CrossSection, DISABLED_BooleanDistributivityExtremeMagStars) {
+TEST(CrossSection, BooleanDistributivityExtremeMagStars) {
   auto star = [](const std::vector<double>& radii) {
     SimplePolygon ring;
     const int n = static_cast<int>(radii.size());
