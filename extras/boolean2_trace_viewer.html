@@ -245,8 +245,11 @@
       trace: null,
       phaseIndex: 0,
       viewBox: null,
+      renderScale: 1,
       drag: null,
     };
+
+    const kRenderExtent = 1000;
 
     const els = {
       file: document.getElementById('file'),
@@ -336,13 +339,26 @@
       return viewBoxForPoints(phasePoints(phase));
     }
 
+    function fitCurrentPhase() {
+      const vb = currentPhaseViewBox();
+      if (vb) setViewBox(vb);
+    }
+
     function pt([x, y]) {
-      return [x, -y];
+      if (!state.viewBox) return [x, -y];
+      return [
+        (x - state.viewBox[0]) * state.renderScale,
+        (-y - state.viewBox[1]) * state.renderScale,
+      ];
     }
 
     function setViewBox(vb) {
       state.viewBox = vb;
-      els.svg.setAttribute('viewBox', vb.join(' '));
+      state.renderScale = kRenderExtent / Math.max(vb[2], vb[3]);
+      els.svg.setAttribute(
+        'viewBox',
+        [0, 0, vb[2] * state.renderScale, vb[3] * state.renderScale].join(' '),
+      );
     }
 
     function showDetails(item) {
@@ -554,18 +570,21 @@
 
     els.phase.addEventListener('change', () => {
       state.phaseIndex = Number(els.phase.value);
+      fitCurrentPhase();
       render();
     });
 
     els.prev.addEventListener('click', () => {
       if (!state.trace) return;
       state.phaseIndex = Math.max(0, state.phaseIndex - 1);
+      fitCurrentPhase();
       render();
     });
 
     els.next.addEventListener('click', () => {
       if (!state.trace) return;
       state.phaseIndex = Math.min(state.trace.phases.length - 1, state.phaseIndex + 1);
+      fitCurrentPhase();
       render();
     });
 
@@ -576,8 +595,8 @@
     els.zoomIn.addEventListener('click', () => zoom(0.75));
     els.zoomOut.addEventListener('click', () => zoom(1.33));
     els.fitPhase.addEventListener('click', () => {
-      const vb = currentPhaseViewBox();
-      if (vb) setViewBox(vb);
+      fitCurrentPhase();
+      render();
     });
     els.reset.addEventListener('click', () => {
       if (state.trace) setViewBox(defaultViewBox(state.trace));
@@ -594,14 +613,18 @@
 
     els.svg.addEventListener('mousedown', (event) => {
       if (!state.viewBox) return;
-      state.drag = { start: svgPoint(event), viewBox: state.viewBox.slice() };
+      state.drag = {
+        start: svgPoint(event),
+        viewBox: state.viewBox.slice(),
+        renderScale: state.renderScale,
+      };
     });
 
     window.addEventListener('mousemove', (event) => {
       if (!state.drag) return;
       const now = svgPoint(event);
-      const dx = state.drag.start[0] - now[0];
-      const dy = state.drag.start[1] - now[1];
+      const dx = (state.drag.start[0] - now[0]) / state.drag.renderScale;
+      const dy = (state.drag.start[1] - now[1]) / state.drag.renderScale;
       const [x, y, w, h] = state.drag.viewBox;
       setViewBox([x + dx, y + dy, w, h]);
     });
