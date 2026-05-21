@@ -3222,6 +3222,24 @@ TEST(CrossSection, SimplifyPostFiltersBoolean2Output) {
   EXPECT_NEAR(twice.Area(), once.Area(), 1e-12);
 }
 
+TEST(CrossSection, SimplifyPostFiltersBoolean2Output) {
+  const double apex = 1.0148512233354445e-6;
+  const SimplePolygon tri = {{-1.0, 0.0}, {1.0, 0.0}, {0.0, apex}};
+  const SimplePolygon quad = {
+      {-0.05, -1.0}, {0.05, -1.0}, {0.05, 2.0}, {-0.05, 2.0}};
+  const CrossSection input(Polygons{tri, quad},
+                           CrossSection::FillRule::NonZero);
+
+  const CrossSection once = input.Simplify();
+  const CrossSection twice = once.Simplify();
+
+  EXPECT_EQ(once.NumContour(), 1);
+  EXPECT_EQ(once.NumVert(), 6);
+  EXPECT_EQ(twice.NumContour(), once.NumContour());
+  EXPECT_EQ(twice.NumVert(), once.NumVert());
+  EXPECT_NEAR(twice.Area(), once.Area(), 1e-12);
+}
+
 TEST(CrossSection, Empty) {
   Polygons polys(2);
   auto e = CrossSection(polys);
