@@ -1,0 +1,546 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Boolean2 Trace Viewer</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f7f7f4;
+      --panel: #ffffff;
+      --ink: #1f2523;
+      --muted: #66716d;
+      --line: #cfd7d2;
+      --accent: #0d7c66;
+      --subject: #1f77b4;
+      --clip: #d1495b;
+      --candidate: #8a63d2;
+      --output: #0b6e4f;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      height: 100vh;
+      overflow: hidden;
+      background: var(--bg);
+      color: var(--ink);
+      font: 14px/1.4 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    .app {
+      display: grid;
+      grid-template-columns: 320px minmax(0, 1fr) 300px;
+      height: 100vh;
+    }
+
+    aside {
+      background: var(--panel);
+      border-right: 1px solid var(--line);
+      overflow: auto;
+      padding: 16px;
+    }
+
+    aside.details {
+      border-right: 0;
+      border-left: 1px solid var(--line);
+    }
+
+    h1 {
+      margin: 0 0 14px;
+      font-size: 18px;
+      font-weight: 650;
+    }
+
+    h2 {
+      margin: 20px 0 8px;
+      font-size: 13px;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    input[type="file"], select, button {
+      width: 100%;
+      min-height: 34px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fff;
+      color: var(--ink);
+      font: inherit;
+    }
+
+    button {
+      cursor: pointer;
+    }
+
+    button:hover {
+      border-color: var(--accent);
+    }
+
+    .row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      margin-top: 8px;
+    }
+
+    label.toggle {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      margin: 8px 0;
+      color: var(--ink);
+    }
+
+    label.toggle input {
+      width: 16px;
+      height: 16px;
+      margin: 0;
+    }
+
+    .meta, .hint, .empty {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    main {
+      position: relative;
+      min-width: 0;
+      overflow: hidden;
+      background:
+        linear-gradient(#ecefeb 1px, transparent 1px),
+        linear-gradient(90deg, #ecefeb 1px, transparent 1px);
+      background-size: 24px 24px;
+    }
+
+    svg {
+      display: block;
+      width: 100%;
+      height: 100%;
+      user-select: none;
+    }
+
+    .segment {
+      stroke-linecap: round;
+      vector-effect: non-scaling-stroke;
+      cursor: pointer;
+    }
+
+    .point {
+      vector-effect: non-scaling-stroke;
+      cursor: pointer;
+    }
+
+    .polygon {
+      vector-effect: non-scaling-stroke;
+      cursor: pointer;
+    }
+
+    .label {
+      font-size: 11px;
+      paint-order: stroke;
+      stroke: #fff;
+      stroke-width: 3px;
+      stroke-linejoin: round;
+      pointer-events: none;
+    }
+
+    .ghost {
+      opacity: 0.22;
+      filter: grayscale(1);
+    }
+
+    pre {
+      margin: 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+
+    .tooltip {
+      position: absolute;
+      display: none;
+      max-width: 360px;
+      padding: 8px 10px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: rgba(255, 255, 255, 0.96);
+      box-shadow: 0 6px 24px rgba(0, 0, 0, 0.12);
+      pointer-events: none;
+      font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      z-index: 5;
+    }
+
+    @media (max-width: 900px) {
+      .app {
+        grid-template-columns: 1fr;
+        grid-template-rows: auto minmax(0, 1fr) 220px;
+      }
+
+      aside {
+        border-right: 0;
+        border-bottom: 1px solid var(--line);
+        max-height: 260px;
+      }
+
+      aside.details {
+        border-left: 0;
+        border-top: 1px solid var(--line);
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <aside>
+      <h1>Boolean2 Trace</h1>
+      <input id="file" type="file" accept="application/json,.json">
+      <p class="hint">Load a trace JSON produced by the debug fixture.</p>
+
+      <h2>Phase</h2>
+      <select id="phase"></select>
+      <div class="row">
+        <button id="prev" type="button">Previous</button>
+        <button id="next" type="button">Next</button>
+      </div>
+      <p id="phaseMeta" class="meta">No trace loaded.</p>
+
+      <h2>Layers</h2>
+      <label class="toggle"><input id="showPolygons" type="checkbox" checked> polygons</label>
+      <label class="toggle"><input id="showSegments" type="checkbox" checked> segments</label>
+      <label class="toggle"><input id="showPoints" type="checkbox" checked> points</label>
+      <label class="toggle"><input id="showLabels" type="checkbox"> labels</label>
+      <label class="toggle"><input id="showGhost" type="checkbox" checked> previous phase ghost</label>
+
+      <h2>View</h2>
+      <div class="row">
+        <button id="zoomIn" type="button">Zoom In</button>
+        <button id="zoomOut" type="button">Zoom Out</button>
+      </div>
+      <button id="reset" type="button" style="margin-top: 8px;">Reset View</button>
+    </aside>
+
+    <main id="canvas">
+      <svg id="svg" role="img" aria-label="Boolean2 trace visualization"></svg>
+      <div id="tooltip" class="tooltip"></div>
+    </main>
+
+    <aside class="details">
+      <h2>Selection</h2>
+      <pre id="details">Nothing selected.</pre>
+      <h2>Annotations</h2>
+      <pre id="annotations">No phase loaded.</pre>
+    </aside>
+  </div>
+
+  <script>
+    const state = {
+      trace: null,
+      phaseIndex: 0,
+      viewBox: null,
+      drag: null,
+    };
+
+    const els = {
+      file: document.getElementById('file'),
+      phase: document.getElementById('phase'),
+      phaseMeta: document.getElementById('phaseMeta'),
+      svg: document.getElementById('svg'),
+      canvas: document.getElementById('canvas'),
+      tooltip: document.getElementById('tooltip'),
+      details: document.getElementById('details'),
+      annotations: document.getElementById('annotations'),
+      prev: document.getElementById('prev'),
+      next: document.getElementById('next'),
+      zoomIn: document.getElementById('zoomIn'),
+      zoomOut: document.getElementById('zoomOut'),
+      reset: document.getElementById('reset'),
+      showPolygons: document.getElementById('showPolygons'),
+      showSegments: document.getElementById('showSegments'),
+      showPoints: document.getElementById('showPoints'),
+      showLabels: document.getElementById('showLabels'),
+      showGhost: document.getElementById('showGhost'),
+    };
+
+    function svgEl(name, attrs = {}) {
+      const node = document.createElementNS('http://www.w3.org/2000/svg', name);
+      for (const [key, value] of Object.entries(attrs)) {
+        node.setAttribute(key, value);
+      }
+      return node;
+    }
+
+    function colorFor(item) {
+      const text = `${item.kind || ''} ${item.source || ''} ${item.label || ''}`;
+      if (text.includes('outer_face')) return '#69746f';
+      if (item.inside === true) return 'var(--output)';
+      if ((item.kind || '') === 'face') return '#8a9a94';
+      if (text.includes('candidate')) return 'var(--candidate)';
+      if (text.includes('retained') || text.includes('final')) return 'var(--output)';
+      if (item.mult < 0 || text.includes('clip')) return 'var(--clip)';
+      if (item.mult > 0 || text.includes('input')) return 'var(--subject)';
+      return '#47524d';
+    }
+
+    function allPoints(trace) {
+      const pts = [];
+      for (const phase of trace.phases || []) {
+        for (const p of phase.points || []) pts.push(p.xy);
+        for (const s of phase.segments || []) {
+          pts.push(s.a, s.b);
+        }
+        for (const p of phase.polygons || []) {
+          for (const v of p.verts || []) pts.push(v);
+        }
+      }
+      return pts.filter((p) => p && Number.isFinite(p[0]) && Number.isFinite(p[1]));
+    }
+
+    function defaultViewBox(trace) {
+      const pts = allPoints(trace);
+      if (!pts.length) return [-1, -1, 2, 2];
+      let minX = pts[0][0], minY = pts[0][1], maxX = minX, maxY = minY;
+      for (const [x, y] of pts) {
+        minX = Math.min(minX, x);
+        minY = Math.min(minY, y);
+        maxX = Math.max(maxX, x);
+        maxY = Math.max(maxY, y);
+      }
+      const w = Math.max(maxX - minX, 1e-9);
+      const h = Math.max(maxY - minY, 1e-9);
+      const pad = 0.08 * Math.max(w, h);
+      return [minX - pad, -maxY - pad, w + 2 * pad, h + 2 * pad];
+    }
+
+    function pt([x, y]) {
+      return [x, -y];
+    }
+
+    function setViewBox(vb) {
+      state.viewBox = vb;
+      els.svg.setAttribute('viewBox', vb.join(' '));
+    }
+
+    function showDetails(item) {
+      els.details.textContent = JSON.stringify(item, null, 2);
+    }
+
+    function bindInspect(node, item) {
+      node.addEventListener('mouseenter', (event) => {
+        els.tooltip.style.display = 'block';
+        els.tooltip.textContent = `${item.id || item.kind || 'item'}\n${item.label || item.kind || ''}`;
+        moveTooltip(event);
+      });
+      node.addEventListener('mousemove', moveTooltip);
+      node.addEventListener('mouseleave', () => {
+        els.tooltip.style.display = 'none';
+      });
+      node.addEventListener('click', (event) => {
+        event.stopPropagation();
+        showDetails(item);
+      });
+    }
+
+    function moveTooltip(event) {
+      els.tooltip.style.left = `${event.clientX + 12}px`;
+      els.tooltip.style.top = `${event.clientY + 12}px`;
+    }
+
+    function renderPhase(phase, ghost = false) {
+      const group = svgEl('g', { class: ghost ? 'ghost' : '' });
+      if (els.showPolygons.checked) {
+        for (const poly of phase.polygons || []) {
+          const pts = (poly.verts || []).map((v) => {
+            const [x, y] = pt(v);
+            return `${x},${y}`;
+          }).join(' ');
+          const outer = (poly.kind || '').includes('outer_face');
+          const node = svgEl('polygon', {
+            points: pts,
+            class: 'polygon',
+            fill: ghost || outer ? 'none' : colorFor(poly),
+            'fill-opacity': ghost || outer ? '0' : (poly.inside ? '0.18' : '0.08'),
+            stroke: colorFor(poly),
+            'stroke-width': outer ? '1' : (ghost ? '1' : '1.5'),
+            'stroke-dasharray': outer ? '5 4' : '',
+          });
+          bindInspect(node, poly);
+          group.appendChild(node);
+        }
+      }
+      if (els.showSegments.checked) {
+        for (const seg of phase.segments || []) {
+          const a = pt(seg.a);
+          const b = pt(seg.b);
+          const node = svgEl('line', {
+            x1: a[0],
+            y1: a[1],
+            x2: b[0],
+            y2: b[1],
+            class: 'segment',
+            stroke: colorFor(seg),
+            'stroke-width': ghost ? '1' : '2',
+            'stroke-dasharray': (seg.kind || '').includes('candidate') ? '4 3' : '',
+          });
+          bindInspect(node, seg);
+          group.appendChild(node);
+          if (!ghost && els.showLabels.checked) {
+            const lx = (a[0] + b[0]) * 0.5;
+            const ly = (a[1] + b[1]) * 0.5;
+            const text = svgEl('text', { x: lx, y: ly, class: 'label', fill: colorFor(seg) });
+            text.textContent = seg.id || '';
+            group.appendChild(text);
+          }
+        }
+      }
+      if (els.showPoints.checked) {
+        for (const point of phase.points || []) {
+          const p = pt(point.xy);
+          const node = svgEl('circle', {
+            cx: p[0],
+            cy: p[1],
+            r: ghost ? 0.8 : 1.8,
+            class: 'point',
+            fill: colorFor(point),
+            stroke: '#fff',
+            'stroke-width': ghost ? '0.5' : '0.8',
+          });
+          bindInspect(node, point);
+          group.appendChild(node);
+          if (!ghost && els.showLabels.checked) {
+            const text = svgEl('text', {
+              x: p[0],
+              y: p[1],
+              dx: 3,
+              dy: -3,
+              class: 'label',
+              fill: colorFor(point),
+            });
+            text.textContent = point.id || '';
+            group.appendChild(text);
+          }
+        }
+      }
+      return group;
+    }
+
+    function render() {
+      els.svg.replaceChildren();
+      if (!state.trace) {
+        els.phaseMeta.textContent = 'No trace loaded.';
+        els.annotations.textContent = 'No phase loaded.';
+        return;
+      }
+      const phases = state.trace.phases || [];
+      const phase = phases[state.phaseIndex];
+      if (!phase) return;
+      if (els.showGhost.checked && state.phaseIndex > 0) {
+        els.svg.appendChild(renderPhase(phases[state.phaseIndex - 1], true));
+      }
+      els.svg.appendChild(renderPhase(phase, false));
+      els.phase.value = String(state.phaseIndex);
+      els.phaseMeta.textContent =
+        `${state.phaseIndex + 1}/${phases.length}: ${phase.name} - ` +
+        `${(phase.points || []).length} points, ${(phase.segments || []).length} segments, ` +
+        `${(phase.polygons || []).length} polygons`;
+      els.annotations.textContent = (phase.annotations || []).length
+        ? JSON.stringify(phase.annotations, null, 2)
+        : 'No annotations for this phase.';
+    }
+
+    function loadTrace(trace) {
+      state.trace = trace;
+      state.phaseIndex = 0;
+      els.phase.replaceChildren();
+      for (let i = 0; i < (trace.phases || []).length; ++i) {
+        const option = document.createElement('option');
+        option.value = String(i);
+        option.textContent = trace.phases[i].name || `phase ${i + 1}`;
+        els.phase.appendChild(option);
+      }
+      setViewBox(defaultViewBox(trace));
+      render();
+    }
+
+    function zoom(factor) {
+      if (!state.viewBox) return;
+      const [x, y, w, h] = state.viewBox;
+      const nw = w * factor;
+      const nh = h * factor;
+      setViewBox([x + (w - nw) / 2, y + (h - nh) / 2, nw, nh]);
+    }
+
+    function svgPoint(event) {
+      const pt = els.svg.createSVGPoint();
+      pt.x = event.clientX;
+      pt.y = event.clientY;
+      const transformed = pt.matrixTransform(els.svg.getScreenCTM().inverse());
+      return [transformed.x, transformed.y];
+    }
+
+    els.file.addEventListener('change', async () => {
+      const file = els.file.files[0];
+      if (!file) return;
+      loadTrace(JSON.parse(await file.text()));
+    });
+
+    els.phase.addEventListener('change', () => {
+      state.phaseIndex = Number(els.phase.value);
+      render();
+    });
+
+    els.prev.addEventListener('click', () => {
+      if (!state.trace) return;
+      state.phaseIndex = Math.max(0, state.phaseIndex - 1);
+      render();
+    });
+
+    els.next.addEventListener('click', () => {
+      if (!state.trace) return;
+      state.phaseIndex = Math.min(state.trace.phases.length - 1, state.phaseIndex + 1);
+      render();
+    });
+
+    for (const id of ['showPolygons', 'showSegments', 'showPoints', 'showLabels', 'showGhost']) {
+      els[id].addEventListener('change', render);
+    }
+
+    els.zoomIn.addEventListener('click', () => zoom(0.75));
+    els.zoomOut.addEventListener('click', () => zoom(1.33));
+    els.reset.addEventListener('click', () => {
+      if (state.trace) setViewBox(defaultViewBox(state.trace));
+    });
+
+    els.svg.addEventListener('click', () => {
+      els.details.textContent = 'Nothing selected.';
+    });
+
+    els.svg.addEventListener('wheel', (event) => {
+      event.preventDefault();
+      zoom(event.deltaY < 0 ? 0.85 : 1.18);
+    }, { passive: false });
+
+    els.svg.addEventListener('mousedown', (event) => {
+      if (!state.viewBox) return;
+      state.drag = { start: svgPoint(event), viewBox: state.viewBox.slice() };
+    });
+
+    window.addEventListener('mousemove', (event) => {
+      if (!state.drag) return;
+      const now = svgPoint(event);
+      const dx = state.drag.start[0] - now[0];
+      const dy = state.drag.start[1] - now[1];
+      const [x, y, w, h] = state.drag.viewBox;
+      setViewBox([x + dx, y + dy, w, h]);
+    });
+
+    window.addEventListener('mouseup', () => {
+      state.drag = null;
+    });
+  </script>
+</body>
+</html>
