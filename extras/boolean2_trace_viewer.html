@@ -552,6 +552,7 @@
       const nw = w * factor;
       const nh = h * factor;
       setViewBox([x + (w - nw) / 2, y + (h - nh) / 2, nw, nh]);
+      render();
     }
 
     function svgPoint(event) {
@@ -599,7 +600,9 @@
       render();
     });
     els.reset.addEventListener('click', () => {
-      if (state.trace) setViewBox(defaultViewBox(state.trace));
+      if (!state.trace) return;
+      setViewBox(defaultViewBox(state.trace));
+      render();
     });
 
     els.svg.addEventListener('click', () => {
@@ -627,6 +630,7 @@
       const dy = (state.drag.start[1] - now[1]) / state.drag.renderScale;
       const [x, y, w, h] = state.drag.viewBox;
       setViewBox([x + dx, y + dy, w, h]);
+      render();
     });
 
     window.addEventListener('mouseup', () => {
