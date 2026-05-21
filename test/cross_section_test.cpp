@@ -17,6 +17,9 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
+#ifdef MANIFOLD_DEBUG
+#include <fstream>
+#endif
 #include <limits>
 #include <map>
 #include <random>
@@ -24,6 +27,7 @@
 
 #ifdef MANIFOLD_CROSS_SECTION_BACKEND_BOOLEAN2
 #include "../src/cross_section/boolean2/boolean2.h"
+#include "../src/cross_section/boolean2/diagnostics.h"
 #include "../src/cross_section/boolean2/intersections.h"
 #endif
 #include "manifold/common.h"
@@ -560,6 +564,64 @@ TEST(CrossSection, SubtractInvariantsTinyVsLargeStars) {
   EXPECT_NEAR(aUnionB.Area(), a.Area() + b.Area() - aIntersectB.Area(), tol)
       << "inclusion-exclusion violated";
 }
+
+#ifdef MANIFOLD_DEBUG
+TEST(CrossSection, DISABLED_Boolean2TraceTinyVsLargeStars) {
+  auto star = [](const std::vector<double>& radii) {
+    SimplePolygon ring;
+    ring.reserve(radii.size());
+    const int n = static_cast<int>(radii.size());
+    for (int i = 0; i < n; ++i) {
+      const double r = 0.1 + std::fabs(radii[i]);
+      const double theta = 2.0 * kPi * i / n;
+      ring.push_back({r * std::cos(theta), r * std::sin(theta)});
+    }
+    return ring;
+  };
+
+  auto append = [](const Polygons& polys, int mult, std::vector<vec2>* verts,
+                   std::vector<boolean2::EdgeM>* edges) {
+    for (const auto& loop : polys) {
+      if (loop.size() < 3) continue;
+      const int base = static_cast<int>(verts->size());
+      for (const vec2& v : loop) verts->push_back(v);
+      const int n = static_cast<int>(loop.size());
+      for (int i = 0; i < n; ++i) {
+        edges->push_back({base + i, base + ((i + 1) % n), mult});
+      }
+    }
+  };
+
+  const std::vector<double> radiiA = {2.0371964671064575e-14,
+                                      1.814002251251902e-10, 0.,
+                                      2.1825088357767143e-09};
+  const std::vector<double> radiiB = {113.5978182908662, 0., 114.34968677141997,
+                                      6.5076626333939721e-10};
+  Polygons a{star(radiiA)};
+  Polygons b{star(radiiB)};
+  for (vec2& v : b[0]) v.y += 4.667562921730494e-33;
+
+  const double eps = boolean2::InferEps(a, b);
+  std::vector<vec2> verts;
+  std::vector<boolean2::EdgeM> edges;
+  append(a, 1, &verts, &edges);
+  append(b, -1, &verts, &edges);
+
+  boolean2::Trace trace;
+  auto result = boolean2::RemoveOverlaps2D(verts, edges, eps, /*debug=*/false,
+                                           boolean2::WindRule::Add, &trace);
+  Polygons final = boolean2::OutEdgesToPolygons(result.verts, result.edges);
+  auto& phase = trace.AddPhase("final_polygons");
+  for (int i = 0; i < static_cast<int>(final.size()); ++i) {
+    phase.polygons.push_back({std::string("poly") + std::to_string(i), final[i],
+                              "final_polygon", "", 0, true, ""});
+  }
+
+  std::ofstream out("boolean2_trace_tiny_vs_large_stars.json");
+  ASSERT_TRUE(out.good());
+  boolean2::WriteTraceJson(out, trace);
+}
+#endif
 
 // Seed: SubtractInvariants (2026-05-16 iteration #14)
 // Counterexample-hash: a7c02d027b57bf97
