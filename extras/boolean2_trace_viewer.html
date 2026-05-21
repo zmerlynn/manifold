@@ -221,7 +221,10 @@
         <button id="zoomIn" type="button">Zoom In</button>
         <button id="zoomOut" type="button">Zoom Out</button>
       </div>
-      <button id="reset" type="button" style="margin-top: 8px;">Reset View</button>
+      <div class="row">
+        <button id="fitPhase" type="button">Fit Phase</button>
+        <button id="reset" type="button">Reset View</button>
+      </div>
     </aside>
 
     <main id="canvas">
@@ -258,6 +261,7 @@
       next: document.getElementById('next'),
       zoomIn: document.getElementById('zoomIn'),
       zoomOut: document.getElementById('zoomOut'),
+      fitPhase: document.getElementById('fitPhase'),
       reset: document.getElementById('reset'),
       showPolygons: document.getElementById('showPolygons'),
       showSegments: document.getElementById('showSegments'),
@@ -286,22 +290,27 @@
       return '#47524d';
     }
 
-    function allPoints(trace) {
+    function phasePoints(phase) {
       const pts = [];
-      for (const phase of trace.phases || []) {
-        for (const p of phase.points || []) pts.push(p.xy);
-        for (const s of phase.segments || []) {
-          pts.push(s.a, s.b);
-        }
-        for (const p of phase.polygons || []) {
-          for (const v of p.verts || []) pts.push(v);
-        }
+      for (const p of phase.points || []) pts.push(p.xy);
+      for (const s of phase.segments || []) {
+        pts.push(s.a, s.b);
+      }
+      for (const p of phase.polygons || []) {
+        for (const v of p.verts || []) pts.push(v);
       }
       return pts.filter((p) => p && Number.isFinite(p[0]) && Number.isFinite(p[1]));
     }
 
-    function defaultViewBox(trace) {
-      const pts = allPoints(trace);
+    function allPoints(trace) {
+      const pts = [];
+      for (const phase of trace.phases || []) {
+        pts.push(...phasePoints(phase));
+      }
+      return pts;
+    }
+
+    function viewBoxForPoints(pts) {
       if (!pts.length) return [-1, -1, 2, 2];
       let minX = pts[0][0], minY = pts[0][1], maxX = minX, maxY = minY;
       for (const [x, y] of pts) {
@@ -314,6 +323,17 @@
       const h = Math.max(maxY - minY, 1e-9);
       const pad = 0.08 * Math.max(w, h);
       return [minX - pad, -maxY - pad, w + 2 * pad, h + 2 * pad];
+    }
+
+    function defaultViewBox(trace) {
+      return viewBoxForPoints(allPoints(trace));
+    }
+
+    function currentPhaseViewBox() {
+      if (!state.trace) return null;
+      const phase = (state.trace.phases || [])[state.phaseIndex];
+      if (!phase) return null;
+      return viewBoxForPoints(phasePoints(phase));
     }
 
     function pt([x, y]) {
@@ -511,6 +531,10 @@
 
     els.zoomIn.addEventListener('click', () => zoom(0.75));
     els.zoomOut.addEventListener('click', () => zoom(1.33));
+    els.fitPhase.addEventListener('click', () => {
+      const vb = currentPhaseViewBox();
+      if (vb) setViewBox(vb);
+    });
     els.reset.addEventListener('click', () => {
       if (state.trace) setViewBox(defaultViewBox(state.trace));
     });
