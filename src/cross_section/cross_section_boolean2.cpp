@@ -338,7 +338,7 @@ CrossSection CrossSection::Simplify(double epsilon) const {
       filtered.push_back(path);
     }
   }
-  return CrossSection(shared_paths(std::move(filtered)));
+  return CrossSection(shared_paths(b2::Simplify(filtered, epsilon)));
 }
 
 CrossSection CrossSection::Offset(double delta, JoinType jt, double miterLimit,
