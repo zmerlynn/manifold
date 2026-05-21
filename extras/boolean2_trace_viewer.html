@@ -404,11 +404,19 @@
         });
         bindInspect(node, poly);
         group.appendChild(node);
+        if (!ghost && els.showLabels.checked) {
+          const lx = (a[0] + b[0]) * 0.5;
+          const ly = (a[1] + b[1]) * 0.5;
+          const text = svgEl('text', { x: lx, y: ly, class: 'label', fill: colorFor(poly) });
+          text.textContent = `${poly.id || 'poly'}.e${i}`;
+          group.appendChild(text);
+        }
       }
     }
 
     function renderPolygonVerts(group, poly, ghost) {
-      for (const v of poly.verts || []) {
+      for (let i = 0; i < (poly.verts || []).length; ++i) {
+        const v = poly.verts[i];
         const p = pt(v);
         const node = svgEl('circle', {
           cx: p[0],
@@ -421,6 +429,18 @@
         });
         bindInspect(node, poly);
         group.appendChild(node);
+        if (!ghost && els.showLabels.checked) {
+          const text = svgEl('text', {
+            x: p[0],
+            y: p[1],
+            dx: 3,
+            dy: -3,
+            class: 'label',
+            fill: colorFor(poly),
+          });
+          text.textContent = `${poly.id || 'poly'}.v${i}`;
+          group.appendChild(text);
+        }
       }
     }
 
