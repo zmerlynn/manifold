@@ -200,14 +200,9 @@ void ExpectCrossSectionValid(const manifold::CrossSection& crossSection) {
 
   // Sanity check Simplify produces a finite, valid result.
   //
-  // We don't assert idempotence here: Simplify is a Clipper2
-  // primitive and can need multiple iterations to reach a fixpoint
-  // on near-degenerate input. The daemon found this on 2026-05-21
-  // hitting 4 targets simultaneously - Simplify^1 vs Simplify^2
-  // differed by 8e-7 on small inputs and Simplify^2 vs Simplify^3
-  // by 1e-3 on offset stars near 12000-area. Whether Clipper2's
-  // Simplify converges quickly is a property of Clipper2, not
-  // boolean2. Asserting finite output is enough for this helper.
+  // Idempotence is covered by targeted unit regressions. Keep this
+  // broad helper focused on validity so fuzz failures point at the
+  // operation under test rather than at cleanup tolerance churn.
   const auto simplified = crossSection.Simplify();
   EXPECT_TRUE(std::isfinite(simplified.Area()));
 }
