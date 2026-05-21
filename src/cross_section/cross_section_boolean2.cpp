@@ -44,6 +44,21 @@ struct PathImpl {
 
 namespace {
 
+Polygons FilterSmallContours(const Polygons& paths, double epsilon) {
+  Polygons filtered;
+  filtered.reserve(paths.size());
+  for (const auto& path : paths) {
+    const double area = b2::SignedArea(path);
+    Rect box;
+    for (const vec2& v : path) box.Union(v);
+    const vec2 size = box.Size();
+    if (std::fabs(area) > std::max(size.x, size.y) * epsilon) {
+      filtered.push_back(path);
+    }
+  }
+  return filtered;
+}
+
 b2::WindRule WindRuleOfFillRule(CrossSection::FillRule fillrule) {
   switch (fillrule) {
     case CrossSection::FillRule::EvenOdd:
@@ -335,18 +350,9 @@ CrossSection CrossSection::WarpBatch(
 
 CrossSection CrossSection::Simplify(double epsilon) const {
   const auto& paths = GetPaths()->paths_;
-  Polygons filtered;
-  filtered.reserve(paths.size());
-  for (const auto& path : paths) {
-    const double area = b2::SignedArea(path);
-    Rect box;
-    for (const vec2& v : path) box.Union(v);
-    const vec2 size = box.Size();
-    if (std::fabs(area) > std::max(size.x, size.y) * epsilon) {
-      filtered.push_back(path);
-    }
-  }
-  return CrossSection(shared_paths(b2::Simplify(filtered, epsilon)));
+  const Polygons filtered = FilterSmallContours(paths, epsilon);
+  return CrossSection(shared_paths(
+      FilterSmallContours(b2::Simplify(filtered, epsilon), epsilon)));
 }
 
 CrossSection CrossSection::Offset(double delta, JoinType jt, double miterLimit,
