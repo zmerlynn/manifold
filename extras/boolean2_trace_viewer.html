@@ -546,13 +546,25 @@
       render();
     }
 
-    function zoom(factor) {
+    function zoomAt(factor, anchor = null) {
       if (!state.viewBox) return;
       const [x, y, w, h] = state.viewBox;
+      let ax = x + w / 2;
+      let ay = y + h / 2;
+      if (anchor) {
+        ax = x + anchor[0] / state.renderScale;
+        ay = y + anchor[1] / state.renderScale;
+      }
       const nw = w * factor;
       const nh = h * factor;
-      setViewBox([x + (w - nw) / 2, y + (h - nh) / 2, nw, nh]);
+      const nx = ax - (ax - x) * factor;
+      const ny = ay - (ay - y) * factor;
+      setViewBox([nx, ny, nw, nh]);
       render();
+    }
+
+    function zoom(factor) {
+      zoomAt(factor);
     }
 
     function svgPoint(event) {
@@ -611,13 +623,14 @@
 
     els.svg.addEventListener('wheel', (event) => {
       event.preventDefault();
-      zoom(event.deltaY < 0 ? 0.85 : 1.18);
+      zoomAt(event.deltaY < 0 ? 0.85 : 1.18, svgPoint(event));
     }, { passive: false });
 
     els.svg.addEventListener('mousedown', (event) => {
       if (!state.viewBox) return;
       state.drag = {
-        start: svgPoint(event),
+        clientX: event.clientX,
+        clientY: event.clientY,
         viewBox: state.viewBox.slice(),
         renderScale: state.renderScale,
       };
@@ -625,9 +638,15 @@
 
     window.addEventListener('mousemove', (event) => {
       if (!state.drag) return;
-      const now = svgPoint(event);
-      const dx = (state.drag.start[0] - now[0]) / state.drag.renderScale;
-      const dy = (state.drag.start[1] - now[1]) / state.drag.renderScale;
+      const svgRect = els.svg.getBoundingClientRect();
+      const renderWidth = state.drag.viewBox[2] * state.drag.renderScale;
+      const renderHeight = state.drag.viewBox[3] * state.drag.renderScale;
+      const dx =
+        (state.drag.clientX - event.clientX) * renderWidth /
+        (svgRect.width * state.drag.renderScale);
+      const dy =
+        (state.drag.clientY - event.clientY) * renderHeight /
+        (svgRect.height * state.drag.renderScale);
       const [x, y, w, h] = state.drag.viewBox;
       setViewBox([x + dx, y + dy, w, h]);
       render();
