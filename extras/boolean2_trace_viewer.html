@@ -370,6 +370,44 @@
       els.tooltip.style.top = `${event.clientY + 12}px`;
     }
 
+    function renderPolygonOutline(group, poly, ghost) {
+      const verts = poly.verts || [];
+      if (verts.length < 2) return;
+      for (let i = 0; i < verts.length; ++i) {
+        const a = pt(verts[i]);
+        const b = pt(verts[(i + 1) % verts.length]);
+        const node = svgEl('line', {
+          x1: a[0],
+          y1: a[1],
+          x2: b[0],
+          y2: b[1],
+          class: 'segment',
+          stroke: colorFor(poly),
+          'stroke-width': ghost ? '1' : '2',
+          'stroke-dasharray': (poly.kind || '').includes('outer_face') ? '5 4' : '',
+        });
+        bindInspect(node, poly);
+        group.appendChild(node);
+      }
+    }
+
+    function renderPolygonVerts(group, poly, ghost) {
+      for (const v of poly.verts || []) {
+        const p = pt(v);
+        const node = svgEl('circle', {
+          cx: p[0],
+          cy: p[1],
+          r: ghost ? 0.8 : 1.8,
+          class: 'point',
+          fill: colorFor(poly),
+          stroke: '#fff',
+          'stroke-width': ghost ? '0.5' : '0.8',
+        });
+        bindInspect(node, poly);
+        group.appendChild(node);
+      }
+    }
+
     function renderPhase(phase, ghost = false) {
       const group = svgEl('g', { class: ghost ? 'ghost' : '' });
       if (els.showPolygons.checked) {
@@ -390,6 +428,7 @@
           });
           bindInspect(node, poly);
           group.appendChild(node);
+          renderPolygonOutline(group, poly, ghost);
         }
       }
       if (els.showSegments.checked) {
@@ -418,6 +457,11 @@
         }
       }
       if (els.showPoints.checked) {
+        if (els.showPolygons.checked) {
+          for (const poly of phase.polygons || []) {
+            renderPolygonVerts(group, poly, ghost);
+          }
+        }
         for (const point of phase.points || []) {
           const p = pt(point.xy);
           const node = svgEl('circle', {
