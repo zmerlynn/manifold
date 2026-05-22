@@ -622,6 +622,55 @@ TEST(CrossSection, DISABLED_Boolean2TraceTinyVsLargeStars) {
   ASSERT_TRUE(out.good());
   boolean2::WriteTraceJson(out, trace);
 }
+
+TEST(CrossSection, DISABLED_Boolean2TraceShowcase) {
+  auto append = [](const Polygons& polys, int mult, std::vector<vec2>* verts,
+                   std::vector<boolean2::EdgeM>* edges) {
+    for (const auto& loop : polys) {
+      if (loop.size() < 3) continue;
+      const int base = static_cast<int>(verts->size());
+      for (const vec2& v : loop) verts->push_back(v);
+      const int n = static_cast<int>(loop.size());
+      for (int i = 0; i < n; ++i) {
+        edges->push_back({base + i, base + ((i + 1) % n), mult});
+      }
+    }
+  };
+
+  const SimplePolygon outer = {
+      {-4.0, -2.0}, {4.0, -2.0}, {4.0, 2.0}, {-4.0, 2.0}};
+  const SimplePolygon hole = {
+      {-1.2, -0.7}, {1.2, -0.7}, {1.2, 0.7}, {-1.2, 0.7}};
+  const SimplePolygon diamond = {
+      {0.0, -3.0}, {3.0, 0.0}, {0.0, 3.0}, {-3.0, 0.0}};
+  const SimplePolygon slantedBar = {
+      {-4.7, -0.35}, {4.7, 0.85}, {4.45, 1.55}, {-4.95, 0.35}};
+  const SimplePolygon notch = {{-3.2, -2.6}, {-1.6, -2.6}, {-2.2, 0.15}};
+
+  const Polygons positive{outer, diamond, slantedBar};
+  const Polygons negative{hole, notch};
+  const Polygons all{outer, hole, diamond, slantedBar, notch};
+  const double eps = boolean2::InferEps(all, {});
+
+  std::vector<vec2> verts;
+  std::vector<boolean2::EdgeM> edges;
+  append(positive, 1, &verts, &edges);
+  append(negative, -1, &verts, &edges);
+
+  boolean2::Trace trace;
+  auto result = boolean2::RemoveOverlaps2D(verts, edges, eps, /*debug=*/false,
+                                           boolean2::WindRule::Add, &trace);
+  Polygons final = boolean2::OutEdgesToPolygons(result.verts, result.edges);
+  auto& phase = trace.AddPhase("final_polygons");
+  for (int i = 0; i < static_cast<int>(final.size()); ++i) {
+    phase.polygons.push_back({std::string("poly") + std::to_string(i), final[i],
+                              "final_polygon", "", 0, true, ""});
+  }
+
+  std::ofstream out("boolean2_trace_showcase.json");
+  ASSERT_TRUE(out.good());
+  boolean2::WriteTraceJson(out, trace);
+}
 #endif
 
 // Seed: SubtractInvariants (2026-05-16 iteration #14)
