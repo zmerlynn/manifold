@@ -101,6 +101,7 @@ jobs:
           - FillRuleAllCCWIdentities
           - InputLoopOrderInvariance
           - LargeEdgeCountSelfUnion
+          - DegenerateInputFuzz
           - RemoveOverlapsDeterminismAcrossThreadCounts
           - SimplePositiveOffset
           - OffsetExtrudeRoundTrip
