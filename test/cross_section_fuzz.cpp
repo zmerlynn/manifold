@@ -1564,6 +1564,87 @@ void LargeEdgeCountSelfUnion(const std::vector<double>& radii) {
       << " (X+X).NumContour()=" << doubled.NumContour();
 }
 
+// Degenerate-input stress: inject deliberate degeneracies into star
+// polygons and run boolean ops. Targets the vertex-merge, edge
+// canonicalization, and T-junction handling code paths that less
+// adversarial fuzz inputs hit only incidentally.
+//
+// Four degeneracy modes selected by `op`:
+//   0: duplicate vertex at index i in A (zero-length edge -
+//      vertex-merge should collapse).
+//   1: collinear midpoint inserted between consecutive vertices
+//      of A (redundant on-edge vertex - canonicalize should drop).
+//   2: coincident vertex - copy A[i] over B[j] so both polygons
+//      have an exact shared point (T-junction / shared-endpoint).
+//   3: collinear PLUS coincident - combination case.
+//
+// Property: ExpectCrossSectionValid + inclusion-exclusion identity
+// area(A union B) == area(A) + area(B) - area(A intersect B)
+// (with relaxed tolerance for degenerate inputs that may collapse
+// to slightly different areas after canonicalization).
+void DegenerateInputFuzz(const std::vector<double>& radiiA,
+                         const std::vector<double>& radiiB, int op, int idxA,
+                         int idxB, double translateX, double translateY) {
+  if (!std::isfinite(translateX) || !std::isfinite(translateY)) return;
+  if (radiiA.size() < 4 || radiiB.size() < 4) return;
+
+  manifold::SimplePolygon a = StarPolygon(radiiA);
+  manifold::SimplePolygon b = StarPolygon(radiiB);
+  for (auto& v : b) {
+    v.x += translateX;
+    v.y += translateY;
+  }
+
+  const int nA = static_cast<int>(a.size());
+  const int nB = static_cast<int>(b.size());
+  const int i = ((idxA % nA) + nA) % nA;
+  const int j = ((idxB % nB) + nB) % nB;
+  const int next = (i + 1) % nA;
+
+  switch (((op % 4) + 4) % 4) {
+    case 0:
+      a.insert(a.begin() + i, a[i]);
+      break;
+    case 1: {
+      const manifold::vec2 mid = (a[i] + a[next]) * 0.5;
+      a.insert(a.begin() + next, mid);
+      break;
+    }
+    case 2:
+      b[j] = a[i];
+      break;
+    case 3: {
+      const manifold::vec2 mid = (a[i] + a[next]) * 0.5;
+      a.insert(a.begin() + next, mid);
+      b[j] = mid;
+      break;
+    }
+  }
+
+  const manifold::CrossSection ca(a);
+  const manifold::CrossSection cb(b);
+  ExpectCrossSectionValid(ca);
+  ExpectCrossSectionValid(cb);
+  if (ca.IsEmpty() || cb.IsEmpty()) return;
+
+  const auto unionAB = ca + cb;
+  const auto intersectAB = ca.Boolean(cb, manifold::OpType::Intersect);
+  const auto subtractAB = ca - cb;
+  ExpectCrossSectionValid(unionAB);
+  ExpectCrossSectionValid(intersectAB);
+  ExpectCrossSectionValid(subtractAB);
+
+  // Inclusion-exclusion: area(A union B) == area(A) + area(B) - area(A
+  // intersect B). Loose tolerance because vertex-merge / canonicalize
+  // can shave tiny zero-area triangles off a degenerate input,
+  // changing both sides equally but the diff floor can be O(eps*scale).
+  const double sum = ca.Area() + cb.Area() - intersectAB.Area();
+  const double tol = 1e-5 * (1.0 + std::fabs(ca.Area()) + std::fabs(cb.Area()));
+  EXPECT_NEAR(unionAB.Area(), sum, tol)
+      << "Inclusion-exclusion violated on degenerate input (op=" << op
+      << " idxA=" << idxA << " idxB=" << idxB << ")";
+}
+
 // Decompose/Compose round-trip on a HOLED CrossSection. The existing
 // DecomposeComposeAndHull covers separated stars (no negative-orientation
 // rings), which doesn't exercise hole containment in the decompose
@@ -2215,6 +2296,11 @@ FUZZ_TEST(CrossSectionFuzz, InputLoopOrderInvariance)
 FUZZ_TEST(CrossSectionFuzz, LargeEdgeCountSelfUnion)
     .WithDomains(
         VectorOf(InRange(0.0, 1000.0)).WithMinSize(256).WithMaxSize(512));
+
+FUZZ_TEST(CrossSectionFuzz, DegenerateInputFuzz)
+    .WithDomains(StarRadiiDomain(), StarRadiiDomain(), InRange(0, 100),
+                 InRange(0, 100), InRange(0, 100), InRange(-5.0, 5.0),
+                 InRange(-5.0, 5.0));
 
 #if defined(MANIFOLD_PAR) && MANIFOLD_PAR == 1
 FUZZ_TEST(CrossSectionFuzz, RemoveOverlapsDeterminismAcrossThreadCounts)
