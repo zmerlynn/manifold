@@ -156,6 +156,15 @@ if(MANIFOLD_FUZZ)
   # address sanitizer required
   add_compile_options(-fsanitize=address)
   add_link_options(-fsanitize=address)
+  # On aarch64 with clang, abseil's int128 code (pulled in by
+  # fuzztest) emits calls to 128-bit overflow builtins like
+  # __muloti4. These live in compiler-rt's builtins library;
+  # Ubuntu's stock libgcc on arm64 doesn't pack them. Force
+  # --rtlib=compiler-rt so the link finds the symbols.
+  if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$"
+     AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+    add_link_options(--rtlib=compiler-rt)
+  endif()
 endif()
 
 if(TRACY_ENABLE)
