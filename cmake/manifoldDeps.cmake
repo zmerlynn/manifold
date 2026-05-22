@@ -272,11 +272,31 @@ endif()
 
 if(MANIFOLD_FUZZ)
   logmissingdep("fuzztest" , "MANIFOLD_FUZZ")
+  # Upstream fuzztest's CompatibilityModeLinkLibFuzzer.cmake hardcodes
+  # the libFuzzer runtime filename as `libclang_rt.fuzzer_no_main-x86_64.a`.
+  # On any non-x86_64 host (e.g. aarch64 with
+  # `libclang_rt.fuzzer_no_main-aarch64.a`) the find returns empty and
+  # the link fails with `undefined reference to LLVMFuzzerRunDriver`.
+  # Apply a one-line sed-style patch via FetchContent_Declare's
+  # PATCH_COMMAND so the file is fixed BEFORE fuzztest's CMakeLists
+  # is processed. Only patches when we're targeting libfuzzer-compat
+  # on a non-x86_64 host - otherwise PATCH_COMMAND is "true" (no-op).
+  if(FUZZTEST_COMPATIBILITY_MODE STREQUAL "libfuzzer"
+     AND NOT CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64")
+    set(_fuzztest_patch_cmd
+        sed -i
+        "s|libclang_rt\\.fuzzer_no_main-x86_64\\.a|libclang_rt.fuzzer_no_main-${CMAKE_SYSTEM_PROCESSOR}.a|g"
+        cmake/CompatibilityModeLinkLibFuzzer.cmake)
+  else()
+    set(_fuzztest_patch_cmd true)
+  endif()
   FetchContent_Declare(
     fuzztest
     GIT_REPOSITORY https://github.com/google/fuzztest.git
     GIT_TAG f1e26613f66997aa09d3026762e275de22b2daae
     GIT_PROGRESS TRUE
+    PATCH_COMMAND ${_fuzztest_patch_cmd}
+    UPDATE_DISCONNECTED TRUE
   )
   FetchContent_MakeAvailable(fuzztest)
 endif()
