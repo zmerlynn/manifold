@@ -1256,9 +1256,8 @@ TEST(CrossSection, DecomposeRecomposeOuterStarWithSmallHole) {
   }
   const double tol = 1e-6 * (1.0 + std::fabs(holedArea));
   EXPECT_NEAR(componentArea, holedArea, tol)
-      << "Decompose lost area on holed input: "
-      << "sum(components.Area)=" << componentArea
-      << " vs holed.Area()=" << holedArea;
+      << "Decompose lost area on holed input: " << "sum(components.Area)="
+      << componentArea << " vs holed.Area()=" << holedArea;
   EXPECT_EQ(componentContourSum, holed.NumContour())
       << "Decompose lost contours on holed input: "
       << "sum(components.NumContour)=" << componentContourSum
@@ -1696,6 +1695,140 @@ TEST(CrossSection, NonFiniteInputReturnsEmpty) {
 
   Polygons finite = {{{0.0, 0.0}, {1.0, 0.0}, {1.0, 1.0}, {0.0, 1.0}}};
   EXPECT_TRUE(boolean2::Boolean2D(Polygons{bad}, finite, OpType::Add).empty());
+}
+
+TEST(CrossSection, ShallowLongEdgeIntersectionIsNotDropped) {
+  vec2 intersection;
+  const double eps = boolean2::EpsilonFromScale(1e9);
+
+  EXPECT_TRUE(boolean2::IntersectSegments({-0.5, 0.0}, {0.5, 0.0}, {-1e9, 0.01},
+                                          {1e9, -0.01}, eps, &intersection));
+  EXPECT_NEAR(intersection.x, 0.0, eps);
+  EXPECT_NEAR(intersection.y, 0.0, eps);
+}
+
+TEST(CrossSection, NearEndpointIntersectionOutsideSegmentIsDropped) {
+  vec2 intersection;
+  const double eps = 1.0;
+
+  EXPECT_FALSE(boolean2::IntersectSegments({0.0, 0.0}, {10.0, 0.0}, {8.0, 0.4},
+                                           {18.0, 1.4}, eps, &intersection));
+}
+
+TEST(CrossSection, EndpointTJunctionIntersectionIsDropped) {
+  vec2 intersection;
+  const double eps = 1.0;
+
+  EXPECT_FALSE(boolean2::IntersectSegments({0.0, 0.0}, {10.0, 0.0}, {5.0, 0.0},
+                                           {5.0, 0.1}, eps, &intersection));
+}
+
+TEST(CrossSection, MergeVertsTransitiveChainCanDriftPastEps) {
+  const double eps = 1.0;
+  const std::vector<vec2> verts = {{0.0, 0.0},  {0.99, 0.0}, {1.98, 0.0},
+                                   {2.97, 0.0}, {3.96, 0.0}, {10.0, 0.0},
+                                   {20.0, 0.0}};
+
+  boolean2::GlobalPhases().Reset();
+  boolean2::SetTimingEnabled(true);
+  const boolean2::VertexMerge merged = boolean2::MergeVerts(verts, eps);
+  boolean2::SetTimingEnabled(false);
+
+  ASSERT_EQ(merged.remap.size(), verts.size());
+  ASSERT_EQ(merged.verts.size(), 3);
+  for (int i = 0; i < 5; ++i) EXPECT_EQ(merged.remap[i], merged.remap[0]);
+  EXPECT_NE(merged.remap[5], merged.remap[0]);
+  EXPECT_NE(merged.remap[6], merged.remap[0]);
+
+  EXPECT_NEAR(merged.verts[0].x, 1.98, 1e-12);
+  EXPECT_NEAR(merged.verts[0].y, 0.0, 1e-12);
+  const vec2 endpointDrift = verts.front() - merged.verts[0];
+  EXPECT_GT(std::hypot(endpointDrift.x, endpointDrift.y), eps);
+
+  const auto& phases = boolean2::GlobalPhases();
+  EXPECT_EQ(phases.mergeMergedComponents.load(), 1);
+  EXPECT_EQ(phases.mergeMergedComponentsDriftGtEps.load(), 1);
+  EXPECT_EQ(phases.mergeMaxMergedComponentVerts.load(), 5);
+  EXPECT_GE(phases.mergeMaxMergedRepresentativeDriftMilliEps.load(), 1980);
+  EXPECT_GE(phases.mergeMaxMergedBboxDiagMilliEps.load(), 3960);
+}
+
+// Seed: VertexMergeIdempotence (2026-05-23 CI run 26323577663)
+// Counterexample-hash: 4caf999681ce3e2a
+TEST(CrossSection, VertexMergeIdempotenceTightCluster) {
+  const std::vector<double> xs = {
+      -564.24299726366871, -564.25684749526681, -564.25684749526681,
+      -564.25684749526681, -564.25684749526681, -564.25684749526681,
+      -564.25684749526681, -564.2434248982521,  -564.25684749526681,
+      -564.25684749526681, -564.25684749526681, -560.99098110791851,
+      -564.24548426671515, -564.25684749526681, -564.25684749526681,
+      -564.24797363468235, -564.25105014358735, -564.25684749526681,
+      -564.25684749526681, -564.2650553505373,  -564.25684749526681,
+      -564.25684749526681, -564.25684749526681, -564.25684749526681,
+      -564.25684749526681, -564.25684749526681, -564.25684749526681,
+      -564.2565950636108,  -564.25684749526681, -564.25684749526681,
+      -564.25684749526681, -564.25684749526681};
+  const std::vector<double> ys = {-1.,
+                                  -1.,
+                                  -1.,
+                                  1.3146737456995536,
+                                  3.334547678102286,
+                                  924.18159456764056,
+                                  -5.0212043784034019,
+                                  -3.442978883496882,
+                                  -882.0023276178074,
+                                  -3.0103861859513601,
+                                  -218.03838880073647,
+                                  1.1654515551817912,
+                                  -361.18598495388369,
+                                  -0.040195183151324976,
+                                  -229.62237726036881,
+                                  -3.4005396935541334,
+                                  -0.37374103257085878,
+                                  3.993690857296496,
+                                  1.1420137899457909,
+                                  210.83410884574982,
+                                  -3.4038895533070526,
+                                  -4.3056143084054153,
+                                  -2.8446598710193314,
+                                  0.90992952485448519,
+                                  -5.1663919232428848,
+                                  -502.42923749613101,
+                                  -2.3459351240317718,
+                                  223.16662739130152,
+                                  810.70082359638945,
+                                  -3.395314716558568,
+                                  0.055697227037768471,
+                                  -1.6836095819963903};
+  ASSERT_EQ(xs.size(), ys.size());
+  const double eps = std::pow(10.0, -2.0433270966230594);
+  std::vector<vec2> verts;
+  verts.reserve(xs.size());
+  for (size_t i = 0; i < xs.size(); ++i) {
+    verts.push_back({xs[i], ys[i]});
+  }
+
+  const auto m1 = boolean2::MergeVerts(verts, eps);
+  ASSERT_FALSE(m1.verts.empty());
+  const auto m2 = boolean2::MergeVerts(m1.verts, eps);
+  EXPECT_EQ(m2.verts.size(), m1.verts.size())
+      << "MergeVerts not idempotent: pass1=" << m1.verts.size()
+      << " pass2=" << m2.verts.size() << " (n=" << xs.size() << ", eps=" << eps
+      << ")";
+}
+
+TEST(CrossSection, OffsetIsInvariantUnderLargeTranslation) {
+  const CrossSection square = CrossSection::Square({10.0, 10.0}, true);
+  const CrossSection origin =
+      square.Offset(1.0, CrossSection::JoinType::Round, 2.0, 8);
+  const CrossSection translated =
+      square.Translate({1e12, -1e12})
+          .Offset(1.0, CrossSection::JoinType::Round, 2.0, 8)
+          .Translate({-1e12, 1e12});
+
+  EXPECT_EQ(translated.NumContour(), origin.NumContour());
+  EXPECT_EQ(translated.NumVert(), origin.NumVert());
+  EXPECT_NEAR(translated.Area(), origin.Area(), 1e-3);
 }
 
 TEST(CrossSection, SimplifyUsesFixedPointWrapper) {
