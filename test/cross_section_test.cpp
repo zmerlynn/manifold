@@ -1516,7 +1516,7 @@ TEST(CrossSection, BooleanDistributivityExtremeMagStars) {
 //   Distinct from previously-fixed BooleanDistributivityExtremeMagStars
 //   (hash 659ec969) - that was a contour-count off-by-one, this is
 //   area drift in absolute terms).
-TEST(CrossSection, DISABLED_BooleanDistributivityRepeatedRadiusStarC) {
+TEST(CrossSection, BooleanDistributivityRepeatedRadiusStarC) {
   auto star = [](const std::vector<double>& radii) {
     SimplePolygon ring;
     const int n = static_cast<int>(radii.size());
