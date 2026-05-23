@@ -29,6 +29,7 @@
 #include "../src/cross_section/boolean2/boolean2.h"
 #include "../src/cross_section/boolean2/diagnostics.h"
 #include "../src/cross_section/boolean2/intersections.h"
+#include "../src/cross_section/boolean2/vertex_merge.h"
 #endif
 #include "manifold/common.h"
 #include "manifold/manifold.h"
@@ -1453,6 +1454,78 @@ TEST(CrossSection, BooleanDistributivityExtremeMagStars) {
   EXPECT_EQ(left.NumContour(), right.NumContour())
       << "distributivity: contour count differs: left=" << left.NumContour()
       << " right=" << right.NumContour();
+}
+
+// Seed: VertexMergeIdempotence (2026-05-23 CI run 26323577663)
+// Counterexample-hash: 4caf999681ce3e2a
+// Suspected owner: pr/boolean2-core (boolean2::MergeVerts is not
+//   idempotent on this input: pass1 produces 30 verts, pass2 (called
+//   on the already-merged output) produces 29. Inputs are 32
+//   vertices clustered at x in [-564.27, -560.99] - most repeats of
+//   exactly x=-564.25684749526681 with a few sub-eps neighbors. eps
+//   = 10^-2.04 ~= 0.00905. Looks like a broad-phase pair-collection
+//   ordering issue or disjoint-set tie-break that lets a vertex
+//   merge with a SECOND cluster on pass 2 that pass 1 missed.
+//   Same family as VertexMergeIdempotence fuzz target).
+TEST(CrossSection, DISABLED_VertexMergeIdempotenceTightCluster) {
+  const std::vector<double> xs = {
+      -564.24299726366871, -564.25684749526681, -564.25684749526681,
+      -564.25684749526681, -564.25684749526681, -564.25684749526681,
+      -564.25684749526681, -564.2434248982521,  -564.25684749526681,
+      -564.25684749526681, -564.25684749526681, -560.99098110791851,
+      -564.24548426671515, -564.25684749526681, -564.25684749526681,
+      -564.24797363468235, -564.25105014358735, -564.25684749526681,
+      -564.25684749526681, -564.2650553505373,  -564.25684749526681,
+      -564.25684749526681, -564.25684749526681, -564.25684749526681,
+      -564.25684749526681, -564.25684749526681, -564.25684749526681,
+      -564.2565950636108,  -564.25684749526681, -564.25684749526681,
+      -564.25684749526681, -564.25684749526681};
+  const std::vector<double> ys = {-1.,
+                                  -1.,
+                                  -1.,
+                                  1.3146737456995536,
+                                  3.334547678102286,
+                                  924.18159456764056,
+                                  -5.0212043784034019,
+                                  -3.442978883496882,
+                                  -882.0023276178074,
+                                  -3.0103861859513601,
+                                  -218.03838880073647,
+                                  1.1654515551817912,
+                                  -361.18598495388369,
+                                  -0.040195183151324976,
+                                  -229.62237726036881,
+                                  -3.4005396935541334,
+                                  -0.37374103257085878,
+                                  3.993690857296496,
+                                  1.1420137899457909,
+                                  210.83410884574982,
+                                  -3.4038895533070526,
+                                  -4.3056143084054153,
+                                  -2.8446598710193314,
+                                  0.90992952485448519,
+                                  -5.1663919232428848,
+                                  -502.42923749613101,
+                                  -2.3459351240317718,
+                                  223.16662739130152,
+                                  810.70082359638945,
+                                  -3.395314716558568,
+                                  0.055697227037768471,
+                                  -1.6836095819963903};
+  ASSERT_EQ(xs.size(), ys.size());
+  const double eps = std::pow(10.0, -2.0433270966230594);
+  std::vector<manifold::vec2> verts;
+  verts.reserve(xs.size());
+  for (size_t i = 0; i < xs.size(); ++i) {
+    verts.push_back({xs[i], ys[i]});
+  }
+  const auto m1 = manifold::boolean2::MergeVerts(verts, eps);
+  ASSERT_FALSE(m1.verts.empty());
+  const auto m2 = manifold::boolean2::MergeVerts(m1.verts, eps);
+  EXPECT_EQ(m2.verts.size(), m1.verts.size())
+      << "MergeVerts not idempotent: pass1=" << m1.verts.size()
+      << " pass2=" << m2.verts.size() << " (n=" << xs.size() << ", eps=" << eps
+      << ")";
 }
 
 // Seed: BooleanCommutativity (2026-05-18 CI run 26006574818)
