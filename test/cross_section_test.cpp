@@ -1504,6 +1504,107 @@ TEST(CrossSection, BooleanDistributivityExtremeMagStars) {
       << " right=" << right.NumContour();
 }
 
+// Seed: BooleanDistributivity (2026-05-23 daemon find - both local
+//   x86_64 and manifoci aarch64 daemons hit it simultaneously)
+// Counterexample-hash: 5d07906de3df36e7
+// Suspected owner: pr/boolean2-core (A ∩ (B ∪ C) != (A ∩ B) ∪ (A ∩ C)
+//   on large-area stars. left.Area=216374, right.Area=215961, diff=412
+//   (relative ~0.2%, exceeds 1e-6 * sum-of-areas tol of 2.34).
+//   Inputs: 16-vertex star A with mixed radii, 4-vertex star B (small),
+//   37-vertex star C with most radii repeated as 332.47 (degenerate-ish
+//   shape). Translations: B by (4.89, 3.65), C by (-1.53, -2.63).
+//   Distinct from previously-fixed BooleanDistributivityExtremeMagStars
+//   (hash 659ec969) - that was a contour-count off-by-one, this is
+//   area drift in absolute terms).
+TEST(CrossSection, DISABLED_BooleanDistributivityRepeatedRadiusStarC) {
+  auto star = [](const std::vector<double>& radii) {
+    SimplePolygon ring;
+    const int n = static_cast<int>(radii.size());
+    for (int i = 0; i < n; ++i) {
+      const double r = 0.1 + std::fabs(radii[i]);
+      const double th = 2.0 * kPi * i / n;
+      ring.push_back({r * std::cos(th), r * std::sin(th)});
+    }
+    return ring;
+  };
+  const std::vector<double> radiiA = {1.,
+                                      283.64569337262878,
+                                      0.,
+                                      705.96814039386641,
+                                      332.07185213769458,
+                                      534.61157622175767,
+                                      1000.,
+                                      1000.,
+                                      1000.,
+                                      1000.,
+                                      1000.,
+                                      1000.,
+                                      1000.,
+                                      1.,
+                                      1.,
+                                      1000.};
+  const std::vector<double> radiiB = {974.53903971669604, 443.79612063734504,
+                                      0.60212977272176105, 601.54223181860084};
+  const std::vector<double> radiiC = {2.8991656937704362,
+                                      1000.,
+                                      1.,
+                                      332.4725376862869,
+                                      332.4725376862869,
+                                      332.4725376862869,
+                                      332.4725376862869,
+                                      332.4725376862869,
+                                      332.4725376862869,
+                                      332.4725376862869,
+                                      332.4725376862869,
+                                      332.4725376862869,
+                                      332.4725376862869,
+                                      332.4725376862869,
+                                      332.4725376862869,
+                                      332.4725376862869,
+                                      332.4725376862869,
+                                      332.4725376862869,
+                                      332.4725376862869,
+                                      332.4725376862869,
+                                      332.4725376862869,
+                                      332.4725376862869,
+                                      332.4725376862869,
+                                      332.4725376862869,
+                                      384.70682133429182,
+                                      384.70682133429182,
+                                      332.4725376862869,
+                                      332.4725376862869,
+                                      682.65150344752476,
+                                      737.43471827249516,
+                                      327.59982985461647,
+                                      332.4725376862869,
+                                      332.4725376862869,
+                                      1.,
+                                      1000.,
+                                      1000.,
+                                      1000.};
+  const CrossSection a(star(radiiA));
+  const CrossSection b =
+      CrossSection(star(radiiB))
+          .Translate({4.890230810667985, 3.6470913496183108});
+  const CrossSection c =
+      CrossSection(star(radiiC))
+          .Translate({-1.5262817329731697, -2.6347725451611175});
+
+  const auto bUc = b + c;
+  const auto left = a.Boolean(bUc, OpType::Intersect);
+  const auto aIntB = a.Boolean(b, OpType::Intersect);
+  const auto aIntC = a.Boolean(c, OpType::Intersect);
+  const auto right = aIntB + aIntC;
+
+  const double tol = 1e-6 * (1.0 + std::fabs(a.Area()) + std::fabs(b.Area()) +
+                             std::fabs(c.Area()));
+  EXPECT_NEAR(left.Area(), right.Area(), tol)
+      << "A ∩ (B ∪ C) != (A ∩ B) ∪ (A ∩ C)";
+  EXPECT_EQ(left.NumContour(), right.NumContour())
+      << "distributivity: contour count differs: left=" << left.NumContour()
+      << " right=" << right.NumContour();
+}
+
 // Seed: VertexMergeIdempotence (2026-05-23 CI run 26323577663)
 // Counterexample-hash: 4caf999681ce3e2a
 // Suspected owner: pr/boolean2-core (boolean2::MergeVerts is not
