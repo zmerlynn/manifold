@@ -28,6 +28,7 @@
 #ifdef MANIFOLD_CROSS_SECTION_BACKEND_BOOLEAN2
 #include "../src/cross_section/boolean2/boolean2.h"
 #include "../src/cross_section/boolean2/diagnostics.h"
+#include "../src/cross_section/boolean2/driver.h"
 #include "../src/cross_section/boolean2/intersections.h"
 #include "../src/cross_section/boolean2/vertex_merge.h"
 #endif
@@ -1675,6 +1676,189 @@ TEST(CrossSection, DISABLED_VertexMergeIdempotenceTightCluster) {
       << "MergeVerts not idempotent: pass1=" << m1.verts.size()
       << " pass2=" << m2.verts.size() << " (n=" << xs.size() << ", eps=" << eps
       << ")";
+}
+
+// Seed: BooleanDistributivity (2026-05-23 cycle 277, both daemons,
+//   post-disconnected-winding-seeds-fix tip 22077d9c)
+// Counterexample-hash: cf05d696225efee5
+// Suspected owner: pr/boolean2-core (sibling of the just-drained
+//   RepeatedRadiusStarC. Smaller magnitude (left.Area=80787,
+//   right.Area=80781, diff=5.9 vs tol=1.28). Star C has many zeros
+//   mixed with mid-range values - a different degeneracy pattern
+//   than the previous all-repeated-radius case).
+TEST(CrossSection, DISABLED_BooleanDistributivityZeroMixStarC) {
+  auto star = [](const std::vector<double>& radii) {
+    SimplePolygon ring;
+    const int n = static_cast<int>(radii.size());
+    for (int i = 0; i < n; ++i) {
+      const double r = 0.1 + std::fabs(radii[i]);
+      const double th = 2.0 * kPi * i / n;
+      ring.push_back({r * std::cos(th), r * std::sin(th)});
+    }
+    return ring;
+  };
+  const std::vector<double> radiiA = {1000.,
+                                      1000.,
+                                      255.79995725682645,
+                                      1.,
+                                      454.29432950304715,
+                                      995.65401133735929,
+                                      1000.,
+                                      811.86733957046874,
+                                      1.,
+                                      437.04103091878892,
+                                      195.25477231407794,
+                                      1.8268273914683537,
+                                      4.5954160688751484,
+                                      3.2030613706914481,
+                                      511.5935307510378,
+                                      2.0771806846580496,
+                                      570.21917979539887,
+                                      1.9769538901315753,
+                                      467.93526395973339,
+                                      1.,
+                                      959.79674877569607,
+                                      0.076792444298594276,
+                                      503.25635714266843,
+                                      0.,
+                                      89.215459767705454,
+                                      0.,
+                                      1000.,
+                                      0.06374847983784826,
+                                      995.14671048524883,
+                                      1.,
+                                      0.};
+  const std::vector<double> radiiB = {271.39306287742255, 997.96011166439871,
+                                      909.94463259654469, 364.30795394492606};
+  const std::vector<double> radiiC = {812.15251441725718,
+                                      0.,
+                                      601.28991029625661,
+                                      0.,
+                                      482.34411167146169,
+                                      0.,
+                                      588.04482477271347,
+                                      0.,
+                                      169.03839642543201,
+                                      0.44553220583928932,
+                                      4.0649812370918958,
+                                      512.45895098827191,
+                                      0.,
+                                      1000.,
+                                      0.,
+                                      999.90271349806335,
+                                      459.5889801989477,
+                                      105.49723198609914,
+                                      0.,
+                                      0.,
+                                      748.07738025389699,
+                                      1.7632947108253827,
+                                      0.,
+                                      0.,
+                                      4.9202747062496162,
+                                      751.85659442712381,
+                                      732.78647234489199,
+                                      0.,
+                                      375.32896975602767,
+                                      0.};
+  const CrossSection a(star(radiiA));
+  const CrossSection b =
+      CrossSection(star(radiiB))
+          .Translate({0.12749108485042271, 2.533194291154123});
+  const CrossSection c =
+      CrossSection(star(radiiC))
+          .Translate({-2.5843878979814856, -4.3357952411613461});
+  const auto bUc = b + c;
+  const auto left = a.Boolean(bUc, OpType::Intersect);
+  const auto aIntB = a.Boolean(b, OpType::Intersect);
+  const auto aIntC = a.Boolean(c, OpType::Intersect);
+  const auto right = aIntB + aIntC;
+  const double tol = 1e-6 * (1.0 + std::fabs(a.Area()) + std::fabs(b.Area()) +
+                             std::fabs(c.Area()));
+  EXPECT_NEAR(left.Area(), right.Area(), tol)
+      << "A ∩ (B ∪ C) != (A ∩ B) ∪ (A ∩ C)";
+  EXPECT_EQ(left.NumContour(), right.NumContour());
+}
+
+// Seed: BooleanRobustness topology-validity failure (2026-05-23
+//   cycle 277, both daemons, post-disconnected-winding-fix tip
+//   22077d9c)
+// Counterexample-hash: 8ea578543f9f1b64
+// Suspected owner: pr/boolean2-core (RemoveOverlaps2D produces an
+//   edge-balance imbalance for some vertices on these mixed-scale
+//   inputs - 1e-6 alongside 1024. The fuzz harness's
+//   CheckTopologicalValidity checks that per-vertex edge balance
+//   from input (sum of mult on outgoing minus incoming) matches the
+//   output for surviving verts and is zero for newly-introduced
+//   ones. This input violates that. Likely eps-inference at the
+//   extreme-scale-mix boundary or vertex-merge corner case in
+//   RemoveOverlaps2D. Replicated inline because
+//   CheckTopologicalValidity isn't exposed via the public API).
+namespace {
+template <typename Edge>
+std::map<int, int> ComputeEdgeBalance(const std::vector<Edge>& edges) {
+  std::map<int, int> balance;
+  for (const auto& edge : edges) {
+    balance[edge.v0] += edge.mult;
+    balance[edge.v1] -= edge.mult;
+  }
+  return balance;
+}
+}  // namespace
+TEST(CrossSection, DISABLED_RemoveOverlaps2DTopologyMixedScale) {
+  // Inputs A and B exactly as the BooleanRobustness fuzz target
+  // constructs them from the counterexample raw polygons. The
+  // topology check is on the OUTPUT of the boolean Add, not the
+  // raw inputs.
+  const Polygons polysA = {
+      {{-1e-6, 1e-6}, {-1e-6, -1e-6}, {-0.0, 0.0}, {1.0, 1024.0}},
+      {{1024.0, 1024.0}, {1.0, 1.0}, {1e-6, -1e-6}}};
+  const Polygons polysB = {
+      {{0.0, 1.0},
+       {1e-6, 1024.0},
+       {-1.0, -1024.0},
+       {-0.0, 1024.0},
+       {1.0, -1.0}},
+      {{-260.66988565137592, -0.0},
+       {0.0, -414.46576455279967},
+       {-1.0, -1024.0}},
+      {{1.0, 1.0}, {-1e-6, -0.0}, {1.0, 1024.0}, {1e-6, 0.0}},
+      {{-111.03407576117854, 0.0},
+       {560.59976308273758, 2.9313131393310714},
+       {-1024.0, 1.0},
+       {89.678187020143696, 0.0},
+       {1024.0, 1.0}}};
+  const CrossSection a(polysA);
+  const CrossSection b(polysB);
+  const auto result = a + b;
+  const auto resultPolys = result.ToPolygons();
+
+  // Run RemoveOverlaps2D on the Boolean's output and check that the
+  // per-vertex edge balance is preserved (sum of mult on outgoing
+  // minus incoming) for surviving verts, zero for newly-introduced.
+  const auto [verts, edges] = manifold::boolean2::PolygonsToInput(resultPolys);
+  if (verts.empty()) GTEST_SKIP() << "Boolean output collapsed to empty";
+  const double eps = manifold::boolean2::InferEps(resultPolys, {});
+  const auto overlapResult =
+      manifold::boolean2::RemoveOverlaps2D(verts, edges, eps);
+
+  std::vector<manifold::boolean2::EdgeM> remapped;
+  for (const auto& edge : edges) {
+    const int aIdx = overlapResult.inputRemap[edge.v0];
+    const int bIdx = overlapResult.inputRemap[edge.v1];
+    if (aIdx != bIdx) remapped.push_back({aIdx, bIdx, edge.mult});
+  }
+  const auto expected = ComputeEdgeBalance(remapped);
+  const auto actual = ComputeEdgeBalance(overlapResult.edges);
+  for (int v = 0; v < static_cast<int>(overlapResult.verts.size()); ++v) {
+    const int expectedBalance =
+        expected.count(v) ? expected.find(v)->second : 0;
+    const int actualBalance = actual.count(v) ? actual.find(v)->second : 0;
+    const int target = (v < overlapResult.numMergedVerts) ? expectedBalance : 0;
+    EXPECT_EQ(actualBalance, target)
+        << "Vertex " << v
+        << " edge-balance mismatch after RemoveOverlaps2D on boolean "
+        << "Add result: expected=" << target << " actual=" << actualBalance;
+  }
 }
 
 // Seed: BooleanCommutativity (2026-05-18 CI run 26006574818)
