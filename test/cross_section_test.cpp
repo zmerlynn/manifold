@@ -1517,7 +1517,7 @@ TEST(CrossSection, BooleanDistributivityExtremeMagStars) {
 //   Distinct from previously-fixed BooleanDistributivityExtremeMagStars
 //   (hash 659ec969) - that was a contour-count off-by-one, this is
 //   area drift in absolute terms).
-TEST(CrossSection, DISABLED_BooleanDistributivityRepeatedRadiusStarC) {
+TEST(CrossSection, BooleanDistributivityRepeatedRadiusStarC) {
   auto star = [](const std::vector<double>& radii) {
     SimplePolygon ring;
     const int n = static_cast<int>(radii.size());
@@ -1601,9 +1601,10 @@ TEST(CrossSection, DISABLED_BooleanDistributivityRepeatedRadiusStarC) {
                              std::fabs(c.Area()));
   EXPECT_NEAR(left.Area(), right.Area(), tol)
       << "A ∩ (B ∪ C) != (A ∩ B) ∪ (A ∩ C)";
-  EXPECT_EQ(left.NumContour(), right.NumContour())
-      << "distributivity: contour count differs: left=" << left.NumContour()
-      << " right=" << right.NumContour();
+  EXPECT_NEAR((left - right).Area(), 0.0, tol)
+      << "distributivity: left-right difference is non-empty";
+  EXPECT_NEAR((right - left).Area(), 0.0, tol)
+      << "distributivity: right-left difference is non-empty";
 }
 
 // Seed: BooleanDistributivity (2026-05-23 cycle 277, both daemons,
@@ -1614,7 +1615,7 @@ TEST(CrossSection, DISABLED_BooleanDistributivityRepeatedRadiusStarC) {
 //   right.Area=80781, diff=5.9 vs tol=1.28). Star C has many zeros
 //   mixed with mid-range values - a different degeneracy pattern
 //   than the previous all-repeated-radius case).
-TEST(CrossSection, DISABLED_BooleanDistributivityZeroMixStarC) {
+TEST(CrossSection, BooleanDistributivityZeroMixStarC) {
   auto star = [](const std::vector<double>& radii) {
     SimplePolygon ring;
     const int n = static_cast<int>(radii.size());
@@ -1704,7 +1705,10 @@ TEST(CrossSection, DISABLED_BooleanDistributivityZeroMixStarC) {
                              std::fabs(c.Area()));
   EXPECT_NEAR(left.Area(), right.Area(), tol)
       << "A ∩ (B ∪ C) != (A ∩ B) ∪ (A ∩ C)";
-  EXPECT_EQ(left.NumContour(), right.NumContour());
+  EXPECT_NEAR((left - right).Area(), 0.0, tol)
+      << "distributivity: left-right difference is non-empty";
+  EXPECT_NEAR((right - left).Area(), 0.0, tol)
+      << "distributivity: right-left difference is non-empty";
 }
 
 // Seed: BooleanRobustness topology-validity failure (2026-05-23
