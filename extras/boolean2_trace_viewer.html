@@ -199,7 +199,8 @@
     <aside>
       <h1>Boolean2 Trace</h1>
       <input id="file" type="file" accept="application/json,.json">
-      <p class="hint">Load a trace JSON produced by the debug fixture.</p>
+      <p class="hint">Load a trace JSON produced by the debug fixture, or pass
+        <code>?trace=URL</code> in the address bar.</p>
 
       <h2>Phase</h2>
       <select id="phase"></select>
@@ -247,6 +248,7 @@
       viewBox: null,
       renderScale: 1,
       drag: null,
+      traceSource: '',
     };
 
     const kRenderExtent = 1000;
@@ -552,9 +554,10 @@
         : 'No annotations for this phase.';
     }
 
-    function loadTrace(trace) {
+    function loadTrace(trace, source = '') {
       state.trace = trace;
       state.phaseIndex = 0;
+      state.traceSource = source;
       els.phase.replaceChildren();
       for (let i = 0; i < (trace.phases || []).length; ++i) {
         const option = document.createElement('option');
@@ -564,6 +567,14 @@
       }
       setViewBox(defaultViewBox(trace));
       render();
+    }
+
+    async function loadTraceUrl(url) {
+      const response = await fetch(url);
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status} loading ${url}`);
+      }
+      loadTrace(await response.json(), url);
     }
 
     function zoomAt(factor, anchor = null) {
@@ -598,7 +609,7 @@
     els.file.addEventListener('change', async () => {
       const file = els.file.files[0];
       if (!file) return;
-      loadTrace(JSON.parse(await file.text()));
+      loadTrace(JSON.parse(await file.text()), file.name);
     });
 
     els.phase.addEventListener('change', () => {
@@ -675,6 +686,16 @@
     window.addEventListener('mouseup', () => {
       state.drag = null;
     });
+
+    const params = new URLSearchParams(window.location.search);
+    const traceUrl = params.get('trace');
+    if (traceUrl) {
+      const resolved = new URL(traceUrl, window.location.href).href;
+      els.phaseMeta.textContent = `Loading ${resolved}`;
+      loadTraceUrl(resolved).catch((error) => {
+        els.phaseMeta.textContent = `Failed to load trace: ${error.message}`;
+      });
+    }
   </script>
 </body>
 </html>
