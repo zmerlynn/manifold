@@ -554,9 +554,21 @@
         : 'No annotations for this phase.';
     }
 
+    function phaseIndexFromParam(trace, value) {
+      if (!value) return 0;
+      const phases = trace.phases || [];
+      const numeric = Number(value);
+      if (Number.isInteger(numeric) && numeric >= 0 && numeric < phases.length) {
+        return numeric;
+      }
+      const decoded = decodeURIComponent(value);
+      const named = phases.findIndex((phase) => phase.name === decoded);
+      return named >= 0 ? named : 0;
+    }
+
     function loadTrace(trace, source = '') {
       state.trace = trace;
-      state.phaseIndex = 0;
+      state.phaseIndex = phaseIndexFromParam(trace, params.get('phase'));
       state.traceSource = source;
       els.phase.replaceChildren();
       for (let i = 0; i < (trace.phases || []).length; ++i) {
@@ -566,6 +578,7 @@
         els.phase.appendChild(option);
       }
       setViewBox(defaultViewBox(trace));
+      fitCurrentPhase();
       render();
     }
 
