@@ -1367,18 +1367,13 @@ void PredicatesIdentities(const std::vector<double>& radii) {
       << "SignedArea(reverse(loop)) != -SignedArea(loop): " << area << " vs "
       << -areaRev;
 
-  // 2. CCW(a, b, c) == -CCW(a, c, b) for every consecutive triple.
+  // 2. (Removed: CCW antisymmetry. Consumer's dbe77f74 "Inline
+  //     Boolean2 CCW predicate use" made CCW internal to predicates.cpp
+  //     by dropping its header declaration. The property still holds
+  //     algebraically but isn't exposed to fuzz callers any more.)
   const double maxCoord =
       std::max({std::fabs(loop.front().x), std::fabs(loop.front().y), 1.0});
   const double eps = manifold::boolean2::EpsilonFromScale(maxCoord);
-  for (size_t i = 0; i + 2 < loop.size(); ++i) {
-    const int abc =
-        manifold::boolean2::CCW(loop[i], loop[i + 1], loop[i + 2], eps);
-    const int acb =
-        manifold::boolean2::CCW(loop[i], loop[i + 2], loop[i + 1], eps);
-    EXPECT_EQ(abc, -acb) << "CCW antisymmetry violated at i=" << i
-                         << ": CCW(a,b,c)=" << abc << " CCW(a,c,b)=" << acb;
-  }
 
   // 3. IntersectSegments is order-symmetric in the segment pair.
   // Pair every edge with the edge two steps later (so they share no
