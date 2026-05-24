@@ -1711,6 +1711,120 @@ TEST(CrossSection, BooleanDistributivityZeroMixStarC) {
       << "distributivity: right-left difference is non-empty";
 }
 
+// Seed: BooleanDistributivity (2026-05-24 local daemon cycle 290,
+//   post-nonzero-union-fix tip a9cfd4ff)
+// Counterexample-hash: 86029efb7e8d5bd1
+// Suspected owner: pr/boolean2-core (residual distributivity failure
+//   after a9cfd4ff "Use nonzero union for boolean2 set add". A is a
+//   33-radii star, C is a 32-radii star with zeros interleaved with
+//   mid-large radii. Area asymmetry: left.Area ~ 71882, right.Area
+//   ~ 66448, diff 5435 (~7%). The right side (A ∩ B) ∪ (A ∩ C) is
+//   contained in left ((right - left).Area == 0) but is missing
+//   5435 area units. NumContour also diverges (left=1, right=5).
+//   The zero-radius vertices collapse to the 0.1 baseline floor,
+//   producing dense near-degenerate slivers that the intersect path
+//   appears to drop on one side of the distributivity identity).
+TEST(CrossSection, DISABLED_BooleanDistributivityNonzeroUnionResidual) {
+  auto star = [](const std::vector<double>& radii) {
+    SimplePolygon ring;
+    const int n = static_cast<int>(radii.size());
+    constexpr double kPi = 3.14159265358979323846;
+    for (int i = 0; i < n; ++i) {
+      const double r = 0.1 + std::fabs(radii[i]);
+      const double th = 2.0 * kPi * i / n;
+      ring.push_back({r * std::cos(th), r * std::sin(th)});
+    }
+    return ring;
+  };
+  const std::vector<double> rA = {1000.,
+                                  1000.,
+                                  1.,
+                                  454.29432950304715,
+                                  995.65401133735929,
+                                  1000.,
+                                  1.,
+                                  1000.,
+                                  437.04103091878892,
+                                  195.25477231407794,
+                                  1.8268273914683537,
+                                  4.5954160688751484,
+                                  3.2030613706914481,
+                                  511.5935307510378,
+                                  2.0771806846580496,
+                                  643.7557324509894,
+                                  570.21917979539887,
+                                  1.9769538901315753,
+                                  467.93526395973339,
+                                  2.8343333181297945,
+                                  832.7231586632563,
+                                  1.9935416909420567,
+                                  3.4941254801335897,
+                                  503.25635714266843,
+                                  0.,
+                                  677.87894521363603,
+                                  1000.,
+                                  0.,
+                                  1000.,
+                                  0.06374847983784826,
+                                  995.14671048524883,
+                                  1.,
+                                  0.};
+  const std::vector<double> rB = {381.47868752207233, 271.38539902365324,
+                                  902.29172154497269, 369.78142089265032};
+  const std::vector<double> rC = {812.15251441725718,
+                                  0.,
+                                  996.64035079388486,
+                                  1.2440205144455736,
+                                  845.2781504274202,
+                                  1.7150332286725525,
+                                  601.28991029625661,
+                                  0.,
+                                  482.34411167146169,
+                                  0.,
+                                  588.04482477271347,
+                                  0.,
+                                  169.03839642543201,
+                                  512.45895098827191,
+                                  3.4002817704521431,
+                                  793.8531142632803,
+                                  234.81914439627278,
+                                  0.,
+                                  999.90271349806335,
+                                  105.49723198609914,
+                                  0.,
+                                  1000.,
+                                  0.,
+                                  705.33517104963164,
+                                  2.2547666355380791,
+                                  949.94413913719598,
+                                  0.,
+                                  4.9202747062496162,
+                                  751.85659442712381,
+                                  0.,
+                                  375.32896975602767,
+                                  0.};
+  const CrossSection a({star(rA)});
+  const CrossSection b =
+      CrossSection({star(rB)})
+          .Translate({-4.2594328040756597, -3.826038498814941});
+  const CrossSection c =
+      CrossSection({star(rC)})
+          .Translate({-4.6033649212771799, -4.3357952411613461});
+  const auto bUc = b + c;
+  const auto left = a.Boolean(bUc, OpType::Intersect);
+  const auto aIntB = a.Boolean(b, OpType::Intersect);
+  const auto aIntC = a.Boolean(c, OpType::Intersect);
+  const auto right = aIntB + aIntC;
+  const double tol = 1e-6 * (1.0 + std::fabs(a.Area()) + std::fabs(b.Area()) +
+                             std::fabs(c.Area()));
+  EXPECT_NEAR(left.Area(), right.Area(), tol)
+      << "A ∩ (B ∪ C) != (A ∩ B) ∪ (A ∩ C)";
+  EXPECT_NEAR((left - right).Area(), 0.0, tol)
+      << "distributivity: left-right difference is non-empty";
+  EXPECT_NEAR((right - left).Area(), 0.0, tol)
+      << "distributivity: right-left difference is non-empty";
+}
+
 // Seed: BooleanRobustness topology-validity failure (2026-05-23
 //   cycle 277, both daemons, post-disconnected-winding-fix tip
 //   22077d9c)
