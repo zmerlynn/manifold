@@ -20,6 +20,8 @@
 #include <cstdint>
 #ifdef MANIFOLD_DEBUG
 #include <fstream>
+#include <iomanip>
+#include <ostream>
 #endif
 #include <limits>
 #include <map>
@@ -43,6 +45,147 @@
 using namespace manifold;
 
 namespace {
+
+#if defined(MANIFOLD_CROSS_SECTION_BACKEND_BOOLEAN2) && defined(MANIFOLD_DEBUG)
+void WriteEscaped(std::ostream& os, const std::string& s) {
+  os << '"';
+  for (char c : s) {
+    switch (c) {
+      case '"':
+        os << "\\\"";
+        break;
+      case '\\':
+        os << "\\\\";
+        break;
+      case '\n':
+        os << "\\n";
+        break;
+      case '\r':
+        os << "\\r";
+        break;
+      case '\t':
+        os << "\\t";
+        break;
+      default:
+        os << c;
+        break;
+    }
+  }
+  os << '"';
+}
+
+void WriteVec2(std::ostream& os, const vec2& p) {
+  os << '[' << p.x << ',' << p.y << ']';
+}
+
+void WriteField(std::ostream& os, const char* name, const std::string& value,
+                bool comma = true) {
+  WriteEscaped(os, name);
+  os << ':';
+  WriteEscaped(os, value);
+  if (comma) os << ',';
+}
+
+template <typename T, typename F>
+void WriteArray(std::ostream& os, const std::vector<T>& items, F writeItem) {
+  os << '[';
+  for (size_t i = 0; i < items.size(); ++i) {
+    if (i > 0) os << ',';
+    writeItem(os, items[i]);
+  }
+  os << ']';
+}
+
+void WriteTraceJson(std::ostream& os, const boolean2::Trace& trace) {
+  os << std::setprecision(17);
+  os << "{\n";
+  WriteEscaped(os, "eps");
+  os << ':' << trace.eps << ",\n";
+  WriteField(os, "rule", trace.rule);
+  os << "\n";
+  WriteEscaped(os, "phases");
+  os << ":[\n";
+  for (size_t i = 0; i < trace.phases.size(); ++i) {
+    const boolean2::TracePhase& phase = trace.phases[i];
+    if (i > 0) os << ",\n";
+    os << '{';
+    WriteField(os, "name", phase.name);
+    WriteEscaped(os, "points");
+    os << ':';
+    WriteArray(os, phase.points,
+               [](std::ostream& out, const boolean2::TracePoint& p) {
+                 out << '{';
+                 WriteField(out, "id", p.id);
+                 WriteEscaped(out, "xy");
+                 out << ':';
+                 WriteVec2(out, p.p);
+                 out << ',';
+                 WriteField(out, "kind", p.kind);
+                 WriteField(out, "source", p.source);
+                 WriteField(out, "label", p.label, false);
+                 out << '}';
+               });
+    os << ',';
+    WriteEscaped(os, "segments");
+    os << ':';
+    WriteArray(os, phase.segments,
+               [](std::ostream& out, const boolean2::TraceSegment& s) {
+                 out << '{';
+                 WriteField(out, "id", s.id);
+                 WriteEscaped(out, "a");
+                 out << ':';
+                 WriteVec2(out, s.a);
+                 out << ',';
+                 WriteEscaped(out, "b");
+                 out << ':';
+                 WriteVec2(out, s.b);
+                 out << ',';
+                 WriteField(out, "kind", s.kind);
+                 WriteField(out, "source", s.source);
+                 WriteEscaped(out, "mult");
+                 out << ':' << s.mult << ',';
+                 WriteField(out, "label", s.label, false);
+                 out << '}';
+               });
+    os << ',';
+    WriteEscaped(os, "polygons");
+    os << ':';
+    WriteArray(os, phase.polygons,
+               [](std::ostream& out, const boolean2::TracePolygon& p) {
+                 out << '{';
+                 WriteField(out, "id", p.id);
+                 WriteEscaped(out, "verts");
+                 out << ":[";
+                 for (size_t j = 0; j < p.verts.size(); ++j) {
+                   if (j > 0) out << ',';
+                   WriteVec2(out, p.verts[j]);
+                 }
+                 out << "],";
+                 WriteField(out, "kind", p.kind);
+                 WriteField(out, "source", p.source);
+                 WriteEscaped(out, "winding");
+                 out << ':' << p.winding << ',';
+                 WriteEscaped(out, "inside");
+                 out << ':' << (p.inside ? "true" : "false") << ',';
+                 WriteField(out, "label", p.label, false);
+                 out << '}';
+               });
+    os << ',';
+    WriteEscaped(os, "annotations");
+    os << ':';
+    WriteArray(os, phase.annotations,
+               [](std::ostream& out, const boolean2::TraceAnnotation& a) {
+                 out << '{';
+                 WriteField(out, "target", a.target);
+                 WriteField(out, "key", a.key);
+                 WriteField(out, "value", a.value, false);
+                 out << '}';
+               });
+    os << '}';
+  }
+  os << "\n]\n}\n";
+}
+#endif
 
 SimplePolygon RandomTopologicalRing(int n, uint64_t seed) {
   std::mt19937_64 rng(seed);
@@ -324,6 +467,16 @@ std::pair<std::vector<vec2>, std::vector<boolean2::EdgeM>> CombinedInput(
     edges.push_back(edge);
   }
   return {std::move(verts), std::move(edges)};
+}
+
+template <typename Edge>
+std::map<int, int> ComputeEdgeBalance(const std::vector<Edge>& edges) {
+  std::map<int, int> balance;
+  for (const auto& edge : edges) {
+    balance[edge.v0] += edge.mult;
+    balance[edge.v1] -= edge.mult;
+  }
+  return balance;
 }
 #endif
 
@@ -836,7 +989,7 @@ TEST(CrossSection, DISABLED_Boolean2TraceTinyVsLargeStars) {
 
   std::ofstream out("boolean2_trace_tiny_vs_large_stars.json");
   ASSERT_TRUE(out.good());
-  boolean2::WriteTraceJson(out, trace);
+  WriteTraceJson(out, trace);
 }
 
 TEST(CrossSection, DISABLED_Boolean2TraceShowcase) {
@@ -885,7 +1038,7 @@ TEST(CrossSection, DISABLED_Boolean2TraceShowcase) {
 
   std::ofstream out("boolean2_trace_showcase.json");
   ASSERT_TRUE(out.good());
-  boolean2::WriteTraceJson(out, trace);
+  WriteTraceJson(out, trace);
 }
 #endif
 
@@ -2449,17 +2602,6 @@ TEST(CrossSection, BooleanDistributivityLargeInputsResidual) {
 //   RemoveOverlaps2D. Replicated inline because
 //   CheckRetainedGraphValidity isn't exposed via the public API).
 #ifdef MANIFOLD_CROSS_SECTION_BACKEND_BOOLEAN2
-namespace {
-template <typename Edge>
-std::map<int, int> ComputeEdgeBalance(const std::vector<Edge>& edges) {
-  std::map<int, int> balance;
-  for (const auto& edge : edges) {
-    balance[edge.v0] += edge.mult;
-    balance[edge.v1] -= edge.mult;
-  }
-  return balance;
-}
-}  // namespace
 TEST(CrossSection, RemoveOverlaps2DTopologyMixedScale) {
   // Inputs A and B exactly as the BooleanRobustness fuzz target
   // constructs them from the counterexample raw polygons. The
@@ -2674,10 +2816,7 @@ TEST(CrossSection, MergeVertsTransitiveChainCanDriftPastEps) {
                                    {2.97, 0.0}, {3.96, 0.0}, {10.0, 0.0},
                                    {20.0, 0.0}};
 
-  boolean2::GlobalPhases().Reset();
-  boolean2::SetTimingEnabled(true);
   const boolean2::VertexMerge merged = boolean2::MergeVerts(verts, eps);
-  boolean2::SetTimingEnabled(false);
 
   ASSERT_EQ(merged.remap.size(), verts.size());
   ASSERT_EQ(merged.verts.size(), 3);
@@ -2689,13 +2828,6 @@ TEST(CrossSection, MergeVertsTransitiveChainCanDriftPastEps) {
   EXPECT_NEAR(merged.verts[0].y, 0.0, 1e-12);
   const vec2 endpointDrift = verts.front() - merged.verts[0];
   EXPECT_GT(std::hypot(endpointDrift.x, endpointDrift.y), eps);
-
-  const auto& phases = boolean2::GlobalPhases();
-  EXPECT_EQ(phases.mergeMergedComponents.load(), 1);
-  EXPECT_EQ(phases.mergeMergedComponentsDriftGtEps.load(), 1);
-  EXPECT_EQ(phases.mergeMaxMergedComponentVerts.load(), 5);
-  EXPECT_GE(phases.mergeMaxMergedRepresentativeDriftMilliEps.load(), 1980);
-  EXPECT_GE(phases.mergeMaxMergedBboxDiagMilliEps.load(), 3960);
 }
 
 // Seed: VertexMergeIdempotence (2026-05-23 CI run 26323577663)
