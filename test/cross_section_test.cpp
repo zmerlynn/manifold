@@ -72,6 +72,7 @@ std::map<int, int> ComputeBalance(const std::vector<Edge>& edges) {
   return balance;
 }
 
+#ifdef MANIFOLD_CROSS_SECTION_BACKEND_BOOLEAN2
 bool CheckTopologicalValidity(const boolean2::OverlapResult& result,
                               const std::vector<boolean2::EdgeM>& inputEdges,
                               const std::vector<int>& inputRemap,
@@ -116,6 +117,7 @@ std::pair<std::vector<vec2>, std::vector<boolean2::EdgeM>> CombinedInput(
   }
   return {std::move(verts), std::move(edges)};
 }
+#endif
 
 }  // namespace
 
@@ -286,6 +288,7 @@ TEST(CrossSection, ConcurrentIndependentEdgePairs) {
   }
 }
 
+#ifdef MANIFOLD_CROSS_SECTION_BACKEND_BOOLEAN2
 TEST(CrossSection, PropagatesShallowIndependentIntersections) {
   using boolean2::Box2;
   using boolean2::BoxOf2DEdge;
@@ -321,6 +324,7 @@ TEST(CrossSection, PropagatesShallowIndependentIntersections) {
   ASSERT_EQ(verts.size(), 12);
   EXPECT_EQ(lists[4].size(), 2);
 }
+#endif
 
 TEST(CrossSection, TranslatedShallowConcurrentEdges) {
   auto rhomb = [](double angleDegrees, vec2 offset) {
@@ -570,7 +574,7 @@ TEST(CrossSection, SubtractInvariantsTinyVsLargeStars) {
       << "inclusion-exclusion violated";
 }
 
-#ifdef MANIFOLD_DEBUG
+#if defined(MANIFOLD_DEBUG) && defined(MANIFOLD_CROSS_SECTION_BACKEND_BOOLEAN2)
 TEST(CrossSection, DISABLED_Boolean2TraceTinyVsLargeStars) {
   auto star = [](const std::vector<double>& radii) {
     SimplePolygon ring;
@@ -2236,6 +2240,7 @@ TEST(CrossSection, BooleanDistributivityLargeInputsResidual) {
 //   extreme-scale-mix boundary or vertex-merge corner case in
 //   RemoveOverlaps2D. Replicated inline because
 //   CheckTopologicalValidity isn't exposed via the public API).
+#ifdef MANIFOLD_CROSS_SECTION_BACKEND_BOOLEAN2
 namespace {
 template <typename Edge>
 std::map<int, int> ComputeEdgeBalance(const std::vector<Edge>& edges) {
@@ -2303,6 +2308,7 @@ TEST(CrossSection, RemoveOverlaps2DTopologyMixedScale) {
         << "Add result: expected=" << target << " actual=" << actualBalance;
   }
 }
+#endif
 
 // Seed: BooleanCommutativity (2026-05-18 CI run 26006574818)
 // Counterexample-hash: 68e22a523aa8d6a5
@@ -2421,10 +2427,13 @@ TEST(CrossSection, NonFiniteInputReturnsEmpty) {
   CrossSection constructed(bad);
   EXPECT_TRUE(constructed.IsEmpty());
 
+#ifdef MANIFOLD_CROSS_SECTION_BACKEND_BOOLEAN2
   Polygons finite = {{{0.0, 0.0}, {1.0, 0.0}, {1.0, 1.0}, {0.0, 1.0}}};
   EXPECT_TRUE(boolean2::Boolean2D(Polygons{bad}, finite, OpType::Add).empty());
+#endif
 }
 
+#ifdef MANIFOLD_CROSS_SECTION_BACKEND_BOOLEAN2
 TEST(CrossSection, ShallowLongEdgeIntersectionIsNotDropped) {
   vec2 intersection;
   const double eps = boolean2::EpsilonFromScale(1e9);
@@ -2544,6 +2553,7 @@ TEST(CrossSection, VertexMergeIdempotenceTightCluster) {
       << " pass2=" << m2.verts.size() << " (n=" << xs.size() << ", eps=" << eps
       << ")";
 }
+#endif
 
 TEST(CrossSection, OffsetIsInvariantUnderLargeTranslation) {
   const CrossSection square = CrossSection::Square({10.0, 10.0}, true);
@@ -2559,6 +2569,7 @@ TEST(CrossSection, OffsetIsInvariantUnderLargeTranslation) {
   EXPECT_NEAR(translated.Area(), origin.Area(), 1e-3);
 }
 
+#ifdef MANIFOLD_CROSS_SECTION_BACKEND_BOOLEAN2
 TEST(CrossSection, SimplifyUsesFixedPointWrapper) {
   Polygons polys{RandomTopologicalRing(8, 618)};
   const double eps = boolean2::InferEps(polys, {});
@@ -2589,6 +2600,7 @@ TEST(CrossSection, ConstructorUsesFixedPointWrapper) {
   EXPECT_EQ(constructed.NumVert(), 17);
   EXPECT_NEAR(constructed.Area(), 1.7657086786950753, 1e-9);
 }
+#endif
 
 TEST(CrossSection, SimplifyPostFiltersBoolean2Output) {
   const double apex = 1.0148512233354445e-6;
@@ -2843,6 +2855,7 @@ TEST(CrossSection, BatchBoolean) {
 // Counterexample-hash: pending minimization
 // Suspected owner: pr/boolean2-core (output topology balance check fails
 // after Add on raw multi-contour, near-duplicate-heavy polygons).
+#ifdef MANIFOLD_CROSS_SECTION_BACKEND_BOOLEAN2
 TEST(CrossSection, BooleanRobustnessMergeTopologyBalance) {
   const Polygons a = {{{1024., 1024.},
                        {1., 1.},
@@ -2914,6 +2927,7 @@ TEST(CrossSection, BooleanRobustnessDirectCastKeepsExpectedArea) {
   EXPECT_NEAR(boolean2::TotalSignedArea(polys), 1678.2538553263785,
               1e-10 * (1.0 + 1678.2538553263785));
 }
+#endif
 
 TEST(CrossSection, BooleanOperatorAssignments) {
   CrossSection a = CrossSection::Square({10, 10});
