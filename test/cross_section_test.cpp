@@ -23,6 +23,7 @@
 #include <limits>
 #include <map>
 #include <random>
+#include <sstream>
 #include <vector>
 
 #ifdef MANIFOLD_CROSS_SECTION_BACKEND_BOOLEAN2
@@ -71,13 +72,121 @@ std::map<int, int> ComputeBalance(const std::vector<Edge>& edges) {
 }
 
 #ifdef MANIFOLD_CROSS_SECTION_BACKEND_BOOLEAN2
-bool CheckTopologicalValidity(const boolean2::OverlapResult& result,
-                              const std::vector<boolean2::EdgeM>& inputEdges,
-                              const std::vector<int>& inputRemap,
-                              int numMergedVerts) {
+double Cross2D(vec2 a, vec2 b) { return a.x * b.y - a.y * b.x; }
+
+bool ValidVertId(int v, const std::vector<vec2>& verts) {
+  return 0 <= v && v < static_cast<int>(verts.size());
+}
+
+bool PointsCollinearWithinEps(vec2 a, vec2 b, vec2 p, double eps) {
+  const vec2 d = b - a;
+  const double len2 = dot(d, d);
+  if (len2 == 0.0) return false;
+  return std::fabs(Cross2D(d, p - a)) <= eps * std::sqrt(len2);
+}
+
+bool SegmentsHavePositiveCollinearOverlap(vec2 a0, vec2 a1, vec2 b0, vec2 b1,
+                                          double eps) {
+  if (!PointsCollinearWithinEps(a0, a1, b0, eps) ||
+      !PointsCollinearWithinEps(a0, a1, b1, eps)) {
+    return false;
+  }
+  const int axis = std::fabs(a1.x - a0.x) >= std::fabs(a1.y - a0.y) ? 0 : 1;
+  const double aMin =
+      std::min(boolean2::Coord(a0, axis), boolean2::Coord(a1, axis));
+  const double aMax =
+      std::max(boolean2::Coord(a0, axis), boolean2::Coord(a1, axis));
+  const double bMin =
+      std::min(boolean2::Coord(b0, axis), boolean2::Coord(b1, axis));
+  const double bMax =
+      std::max(boolean2::Coord(b0, axis), boolean2::Coord(b1, axis));
+  return std::min(aMax, bMax) - std::max(aMin, bMin) > eps;
+}
+
+int StrictSide(vec2 a, vec2 b, vec2 p, double eps) {
+  const vec2 d = b - a;
+  const double threshold = eps * std::sqrt(dot(d, d));
+  const double area = Cross2D(d, p - a);
+  return (area > threshold) - (area < -threshold);
+}
+
+bool SegmentsHaveStrictCrossing(vec2 a0, vec2 a1, vec2 b0, vec2 b1,
+                                double eps) {
+  const int b0Side = StrictSide(a0, a1, b0, eps);
+  const int b1Side = StrictSide(a0, a1, b1, eps);
+  const int a0Side = StrictSide(b0, b1, a0, eps);
+  const int a1Side = StrictSide(b0, b1, a1, eps);
+  return b0Side * b1Side < 0 && a0Side * a1Side < 0;
+}
+
+bool PointInSegmentInteriorBand(vec2 p, vec2 a, vec2 b, double eps) {
+  const vec2 d = b - a;
+  const double len2 = dot(d, d);
+  if (len2 == 0.0) return false;
+  const double along = dot(p - a, d);
+  if (along <= 0.0 || along >= len2) return false;
+  return std::fabs(Cross2D(d, p - a)) <= eps * std::sqrt(len2);
+}
+
+::testing::AssertionResult CheckRetainedGraphValidity(
+    const boolean2::OverlapResult& result,
+    const std::vector<boolean2::EdgeM>& inputEdges,
+    const std::vector<int>& inputRemap, int numMergedVerts, double eps) {
+  auto fail = [](const std::string& msg) {
+    return ::testing::AssertionFailure() << msg;
+  };
+
+  for (int v = 0; v < static_cast<int>(result.verts.size()); ++v) {
+    if (!std::isfinite(result.verts[v].x) ||
+        !std::isfinite(result.verts[v].y)) {
+      std::ostringstream out;
+      out << "non-finite retained vertex " << v << " = (" << result.verts[v].x
+          << ", " << result.verts[v].y << ")";
+      return fail(out.str());
+    }
+  }
+
+  const double eps2 = eps * eps;
+  for (int a = 0; a < static_cast<int>(result.verts.size()); ++a) {
+    for (int b = a + 1; b < static_cast<int>(result.verts.size()); ++b) {
+      if (dot(result.verts[b] - result.verts[a],
+              result.verts[b] - result.verts[a]) <= eps2) {
+        std::ostringstream out;
+        out << "retained vertices " << a << " and " << b
+            << " remain within epsilon";
+        return fail(out.str());
+      }
+    }
+  }
+
+  for (int i = 0; i < static_cast<int>(result.edges.size()); ++i) {
+    const auto& edge = result.edges[i];
+    if (!ValidVertId(edge.v0, result.verts) ||
+        !ValidVertId(edge.v1, result.verts)) {
+      std::ostringstream out;
+      out << "retained edge " << i << " has invalid verts " << edge.v0 << " -> "
+          << edge.v1;
+      return fail(out.str());
+    }
+    if (dot(result.verts[edge.v1] - result.verts[edge.v0],
+            result.verts[edge.v1] - result.verts[edge.v0]) <= eps2) {
+      std::ostringstream out;
+      out << "retained edge " << i << " is epsilon-zero: " << edge.v0 << " -> "
+          << edge.v1;
+      return fail(out.str());
+    }
+  }
+
   std::vector<boolean2::EdgeM> remapped;
   remapped.reserve(inputEdges.size());
   for (const auto& edge : inputEdges) {
+    if (edge.v0 < 0 || edge.v0 >= static_cast<int>(inputRemap.size()) ||
+        edge.v1 < 0 || edge.v1 >= static_cast<int>(inputRemap.size())) {
+      std::ostringstream out;
+      out << "input edge has verts outside inputRemap: " << edge.v0 << " -> "
+          << edge.v1;
+      return fail(out.str());
+    }
     const int a = inputRemap[edge.v0];
     const int b = inputRemap[edge.v1];
     if (a != b) remapped.push_back({a, b, edge.mult});
@@ -87,7 +196,9 @@ bool CheckTopologicalValidity(const boolean2::OverlapResult& result,
   const auto actual = ComputeBalance(result.edges);
   for (const auto& [v, actualBalance] : actual) {
     if (v < 0 || v >= static_cast<int>(result.verts.size())) {
-      return false;
+      std::ostringstream out;
+      out << "retained balance references invalid vertex " << v;
+      return fail(out.str());
     }
     (void)actualBalance;
   }
@@ -96,9 +207,56 @@ bool CheckTopologicalValidity(const boolean2::OverlapResult& result,
         expected.count(v) ? expected.find(v)->second : 0;
     const int actualBalance = actual.count(v) ? actual.find(v)->second : 0;
     const int target = (v < numMergedVerts) ? expectedBalance : 0;
-    if (actualBalance != target) return false;
+    if (actualBalance != target) {
+      std::ostringstream out;
+      out << "retained balance mismatch at vertex " << v << ": expected "
+          << target << ", got " << actualBalance;
+      return fail(out.str());
+    }
   }
-  return true;
+
+  for (int i = 0; i < static_cast<int>(result.edges.size()); ++i) {
+    const auto& a = result.edges[i];
+    for (int j = i + 1; j < static_cast<int>(result.edges.size()); ++j) {
+      const auto& b = result.edges[j];
+      if (a.v0 == b.v0 || a.v0 == b.v1 || a.v1 == b.v0 || a.v1 == b.v1) {
+        continue;
+      }
+      const vec2 a0 = result.verts[a.v0];
+      const vec2 a1 = result.verts[a.v1];
+      const vec2 b0 = result.verts[b.v0];
+      const vec2 b1 = result.verts[b.v1];
+      if (SegmentsHaveStrictCrossing(a0, a1, b0, b1, eps)) {
+        std::ostringstream out;
+        out << "retained edges " << i << " and " << j
+            << " still have a strict crossing";
+        return fail(out.str());
+      }
+      if (SegmentsHavePositiveCollinearOverlap(a0, a1, b0, b1, eps)) {
+        std::ostringstream out;
+        out << "retained edges " << i << " and " << j
+            << " still have positive collinear overlap";
+        return fail(out.str());
+      }
+    }
+  }
+
+  for (int e = 0; e < static_cast<int>(result.edges.size()); ++e) {
+    const auto& edge = result.edges[e];
+    const vec2 a = result.verts[edge.v0];
+    const vec2 b = result.verts[edge.v1];
+    for (int v = 0; v < static_cast<int>(result.verts.size()); ++v) {
+      if (v == edge.v0 || v == edge.v1) continue;
+      if (PointInSegmentInteriorBand(result.verts[v], a, b, eps)) {
+        std::ostringstream out;
+        out << "retained vertex " << v << " lies in the interior band of edge "
+            << e << " (" << edge.v0 << " -> " << edge.v1 << ")";
+        return fail(out.str());
+      }
+    }
+  }
+
+  return ::testing::AssertionSuccess();
 }
 
 std::pair<std::vector<vec2>, std::vector<boolean2::EdgeM>> CombinedInput(
@@ -2231,13 +2389,13 @@ TEST(CrossSection, BooleanDistributivityLargeInputsResidual) {
 // Suspected owner: pr/boolean2-core (RemoveOverlaps2D produces an
 //   edge-balance imbalance for some vertices on these mixed-scale
 //   inputs - 1e-6 alongside 1024. The fuzz harness's
-//   CheckTopologicalValidity checks that per-vertex edge balance
+//   CheckRetainedGraphValidity checks that per-vertex edge balance
 //   from input (sum of mult on outgoing minus incoming) matches the
 //   output for surviving verts and is zero for newly-introduced
 //   ones. This input violates that. Likely eps-inference at the
 //   extreme-scale-mix boundary or vertex-merge corner case in
 //   RemoveOverlaps2D. Replicated inline because
-//   CheckTopologicalValidity isn't exposed via the public API).
+//   CheckRetainedGraphValidity isn't exposed via the public API).
 #ifdef MANIFOLD_CROSS_SECTION_BACKEND_BOOLEAN2
 namespace {
 template <typename Edge>
@@ -2568,6 +2726,39 @@ TEST(CrossSection, OffsetIsInvariantUnderLargeTranslation) {
 }
 
 #ifdef MANIFOLD_CROSS_SECTION_BACKEND_BOOLEAN2
+TEST(CrossSection, Boolean2ValidatorRejectsRetainedVertsWithinEps) {
+  const std::vector<vec2> verts = {{0.0, 0.0}, {10.0, 0.0}, {0.0, 10.0},
+                                   {0.5, 0.5}, {20.0, 0.0}, {20.0, 10.0}};
+  const std::vector<boolean2::EdgeM> edges = {{0, 1, 1}, {1, 2, 1}, {2, 0, 1},
+                                              {3, 4, 1}, {4, 5, 1}, {5, 3, 1}};
+  const boolean2::OverlapResult result{verts, edges, {0, 1, 2, 3, 4, 5}, 6};
+
+  EXPECT_FALSE(CheckRetainedGraphValidity(result, edges, result.inputRemap,
+                                          result.numMergedVerts, 1.0));
+}
+
+TEST(CrossSection, Boolean2ValidatorRejectsNearEndpointTJunction) {
+  const std::vector<vec2> verts = {{0.0, 0.0},   {10.0, 0.0}, {0.5, 0.9},
+                                   {10.0, 10.0}, {20.0, 5.0}, {20.0, 15.0}};
+  const std::vector<boolean2::EdgeM> edges = {{0, 1, 1}, {1, 3, 1}, {3, 0, 1},
+                                              {2, 4, 1}, {4, 5, 1}, {5, 2, 1}};
+  const boolean2::OverlapResult result{verts, edges, {0, 1, 2, 3, 4, 5}, 6};
+
+  EXPECT_FALSE(CheckRetainedGraphValidity(result, edges, result.inputRemap,
+                                          result.numMergedVerts, 1.0));
+}
+
+TEST(CrossSection, Boolean2ValidatorRejectsRetainedStrictCrossing) {
+  const std::vector<vec2> verts = {{0.0, 0.0},  {10.0, 10.0}, {0.0, 10.0},
+                                   {10.0, 0.0}, {-10.0, 5.0}, {20.0, 5.0}};
+  const std::vector<boolean2::EdgeM> edges = {{0, 1, 1}, {1, 4, 1}, {4, 0, 1},
+                                              {2, 3, 1}, {3, 5, 1}, {5, 2, 1}};
+  const boolean2::OverlapResult result{verts, edges, {0, 1, 2, 3, 4, 5}, 6};
+
+  EXPECT_FALSE(CheckRetainedGraphValidity(result, edges, result.inputRemap,
+                                          result.numMergedVerts, 0.01));
+}
+
 TEST(CrossSection, SimplifyUsesFixedPointWrapper) {
   Polygons polys{RandomTopologicalRing(8, 618)};
   const double eps = boolean2::InferEps(polys, {});
@@ -2841,8 +3032,8 @@ TEST(CrossSection, BooleanRobustnessMergeTopologyBalance) {
   const double eps = boolean2::InferEps(a, b);
   const auto overlap = boolean2::RemoveOverlaps2D(
       verts, edges, eps, /*debug=*/false, boolean2::WindRule::Add);
-  EXPECT_TRUE(CheckTopologicalValidity(overlap, edges, overlap.inputRemap,
-                                       overlap.numMergedVerts));
+  EXPECT_TRUE(CheckRetainedGraphValidity(overlap, edges, overlap.inputRemap,
+                                         overlap.numMergedVerts, eps));
 }
 
 // Seed: BooleanRobustness (2026-05-23 daemon find)
@@ -2876,8 +3067,8 @@ TEST(CrossSection, BooleanRobustnessDirectCastKeepsExpectedArea) {
   const double eps = boolean2::InferEps(a, b);
   const auto overlap = boolean2::RemoveOverlaps2D(
       verts, edges, eps, /*debug=*/false, boolean2::WindRule::Add);
-  EXPECT_TRUE(CheckTopologicalValidity(overlap, edges, overlap.inputRemap,
-                                       overlap.numMergedVerts));
+  EXPECT_TRUE(CheckRetainedGraphValidity(overlap, edges, overlap.inputRemap,
+                                         overlap.numMergedVerts, eps));
 
   const auto polys = boolean2::OutEdgesToPolygons(overlap.verts, overlap.edges);
   EXPECT_EQ(polys.size(), 11);
