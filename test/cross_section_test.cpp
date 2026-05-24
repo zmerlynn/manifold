@@ -1940,7 +1940,7 @@ TEST(CrossSection, BooleanDistributivityZerosInANonzeroUnion) {
 //   "right is strictly contained in left, missing area" shape of
 //   86029efb/278f30ca seeds which were fixed by the recent
 //   nonzero-outer-face classifier change).
-TEST(CrossSection, DISABLED_BooleanDistributivityRightOverMerges) {
+TEST(CrossSection, BooleanDistributivityRightOverMerges) {
   auto star = [](const std::vector<double>& radii) {
     SimplePolygon ring;
     const int n = static_cast<int>(radii.size());
@@ -2087,7 +2087,7 @@ TEST(CrossSection, DISABLED_BooleanDistributivityRightOverMerges) {
 //   fully drain the bug class: the specific seeded counterexamples
 //   pass, but neighbors in the same family with larger zero/repeat
 //   counts still trigger the same misclassification).
-TEST(CrossSection, DISABLED_BooleanDistributivityLargeInputsResidual) {
+TEST(CrossSection, BooleanDistributivityLargeInputsResidual) {
   auto star = [](const std::vector<double>& radii) {
     SimplePolygon ring;
     const int n = static_cast<int>(radii.size());
