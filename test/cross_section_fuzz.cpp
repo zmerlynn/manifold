@@ -64,7 +64,6 @@ extern "C" int ManifoldCrossSectionBackendIsBoolean2();
 #include "../src/cross_section/boolean2/boolean2.h"
 #include "../src/cross_section/boolean2/bvh.h"
 #include "../src/cross_section/boolean2/canonicalize.h"
-#include "../src/cross_section/boolean2/iterate.h"
 #include "../src/cross_section/boolean2/predicates.h"
 #include "../src/cross_section/boolean2/vertex_merge.h"
 #include "fuzztest/fuzztest.h"
@@ -1166,33 +1165,6 @@ void SubtractInvariants(const std::vector<double>& radiiA,
       << "inclusion-exclusion violated";
 }
 
-// Iterate-to-fixed-point convergence: a random star polygon should
-// converge under iterate.h's fingerprint loop within a few iterations.
-// Smith's alpha-budget proves <=2 iterations with symbolic
-// intersections; production passes maxIter=2 and ignores the status.
-// This dimension exercises maxIter=10 and asserts the result is
-// either Converged or Cycled, never MaxedOut. A MaxedOut counterexample
-// is itself a regression seed - it means topology drifts past
-// iteration 10, which today would only show up as off-by-eps cliffs.
-void IterateToFixedPointConverges(const std::vector<double>& radii) {
-  const manifold::Polygons polys{StarPolygon(radii)};
-  const auto [verts, edges] = manifold::boolean2::PolygonsToInput(polys);
-  if (verts.empty()) return;
-  const double eps = manifold::boolean2::InferEps(polys, {});
-
-  int iters = -1;
-  manifold::boolean2::IterStatus status =
-      manifold::boolean2::IterStatus::MaxedOut;
-  manifold::boolean2::IterateToFixedPoint(verts, edges, eps, /*maxIter=*/10,
-                                          &iters, &status);
-
-  EXPECT_NE(static_cast<int>(status),
-            static_cast<int>(manifold::boolean2::IterStatus::MaxedOut))
-      << "IterateToFixedPoint hit MaxedOut at iter=10 (production maxIter=2 "
-      << "would have produced different topology). Input is a regression "
-      << "seed for boolean2 iteration tail behavior.";
-}
-
 #if defined(MANIFOLD_PAR) && MANIFOLD_PAR == 1
 // Structural-coverage dim targeting boolean2's TBB-parallelized paths.
 // Property: FillByRule produces byte-identical output regardless of the
@@ -1381,10 +1353,9 @@ void BVHPairEnumerationMatchesBruteForce(const std::vector<double>& xs,
 // MergeVerts is idempotent. Once a set of vertices has been merged at
 // eps, re-merging the centroids should produce no further clustering
 // (centroid placement keeps clusters > eps apart). A non-idempotent
-// merge would mean topology oscillates between iterations and the
-// fixed-point loop would never converge cleanly. Catches off-by-eps
-// errors in vertex_merge's broad-phase pair collection or the
-// disjoint-set tie-break.
+// merge would mean topology can drift under repeated cleanup passes.
+// Catches off-by-eps errors in vertex_merge's broad-phase pair collection
+// or the disjoint-set tie-break.
 void VertexMergeIdempotence(const std::vector<double>& xs,
                             const std::vector<double>& ys, double logEps) {
   if (xs.size() != ys.size()) return;
@@ -1524,8 +1495,8 @@ void FillRuleAllCCWIdentities(const std::vector<double>& radiiA,
   // NonZero and Positive must agree exactly on all-CCW input.
   const double tol = 1e-6 * (1.0 + std::fabs(nz.Area()));
   EXPECT_NEAR(nz.Area(), pos.Area(), tol)
-      << "NonZero and Positive areas diverge on all-CCW input: "
-      << "NonZero=" << nz.Area() << " Positive=" << pos.Area();
+      << "NonZero and Positive areas diverge on all-CCW input: " << "NonZero="
+      << nz.Area() << " Positive=" << pos.Area();
   EXPECT_EQ(nz.NumContour(), pos.NumContour())
       << "NonZero and Positive contour counts diverge on all-CCW input: "
       << "NonZero=" << nz.NumContour() << " Positive=" << pos.NumContour();
@@ -1626,8 +1597,8 @@ void LargeEdgeCountSelfUnion(const std::vector<double>& radii) {
 
   const double tol = 1e-6 * (1.0 + std::fabs(area));
   EXPECT_NEAR(doubled.Area(), area, tol)
-      << "Self-union changed area on large-edge-count input: "
-      << "X.Area()=" << area << " (X+X).Area()=" << doubled.Area();
+      << "Self-union changed area on large-edge-count input: " << "X.Area()="
+      << area << " (X+X).Area()=" << doubled.Area();
   EXPECT_EQ(doubled.NumContour(), input.NumContour())
       << "Self-union changed contour count on large-edge-count input: "
       << "X.NumContour()=" << input.NumContour()
@@ -2281,9 +2252,6 @@ FUZZ_TEST(CrossSectionFuzz, ApexSkipNearLine)
 
 FUZZ_TEST(CrossSectionFuzz, TranslationInvariance)
     .WithDomains(StarRadiiDomain(), InRange(1e3, 1e9), InRange(1e3, 1e9));
-
-FUZZ_TEST(CrossSectionFuzz, IterateToFixedPointConverges)
-    .WithDomains(StarRadiiDomain());
 
 FUZZ_TEST(CrossSectionFuzz, SubtractInvariants)
     .WithDomains(StarRadiiDomain(), StarRadiiDomain(), InRange(-5.0, 5.0),

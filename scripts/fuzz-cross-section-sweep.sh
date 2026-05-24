@@ -53,7 +53,6 @@ targets=(
   CrossSectionFuzz.SimpleBooleanIdentities
   CrossSectionFuzz.ApexSkipNearLine
   CrossSectionFuzz.TranslationInvariance
-  CrossSectionFuzz.IterateToFixedPointConverges
   CrossSectionFuzz.SubtractInvariants
   CrossSectionFuzz.BooleanCommutativity
   CrossSectionFuzz.BooleanAssociativity
