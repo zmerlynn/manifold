@@ -276,7 +276,7 @@ bool PointInSegmentInteriorBand(vec2 p, vec2 a, vec2 b, double eps) {
 ::testing::AssertionResult CheckRetainedGraphValidity(
     const boolean2::OverlapResult& result,
     const std::vector<boolean2::EdgeM>& inputEdges,
-    const std::vector<int>& inputRemap, int numMergedVerts, double eps) {
+    const std::vector<int>& inputVert2Merged, int numMergedVerts, double eps) {
   auto fail = [](const std::string& msg) {
     return ::testing::AssertionFailure() << msg;
   };
@@ -325,15 +325,15 @@ bool PointInSegmentInteriorBand(vec2 p, vec2 a, vec2 b, double eps) {
   std::vector<boolean2::EdgeM> remapped;
   remapped.reserve(inputEdges.size());
   for (const auto& edge : inputEdges) {
-    if (edge.v0 < 0 || edge.v0 >= static_cast<int>(inputRemap.size()) ||
-        edge.v1 < 0 || edge.v1 >= static_cast<int>(inputRemap.size())) {
+    if (edge.v0 < 0 || edge.v0 >= static_cast<int>(inputVert2Merged.size()) ||
+        edge.v1 < 0 || edge.v1 >= static_cast<int>(inputVert2Merged.size())) {
       std::ostringstream out;
-      out << "input edge has verts outside inputRemap: " << edge.v0 << " -> "
-          << edge.v1;
+      out << "input edge has verts outside inputVert2Merged: " << edge.v0
+          << " -> " << edge.v1;
       return fail(out.str());
     }
-    const int a = inputRemap[edge.v0];
-    const int b = inputRemap[edge.v1];
+    const int a = inputVert2Merged[edge.v0];
+    const int b = inputVert2Merged[edge.v1];
     if (a != b) remapped.push_back({a, b, edge.mult});
   }
 
@@ -2641,8 +2641,8 @@ TEST(CrossSection, RemoveOverlaps2DTopologyMixedScale) {
 
   std::vector<manifold::boolean2::EdgeM> remapped;
   for (const auto& edge : edges) {
-    const int aIdx = overlapResult.inputRemap[edge.v0];
-    const int bIdx = overlapResult.inputRemap[edge.v1];
+    const int aIdx = overlapResult.inputVert2Merged[edge.v0];
+    const int bIdx = overlapResult.inputVert2Merged[edge.v1];
     if (aIdx != bIdx) remapped.push_back({aIdx, bIdx, edge.mult});
   }
   const auto expected = ComputeEdgeBalance(remapped);
@@ -2818,11 +2818,12 @@ TEST(CrossSection, MergeVertsTransitiveChainCanDriftPastEps) {
 
   const boolean2::VertexMerge merged = boolean2::MergeVerts(verts, eps);
 
-  ASSERT_EQ(merged.remap.size(), verts.size());
+  ASSERT_EQ(merged.inputVert2Merged.size(), verts.size());
   ASSERT_EQ(merged.verts.size(), 3);
-  for (int i = 0; i < 5; ++i) EXPECT_EQ(merged.remap[i], merged.remap[0]);
-  EXPECT_NE(merged.remap[5], merged.remap[0]);
-  EXPECT_NE(merged.remap[6], merged.remap[0]);
+  for (int i = 0; i < 5; ++i)
+    EXPECT_EQ(merged.inputVert2Merged[i], merged.inputVert2Merged[0]);
+  EXPECT_NE(merged.inputVert2Merged[5], merged.inputVert2Merged[0]);
+  EXPECT_NE(merged.inputVert2Merged[6], merged.inputVert2Merged[0]);
 
   EXPECT_NEAR(merged.verts[0].x, 1.98, 1e-12);
   EXPECT_NEAR(merged.verts[0].y, 0.0, 1e-12);
@@ -2917,8 +2918,8 @@ TEST(CrossSection, Boolean2ValidatorRejectsRetainedVertsWithinEps) {
                                               {3, 4, 1}, {4, 5, 1}, {5, 3, 1}};
   const boolean2::OverlapResult result{verts, edges, {0, 1, 2, 3, 4, 5}, 6};
 
-  EXPECT_FALSE(CheckRetainedGraphValidity(result, edges, result.inputRemap,
-                                          result.numMergedVerts, 1.0));
+  EXPECT_FALSE(CheckRetainedGraphValidity(
+      result, edges, result.inputVert2Merged, result.numMergedVerts, 1.0));
 }
 
 TEST(CrossSection, Boolean2ValidatorRejectsNearEndpointTJunction) {
@@ -2928,8 +2929,8 @@ TEST(CrossSection, Boolean2ValidatorRejectsNearEndpointTJunction) {
                                               {2, 4, 1}, {4, 5, 1}, {5, 2, 1}};
   const boolean2::OverlapResult result{verts, edges, {0, 1, 2, 3, 4, 5}, 6};
 
-  EXPECT_FALSE(CheckRetainedGraphValidity(result, edges, result.inputRemap,
-                                          result.numMergedVerts, 1.0));
+  EXPECT_FALSE(CheckRetainedGraphValidity(
+      result, edges, result.inputVert2Merged, result.numMergedVerts, 1.0));
 }
 
 TEST(CrossSection, Boolean2ValidatorRejectsRetainedStrictCrossing) {
@@ -2939,8 +2940,8 @@ TEST(CrossSection, Boolean2ValidatorRejectsRetainedStrictCrossing) {
                                               {2, 3, 1}, {3, 5, 1}, {5, 2, 1}};
   const boolean2::OverlapResult result{verts, edges, {0, 1, 2, 3, 4, 5}, 6};
 
-  EXPECT_FALSE(CheckRetainedGraphValidity(result, edges, result.inputRemap,
-                                          result.numMergedVerts, 0.01));
+  EXPECT_FALSE(CheckRetainedGraphValidity(
+      result, edges, result.inputVert2Merged, result.numMergedVerts, 0.01));
 }
 
 TEST(CrossSection, Boolean2CleanupPassMatchesValidAddSinglePass) {
@@ -2949,19 +2950,19 @@ TEST(CrossSection, Boolean2CleanupPassMatchesValidAddSinglePass) {
   const auto [verts, edges] = boolean2::PolygonsToInput(polys);
   const auto pass1 = boolean2::RemoveOverlaps2D(
       verts, edges, eps, /*debug=*/false, boolean2::WindRule::Add);
-  EXPECT_TRUE(CheckRetainedGraphValidity(pass1, edges, pass1.inputRemap,
+  EXPECT_TRUE(CheckRetainedGraphValidity(pass1, edges, pass1.inputVert2Merged,
                                          pass1.numMergedVerts, eps));
 
   const auto pass2 = CleanupPassLikeIterate(pass1, eps);
   const auto pass2Input = EdgesFromOverlapResult(pass1);
-  EXPECT_TRUE(CheckRetainedGraphValidity(pass2, pass2Input, pass2.inputRemap,
-                                         pass2.numMergedVerts, eps));
+  EXPECT_TRUE(CheckRetainedGraphValidity(
+      pass2, pass2Input, pass2.inputVert2Merged, pass2.numMergedVerts, eps));
   ExpectSameFingerprint(pass1, pass2, eps);
 
   const auto pass3 = CleanupPassLikeIterate(pass2, eps);
   const auto pass3Input = EdgesFromOverlapResult(pass2);
-  EXPECT_TRUE(CheckRetainedGraphValidity(pass3, pass3Input, pass3.inputRemap,
-                                         pass3.numMergedVerts, eps));
+  EXPECT_TRUE(CheckRetainedGraphValidity(
+      pass3, pass3Input, pass3.inputVert2Merged, pass3.numMergedVerts, eps));
   ExpectSameFingerprint(pass2, pass3, eps);
 
   const auto pass1Polys =
@@ -2982,19 +2983,19 @@ TEST(CrossSection, Boolean2CleanupPassMatchesValidNonZeroSinglePass) {
   const auto [verts, edges] = boolean2::PolygonsToInput(polys);
   const auto pass1 = boolean2::RemoveOverlaps2D(
       verts, edges, eps, /*debug=*/false, boolean2::WindRule::NonZero);
-  EXPECT_TRUE(CheckRetainedGraphValidity(pass1, edges, pass1.inputRemap,
+  EXPECT_TRUE(CheckRetainedGraphValidity(pass1, edges, pass1.inputVert2Merged,
                                          pass1.numMergedVerts, eps));
 
   const auto pass2 = CleanupPassLikeIterate(pass1, eps);
   const auto pass2Input = EdgesFromOverlapResult(pass1);
-  EXPECT_TRUE(CheckRetainedGraphValidity(pass2, pass2Input, pass2.inputRemap,
-                                         pass2.numMergedVerts, eps));
+  EXPECT_TRUE(CheckRetainedGraphValidity(
+      pass2, pass2Input, pass2.inputVert2Merged, pass2.numMergedVerts, eps));
   ExpectSameFingerprint(pass1, pass2, eps);
 
   const auto pass3 = CleanupPassLikeIterate(pass2, eps);
   const auto pass3Input = EdgesFromOverlapResult(pass2);
-  EXPECT_TRUE(CheckRetainedGraphValidity(pass3, pass3Input, pass3.inputRemap,
-                                         pass3.numMergedVerts, eps));
+  EXPECT_TRUE(CheckRetainedGraphValidity(
+      pass3, pass3Input, pass3.inputVert2Merged, pass3.numMergedVerts, eps));
   ExpectSameFingerprint(pass2, pass3, eps);
 
   const auto pass1Polys =
@@ -3252,8 +3253,8 @@ TEST(CrossSection, BooleanRobustnessMergeTopologyBalance) {
   const double eps = boolean2::InferEps(a, b);
   const auto overlap = boolean2::RemoveOverlaps2D(
       verts, edges, eps, /*debug=*/false, boolean2::WindRule::Add);
-  EXPECT_TRUE(CheckRetainedGraphValidity(overlap, edges, overlap.inputRemap,
-                                         overlap.numMergedVerts, eps));
+  EXPECT_TRUE(CheckRetainedGraphValidity(
+      overlap, edges, overlap.inputVert2Merged, overlap.numMergedVerts, eps));
 }
 
 // Seed: BooleanRobustness (2026-05-23 daemon find)
@@ -3287,8 +3288,8 @@ TEST(CrossSection, BooleanRobustnessDirectCastKeepsExpectedArea) {
   const double eps = boolean2::InferEps(a, b);
   const auto overlap = boolean2::RemoveOverlaps2D(
       verts, edges, eps, /*debug=*/false, boolean2::WindRule::Add);
-  EXPECT_TRUE(CheckRetainedGraphValidity(overlap, edges, overlap.inputRemap,
-                                         overlap.numMergedVerts, eps));
+  EXPECT_TRUE(CheckRetainedGraphValidity(
+      overlap, edges, overlap.inputVert2Merged, overlap.numMergedVerts, eps));
 
   const auto polys = boolean2::OutEdgesToPolygons(overlap.verts, overlap.edges);
   EXPECT_EQ(polys.size(), 11);
