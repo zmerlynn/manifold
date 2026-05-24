@@ -115,10 +115,10 @@
 #include "cross_section/boolean2/boolean2.h"
 #include "cross_section/boolean2/bvh.h"
 #include "cross_section/boolean2/canonicalize.h"
+#include "cross_section/boolean2/diagnostics.h"
 #include "cross_section/boolean2/driver.h"
 #include "cross_section/boolean2/edge_vert_lists.h"
 #include "cross_section/boolean2/intersections.h"
-#include "cross_section/boolean2/iterate.h"
 #include "cross_section/boolean2/offset.h"
 #include "cross_section/boolean2/predicates.h"
 #include "cross_section/boolean2/vertex_merge.h"
@@ -137,6 +137,9 @@ using manifold::vec3;
 using manifold::VecView;
 using manifold::la::dot;
 using manifold::la::length;
+
+int CastWindingRay(vec2 origin, const CanonicalSubEdges& canon,
+                   const std::vector<vec2>& verts);
 
 // =============================================================================
 // Property checks.
@@ -297,6 +300,100 @@ std::pair<std::vector<vec2>, std::vector<EdgeM>> TwoSquares() {
 // =============================================================================
 // Main: run a battery of tests and report.
 // =============================================================================
+using FingerprintData =
+    std::vector<std::tuple<int64_t, int64_t, int64_t, int64_t, int>>;
+
+FingerprintData FingerprintAt(const OverlapResult& r, double quantum) {
+  auto q = [quantum](double x) {
+    return static_cast<int64_t>(std::round(x / quantum));
+  };
+  FingerprintData subs;
+  subs.reserve(r.edges.size());
+  for (const auto& oe : r.edges) {
+    vec2 p0 = r.verts[oe.v0];
+    vec2 p1 = r.verts[oe.v1];
+    auto ka = std::make_pair(q(p0.x), q(p0.y));
+    auto kb = std::make_pair(q(p1.x), q(p1.y));
+    int mult = oe.mult;
+    if (kb < ka) {
+      std::swap(ka, kb);
+      mult = -mult;
+    }
+    subs.emplace_back(ka.first, ka.second, kb.first, kb.second, mult);
+  }
+  manifold::stable_sort(subs.begin(), subs.end());
+  return subs;
+}
+
+FingerprintData Fingerprint(const OverlapResult& r, double eps) {
+  return FingerprintAt(r, eps * 0.01);
+}
+
+double SignedAreaFromOutEdges(const std::vector<vec2>& verts,
+                              const std::vector<OutEdge>& edges) {
+  double area = 0.0;
+  for (const auto& e : edges) {
+    const vec2& a = verts[e.v0];
+    const vec2& b = verts[e.v1];
+    area += 0.5 * e.mult * (a.x * b.y - b.x * a.y);
+  }
+  return area;
+}
+
+enum class IterStatus {
+  Converged,
+  Cycled,
+  MaxedOut,
+};
+
+// Diagnostics-only compatibility helper for old fixed-point experiments. The
+// production Boolean2 path is intentionally single-pass.
+OverlapResult IterateToFixedPoint(const std::vector<vec2>& vIn,
+                                  const std::vector<EdgeM>& eIn, double eps,
+                                  int maxIter = 2, int* outIters = nullptr,
+                                  IterStatus* outStatus = nullptr,
+                                  WindRule pred = WindRule::Add) {
+  std::vector<OverlapResult> history;
+  std::vector<FingerprintData> fps;
+  history.push_back(RemoveOverlaps2D(vIn, eIn, eps, /*debug=*/false, pred));
+  fps.push_back(Fingerprint(history.back(), eps));
+  std::vector<int> composedRemap = history.back().inputRemap;
+  for (int iter = 1; iter <= maxIter; ++iter) {
+    std::vector<EdgeM> nextEdges;
+    nextEdges.reserve(history.back().edges.size());
+    for (const auto& oe : history.back().edges) {
+      nextEdges.push_back({oe.v0, oe.v1, oe.mult});
+    }
+    auto next = RemoveOverlaps2D(history.back().verts, nextEdges, eps);
+    for (auto& v : composedRemap) v = next.inputRemap[v];
+    next.inputRemap = composedRemap;
+    auto nextFp = Fingerprint(next, eps);
+    if (nextFp == fps.back()) {
+      if (outIters) *outIters = iter;
+      if (outStatus) *outStatus = IterStatus::Converged;
+      return next;
+    }
+    for (size_t k = 0; k + 1 < fps.size(); ++k) {
+      if (fps[k] == nextFp) {
+        if (outIters) *outIters = iter;
+        if (outStatus) *outStatus = IterStatus::Cycled;
+        size_t minIdx = 0;
+        for (size_t j = 1; j < fps.size(); ++j) {
+          if (fps[j] < fps[minIdx]) minIdx = j;
+        }
+        if (nextFp < fps[minIdx]) return next;
+        return std::move(history[minIdx]);
+      }
+    }
+    history.push_back(std::move(next));
+    fps.push_back(std::move(nextFp));
+  }
+  if (outIters) *outIters = maxIter;
+  if (outStatus) *outStatus = IterStatus::MaxedOut;
+  history.back().inputRemap = std::move(composedRemap);
+  return std::move(history.back());
+}
+
 struct TestCase {
   std::string name;
   std::vector<vec2> verts;
@@ -453,7 +550,7 @@ void Diagnose(uint64_t seed, int kPow = 30, int n = 50) {
             << "\n";
 
   // Now also run the winding filter and check balance again.
-  auto out = FilterByWindingDCEL(canon, merge.verts);
+  auto out = FilterByWindingHalfedges(canon, merge.verts);
   std::cerr << "\nAfter winding filter: " << out.size()
             << " output edges (from " << canon.edges.size()
             << " canonical sub-edges)\n";
@@ -1237,8 +1334,7 @@ inline void RunClipper2Corpus(const std::string& path) {
     for (size_t i = 0; i < drifters.size() && i < 30; ++i) {
       auto& [n, desc, drift, outA, solA] = drifters[i];
       std::cout << "    #" << n << "  " << desc << "  drift=" << (drift * 100.0)
-                << "%"
-                << "  out=" << outA << "  sol=" << solA << "\n";
+                << "%" << "  out=" << outA << "  sol=" << solA << "\n";
     }
   }
 }
@@ -1657,13 +1753,8 @@ inline manifold::Polygons RunMfogelOp(const MfogelCase& c,
   } else if (op == "xor") {
     r = RemoveOverlaps2D(verts, edges, eps, /*debug=*/false, WindRule::EvenOdd);
   } else if (op == "intersection") {
-    // N-ary intersection: keep faces with w >= N. Parameterized
-    // predicate, so we go through RemoveOverlaps2D's templated
-    // overload with a lambda (only the diagnostic driver pays the
-    // extra instantiation).
-    const int N = static_cast<int>(filled.size());
     r = RemoveOverlaps2D(verts, edges, eps, /*debug=*/false,
-                         [N](int w) { return w >= N; });
+                         WindRule::Intersect);
   } else if (op == "difference") {
     r = RemoveOverlaps2D(verts, edges, eps, /*debug=*/false, WindRule::Add);
   } else {
@@ -1764,8 +1855,8 @@ inline void RunMfogelCorpus(const std::string& dir) {
     for (size_t i = 0; i < drifters.size() && i < 30; ++i) {
       auto& [name, op, drift, outA, expA] = drifters[i];
       std::cout << "    " << name << " / " << op
-                << "  drift=" << (drift * 100.0) << "%"
-                << "  out=" << outA << "  exp=" << expA << "\n";
+                << "  drift=" << (drift * 100.0) << "%" << "  out=" << outA
+                << "  exp=" << expA << "\n";
     }
   }
 }
@@ -3239,9 +3330,8 @@ void OffsetCase(int kPow, int n, uint64_t seed64, JoinType jt,
   const auto [lo, hi] = BoundsOf(in);
   const double bboxExtent = std::max(hi.x - lo.x, hi.y - lo.y);
   const double delta = deltaFrac * bboxExtent;
-  auto raw = offset_detail::OffsetContour(ring, delta, jt, 2.0, 0.0);
-  Polygons rawPolys;
-  if (raw.size() >= 3) rawPolys.push_back(raw);
+  Polygons rawPolys = Offset(in, delta, jt, /*miterLimit=*/2.0,
+                             /*arcTol=*/0.0);
   const double eps =
       rawPolys.empty() ? EpsilonFromScale(scale) : InferEps(rawPolys, {});
   auto rawNonZero = FillByRule(rawPolys, WindRule::NonZero, eps);
@@ -3255,8 +3345,9 @@ void OffsetCase(int kPow, int n, uint64_t seed64, JoinType jt,
   std::cout << "  input bbox: [" << lo.x << "," << lo.y << "] - [" << hi.x
             << "," << hi.y << "], extent=" << bboxExtent << "\n";
   std::cout << "  input area: " << TotalSignedArea(in) << "\n";
-  std::cout << "  raw contour: verts=" << raw.size()
-            << " area=" << SignedArea(raw) << "\n";
+  std::cout << "  raw offset: paths=" << rawPolys.size()
+            << " verts=" << PolygonsToInput(rawPolys).first.size()
+            << " area=" << TotalSignedArea(rawPolys) << "\n";
   std::cout << "  raw fill NonZero: paths=" << rawNonZero.size()
             << " area=" << TotalSignedArea(rawNonZero) << "\n";
   std::cout << "  raw fill Positive: paths=" << rawPositive.size()
@@ -4045,64 +4136,14 @@ int main(int argc, char** argv) {
     };
     row("vertex merge", P.mergeNs.load());
     row("edge collapse", P.remapNs.load());
-    row("near-vertex indexing", P.buildListsNs.load());
+    row("edge-vertex lists", P.edgeVertListsNs.load());
     row("intersection insertion", P.findIxNs.load());
     row("structural re-merge", P.restructNs.load());
     row("canonicalization", P.canonNs.load());
-    row("winding filter", P.filterDcelNs.load());
-    std::cout << "\n  Sub-phase breakdown (% of pipeline total):\n";
-    row("  merge BVH build", P.mergeBvhBuildNs.load());
-    row("  merge BVH self-collide", P.mergeCollideNs.load());
+    row("winding filter", P.filterHalfedgeNs.load());
+    std::cout << "\n  Shared broad-phase work (% of pipeline total):\n";
     row("  shared edge BVH build", P.bvhBuildNs.load());
     row("  broad candidate work", P.broadPairWorkNs.load());
-    row("  edge-vertex lists", P.edgeVertListsNs.load());
-    row("  intersection broad", P.intersectionBroadNs.load());
-    row("  intersection narrow", P.intersectionNarrowNs.load());
-    row("  intersection propagation", P.intersectionPropagationNs.load());
-    const int64_t evCand = P.edgeVertCandidates.load();
-    if (evCand > 0) {
-      std::cout << "\n  Edge-vertex candidate breakdown:\n";
-      auto crow = [&](const char* name, int64_t count) {
-        std::cout << "    " << std::left << std::setw(28) << name << std::right
-                  << std::setw(12) << count << "  " << std::setw(6);
-        std::cout.setf(std::ios::fixed);
-        std::cout.precision(2);
-        std::cout << (count * 100.0 / evCand) << "%\n";
-        std::cout.unsetf(std::ios::fixed);
-      };
-      crow("candidates", evCand);
-      crow("endpoint rejects", P.edgeVertEndpointRejects.load());
-      crow("degenerate edge rejects", P.edgeVertDegenerateRejects.load());
-      crow("t-range rejects", P.edgeVertTRangeRejects.load());
-      crow("distance rejects", P.edgeVertDistanceRejects.load());
-      crow("apex rejects", P.edgeVertApexRejects.load());
-      crow("hits", P.edgeVertHits.load());
-      const int64_t evCalls = P.edgeVertCalls.load();
-      const int64_t evEdges = P.edgeVertTotalEdges.load();
-      const int64_t evVerts = P.edgeVertTotalVerts.load();
-      if (evCalls > 0) {
-        std::cout << "\n  Edge-vertex shape breakdown:\n";
-        std::cout << "    calls=" << evCalls
-                  << " brute=" << P.edgeVertBruteCalls.load()
-                  << " vertexBvh=" << P.edgeVertVertexBvhCalls.load()
-                  << " bvh=" << P.edgeVertBvhCalls.load()
-                  << " pairDerived=" << P.edgeVertPairDerivedCalls.load()
-                  << " avgE=" << (evEdges * 1.0 / evCalls)
-                  << " avgV=" << (evVerts * 1.0 / evCalls)
-                  << " flatHits=" << P.edgeVertHitsFlat.load() << "\n";
-        std::cout << "    edge buckets: <64=" << P.edgeVertBucketLt64.load()
-                  << " <256=" << P.edgeVertBucketLt256.load()
-                  << " <1024=" << P.edgeVertBucketLt1024.load()
-                  << " >=1024=" << P.edgeVertBucketGe1024.load() << "\n";
-      }
-    }
-    const int64_t propCalls = P.propagationCalls.load();
-    if (propCalls > 0) {
-      std::cout << "\n  Intersection propagation shape:\n";
-      std::cout << "    calls=" << propCalls
-                << " skippedNoNearDup=" << P.propagationSkippedNoNearDup.load()
-                << "\n";
-    }
     return 0;
   }
   SetTimingEnabled(false);
