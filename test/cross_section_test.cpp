@@ -3295,6 +3295,18 @@ TEST(CrossSection, BooleanRobustnessDirectCastKeepsExpectedArea) {
   EXPECT_NEAR(boolean2::TotalSignedArea(polys), 1678.2538553263785,
               1e-10 * (1.0 + 1678.2538553263785));
 }
+
+// Regression: a single closed directed ring must round-trip through
+// OutEdgesToPolygons. Earlier closure logic detected closure by trying to
+// re-select the start edge as `next`, which is skipped by the visited guard;
+// the natural walk terminates with destV == startV instead.
+TEST(CrossSection, OutEdgesToPolygonsClosesSimpleRing) {
+  const std::vector<vec2> verts = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
+  const std::vector<boolean2::OutEdge> edges = {{0, 1}, {1, 2}, {2, 3}, {3, 0}};
+  const auto polys = boolean2::OutEdgesToPolygons(verts, edges);
+  ASSERT_EQ(polys.size(), 1u);
+  EXPECT_EQ(polys[0].size(), 4u);
+}
 #endif
 
 TEST(CrossSection, BooleanOperatorAssignments) {
