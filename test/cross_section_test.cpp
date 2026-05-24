@@ -1724,7 +1724,7 @@ TEST(CrossSection, BooleanDistributivityZeroMixStarC) {
 //   The zero-radius vertices collapse to the 0.1 baseline floor,
 //   producing dense near-degenerate slivers that the intersect path
 //   appears to drop on one side of the distributivity identity).
-TEST(CrossSection, DISABLED_BooleanDistributivityNonzeroUnionResidual) {
+TEST(CrossSection, BooleanDistributivityNonzeroUnionResidual) {
   auto star = [](const std::vector<double>& radii) {
     SimplePolygon ring;
     const int n = static_cast<int>(radii.size());
@@ -1823,6 +1823,10 @@ TEST(CrossSection, DISABLED_BooleanDistributivityNonzeroUnionResidual) {
       << "distributivity: left-right difference is non-empty";
   EXPECT_NEAR((right - left).Area(), 0.0, tol)
       << "distributivity: right-left difference is non-empty";
+  EXPECT_NEAR((aIntB - right).Area(), 0.0, tol)
+      << "union monotonicity: (A ∩ B) is not contained in right";
+  EXPECT_NEAR((aIntC - right).Area(), 0.0, tol)
+      << "union monotonicity: (A ∩ C) is not contained in right";
 }
 
 // Seed: BooleanDistributivity (2026-05-24 manifoci daemon cycle 90,
@@ -1837,7 +1841,7 @@ TEST(CrossSection, DISABLED_BooleanDistributivityNonzeroUnionResidual) {
 //   strictly contained in left, missing ~4001 area units out of
 //   ~16255 (~25%). Confirms the intersect-path sliver-drop bug is
 //   not specific to which input carries the zeros).
-TEST(CrossSection, DISABLED_BooleanDistributivityZerosInANonzeroUnion) {
+TEST(CrossSection, BooleanDistributivityZerosInANonzeroUnion) {
   auto star = [](const std::vector<double>& radii) {
     SimplePolygon ring;
     const int n = static_cast<int>(radii.size());
@@ -1915,6 +1919,10 @@ TEST(CrossSection, DISABLED_BooleanDistributivityZerosInANonzeroUnion) {
       << "distributivity: left-right difference is non-empty";
   EXPECT_NEAR((right - left).Area(), 0.0, tol)
       << "distributivity: right-left difference is non-empty";
+  EXPECT_NEAR((aIntB - right).Area(), 0.0, tol)
+      << "union monotonicity: (A ∩ B) is not contained in right";
+  EXPECT_NEAR((aIntC - right).Area(), 0.0, tol)
+      << "union monotonicity: (A ∩ C) is not contained in right";
 }
 
 // Seed: BooleanRobustness topology-validity failure (2026-05-23
