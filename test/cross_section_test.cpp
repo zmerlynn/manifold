@@ -3075,6 +3075,20 @@ TEST(CrossSection, Boolean2IntersectSegmentsKeepsTwoSidedEpsBandCrossing) {
   EXPECT_NEAR(intersection.y, 0.0, 1e-12);
 }
 
+TEST(CrossSection, Boolean2IntersectSegmentsKeepsUnderflowingSignChange) {
+  using boolean2::GraphSegment2D;
+  using boolean2::IntersectSegments;
+
+  const double tiny = 1e-200;
+  vec2 intersection;
+  GraphSegment2D a{{0.0, 0.0}, {10.0, 0.0}, 0, 0};
+  GraphSegment2D b{{0.0, -tiny}, {10.0, tiny}, 0, 1};
+
+  EXPECT_TRUE(IntersectSegments(a, b, 1.0, &intersection));
+  EXPECT_NEAR(intersection.x, 5.0, 1e-12);
+  EXPECT_NEAR(intersection.y, 0.0, 1e-12);
+}
+
 TEST(CrossSection, Boolean2IntersectSegmentsDropsEpsNearEndpointCrossing) {
   using boolean2::GraphSegment2D;
   using boolean2::IntersectSegments;
