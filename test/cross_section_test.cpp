@@ -17,6 +17,7 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <cstdint>
 #ifdef MANIFOLD_DEBUG
 #include <fstream>
 #endif
@@ -24,6 +25,7 @@
 #include <map>
 #include <random>
 #include <sstream>
+#include <tuple>
 #include <vector>
 
 #ifdef MANIFOLD_CROSS_SECTION_BACKEND_BOOLEAN2
@@ -257,6 +259,56 @@ bool PointInSegmentInteriorBand(vec2 p, vec2 a, vec2 b, double eps) {
   }
 
   return ::testing::AssertionSuccess();
+}
+
+std::vector<boolean2::EdgeM> EdgesFromOverlapResult(
+    const boolean2::OverlapResult& result) {
+  std::vector<boolean2::EdgeM> edges;
+  edges.reserve(result.edges.size());
+  for (const auto& edge : result.edges) {
+    edges.push_back({edge.v0, edge.v1, edge.mult});
+  }
+  return edges;
+}
+
+boolean2::OverlapResult CleanupPassLikeIterate(
+    const boolean2::OverlapResult& result, double eps) {
+  return boolean2::RemoveOverlaps2D(result.verts,
+                                    EdgesFromOverlapResult(result), eps,
+                                    /*debug=*/false, boolean2::WindRule::Add);
+}
+
+void ExpectSameFingerprint(const boolean2::OverlapResult& a,
+                           const boolean2::OverlapResult& b, double eps) {
+  using Fingerprint =
+      std::vector<std::tuple<int64_t, int64_t, int64_t, int64_t, int>>;
+  auto fingerprint = [eps](const boolean2::OverlapResult& r) {
+    const double quantum = eps * 0.01;
+    auto q = [quantum](double x) {
+      return static_cast<int64_t>(std::round(x / quantum));
+    };
+    Fingerprint fp;
+    fp.reserve(r.edges.size());
+    for (const auto& edge : r.edges) {
+      vec2 p0 = r.verts[edge.v0];
+      vec2 p1 = r.verts[edge.v1];
+      auto k0 = std::make_pair(q(p0.x), q(p0.y));
+      auto k1 = std::make_pair(q(p1.x), q(p1.y));
+      int mult = edge.mult;
+      if (k1 < k0) {
+        std::swap(k0, k1);
+        mult = -mult;
+      }
+      fp.emplace_back(k0.first, k0.second, k1.first, k1.second, mult);
+    }
+    manifold::stable_sort(fp.begin(), fp.end());
+    return fp;
+  };
+
+  const auto fpA = fingerprint(a);
+  const auto fpB = fingerprint(b);
+  EXPECT_EQ(fpA, fpB) << "fingerprints differ: lhs edges=" << a.edges.size()
+                      << " rhs edges=" << b.edges.size();
 }
 
 std::pair<std::vector<vec2>, std::vector<boolean2::EdgeM>> CombinedInput(
@@ -2759,35 +2811,71 @@ TEST(CrossSection, Boolean2ValidatorRejectsRetainedStrictCrossing) {
                                           result.numMergedVerts, 0.01));
 }
 
-TEST(CrossSection, SimplifyUsesFixedPointWrapper) {
+TEST(CrossSection, Boolean2CleanupPassMatchesValidAddSinglePass) {
   Polygons polys{RandomTopologicalRing(8, 618)};
   const double eps = boolean2::InferEps(polys, {});
-
   const auto [verts, edges] = boolean2::PolygonsToInput(polys);
-  auto single = boolean2::RemoveOverlaps2D(verts, edges, eps);
-  auto singlePolys = boolean2::OutEdgesToPolygons(single.verts, single.edges);
-  ASSERT_EQ(singlePolys.size(), 2);
+  const auto pass1 = boolean2::RemoveOverlaps2D(
+      verts, edges, eps, /*debug=*/false, boolean2::WindRule::Add);
+  EXPECT_TRUE(CheckRetainedGraphValidity(pass1, edges, pass1.inputRemap,
+                                         pass1.numMergedVerts, eps));
 
-  auto simplified = boolean2::Simplify(polys, eps);
-  ASSERT_EQ(simplified.size(), 2);
-  EXPECT_EQ(simplified[0].size(), 11);
-  EXPECT_EQ(simplified[1].size(), 3);
-  EXPECT_NEAR(boolean2::TotalSignedArea(simplified), 1.7657076120973501, 1e-12);
+  const auto pass2 = CleanupPassLikeIterate(pass1, eps);
+  const auto pass2Input = EdgesFromOverlapResult(pass1);
+  EXPECT_TRUE(CheckRetainedGraphValidity(pass2, pass2Input, pass2.inputRemap,
+                                         pass2.numMergedVerts, eps));
+  ExpectSameFingerprint(pass1, pass2, eps);
+
+  const auto pass3 = CleanupPassLikeIterate(pass2, eps);
+  const auto pass3Input = EdgesFromOverlapResult(pass2);
+  EXPECT_TRUE(CheckRetainedGraphValidity(pass3, pass3Input, pass3.inputRemap,
+                                         pass3.numMergedVerts, eps));
+  ExpectSameFingerprint(pass2, pass3, eps);
+
+  const auto pass1Polys =
+      boolean2::OutEdgesToPolygons(pass1.verts, pass1.edges);
+  const auto pass2Polys =
+      boolean2::OutEdgesToPolygons(pass2.verts, pass2.edges);
+  ASSERT_EQ(pass1Polys.size(), 2);
+  ASSERT_EQ(pass2Polys.size(), 2);
+  EXPECT_EQ(pass1Polys[0].size(), pass2Polys[0].size());
+  EXPECT_EQ(pass1Polys[1].size(), pass2Polys[1].size());
+  EXPECT_NEAR(boolean2::TotalSignedArea(pass1Polys),
+              boolean2::TotalSignedArea(pass2Polys), 1e-12);
 }
 
-TEST(CrossSection, ConstructorUsesFixedPointWrapper) {
+TEST(CrossSection, Boolean2CleanupPassMatchesValidNonZeroSinglePass) {
   Polygons polys{RandomTopologicalRing(8, 618)};
   const double eps = boolean2::InferEps(polys, {});
   const auto [verts, edges] = boolean2::PolygonsToInput(polys);
-  auto single = boolean2::RemoveOverlaps2D(verts, edges, eps);
-  auto singlePolys = boolean2::OutEdgesToPolygons(single.verts, single.edges);
-  ASSERT_EQ(singlePolys.size(), 2);
+  const auto pass1 = boolean2::RemoveOverlaps2D(
+      verts, edges, eps, /*debug=*/false, boolean2::WindRule::NonZero);
+  EXPECT_TRUE(CheckRetainedGraphValidity(pass1, edges, pass1.inputRemap,
+                                         pass1.numMergedVerts, eps));
 
-  CrossSection constructed(polys, CrossSection::FillRule::NonZero);
+  const auto pass2 = CleanupPassLikeIterate(pass1, eps);
+  const auto pass2Input = EdgesFromOverlapResult(pass1);
+  EXPECT_TRUE(CheckRetainedGraphValidity(pass2, pass2Input, pass2.inputRemap,
+                                         pass2.numMergedVerts, eps));
+  ExpectSameFingerprint(pass1, pass2, eps);
 
-  EXPECT_EQ(constructed.NumContour(), 3);
-  EXPECT_EQ(constructed.NumVert(), 17);
-  EXPECT_NEAR(constructed.Area(), 1.7657086786950753, 1e-9);
+  const auto pass3 = CleanupPassLikeIterate(pass2, eps);
+  const auto pass3Input = EdgesFromOverlapResult(pass2);
+  EXPECT_TRUE(CheckRetainedGraphValidity(pass3, pass3Input, pass3.inputRemap,
+                                         pass3.numMergedVerts, eps));
+  ExpectSameFingerprint(pass2, pass3, eps);
+
+  const auto pass1Polys =
+      boolean2::OutEdgesToPolygons(pass1.verts, pass1.edges);
+  const auto pass2Polys =
+      boolean2::OutEdgesToPolygons(pass2.verts, pass2.edges);
+  ASSERT_EQ(pass1Polys.size(), 3);
+  ASSERT_EQ(pass2Polys.size(), 3);
+  EXPECT_EQ(pass1Polys[0].size(), pass2Polys[0].size());
+  EXPECT_EQ(pass1Polys[1].size(), pass2Polys[1].size());
+  EXPECT_EQ(pass1Polys[2].size(), pass2Polys[2].size());
+  EXPECT_NEAR(boolean2::TotalSignedArea(pass1Polys),
+              boolean2::TotalSignedArea(pass2Polys), 1e-12);
 }
 #endif
 
