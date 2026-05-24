@@ -1925,6 +1925,300 @@ TEST(CrossSection, BooleanDistributivityZerosInANonzeroUnion) {
       << "union monotonicity: (A ∩ C) is not contained in right";
 }
 
+// Seed: BooleanDistributivity (2026-05-24 local daemon cycle ~294,
+//   post-classify-nonzero-outer-face tip 986183af)
+// Counterexample-hash: 389840fbf4d32247
+// Suspected owner: pr/boolean2-core (small-residual failure on the
+//   OPPOSITE side from the previous nonzero-union residuals: here
+//   right > left, with left.Area=172524 and right.Area=172618 -
+//   diff only 94.6 (~0.06%) but (left-right).Area==0 and
+//   (right-left).Area=94. NumContour also reversed: left=25,
+//   right=8 - right side collapses many contours into fewer.
+//   Suggests the right-hand `(A∩B) ∪ (A∩C)` is over-merging
+//   adjacent components and accidentally including area that the
+//   left-hand `A ∩ (B∪C)` correctly carves out. Distinct from the
+//   "right is strictly contained in left, missing area" shape of
+//   86029efb/278f30ca seeds which were fixed by the recent
+//   nonzero-outer-face classifier change).
+TEST(CrossSection, DISABLED_BooleanDistributivityRightOverMerges) {
+  auto star = [](const std::vector<double>& radii) {
+    SimplePolygon ring;
+    const int n = static_cast<int>(radii.size());
+    constexpr double kPi = 3.14159265358979323846;
+    for (int i = 0; i < n; ++i) {
+      const double r = 0.1 + std::fabs(radii[i]);
+      const double th = 2.0 * kPi * i / n;
+      ring.push_back({r * std::cos(th), r * std::sin(th)});
+    }
+    return ring;
+  };
+  const std::vector<double> rA = {1000.,
+                                  995.07901723564635,
+                                  1.,
+                                  1000.,
+                                  974.26213405728731,
+                                  974.26213405728731,
+                                  887.65436435582899,
+                                  1000.,
+                                  0.,
+                                  1000.,
+                                  1000.,
+                                  0.06374847983784826,
+                                  671.02238904111891,
+                                  671.02238904111891,
+                                  671.02238904111891,
+                                  0.};
+  const std::vector<double> rB = {165.9646574194592,
+                                  134.35969768300723,
+                                  134.35969768300723,
+                                  0.,
+                                  0.,
+                                  0.,
+                                  134.35969768300723,
+                                  0.90493025476122824,
+                                  95.854999537523781,
+                                  0.,
+                                  730.30962259021919,
+                                  0.,
+                                  460.32237309958083,
+                                  2.9791218075989327,
+                                  30.186663600739344,
+                                  1.,
+                                  90.446292042234916,
+                                  5.732788180417673,
+                                  487.77994489187455,
+                                  4.5933105105744643,
+                                  110.52720785200476,
+                                  1.,
+                                  1.,
+                                  1.,
+                                  338.4042053897046,
+                                  1.,
+                                  1.,
+                                  405.85342012592389,
+                                  405.85342012592389,
+                                  0.,
+                                  1.,
+                                  405.85342012592389,
+                                  706.56289376450047,
+                                  405.85342012592389,
+                                  405.85342012592389,
+                                  1.,
+                                  1.,
+                                  1.,
+                                  1.,
+                                  1.,
+                                  1.,
+                                  1.,
+                                  1.,
+                                  1.};
+  const std::vector<double> rC = {279.68331311398725,
+                                  814.7527470368675,
+                                  812.15251441725718,
+                                  1000.,
+                                  0.,
+                                  996.64035079388486,
+                                  1.,
+                                  1000.,
+                                  1.,
+                                  0.,
+                                  146.36259356992105,
+                                  1000.,
+                                  1.2440205144455736,
+                                  2.4903214421341642,
+                                  1.4267332381508839,
+                                  1.0658012274682902,
+                                  937.2477438999249,
+                                  601.28991029625661,
+                                  0.,
+                                  482.34411167146169,
+                                  0.,
+                                  999.13575735403208,
+                                  0.,
+                                  124.51182502694519,
+                                  0.44553220583928932,
+                                  4.0649812370918958,
+                                  512.45895098827191,
+                                  1000.,
+                                  0.,
+                                  0.,
+                                  0.,
+                                  595.63567011806413,
+                                  2.5851695628219766,
+                                  354.45821723238265,
+                                  4.2476895774067867,
+                                  956.03225557664916,
+                                  0.,
+                                  0.,
+                                  98.799661756610732,
+                                  0.,
+                                  1000.,
+                                  1.};
+  const CrossSection a({star(rA)});
+  const CrossSection b =
+      CrossSection({star(rB)})
+          .Translate({0.61958285855050033, -2.9878148015921839});
+  const CrossSection c =
+      CrossSection({star(rC)})
+          .Translate({2.4887547431653907, 4.8411440198518338});
+  const auto bUc = b + c;
+  const auto left = a.Boolean(bUc, OpType::Intersect);
+  const auto aIntB = a.Boolean(b, OpType::Intersect);
+  const auto aIntC = a.Boolean(c, OpType::Intersect);
+  const auto right = aIntB + aIntC;
+  const double tol = 1e-6 * (1.0 + std::fabs(a.Area()) + std::fabs(b.Area()) +
+                             std::fabs(c.Area()));
+  EXPECT_NEAR(left.Area(), right.Area(), tol)
+      << "A ∩ (B ∪ C) != (A ∩ B) ∪ (A ∩ C)";
+  EXPECT_NEAR((left - right).Area(), 0.0, tol)
+      << "distributivity: left-right difference is non-empty";
+  EXPECT_NEAR((right - left).Area(), 0.0, tol)
+      << "distributivity: right-left difference is non-empty";
+}
+
+// Seed: BooleanDistributivity (2026-05-24 manifoci daemon cycle ~94,
+//   post-classify-nonzero-outer-face tip 986183af)
+// Counterexample-hash: dbc69cb9e33a69c4
+// Suspected owner: pr/boolean2-core (same failure shape as the
+//   already-drained 86029efb/278f30ca residuals - right strictly
+//   contained in left, missing area - but on larger inputs (34/19/45
+//   radii). Area diff 26631 (~19% of left), NumContour 11 vs 10.
+//   Demonstrates that the nonzero-outer-face classifier fix did not
+//   fully drain the bug class: the specific seeded counterexamples
+//   pass, but neighbors in the same family with larger zero/repeat
+//   counts still trigger the same misclassification).
+TEST(CrossSection, DISABLED_BooleanDistributivityLargeInputsResidual) {
+  auto star = [](const std::vector<double>& radii) {
+    SimplePolygon ring;
+    const int n = static_cast<int>(radii.size());
+    constexpr double kPi = 3.14159265358979323846;
+    for (int i = 0; i < n; ++i) {
+      const double r = 0.1 + std::fabs(radii[i]);
+      const double th = 2.0 * kPi * i / n;
+      ring.push_back({r * std::cos(th), r * std::sin(th)});
+    }
+    return ring;
+  };
+  const std::vector<double> rA = {215.54119679461166,
+                                  0.,
+                                  1000.,
+                                  85.932045280269435,
+                                  85.932045280269435,
+                                  503.627431790542,
+                                  85.932045280269435,
+                                  1.6560313083633313,
+                                  90.069450175585047,
+                                  90.069450175585047,
+                                  1.,
+                                  1.,
+                                  1.,
+                                  1.,
+                                  0.,
+                                  1.,
+                                  1.,
+                                  1.,
+                                  1.,
+                                  87.027104618165325,
+                                  85.932045280269435,
+                                  258.81750993550418,
+                                  1000.,
+                                  1.,
+                                  0.,
+                                  89.294011990045064,
+                                  85.932045280269435,
+                                  85.932045280269435,
+                                  85.932045280269435,
+                                  85.932045280269435,
+                                  85.932045280269435,
+                                  1000.,
+                                  1000.,
+                                  1.};
+  const std::vector<double> rB = {1000.,
+                                  0.,
+                                  997.02489346940774,
+                                  997.07890660881435,
+                                  319.71364680208376,
+                                  675.57216392823045,
+                                  997.55565490398703,
+                                  619.18266326889307,
+                                  345.22578984765374,
+                                  3.1502725292253997,
+                                  121.95185049831551,
+                                  585.41131030666656,
+                                  999.93563090020007,
+                                  1000.,
+                                  0.,
+                                  177.35813950095334,
+                                  0.04587971958967612,
+                                  882.24641989432973,
+                                  1.1946278115288917};
+  const std::vector<double> rC = {1.,
+                                  1000.,
+                                  1.,
+                                  282.41410155737179,
+                                  1.,
+                                  282.41410155737179,
+                                  282.41410155737179,
+                                  282.41410155737179,
+                                  282.41410155737179,
+                                  1000.,
+                                  1.,
+                                  1000.,
+                                  1000.,
+                                  0.,
+                                  0.,
+                                  1000.,
+                                  1000.,
+                                  1000.,
+                                  1000.,
+                                  1000.,
+                                  1000.,
+                                  1000.,
+                                  1000.,
+                                  1000.,
+                                  1000.,
+                                  1000.,
+                                  1000.,
+                                  1000.,
+                                  1000.,
+                                  1000.,
+                                  578.55699544670244,
+                                  1000.,
+                                  1000.,
+                                  1000.,
+                                  1000.,
+                                  1000.,
+                                  1000.,
+                                  1000.,
+                                  1000.,
+                                  1000.,
+                                  1000.,
+                                  1000.,
+                                  1000.,
+                                  1000.,
+                                  1.};
+  const CrossSection a({star(rA)});
+  const CrossSection b =
+      CrossSection({star(rB)})
+          .Translate({-4.3860291464683625, 2.2730433830580954});
+  const CrossSection c =
+      CrossSection({star(rC)})
+          .Translate({0.99578244833742113, -4.0475870932225444});
+  const auto bUc = b + c;
+  const auto left = a.Boolean(bUc, OpType::Intersect);
+  const auto aIntB = a.Boolean(b, OpType::Intersect);
+  const auto aIntC = a.Boolean(c, OpType::Intersect);
+  const auto right = aIntB + aIntC;
+  const double tol = 1e-6 * (1.0 + std::fabs(a.Area()) + std::fabs(b.Area()) +
+                             std::fabs(c.Area()));
+  EXPECT_NEAR(left.Area(), right.Area(), tol)
+      << "A ∩ (B ∪ C) != (A ∩ B) ∪ (A ∩ C)";
+  EXPECT_NEAR((left - right).Area(), 0.0, tol)
+      << "distributivity: left-right difference is non-empty";
+  EXPECT_NEAR((right - left).Area(), 0.0, tol)
+      << "distributivity: right-left difference is non-empty";
+}
+
 // Seed: BooleanRobustness topology-validity failure (2026-05-23
 //   cycle 277, both daemons, post-disconnected-winding-fix tip
 //   22077d9c)
