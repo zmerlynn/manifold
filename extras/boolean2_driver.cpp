@@ -37,22 +37,6 @@
 //             which this driver implements with Smith's symbolic
 //             perturbation as the FP-robust core.
 //
-// Build (from the manifold repo root):
-//   g++ -std=c++17 -O2 -I include -I src -DMANIFOLD_PAR=-1 \
-//     -ffp-contract=off -fexcess-precision=standard \
-//     extras/boolean2_driver.cpp -o boolean2_driver
-// Run:
-//   ./boolean2_driver                  # full test battery
-//   ./boolean2_driver diagnose 0       # diagnostic dump for one case
-//   ./boolean2_driver deepfuzz 100     # broader randomized verification
-//   ./boolean2_driver offsetfuzz 50    # offset-path adversarial coverage
-//   ./boolean2_driver time --repeat 5 clipper2corpus
-//                                     # stable aggregate corpus timing
-//   ./boolean2_driver vsclipper2 [all|clipper2|offsets|jts|mfogel]
-//                                     # head-to-head bench (needs
-//                                     # -DBOOLEAN2_WITH_CLIPPER2 +
-//                                     # scripts/fetch_clipper2_test_data.sh)
-//
 // Algorithm shape (matches manifold internals where possible):
 //   - Spatial queries via boolean2's 2D BVH (Morton-sorted leaves).
 //   - Edge-edge intersection via a trim-and-`Interpolate` symbolic kernel
@@ -63,21 +47,6 @@
 //     adjacent faces from component seeds.
 //   - Iterate to fixed point per Smith §7.7 (default maxIter=2, his bound).
 //
-// Build can be single-threaded with MANIFOLD_PAR=-1 or use manifold's TBB
-// parallel helpers with MANIFOLD_PAR=1. Optional comparison and corpus modes
-// link Clipper2 and/or libmanifold.
-//
-// Deferred for graduation to manifold's mainline build:
-//   - Mechanical std::vector → manifold::Vec rename (Vec is the project's
-//     CPU/GPU-portable vector). Drop-in API-compatible for our usage; the
-//     conversion is ~135 declarations and is best done in the same patch
-//     that wires the driver into the build system, so the type churn
-//     and the build-graph churn land together.
-//   - ZoneScoped Tracy markers at phase boundaries.
-//   - ExecutionContext::Impl* ctx threading for parallelism dispatch.
-//   - Internal namespace (boolean2::detail) hiding everything except
-//     the public Simplify / Boolean2D entry points.
-
 #include <algorithm>
 #include <atomic>
 #include <cassert>
@@ -110,6 +79,9 @@
 #include "manifold/common.h"
 #ifdef BOOLEAN2_WITH_MANIFOLD
 #include "manifold/manifold.h"
+#endif
+#ifdef BOOLEAN2_WITH_CLIPPER2
+#include "clipper2/clipper.h"
 #endif
 
 #include "cross_section/boolean2/boolean2.h"
@@ -433,15 +405,10 @@ bool CheckIdempotence(const OverlapResult& first, double eps) {
   return ok;
 }
 
-}  // namespace boolean2
-}  // namespace manifold
-
 // Diagnostic: run ONE failing case and dump intermediate state.
 // Invoked via `./boolean2_driver diagnose <seed> [kPow] [n]`. Default
 // kPow=30, n=50, but any DeepFuzz parameter combo can be targeted.
 // IMPORTANT: the seed→RNG mapping must match DeepFuzz exactly.
-namespace manifold {
-namespace boolean2 {
 void Diagnose(uint64_t seed, int kPow = 30, int n = 50) {
   const double offset = std::ldexp(1.5, kPow);
   const double eps = EpsilonFromScale(offset);
@@ -841,9 +808,6 @@ void Diagnose(uint64_t seed, int kPow = 30, int n = 50) {
       std::cerr << "  v" << i << " → " << rIter.inputRemap[i] << "\n";
   }
 }
-}  // namespace boolean2
-}  // namespace manifold
-
 // =============================================================================
 // Polygon corpus runner.
 //
@@ -872,9 +836,6 @@ void Diagnose(uint64_t seed, int kPow = 30, int n = 50) {
 // expected_tri_count is informational for now (it's a triangulation
 // metric, not directly an overlap-removal one).
 // =============================================================================
-namespace manifold {
-namespace boolean2 {
-
 struct CorpusEntry {
   std::string name;
   manifold::Polygons polys;
@@ -978,9 +939,6 @@ inline void RunCorpus(const std::string& path) {
   }
 }
 
-}  // namespace boolean2
-}  // namespace manifold
-
 // =============================================================================
 // Clipper2 Polygons.txt corpus runner.
 //
@@ -1027,9 +985,6 @@ inline void RunCorpus(const std::string& path) {
 // the unit grid the corpus uses, so iteration shouldn't be triggered
 // by snap-induced changes.
 // =============================================================================
-namespace manifold {
-namespace boolean2 {
-
 struct Clipper2Case {
   int n = 0;
   std::string caption;
@@ -1339,9 +1294,6 @@ inline void RunClipper2Corpus(const std::string& path) {
   }
 }
 
-}  // namespace boolean2
-}  // namespace manifold
-
 // =============================================================================
 // mfogel/polygon-clipping end-to-end fixtures.
 //
@@ -1367,9 +1319,6 @@ inline void RunClipper2Corpus(const std::string& path) {
 // infinitely-thin-polygon, self-intersects-but-doesnt-cross, ...
 // This is exactly the layer Clipper2's int-coord corpus doesn't cover.
 // =============================================================================
-namespace manifold {
-namespace boolean2 {
-
 // ---------------------------------------------------------------------------
 // Minimal JSON value + parser. Hand-rolled to avoid a third-party
 // dependency for this single-translation-unit diagnostic driver.
@@ -1861,9 +1810,6 @@ inline void RunMfogelCorpus(const std::string& dir) {
   }
 }
 
-}  // namespace boolean2
-}  // namespace manifold
-
 // =============================================================================
 // JTS robust/overlay corpus runner.
 //
@@ -1898,9 +1844,6 @@ inline void RunMfogelCorpus(const std::string& dir) {
 //
 // Supported ops: `overlayAreaTest` (invariant) and `unionArea` (oracle).
 // =============================================================================
-namespace manifold {
-namespace boolean2 {
-
 struct JtsCase {
   int n = 0;
   std::string op;
@@ -2374,9 +2317,6 @@ inline void RunCadCorpus() {
   std::cout << "  Aggregate abs area: " << totalArea << "\n";
 }
 
-}  // namespace boolean2
-}  // namespace manifold
-
 // =============================================================================
 // Head-to-head benchmark vs Clipper2 (the library boolean2 is intended to
 // eventually replace as `CrossSection`'s boolean/Simplify backend). Built
@@ -2408,10 +2348,6 @@ inline void RunCadCorpus() {
 // against an end state nobody plans to ship.
 // =============================================================================
 #ifdef BOOLEAN2_WITH_CLIPPER2
-#include "clipper2/clipper.h"
-namespace manifold {
-namespace boolean2 {
-
 inline Clipper2Lib::PathsD ToPathsD(const manifold::Polygons& p) {
   Clipper2Lib::PathsD out;
   out.reserve(p.size());
@@ -2895,8 +2831,6 @@ inline void RunJtsDropDiag(const std::string& path) {
   std::cout << "  total theirs drops:    " << clipperDrops << "\n";
 }
 
-}  // namespace boolean2
-}  // namespace manifold
 #endif  // BOOLEAN2_WITH_CLIPPER2
 
 // =============================================================================
@@ -2914,8 +2848,6 @@ inline void RunJtsDropDiag(const std::string& path) {
 // case, the iteration is shifting positions only, not topology. That's the
 // cut-corner answer for whether iter=2 is doing real work.
 // =============================================================================
-namespace manifold {
-namespace boolean2 {
 void DeepFuzz(int seedsPerCell) {
   const std::vector<int> kPows = {10, 20, 30, 35, 40, 45, 49};
   const std::vector<int> sizes = {8, 20, 50, 100};
@@ -3197,9 +3129,6 @@ void DeepFuzz(int seedsPerCell) {
     }
   }
 }
-}  // namespace boolean2
-}  // namespace manifold
-
 // =============================================================================
 // OffsetFuzz: parameterized adversarial offset coverage.
 //
@@ -3223,9 +3152,6 @@ void DeepFuzz(int seedsPerCell) {
 //
 // Outputs a histogram of failure modes plus the first 10 failing
 // (kPow, n, seed, jointype, deltaFrac) tuples for each failure category.
-namespace manifold {
-namespace boolean2 {
-
 // Star-polygon generator: n verts at increasing angles around origin
 // with random radii. Always simple (non-self-intersecting) because the
 // boundary is monotonic in angle. Convex iff all radii equal; concave
