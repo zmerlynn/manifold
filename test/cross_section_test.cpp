@@ -1825,6 +1825,98 @@ TEST(CrossSection, DISABLED_BooleanDistributivityNonzeroUnionResidual) {
       << "distributivity: right-left difference is non-empty";
 }
 
+// Seed: BooleanDistributivity (2026-05-24 manifoci daemon cycle 90,
+//   post-nonzero-union-fix tip a9cfd4ff)
+// Counterexample-hash: 278f30ca6f52d93f
+// Suspected owner: pr/boolean2-core (companion to
+//   DISABLED_BooleanDistributivityNonzeroUnionResidual above, but
+//   with the zeros in A and an intermediate-sized B - 28-radii A
+//   with leading 0., 0. plus repeated 85.93 values, 16-radii B
+//   dominated by 1000s with a few small/zero values, 4-radii simple
+//   C. Same failure shape: left has 1 contour, right has 3, right
+//   strictly contained in left, missing ~4001 area units out of
+//   ~16255 (~25%). Confirms the intersect-path sliver-drop bug is
+//   not specific to which input carries the zeros).
+TEST(CrossSection, DISABLED_BooleanDistributivityZerosInANonzeroUnion) {
+  auto star = [](const std::vector<double>& radii) {
+    SimplePolygon ring;
+    const int n = static_cast<int>(radii.size());
+    constexpr double kPi = 3.14159265358979323846;
+    for (int i = 0; i < n; ++i) {
+      const double r = 0.1 + std::fabs(radii[i]);
+      const double th = 2.0 * kPi * i / n;
+      ring.push_back({r * std::cos(th), r * std::sin(th)});
+    }
+    return ring;
+  };
+  const std::vector<double> rA = {0.,
+                                  0.,
+                                  85.932045280269435,
+                                  85.932045280269435,
+                                  503.627431790542,
+                                  85.932045280269435,
+                                  90.069450175585047,
+                                  90.069450175585047,
+                                  1.,
+                                  1.,
+                                  1.,
+                                  1.,
+                                  1.,
+                                  1.,
+                                  1.,
+                                  3.0409033274230679,
+                                  90.340071855270295,
+                                  88.580867960622072,
+                                  261.53938936688053,
+                                  1.,
+                                  85.932045280269435,
+                                  85.932045280269435,
+                                  85.932045280269435,
+                                  85.932045280269435,
+                                  85.932045280269435,
+                                  85.932045280269435,
+                                  1000.,
+                                  1.};
+  const std::vector<double> rB = {0.,
+                                  1000.,
+                                  1000.,
+                                  150.433665233841,
+                                  1000.,
+                                  1000.,
+                                  1.,
+                                  1000.,
+                                  1000.,
+                                  1000.,
+                                  1000.,
+                                  177.35813950095334,
+                                  0.04587971958967612,
+                                  635.76724699191789,
+                                  0.,
+                                  801.00098835163021};
+  const std::vector<double> rC = {2.2620915191424817, 352.8271046252292,
+                                  124.40008725909412, 583.15656615652506};
+  const CrossSection a({star(rA)});
+  const CrossSection b =
+      CrossSection({star(rB)})
+          .Translate({0.70686431311486997, 4.2881751021813148});
+  const CrossSection c =
+      CrossSection({star(rC)})
+          .Translate({1.9937691377314026, 4.7666664390133615});
+  const auto bUc = b + c;
+  const auto left = a.Boolean(bUc, OpType::Intersect);
+  const auto aIntB = a.Boolean(b, OpType::Intersect);
+  const auto aIntC = a.Boolean(c, OpType::Intersect);
+  const auto right = aIntB + aIntC;
+  const double tol = 1e-6 * (1.0 + std::fabs(a.Area()) + std::fabs(b.Area()) +
+                             std::fabs(c.Area()));
+  EXPECT_NEAR(left.Area(), right.Area(), tol)
+      << "A ∩ (B ∪ C) != (A ∩ B) ∪ (A ∩ C)";
+  EXPECT_NEAR((left - right).Area(), 0.0, tol)
+      << "distributivity: left-right difference is non-empty";
+  EXPECT_NEAR((right - left).Area(), 0.0, tol)
+      << "distributivity: right-left difference is non-empty";
+}
+
 // Seed: BooleanRobustness topology-validity failure (2026-05-23
 //   cycle 277, both daemons, post-disconnected-winding-fix tip
 //   22077d9c)
