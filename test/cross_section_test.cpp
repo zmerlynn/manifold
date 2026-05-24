@@ -2967,4 +2967,74 @@ TEST(CrossSection, Boolean2GraphOrderKeepsEndpointTouchDegenerate) {
   EXPECT_FALSE(order.coincidentOverlap);
   EXPECT_FALSE(order.properCrossing);
 }
+
+TEST(CrossSection, Boolean2IntersectSegmentsFindsStrictCrossing) {
+  using boolean2::GraphSegment2D;
+  using boolean2::IntersectSegments;
+
+  vec2 intersection;
+  GraphSegment2D a{{0.0, 0.0}, {10.0, 10.0}, 0, 0};
+  GraphSegment2D b{{0.0, 10.0}, {10.0, 0.0}, 0, 1};
+
+  EXPECT_TRUE(IntersectSegments(a, b, 0.0, &intersection));
+  EXPECT_NEAR(intersection.x, 5.0, 1e-12);
+  EXPECT_NEAR(intersection.y, 5.0, 1e-12);
+}
+
+TEST(CrossSection, Boolean2IntersectSegmentsDropsEndpointTouch) {
+  using boolean2::GraphSegment2D;
+  using boolean2::IntersectSegments;
+
+  vec2 intersection;
+  GraphSegment2D a{{0.0, 0.0}, {10.0, 0.0}, 0, 0};
+  GraphSegment2D b{{10.0, 0.0}, {20.0, 10.0}, 0, 1};
+
+  EXPECT_FALSE(IntersectSegments(a, b, 0.0, &intersection));
+}
+
+TEST(CrossSection, Boolean2IntersectSegmentsDropsPositiveOverlapTJunction) {
+  using boolean2::GraphSegment2D;
+  using boolean2::IntersectSegments;
+
+  vec2 intersection;
+  GraphSegment2D a{{0.0, 0.0}, {10.0, 0.0}, 0, 0};
+  GraphSegment2D b{{5.0, 0.0}, {15.0, 1.0}, 0, 1};
+
+  EXPECT_FALSE(IntersectSegments(a, b, 0.0, &intersection));
+}
+
+TEST(CrossSection, Boolean2IntersectSegmentsFindsAxisAlignedStrictCrossing) {
+  using boolean2::GraphSegment2D;
+  using boolean2::IntersectSegments;
+
+  vec2 intersection;
+  GraphSegment2D a{{0.0, 5.0}, {10.0, 5.0}, 0, 0};
+  GraphSegment2D b{{5.0, 0.0}, {5.0, 10.0}, 0, 1};
+
+  EXPECT_TRUE(IntersectSegments(a, b, 0.0, &intersection));
+  EXPECT_NEAR(intersection.x, 5.0, 1e-12);
+  EXPECT_NEAR(intersection.y, 5.0, 1e-12);
+}
+
+TEST(CrossSection, Boolean2IntersectSegmentsDropsAxisAlignedEndpointTouch) {
+  using boolean2::GraphSegment2D;
+  using boolean2::IntersectSegments;
+
+  vec2 intersection;
+  GraphSegment2D a{{0.0, 0.0}, {10.0, 0.0}, 0, 0};
+  GraphSegment2D b{{10.0, 0.0}, {10.0, 10.0}, 0, 1};
+
+  EXPECT_FALSE(IntersectSegments(a, b, 0.0, &intersection));
+}
+
+TEST(CrossSection, Boolean2IntersectSegmentsDropsCoincidentOverlap) {
+  using boolean2::GraphSegment2D;
+  using boolean2::IntersectSegments;
+
+  vec2 intersection;
+  GraphSegment2D a{{0.0, 0.0}, {10.0, 0.0}, 0, 0};
+  GraphSegment2D b{{2.0, 0.0}, {8.0, 0.0}, 0, 1};
+
+  EXPECT_FALSE(IntersectSegments(a, b, 0.0, &intersection));
+}
 #endif
