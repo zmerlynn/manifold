@@ -137,6 +137,9 @@ if(MANIFOLD_PAR)
 else()
   target_compile_definitions(manifold PUBLIC MANIFOLD_PAR=-1)
 endif()
+if(MANIFOLD_CROSS_SECTION AND MANIFOLD_CROSS_SECTION_BACKEND STREQUAL "boolean2")
+  target_compile_definitions(manifold PUBLIC MANIFOLD_CROSS_SECTION_BACKEND_BOOLEAN2)
+endif()
 
 # MANIFOLD_NO_IOSTREAM also defines MANIFOLD_NO_FILESYSTEM (the two
 # track together in practice — `<filesystem>` paths are only useful

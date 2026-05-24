@@ -30,6 +30,7 @@
 #include "../src/cross_section/boolean2/diagnostics.h"
 #include "../src/cross_section/boolean2/driver.h"
 #include "../src/cross_section/boolean2/intersections.h"
+#include "../src/cross_section/boolean2/predicates.h"
 #include "../src/cross_section/boolean2/vertex_merge.h"
 #endif
 #include "manifold/common.h"
@@ -2899,3 +2900,71 @@ TEST(CrossSection, NegativeOffset) {
       plusSign.Offset(-10, CrossSection::JoinType::Round, 2.0, 1024);
   EXPECT_NEAR(dilated.Area(), 30 * 30 - 10 * 10 * kPi, 0.01);
 }
+
+#ifdef MANIFOLD_CROSS_SECTION_BACKEND_BOOLEAN2
+TEST(CrossSection, Boolean2GraphOrderDetectsProperCrossing) {
+  using boolean2::CompareProjectedOrder;
+  using boolean2::GraphOrderKind;
+  using boolean2::GraphSegment2D;
+
+  GraphSegment2D a{{0.0, 0.0}, {10.0, 10.0}, 0, 0};
+  GraphSegment2D b{{0.0, 10.0}, {10.0, 0.0}, 1, 1};
+
+  const auto order = CompareProjectedOrder(a, b, /*axis=*/0, 0.0, 10.0);
+  EXPECT_EQ(order.atMinProjection, GraphOrderKind::ALessOrtho);
+  EXPECT_EQ(order.atMaxProjection, GraphOrderKind::AGreaterOrtho);
+  EXPECT_FALSE(order.coincidentOverlap);
+  EXPECT_TRUE(order.properCrossing);
+}
+
+TEST(CrossSection, Boolean2GraphOrderIsEndpointReversalStable) {
+  using boolean2::CompareProjectedOrder;
+  using boolean2::GraphOrderKind;
+  using boolean2::GraphSegment2D;
+
+  GraphSegment2D a{{0.0, 0.0}, {10.0, 10.0}, 0, 0};
+  GraphSegment2D b{{0.0, 10.0}, {10.0, 0.0}, 1, 1};
+  GraphSegment2D aReversed{{10.0, 10.0}, {0.0, 0.0}, 0, 0};
+  GraphSegment2D bReversed{{10.0, 0.0}, {0.0, 10.0}, 1, 1};
+
+  const auto order = CompareProjectedOrder(a, b, /*axis=*/0, 0.0, 10.0);
+  const auto reversed =
+      CompareProjectedOrder(aReversed, bReversed, /*axis=*/0, 0.0, 10.0);
+  EXPECT_EQ(order.atMinProjection, reversed.atMinProjection);
+  EXPECT_EQ(order.atMaxProjection, reversed.atMaxProjection);
+  EXPECT_EQ(order.coincidentOverlap, reversed.coincidentOverlap);
+  EXPECT_EQ(order.properCrossing, reversed.properCrossing);
+  EXPECT_EQ(order.atMinProjection, GraphOrderKind::ALessOrtho);
+  EXPECT_EQ(order.atMaxProjection, GraphOrderKind::AGreaterOrtho);
+}
+
+TEST(CrossSection, Boolean2GraphOrderResolvesCoincidentOverlap) {
+  using boolean2::CompareProjectedOrder;
+  using boolean2::GraphOrderKind;
+  using boolean2::GraphSegment2D;
+
+  GraphSegment2D a{{0.0, 0.0}, {10.0, 0.0}, 0, 0};
+  GraphSegment2D b{{0.0, 0.0}, {10.0, 0.0}, 1, 1};
+
+  const auto order = CompareProjectedOrder(a, b, /*axis=*/0, 0.0, 10.0);
+  EXPECT_EQ(order.atMinProjection, GraphOrderKind::ALessOrtho);
+  EXPECT_EQ(order.atMaxProjection, GraphOrderKind::ALessOrtho);
+  EXPECT_TRUE(order.coincidentOverlap);
+  EXPECT_FALSE(order.properCrossing);
+}
+
+TEST(CrossSection, Boolean2GraphOrderKeepsEndpointTouchDegenerate) {
+  using boolean2::CompareProjectedOrder;
+  using boolean2::GraphOrderKind;
+  using boolean2::GraphSegment2D;
+
+  GraphSegment2D a{{0.0, 0.0}, {10.0, 0.0}, 0, 0};
+  GraphSegment2D b{{5.0, 0.0}, {15.0, 1.0}, 1, 1};
+
+  const auto order = CompareProjectedOrder(a, b, /*axis=*/0, 5.0, 10.0);
+  EXPECT_EQ(order.atMinProjection, GraphOrderKind::EndpointTouch);
+  EXPECT_EQ(order.atMaxProjection, GraphOrderKind::ALessOrtho);
+  EXPECT_FALSE(order.coincidentOverlap);
+  EXPECT_FALSE(order.properCrossing);
+}
+#endif
