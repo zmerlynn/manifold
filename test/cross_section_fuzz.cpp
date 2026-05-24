@@ -12,18 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// ---------------------------------------------------------------------
-// Build-config guardrails. These exist because we wasted an iteration
-// on 2026-05-16 chasing a "boolean2 Simplify idempotence cliff" that
-// was actually a Clipper2 cliff: the local fuzz binary had been built
-// with `-DMANIFOLD_CROSS_SECTION_BACKEND=clipper2` (the CMake default)
-// instead of boolean2. The fuzz targets in this TU assume:
-//   - boolean2 backend (cross_section_boolean2.cpp linked),
-//   - AddressSanitizer enabled,
-//   - UndefinedBehaviorSanitizer enabled.
-// If any of these is wrong, the build fails here. The boolean2 check
-// is a link-time fingerprint (see cross_section_boolean2.cpp).
-// ---------------------------------------------------------------------
+// These targets require the boolean2 backend plus ASAN/UBSAN. Fail at
+// build/link time rather than spending fuzz cycles on the wrong binary.
 
 #if defined(__has_feature)
 #if !__has_feature(address_sanitizer)
@@ -44,12 +34,7 @@
 #endif
 #endif
 
-// Backend fingerprint: defined only by cross_section_boolean2.cpp.
-// A Clipper2 build of the Manifold library has no definition and the
-// link below fails with `undefined reference to
-// ManifoldCrossSectionBackendIsBoolean2`. A misconfigured-but-linked
-// build (e.g. weak-symbol stub) still aborts at process start via the
-// constructor below.
+// Defined only by cross_section_boolean2.cpp; Clipper2 builds fail to link.
 extern "C" int ManifoldCrossSectionBackendIsBoolean2();
 
 #include <algorithm>
@@ -245,20 +230,8 @@ manifold::Manifold ApplyBoolean(const manifold::Manifold& a,
   return a + b;
 }
 
-// WARNING: this target has been observed to *hang* (infinite loop in
-// boolean2 on a specific mutated input). Producer's sweep on
-// 2026-05-17 against the post-743a75b7-pre-68cbade7 binary froze
-// after corpus_size=256 / fuzz_time=1m22s with CPU pinned but no
-// log progress. Could not isolate the exact input (PRNG-driven
-// mutation, not in saved corpus); the subsequent fixes (68cbade7
-// "Keep winding seed rays inside narrow faces" and later) may have
-// resolved it. If you see this target hang again:
-//   1. Note the wall time / corpus_size at the freeze.
-//   2. `gdb -p <fuzz pid> --batch -ex "thread apply all bt"` to
-//      capture the stack.
-//   3. Re-run with smaller `--fuzz_for` to narrow the input.
-//   4. Once isolated, seed as a regression on pr/boolean2-tests
-//      and remove this warning.
+// If this target hangs, capture a backtrace, narrow the input, and seed the
+// isolated repro on pr/boolean2-tests.
 void BooleanRobustness(const RawPolygons& rawA, const RawPolygons& rawB,
                        manifold::OpType op) {
   const manifold::Polygons aPolys = ToPolygons(rawA);
@@ -1166,22 +1139,7 @@ void SubtractInvariants(const std::vector<double>& radiiA,
 }
 
 #if defined(MANIFOLD_PAR) && MANIFOLD_PAR == 1
-// Structural-coverage dim targeting boolean2's TBB-parallelized paths.
-// Property: FillByRule produces byte-identical output regardless of the
-// thread count TBB is configured to use. Two runs of the same input
-// under different `tbb::global_control(max_allowed_parallelism, N)`
-// settings should produce identical Polygons (same rings, same vert
-// counts, same coordinates).
-//
-// Catches accidental thread-local non-determinism: reduce-into-shared-
-// state races, intermediate-sort tie-breaks that depend on visit order,
-// pair-collection ordering that depends on which worker found them
-// first. Boolean2 was designed to be deterministic (see
-// vertex_merge.h's stable-sort + lex-ascending tie-break for the
-// disjoint-set roots), this dim is the regression guard.
-//
-// Only compiled when MANIFOLD_PAR == 1 (parallel build). Builds without
-// TBB skip this dim entirely.
+// FillByRule must be byte-identical across TBB thread counts.
 void RemoveOverlapsDeterminismAcrossThreadCounts(
     const std::vector<double>& radii) {
   if (radii.size() < 3 || radii.size() > 64) return;
@@ -1217,16 +1175,7 @@ void RemoveOverlapsDeterminismAcrossThreadCounts(
 }
 #endif  // MANIFOLD_PAR == 1
 
-// Structural-coverage dim targeting boolean2/winding_filter.h
-// (688 lines, biggest backend file). Property: a starburst of N thin
-// rotated strips passing through the origin produces a topologically-
-// valid CrossSection. The origin is a high-degree vertex where 4*N
-// halfedges meet; this stresses the angular-sort path at
-// winding_filter.h:306 (the std::sort with the buckets-then-cross-
-// product tie-breaker) much harder than the typical convex-polygon
-// degree-2 vertex. Assertion: self-union is area-preserving (X+X==X
-// modulo arithmetic noise), which would fail if winding_filter
-// produced wrong face cycles for the starburst topology.
+// High-degree origin stress for winding-filter angular sorting.
 void WindingFilterStarburstStress(int numStrips, double angleSpread,
                                   double stripWidth) {
   if (numStrips < 2 || numStrips > 32) return;
