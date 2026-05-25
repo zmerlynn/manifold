@@ -2587,6 +2587,57 @@ TEST(CrossSection, BooleanDistributivityLargeInputsResidual) {
       << "distributivity: right-left difference is non-empty";
 }
 
+// Seed: DegenerateInputFuzz (2026-05-25 local daemon cycle 339,
+//   post-single-ray-cast tip 12e769fe)
+// Counterexample-hash: 6151576e50da41a2
+// Suspected owner: pr/boolean2-core (inclusion-exclusion fails when
+//   one vertex of B is set exactly coincident with a vertex of A
+//   (op=2 in the DegenerateInputFuzz harness). Both stars are 6
+//   vertices with mid-range radii. unionAB.Area=436995 but
+//   ca.Area+cb.Area-intersectAB.Area=434285, diff 2710 (~0.6%) far
+//   above the 4.34 tol. intersectAB.Area only 0.51 - tiny sliver,
+//   yet the union absorbs ~2710 extra area. Likely the coincident
+//   vertex is mis-classified during merge, creating phantom area
+//   in the union or losing it from the intersection).
+TEST(CrossSection, DISABLED_DegenerateCoincidentVertexUnion) {
+  auto starPolygon = [](const std::vector<double>& radii) {
+    SimplePolygon ring;
+    const int n = static_cast<int>(radii.size());
+    constexpr double kPi = 3.14159265358979323846;
+    for (int i = 0; i < n; ++i) {
+      const double r = 0.1 + std::fabs(radii[i]);
+      const double th = 2.0 * kPi * i / n;
+      ring.push_back({r * std::cos(th), r * std::sin(th)});
+    }
+    return ring;
+  };
+  const std::vector<double> radiiA = {1.0169016983060246, 1000., 1.,
+                                      578.85382959129936, 0.,    0.};
+  const std::vector<double> radiiB = {0.,
+                                      1000.,
+                                      999.83083173100238,
+                                      7.275875880519048,
+                                      726.89009231357352,
+                                      3.880747251022969};
+  SimplePolygon a = starPolygon(radiiA);
+  SimplePolygon b = starPolygon(radiiB);
+  for (auto& v : b) {
+    v.x += 0.0030378301550779696;
+  }
+  // op=94 % 4 = 2 in DegenerateInputFuzz: set b[j] = a[i] to create
+  // a coincident-vertex degeneracy. idxA=25 % 6 = 1, idxB=52 % 6 = 4.
+  b[4] = a[1];
+
+  const CrossSection ca(a);
+  const CrossSection cb(b);
+  const auto unionAB = ca + cb;
+  const auto intersectAB = ca.Boolean(cb, OpType::Intersect);
+  const double sum = ca.Area() + cb.Area() - intersectAB.Area();
+  const double tol = 1e-5 * (1.0 + std::fabs(ca.Area()) + std::fabs(cb.Area()));
+  EXPECT_NEAR(unionAB.Area(), sum, tol)
+      << "Inclusion-exclusion violated on coincident-vertex degenerate input";
+}
+
 // Seed: BooleanRobustness topology-validity failure (2026-05-23
 //   cycle 277, both daemons, post-disconnected-winding-fix tip
 //   22077d9c)
