@@ -148,12 +148,12 @@ std::map<int, int> ComputeBalance(const std::vector<Edge>& edges) {
 bool CheckTopologicalValidity(
     const manifold::boolean2::OverlapResult& result,
     const std::vector<manifold::boolean2::EdgeM>& inputEdges,
-    const std::vector<int>& inputRemap, int numMergedVerts) {
+    const std::vector<int>& inputVert2Merged, int numMergedVerts) {
   std::vector<manifold::boolean2::EdgeM> remapped;
   remapped.reserve(inputEdges.size());
   for (const auto& edge : inputEdges) {
-    const int a = inputRemap[edge.v0];
-    const int b = inputRemap[edge.v1];
+    const int a = inputVert2Merged[edge.v0];
+    const int b = inputVert2Merged[edge.v1];
     if (a != b) remapped.push_back({a, b, edge.mult});
   }
 
@@ -183,7 +183,7 @@ void ExpectBoolean2TopologyValid(const manifold::Polygons& polys) {
   if (verts.empty()) return;
   const double eps = manifold::boolean2::InferEps(polys, {});
   const auto result = manifold::boolean2::RemoveOverlaps2D(verts, edges, eps);
-  EXPECT_TRUE(CheckTopologicalValidity(result, edges, result.inputRemap,
+  EXPECT_TRUE(CheckTopologicalValidity(result, edges, result.inputVert2Merged,
                                        result.numMergedVerts));
 }
 
