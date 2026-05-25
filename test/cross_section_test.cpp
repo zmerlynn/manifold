@@ -418,9 +418,9 @@ std::vector<boolean2::EdgeM> EdgesFromOverlapResult(
 
 boolean2::OverlapResult CleanupPassLikeIterate(
     const boolean2::OverlapResult& result, double eps) {
-  return boolean2::RemoveOverlaps2D(result.verts,
-                                    EdgesFromOverlapResult(result), eps,
-                                    /*debug=*/false, boolean2::WindRule::Add);
+  return boolean2::RemoveOverlaps2D(
+      result.verts, EdgesFromOverlapResult(result), eps, /*tolerance=*/0.0,
+      /*debug=*/false, boolean2::WindRule::Add);
 }
 
 void ExpectSameFingerprint(const boolean2::OverlapResult& a,
@@ -980,7 +980,8 @@ TEST(CrossSection, DISABLED_Boolean2TraceTinyVsLargeStars) {
   append(b, -1, &verts, &edges);
 
   boolean2::Trace trace;
-  auto result = boolean2::RemoveOverlaps2D(verts, edges, eps, /*debug=*/false,
+  auto result = boolean2::RemoveOverlaps2D(verts, edges, eps, /*tolerance=*/0.0,
+                                           /*debug=*/false,
                                            boolean2::WindRule::Add, &trace);
   Polygons final = boolean2::OutEdgesToPolygons(result.verts, result.edges);
   auto& phase = trace.AddPhase("final_polygons");
@@ -1029,7 +1030,8 @@ TEST(CrossSection, DISABLED_Boolean2TraceShowcase) {
   append(negative, -1, &verts, &edges);
 
   boolean2::Trace trace;
-  auto result = boolean2::RemoveOverlaps2D(verts, edges, eps, /*debug=*/false,
+  auto result = boolean2::RemoveOverlaps2D(verts, edges, eps, /*tolerance=*/0.0,
+                                           /*debug=*/false,
                                            boolean2::WindRule::Add, &trace);
   Polygons final = boolean2::OutEdgesToPolygons(result.verts, result.edges);
   auto& phase = trace.AddPhase("final_polygons");
@@ -3004,8 +3006,9 @@ TEST(CrossSection, Boolean2CleanupPassMatchesValidAddSinglePass) {
   Polygons polys{RandomTopologicalRing(8, 618)};
   const double eps = boolean2::InferEps(polys, {});
   const auto [verts, edges] = boolean2::PolygonsToInput(polys);
-  const auto pass1 = boolean2::RemoveOverlaps2D(
-      verts, edges, eps, /*debug=*/false, boolean2::WindRule::Add);
+  const auto pass1 =
+      boolean2::RemoveOverlaps2D(verts, edges, eps, /*tolerance=*/0.0,
+                                 /*debug=*/false, boolean2::WindRule::Add);
   EXPECT_TRUE(CheckRetainedGraphValidity(pass1, edges, pass1.inputVert2Merged,
                                          pass1.numMergedVerts, eps));
 
@@ -3037,8 +3040,9 @@ TEST(CrossSection, Boolean2CleanupPassMatchesValidNonZeroSinglePass) {
   Polygons polys{RandomTopologicalRing(8, 618)};
   const double eps = boolean2::InferEps(polys, {});
   const auto [verts, edges] = boolean2::PolygonsToInput(polys);
-  const auto pass1 = boolean2::RemoveOverlaps2D(
-      verts, edges, eps, /*debug=*/false, boolean2::WindRule::NonZero);
+  const auto pass1 =
+      boolean2::RemoveOverlaps2D(verts, edges, eps, /*tolerance=*/0.0,
+                                 /*debug=*/false, boolean2::WindRule::NonZero);
   EXPECT_TRUE(CheckRetainedGraphValidity(pass1, edges, pass1.inputVert2Merged,
                                          pass1.numMergedVerts, eps));
 
@@ -3348,8 +3352,9 @@ TEST(CrossSection, BooleanRobustnessMergeTopologyBalance) {
   const auto [verts, edges] = CombinedInput(a, b, /*bMult=*/1);
   ASSERT_FALSE(verts.empty());
   const double eps = boolean2::InferEps(a, b);
-  const auto overlap = boolean2::RemoveOverlaps2D(
-      verts, edges, eps, /*debug=*/false, boolean2::WindRule::Add);
+  const auto overlap =
+      boolean2::RemoveOverlaps2D(verts, edges, eps, /*tolerance=*/0.0,
+                                 /*debug=*/false, boolean2::WindRule::Add);
   EXPECT_TRUE(CheckRetainedGraphValidity(
       overlap, edges, overlap.inputVert2Merged, overlap.numMergedVerts, eps));
 }
@@ -3383,8 +3388,9 @@ TEST(CrossSection, BooleanRobustnessDirectCastKeepsExpectedArea) {
   const auto [verts, edges] = CombinedInput(a, b, /*bMult=*/1);
   ASSERT_FALSE(verts.empty());
   const double eps = boolean2::InferEps(a, b);
-  const auto overlap = boolean2::RemoveOverlaps2D(
-      verts, edges, eps, /*debug=*/false, boolean2::WindRule::Add);
+  const auto overlap =
+      boolean2::RemoveOverlaps2D(verts, edges, eps, /*tolerance=*/0.0,
+                                 /*debug=*/false, boolean2::WindRule::Add);
   EXPECT_TRUE(CheckRetainedGraphValidity(
       overlap, edges, overlap.inputVert2Merged, overlap.numMergedVerts, eps));
 
