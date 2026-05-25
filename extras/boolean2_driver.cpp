@@ -327,7 +327,8 @@ OverlapResult IterateToFixedPoint(const std::vector<vec2>& vIn,
                                   WindRule pred = WindRule::Add) {
   std::vector<OverlapResult> history;
   std::vector<FingerprintData> fps;
-  history.push_back(RemoveOverlaps2D(vIn, eIn, eps, /*debug=*/false, pred));
+  history.push_back(RemoveOverlaps2D(vIn, eIn, eps, /*tolerance=*/0.0,
+                                     /*debug=*/false, pred));
   fps.push_back(Fingerprint(history.back(), eps));
   std::vector<int> composedRemap = history.back().inputRemap;
   for (int iter = 1; iter <= maxIter; ++iter) {
@@ -1146,7 +1147,8 @@ inline manifold::Polygons FillUnderRule(const manifold::Polygons& polys,
   if (verts.empty()) return {};
   const WindRule windRule =
       (rule == "EVENODD") ? WindRule::EvenOdd : WindRule::NonZero;
-  auto r = RemoveOverlaps2D(verts, edges, eps, /*debug=*/false, windRule);
+  auto r = RemoveOverlaps2D(verts, edges, eps, /*tolerance=*/0.0,
+                            /*debug=*/false, windRule);
   return OutEdgesToPolygons(r.verts, r.edges);
 }
 
@@ -1698,14 +1700,17 @@ inline manifold::Polygons RunMfogelOp(const MfogelCase& c,
   if (verts.empty()) return {};
   OverlapResult r;
   if (op == "union") {
-    r = RemoveOverlaps2D(verts, edges, eps, /*debug=*/false, WindRule::NonZero);
+    r = RemoveOverlaps2D(verts, edges, eps, /*tolerance=*/0.0, /*debug=*/false,
+                         WindRule::NonZero);
   } else if (op == "xor") {
-    r = RemoveOverlaps2D(verts, edges, eps, /*debug=*/false, WindRule::EvenOdd);
+    r = RemoveOverlaps2D(verts, edges, eps, /*tolerance=*/0.0, /*debug=*/false,
+                         WindRule::EvenOdd);
   } else if (op == "intersection") {
-    r = RemoveOverlaps2D(verts, edges, eps, /*debug=*/false,
+    r = RemoveOverlaps2D(verts, edges, eps, /*tolerance=*/0.0, /*debug=*/false,
                          WindRule::Intersect);
   } else if (op == "difference") {
-    r = RemoveOverlaps2D(verts, edges, eps, /*debug=*/false, WindRule::Add);
+    r = RemoveOverlaps2D(verts, edges, eps, /*tolerance=*/0.0, /*debug=*/false,
+                         WindRule::Add);
   } else {
     return {};
   }
@@ -2416,8 +2421,8 @@ inline void TimeOneUnion(const manifold::Polygons& a,
   append(a);
   append(b);
   if (!verts.empty()) {
-    auto r = RemoveOverlaps2D(verts, edges, eps, /*debug=*/false,
-                              [](int w) { return w != 0; });
+    auto r = RemoveOverlaps2D(verts, edges, eps, /*tolerance=*/0.0,
+                              /*debug=*/false, WindRule::NonZero);
     ours = OutEdgesToPolygons(r.verts, r.edges);
   }
   auto t1 = Clock::now();
@@ -2635,8 +2640,8 @@ inline void RunVsClipper2_ManifoldCorpus(const std::string& path) {
     }
     manifold::Polygons ours;
     if (!verts.empty()) {
-      auto r = RemoveOverlaps2D(verts, edges, eps, /*debug=*/false,
-                                [](int w) { return w > 0; });
+      auto r = RemoveOverlaps2D(verts, edges, eps, /*tolerance=*/0.0,
+                                /*debug=*/false, WindRule::Add);
       ours = OutEdgesToPolygons(r.verts, r.edges);
     }
     auto a2 = ToPaths64(c.a);
@@ -2776,8 +2781,8 @@ inline void RunJtsDropDiag(const std::string& path) {
     append(B);
     manifold::Polygons ours;
     if (!verts.empty()) {
-      auto r = RemoveOverlaps2D(verts, edges, eps, /*debug=*/false,
-                                [](int w) { return w != 0; });
+      auto r = RemoveOverlaps2D(verts, edges, eps, /*tolerance=*/0.0,
+                                /*debug=*/false, WindRule::NonZero);
       ours = OutEdgesToPolygons(r.verts, r.edges);
     }
     // Clipper2 reference.
@@ -3609,8 +3614,8 @@ int main(int argc, char** argv) {
       append(B);
       std::cout << "  Pipeline input: " << verts.size() << " verts, "
                 << edges.size() << " edges\n";
-      auto r = RemoveOverlaps2D(verts, edges, eps, /*debug=*/true,
-                                [](int w) { return w != 0; });
+      auto r = RemoveOverlaps2D(verts, edges, eps, /*tolerance=*/0.0,
+                                /*debug=*/true, WindRule::NonZero);
       auto out = OutEdgesToPolygons(r.verts, r.edges);
       std::cout << "  Pipeline output: " << r.verts.size() << " verts, "
                 << r.edges.size() << " edges, " << out.size() << " polygons\n";
@@ -3665,8 +3670,8 @@ int main(int argc, char** argv) {
           edges.push_back({base + i, base + ((i + 1) % n), 1});
       }
       const bool debug = std::getenv("BOOLEAN2_DEBUG") != nullptr;
-      auto r = RemoveOverlaps2D(verts, edges, eps, debug,
-                                [](int w) { return w > 0; });
+      auto r = RemoveOverlaps2D(verts, edges, eps, /*tolerance=*/0.0, debug,
+                                WindRule::Add);
       auto out = OutEdgesToPolygons(r.verts, r.edges);
       double oursArea = 0;
       for (const auto& l : out) {
@@ -3755,8 +3760,8 @@ int main(int argc, char** argv) {
         for (int i = 0; i < n; ++i)
           edges.push_back({base + i, base + ((i + 1) % n), 1});
       }
-      auto r = RemoveOverlaps2D(verts, edges, eps, /*debug=*/false,
-                                [](int w) { return w > 0; });
+      auto r = RemoveOverlaps2D(verts, edges, eps, /*tolerance=*/0.0,
+                                /*debug=*/false, WindRule::Add);
       auto out = OutEdgesToPolygons(r.verts, r.edges);
       double oursArea = 0;
       for (const auto& l : out) {
@@ -3847,7 +3852,8 @@ int main(int argc, char** argv) {
         return w > 0;  // positive (default)
       };
       std::cout << "  rule=" << rule << "\n";
-      auto r = RemoveOverlaps2D(verts, edges, eps, /*debug=*/true, rPred);
+      auto r = RemoveOverlaps2D(verts, edges, eps, /*tolerance=*/0.0,
+                                /*debug=*/true, rPred);
       auto out = OutEdgesToPolygons(r.verts, r.edges);
       std::cout << "  Pipeline output: " << r.verts.size() << " verts, "
                 << r.edges.size() << " edges, " << out.size() << " polygons\n";
@@ -4114,7 +4120,8 @@ int main(int argc, char** argv) {
     std::cerr << "=== idempotence: kPow=" << kPow << " n=" << n
               << " seed=" << seed << " eps=" << eps << " ===\n";
     std::cerr << "--- pass 1 ---\n";
-    auto pass1 = RemoveOverlaps2D(vIn, eIn, eps, /*debug=*/true);
+    auto pass1 =
+        RemoveOverlaps2D(vIn, eIn, eps, /*tolerance=*/0.0, /*debug=*/true);
     std::vector<EdgeM> p2in;
     for (const auto& oe : pass1.edges) p2in.push_back({oe.v0, oe.v1, oe.mult});
     std::cerr << "--- pass 2 (input: " << pass1.verts.size() << " verts, "
@@ -4148,7 +4155,8 @@ int main(int argc, char** argv) {
     std::cerr << "  canonicalization: " << p2_canon.edges.size()
               << " sub-edges\n";
 
-    auto pass2 = RemoveOverlaps2D(pass1.verts, p2in, eps, /*debug=*/true);
+    auto pass2 = RemoveOverlaps2D(pass1.verts, p2in, eps, /*tolerance=*/0.0,
+                                  /*debug=*/true);
     std::cerr << "pass1: " << pass1.verts.size() << " verts, "
               << pass1.edges.size() << " edges\n";
     std::cerr << "pass2: " << pass2.verts.size() << " verts, "
