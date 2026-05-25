@@ -42,6 +42,14 @@ target_link_libraries(largeSceneTest manifold)
 target_compile_options(largeSceneTest PRIVATE ${MANIFOLD_FLAGS})
 exportbin(largeSceneTest)
 
+if(MANIFOLD_CROSS_SECTION_BACKEND STREQUAL "boolean2")
+  add_executable(measureDrift measure_drift.cpp)
+  target_link_libraries(measureDrift manifold)
+  target_include_directories(measureDrift PRIVATE ${PROJECT_SOURCE_DIR}/src)
+  target_compile_options(measureDrift PRIVATE ${MANIFOLD_FLAGS})
+  exportbin(measureDrift)
+endif()
+
 if(MANIFOLD_DEBUG)
   add_executable(minimizeTestcase minimize_testcase.cpp)
   target_link_libraries(
