@@ -2788,8 +2788,9 @@ TEST(CrossSection, ShallowLongEdgeIntersectionIsNotDropped) {
   vec2 intersection;
   const double eps = boolean2::EpsilonFromScale(1e9);
 
-  EXPECT_TRUE(boolean2::IntersectSegments({-0.5, 0.0}, {0.5, 0.0}, {-1e9, 0.01},
-                                          {1e9, -0.01}, eps, &intersection));
+  EXPECT_TRUE(boolean2::IntersectSegments({{-0.5, 0.0}, {0.5, 0.0}, 0},
+                                          {{-1e9, 0.01}, {1e9, -0.01}, 1}, eps,
+                                          &intersection));
   EXPECT_NEAR(intersection.x, 0.0, eps);
   EXPECT_NEAR(intersection.y, 0.0, eps);
 }
@@ -2798,16 +2799,18 @@ TEST(CrossSection, NearEndpointIntersectionOutsideSegmentIsDropped) {
   vec2 intersection;
   const double eps = 1.0;
 
-  EXPECT_FALSE(boolean2::IntersectSegments({0.0, 0.0}, {10.0, 0.0}, {8.0, 0.4},
-                                           {18.0, 1.4}, eps, &intersection));
+  EXPECT_FALSE(boolean2::IntersectSegments({{0.0, 0.0}, {10.0, 0.0}, 0},
+                                           {{8.0, 0.4}, {18.0, 1.4}, 1}, eps,
+                                           &intersection));
 }
 
 TEST(CrossSection, EndpointTJunctionIntersectionIsDropped) {
   vec2 intersection;
   const double eps = 1.0;
 
-  EXPECT_FALSE(boolean2::IntersectSegments({0.0, 0.0}, {10.0, 0.0}, {5.0, 0.0},
-                                           {5.0, 0.1}, eps, &intersection));
+  EXPECT_FALSE(boolean2::IntersectSegments({{0.0, 0.0}, {10.0, 0.0}, 0},
+                                           {{5.0, 0.0}, {5.0, 0.1}, 1}, eps,
+                                           &intersection));
 }
 
 TEST(CrossSection, MergeVertsTransitiveChainCanDriftPastEps) {
