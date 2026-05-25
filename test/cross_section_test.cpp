@@ -3388,8 +3388,8 @@ TEST(CrossSection, Boolean2GraphOrderDetectsProperCrossing) {
   using boolean2::GraphOrderKind;
   using boolean2::GraphSegment2D;
 
-  GraphSegment2D a{{0.0, 0.0}, {10.0, 10.0}, 0, 0};
-  GraphSegment2D b{{0.0, 10.0}, {10.0, 0.0}, 1, 1};
+  GraphSegment2D a{{0.0, 0.0}, {10.0, 10.0}, 0};
+  GraphSegment2D b{{0.0, 10.0}, {10.0, 0.0}, 1};
 
   const auto order = CompareProjectedOrder(a, b, /*axis=*/0, 0.0, 10.0);
   EXPECT_EQ(order.atMinProjection, GraphOrderKind::ALessOrtho);
@@ -3403,10 +3403,10 @@ TEST(CrossSection, Boolean2GraphOrderIsEndpointReversalStable) {
   using boolean2::GraphOrderKind;
   using boolean2::GraphSegment2D;
 
-  GraphSegment2D a{{0.0, 0.0}, {10.0, 10.0}, 0, 0};
-  GraphSegment2D b{{0.0, 10.0}, {10.0, 0.0}, 1, 1};
-  GraphSegment2D aReversed{{10.0, 10.0}, {0.0, 0.0}, 0, 0};
-  GraphSegment2D bReversed{{10.0, 0.0}, {0.0, 10.0}, 1, 1};
+  GraphSegment2D a{{0.0, 0.0}, {10.0, 10.0}, 0};
+  GraphSegment2D b{{0.0, 10.0}, {10.0, 0.0}, 1};
+  GraphSegment2D aReversed{{10.0, 10.0}, {0.0, 0.0}, 0};
+  GraphSegment2D bReversed{{10.0, 0.0}, {0.0, 10.0}, 1};
 
   const auto order = CompareProjectedOrder(a, b, /*axis=*/0, 0.0, 10.0);
   const auto reversed =
@@ -3435,8 +3435,8 @@ TEST(CrossSection, Boolean2GraphOrderSupportsYAxisProjection) {
   using boolean2::GraphOrderKind;
   using boolean2::GraphSegment2D;
 
-  GraphSegment2D a{{0.0, 0.0}, {10.0, 10.0}, 0, 0};
-  GraphSegment2D b{{10.0, 0.0}, {0.0, 10.0}, 1, 1};
+  GraphSegment2D a{{0.0, 0.0}, {10.0, 10.0}, 0};
+  GraphSegment2D b{{10.0, 0.0}, {0.0, 10.0}, 1};
 
   const auto order = CompareProjectedOrder(a, b, /*axis=*/1, 0.0, 10.0);
   EXPECT_EQ(order.atMinProjection, GraphOrderKind::ALessOrtho);
@@ -3449,8 +3449,8 @@ TEST(CrossSection, Boolean2GraphOrderResolvesCoincidentOverlap) {
   using boolean2::GraphOrderKind;
   using boolean2::GraphSegment2D;
 
-  GraphSegment2D a{{0.0, 0.0}, {10.0, 0.0}, 0, 0};
-  GraphSegment2D b{{0.0, 0.0}, {10.0, 0.0}, 1, 1};
+  GraphSegment2D a{{0.0, 0.0}, {10.0, 0.0}, 0};
+  GraphSegment2D b{{0.0, 0.0}, {10.0, 0.0}, 1};
 
   const auto order = CompareProjectedOrder(a, b, /*axis=*/0, 0.0, 10.0);
   EXPECT_EQ(order.atMinProjection, GraphOrderKind::ALessOrtho);
@@ -3470,8 +3470,8 @@ TEST(CrossSection, Boolean2GraphOrderUsesCanonicalGeometryTieBeforeEdgeId) {
   using boolean2::GraphOrderKind;
   using boolean2::GraphSegment2D;
 
-  GraphSegment2D lower{{0.0, 0.0}, {10.0, 0.0}, 0, 100};
-  GraphSegment2D upper{{0.0, 0.5}, {10.0, 0.5}, 0, 1};
+  GraphSegment2D lower{{0.0, 0.0}, {10.0, 0.0}, 100};
+  GraphSegment2D upper{{0.0, 0.5}, {10.0, 0.5}, 1};
 
   const auto order =
       CompareProjectedOrder(lower, upper, /*axis=*/0, 0.0, 10.0, 1.0);
@@ -3493,8 +3493,8 @@ TEST(CrossSection, Boolean2GraphOrderKeepsEndpointTouchDegenerate) {
   using boolean2::GraphOrderKind;
   using boolean2::GraphSegment2D;
 
-  GraphSegment2D a{{0.0, 0.0}, {10.0, 0.0}, 0, 0};
-  GraphSegment2D b{{5.0, 0.0}, {15.0, 1.0}, 1, 1};
+  GraphSegment2D a{{0.0, 0.0}, {10.0, 0.0}, 0};
+  GraphSegment2D b{{5.0, 0.0}, {15.0, 1.0}, 1};
 
   const auto order = CompareProjectedOrder(a, b, /*axis=*/0, 5.0, 10.0);
   EXPECT_EQ(order.atMinProjection, GraphOrderKind::EndpointTouch);
@@ -3508,8 +3508,8 @@ TEST(CrossSection, Boolean2IntersectSegmentsFindsStrictCrossing) {
   using boolean2::IntersectSegments;
 
   vec2 intersection;
-  GraphSegment2D a{{0.0, 0.0}, {10.0, 10.0}, 0, 0};
-  GraphSegment2D b{{0.0, 10.0}, {10.0, 0.0}, 0, 1};
+  GraphSegment2D a{{0.0, 0.0}, {10.0, 10.0}, 0};
+  GraphSegment2D b{{0.0, 10.0}, {10.0, 0.0}, 1};
 
   EXPECT_TRUE(IntersectSegments(a, b, 0.0, &intersection));
   EXPECT_NEAR(intersection.x, 5.0, 1e-12);
@@ -3521,8 +3521,8 @@ TEST(CrossSection, Boolean2IntersectSegmentsKeepsOneSidedEpsBandCrossing) {
   using boolean2::IntersectSegments;
 
   vec2 intersection;
-  GraphSegment2D a{{0.0, 0.0}, {10.0, 0.0}, 0, 0};
-  GraphSegment2D b{{0.0, -0.5}, {10.0, 2.0}, 0, 1};
+  GraphSegment2D a{{0.0, 0.0}, {10.0, 0.0}, 0};
+  GraphSegment2D b{{0.0, -0.5}, {10.0, 2.0}, 1};
 
   EXPECT_TRUE(IntersectSegments(a, b, 1.0, &intersection));
   EXPECT_NEAR(intersection.x, 2.0, 1e-12);
@@ -3534,8 +3534,8 @@ TEST(CrossSection, Boolean2IntersectSegmentsKeepsTwoSidedEpsBandCrossing) {
   using boolean2::IntersectSegments;
 
   vec2 intersection;
-  GraphSegment2D a{{0.0, 0.0}, {10.0, 0.0}, 0, 0};
-  GraphSegment2D b{{0.0, -0.75}, {10.0, 0.75}, 0, 1};
+  GraphSegment2D a{{0.0, 0.0}, {10.0, 0.0}, 0};
+  GraphSegment2D b{{0.0, -0.75}, {10.0, 0.75}, 1};
 
   EXPECT_TRUE(IntersectSegments(a, b, 1.0, &intersection));
   EXPECT_NEAR(intersection.x, 5.0, 1e-12);
@@ -3548,8 +3548,8 @@ TEST(CrossSection, Boolean2IntersectSegmentsKeepsUnderflowingSignChange) {
 
   const double tiny = 1e-200;
   vec2 intersection;
-  GraphSegment2D a{{0.0, 0.0}, {10.0, 0.0}, 0, 0};
-  GraphSegment2D b{{0.0, -tiny}, {10.0, tiny}, 0, 1};
+  GraphSegment2D a{{0.0, 0.0}, {10.0, 0.0}, 0};
+  GraphSegment2D b{{0.0, -tiny}, {10.0, tiny}, 1};
 
   EXPECT_TRUE(IntersectSegments(a, b, 1.0, &intersection));
   EXPECT_NEAR(intersection.x, 5.0, 1e-12);
@@ -3561,8 +3561,8 @@ TEST(CrossSection, Boolean2IntersectSegmentsDropsEpsNearEndpointCrossing) {
   using boolean2::IntersectSegments;
 
   vec2 intersection;
-  GraphSegment2D a{{0.0, 0.0}, {10.0, 0.0}, 0, 0};
-  GraphSegment2D b{{0.5, -1.0}, {0.5, 1.0}, 0, 1};
+  GraphSegment2D a{{0.0, 0.0}, {10.0, 0.0}, 0};
+  GraphSegment2D b{{0.5, -1.0}, {0.5, 1.0}, 1};
 
   EXPECT_FALSE(IntersectSegments(a, b, 1.0, &intersection));
 }
@@ -3572,8 +3572,8 @@ TEST(CrossSection, Boolean2IntersectSegmentsKeepsSteepInteriorCrossing) {
   using boolean2::IntersectSegments;
 
   vec2 intersection;
-  GraphSegment2D a{{0.0, 0.0}, {0.0015, 1000.0}, 0, 0};
-  GraphSegment2D b{{-1.0, 500.0}, {1.0, 500.0}, 0, 1};
+  GraphSegment2D a{{0.0, 0.0}, {0.0015, 1000.0}, 0};
+  GraphSegment2D b{{-1.0, 500.0}, {1.0, 500.0}, 1};
 
   EXPECT_TRUE(IntersectSegments(a, b, 0.001, &intersection));
   EXPECT_NEAR(intersection.x, 0.00075, 1e-12);
@@ -3585,8 +3585,8 @@ TEST(CrossSection, Boolean2IntersectSegmentsDropsEndpointTouch) {
   using boolean2::IntersectSegments;
 
   vec2 intersection;
-  GraphSegment2D a{{0.0, 0.0}, {10.0, 0.0}, 0, 0};
-  GraphSegment2D b{{10.0, 0.0}, {20.0, 10.0}, 0, 1};
+  GraphSegment2D a{{0.0, 0.0}, {10.0, 0.0}, 0};
+  GraphSegment2D b{{10.0, 0.0}, {20.0, 10.0}, 1};
 
   EXPECT_FALSE(IntersectSegments(a, b, 0.0, &intersection));
 }
@@ -3596,8 +3596,8 @@ TEST(CrossSection, Boolean2IntersectSegmentsDropsPositiveOverlapTJunction) {
   using boolean2::IntersectSegments;
 
   vec2 intersection;
-  GraphSegment2D a{{0.0, 0.0}, {10.0, 0.0}, 0, 0};
-  GraphSegment2D b{{5.0, 0.0}, {15.0, 1.0}, 0, 1};
+  GraphSegment2D a{{0.0, 0.0}, {10.0, 0.0}, 0};
+  GraphSegment2D b{{5.0, 0.0}, {15.0, 1.0}, 1};
 
   EXPECT_FALSE(IntersectSegments(a, b, 0.0, &intersection));
 }
@@ -3607,8 +3607,8 @@ TEST(CrossSection, Boolean2IntersectSegmentsFindsAxisAlignedStrictCrossing) {
   using boolean2::IntersectSegments;
 
   vec2 intersection;
-  GraphSegment2D a{{0.0, 5.0}, {10.0, 5.0}, 0, 0};
-  GraphSegment2D b{{5.0, 0.0}, {5.0, 10.0}, 0, 1};
+  GraphSegment2D a{{0.0, 5.0}, {10.0, 5.0}, 0};
+  GraphSegment2D b{{5.0, 0.0}, {5.0, 10.0}, 1};
 
   EXPECT_TRUE(IntersectSegments(a, b, 0.0, &intersection));
   EXPECT_NEAR(intersection.x, 5.0, 1e-12);
@@ -3620,8 +3620,8 @@ TEST(CrossSection, Boolean2IntersectSegmentsDropsAxisAlignedEndpointTouch) {
   using boolean2::IntersectSegments;
 
   vec2 intersection;
-  GraphSegment2D a{{0.0, 0.0}, {10.0, 0.0}, 0, 0};
-  GraphSegment2D b{{10.0, 0.0}, {10.0, 10.0}, 0, 1};
+  GraphSegment2D a{{0.0, 0.0}, {10.0, 0.0}, 0};
+  GraphSegment2D b{{10.0, 0.0}, {10.0, 10.0}, 1};
 
   EXPECT_FALSE(IntersectSegments(a, b, 0.0, &intersection));
 }
@@ -3631,8 +3631,8 @@ TEST(CrossSection, Boolean2IntersectSegmentsDropsCoincidentOverlap) {
   using boolean2::IntersectSegments;
 
   vec2 intersection;
-  GraphSegment2D a{{0.0, 0.0}, {10.0, 0.0}, 0, 0};
-  GraphSegment2D b{{2.0, 0.0}, {8.0, 0.0}, 0, 1};
+  GraphSegment2D a{{0.0, 0.0}, {10.0, 0.0}, 0};
+  GraphSegment2D b{{2.0, 0.0}, {8.0, 0.0}, 1};
 
   EXPECT_FALSE(IntersectSegments(a, b, 0.0, &intersection));
 }
