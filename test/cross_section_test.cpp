@@ -998,6 +998,132 @@ TEST(CrossSection, DISABLED_Boolean2TraceTinyVsLargeStars) {
   WriteTraceJson(out, trace);
 }
 
+TEST(CrossSection, DISABLED_Boolean2TraceDegenerateCoincidentVertexUnion) {
+  auto starPolygon = [](const std::vector<double>& radii) {
+    SimplePolygon ring;
+    const int n = static_cast<int>(radii.size());
+    constexpr double kPi = 3.14159265358979323846;
+    for (int i = 0; i < n; ++i) {
+      const double r = 0.1 + std::fabs(radii[i]);
+      const double th = 2.0 * kPi * i / n;
+      ring.push_back({r * std::cos(th), r * std::sin(th)});
+    }
+    return ring;
+  };
+  const std::vector<double> radiiA = {1.0169016983060246, 1000., 1.,
+                                      578.85382959129936, 0.,    0.};
+  const std::vector<double> radiiB = {0.,
+                                      1000.,
+                                      999.83083173100238,
+                                      7.275875880519048,
+                                      726.89009231357352,
+                                      3.880747251022969};
+  SimplePolygon aRing = starPolygon(radiiA);
+  SimplePolygon bRing = starPolygon(radiiB);
+  for (auto& v : bRing) v.x += 0.0030378301550779696;
+  bRing[4] = aRing[1];
+  // FillByRule via the ctor: the failing seed runs on regularized polys.
+  const Polygons a = CrossSection(aRing).ToPolygons();
+  const Polygons b = CrossSection(bRing).ToPolygons();
+
+  vec2 lo(0.0), hi(0.0);
+  bool any = false;
+  for (const auto& src : {a, b}) {
+    for (const auto& loop : src) {
+      for (const vec2& v : loop) {
+        if (!any) {
+          lo = hi = v;
+          any = true;
+        } else {
+          lo.x = std::min(lo.x, v.x);
+          lo.y = std::min(lo.y, v.y);
+          hi.x = std::max(hi.x, v.x);
+          hi.y = std::max(hi.y, v.y);
+        }
+      }
+    }
+  }
+  const vec2 origin = lo * 0.5 + hi * 0.5;
+  auto translate = [&](const Polygons& polys) {
+    Polygons out = polys;
+    for (auto& loop : out)
+      for (vec2& v : loop) v = v - origin;
+    return out;
+  };
+  const Polygons localA = translate(a);
+  const Polygons localB = translate(b);
+  const double eps = boolean2::InferEps(localA, localB);
+
+  auto append = [](const Polygons& polys, int mult, std::vector<vec2>* verts,
+                   std::vector<boolean2::EdgeM>* edges) {
+    for (const auto& loop : polys) {
+      if (loop.size() < 3) continue;
+      const int base = static_cast<int>(verts->size());
+      for (const vec2& v : loop) verts->push_back(v);
+      const int n = static_cast<int>(loop.size());
+      for (int i = 0; i < n; ++i) {
+        edges->push_back({base + i, base + ((i + 1) % n), mult});
+      }
+    }
+  };
+
+  std::vector<vec2> verts;
+  std::vector<boolean2::EdgeM> edges;
+  append(localA, 1, &verts, &edges);
+  append(localB, 1, &verts, &edges);
+
+  boolean2::Trace trace;
+  auto& seedPhase = trace.AddPhase("seed_metadata");
+  seedPhase.annotations.push_back(
+      {"origin", "frame.origin = " + std::to_string(origin.x) + ", " +
+                     std::to_string(origin.y) +
+                     "; eps = " + std::to_string(eps)});
+  seedPhase.annotations.push_back(
+      {"shared_vertex",
+       "Raw input b[4] = a[1] = (" + std::to_string(aRing[1].x) + ", " +
+           std::to_string(aRing[1].y) +
+           "); persists through per-polygon FillByRule into a multi-source "
+           "merged vertex v1 in the BinaryOpByRule arrangement"});
+  seedPhase.annotations.push_back(
+      {"cluster_scale",
+       "Expected cluster spread ~5.2e-7 from v1 in local frame "
+       "(delta * sin(theta) = 0.003 * 9.7e-5)"});
+
+  auto result = boolean2::RemoveOverlaps2D(verts, edges, eps, /*tolerance=*/0.0,
+                                           /*debug=*/false,
+                                           boolean2::WindRule::Add, &trace);
+
+  // Match BinaryOpByRule's nearRepeatedVertexTol so the loop walker sees
+  // what production sees.
+  Polygons final =
+      boolean2::OutEdgesToPolygons(result.verts, result.edges, 2.0 * eps);
+  auto& phase = trace.AddPhase("final_polygons");
+  for (int i = 0; i < static_cast<int>(final.size()); ++i) {
+    phase.polygons.push_back({std::string("poly") + std::to_string(i), final[i],
+                              "final_polygon", "", 0, true, ""});
+  }
+  const double totalArea = boolean2::TotalSignedArea(final);
+  phase.annotations.push_back(
+      {"output_area",
+       "Total signed area of output: " + std::to_string(totalArea) +
+           ". boolean2's own inclusion-exclusion identity from this same "
+           "backend (ca.Area + cb.Area - (ca and cb).Area) gives ~434284, so "
+           "the algebraic self-consistency residual is ~2710. This is NOT a "
+           "Clipper oracle - it's boolean2 contradicting itself. Clipper2 "
+           "backend on the same input satisfies the identity."});
+  phase.annotations.push_back(
+      {"non_simple_output",
+       "The single output polygon is NOT simple per OGC simple-features - it "
+       "revisits the merged-source vertex (~539.5, ~433.1) several times as "
+       "the boundary stitches the cb[1] lobe in as a spike. Clipper2 would "
+       "emit two separate polygons via AddLocalMaxPoly/AddLocalMinPoly at "
+       "the shared-vertex touch."});
+
+  std::ofstream out("boolean2_trace_degenerate_coincident_vertex_union.json");
+  ASSERT_TRUE(out.good());
+  WriteTraceJson(out, trace);
+}
+
 TEST(CrossSection, DISABLED_Boolean2TraceShowcase) {
   auto append = [](const Polygons& polys, int mult, std::vector<vec2>* verts,
                    std::vector<boolean2::EdgeM>* edges) {
