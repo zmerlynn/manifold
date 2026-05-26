@@ -111,7 +111,23 @@ using manifold::la::dot;
 using manifold::la::length;
 
 int CastWindingRay(vec2 origin, const CanonicalSubEdges& canon,
-                   const std::vector<vec2>& verts);
+                   const std::vector<vec2>& verts) {
+  int winding = 0;
+  for (const auto& edge : canon.edges) {
+    const int mult = edge.mult;
+    vec2 p0 = verts[edge.vMin];
+    vec2 p1 = verts[edge.vMax];
+    const bool upward = p0.y < p1.y;
+    if (!upward) std::swap(p0, p1);
+    if (p0.y == p1.y) continue;
+    if (origin.y < p0.y || origin.y >= p1.y) continue;
+    const double xSlope = (p1.x - p0.x) / (p1.y - p0.y);
+    const double xCross = p0.x + xSlope * (origin.y - p0.y);
+    if (xCross <= origin.x) continue;
+    winding += upward ? mult : -mult;
+  }
+  return winding;
+}
 
 // =============================================================================
 // Property checks.
@@ -143,14 +159,14 @@ std::map<int, int> ComputeBalance(const std::vector<Edge>& edges) {
 // verts come after).
 bool CheckTopologicalValidity(const OverlapResult& r,
                               const std::vector<EdgeM>& inputEdges,
-                              const std::vector<int>& inputRemap,
+                              const std::vector<int>& inputVert2Merged,
                               int numMergedVerts) {
-  // Expected balance: remap input edges through `inputRemap`, compute
+  // Expected balance: remap input edges through `inputVert2Merged`, compute
   // per-output-vertex balance contribution from the input.
   std::vector<EdgeM> remapped;
   for (const auto& e : inputEdges) {
-    int a = inputRemap[e.v0];
-    int b = inputRemap[e.v1];
+    int a = inputVert2Merged[e.v0];
+    int b = inputVert2Merged[e.v1];
     if (a != b) remapped.push_back({a, b, e.mult});
   }
   auto expected = ComputeBalance(remapped);
@@ -330,7 +346,7 @@ OverlapResult IterateToFixedPoint(const std::vector<vec2>& vIn,
   history.push_back(RemoveOverlaps2D(vIn, eIn, eps, /*tolerance=*/0.0,
                                      /*debug=*/false, pred));
   fps.push_back(Fingerprint(history.back(), eps));
-  std::vector<int> composedRemap = history.back().inputRemap;
+  std::vector<int> composedRemap = history.back().inputVert2Merged;
   for (int iter = 1; iter <= maxIter; ++iter) {
     std::vector<EdgeM> nextEdges;
     nextEdges.reserve(history.back().edges.size());
@@ -338,8 +354,8 @@ OverlapResult IterateToFixedPoint(const std::vector<vec2>& vIn,
       nextEdges.push_back({oe.v0, oe.v1, oe.mult});
     }
     auto next = RemoveOverlaps2D(history.back().verts, nextEdges, eps);
-    for (auto& v : composedRemap) v = next.inputRemap[v];
-    next.inputRemap = composedRemap;
+    for (auto& v : composedRemap) v = next.inputVert2Merged[v];
+    next.inputVert2Merged = composedRemap;
     auto nextFp = Fingerprint(next, eps);
     if (nextFp == fps.back()) {
       if (outIters) *outIters = iter;
@@ -363,7 +379,7 @@ OverlapResult IterateToFixedPoint(const std::vector<vec2>& vIn,
   }
   if (outIters) *outIters = maxIter;
   if (outStatus) *outStatus = IterStatus::MaxedOut;
-  history.back().inputRemap = std::move(composedRemap);
+  history.back().inputVert2Merged = std::move(composedRemap);
   return std::move(history.back());
 }
 
@@ -383,8 +399,8 @@ OverlapResult RunCase(const TestCase& tc, bool* allPass) {
   auto r = RemoveOverlaps2D(tc.verts, tc.edges, tc.eps);
   std::cout << "  Output: " << r.verts.size() << " verts, " << r.edges.size()
             << " edges" << std::endl;
-  bool topo =
-      CheckTopologicalValidity(r, tc.edges, r.inputRemap, r.numMergedVerts);
+  bool topo = CheckTopologicalValidity(r, tc.edges, r.inputVert2Merged,
+                                       r.numMergedVerts);
   std::cout << "  Topological validity: " << (topo ? "PASS" : "FAIL")
             << std::endl;
   if (!topo) *allPass = false;
@@ -428,7 +444,7 @@ void Diagnose(uint64_t seed, int kPow = 30, int n = 50) {
   std::cerr << "After vertex merge: " << merge.verts.size() << " verts (was "
             << vIn.size() << ")\n";
 
-  auto edges = RemapAndCollapse(eIn, merge.remap);
+  auto edges = RemapAndCollapse(eIn, merge.inputVert2Merged);
   std::cerr << "After edge collapse: " << edges.size() << " edges (was "
             << eIn.size() << ")\n";
 
@@ -480,8 +496,8 @@ void Diagnose(uint64_t seed, int kPow = 30, int n = 50) {
   // Expected balance from remapped input.
   std::vector<EdgeM> remappedInput;
   for (const auto& e : eIn) {
-    int a = merge.remap[e.v0];
-    int b = merge.remap[e.v1];
+    int a = merge.inputVert2Merged[e.v0];
+    int b = merge.inputVert2Merged[e.v1];
     if (a != b) remappedInput.push_back({a, b, e.mult});
   }
   auto expBalance = ComputeBalance(remappedInput);
@@ -636,7 +652,7 @@ void Diagnose(uint64_t seed, int kPow = 30, int n = 50) {
             << " edges, numMergedVerts=" << rIter.numMergedVerts << "\n";
 
   // Check topology validity on the iterated result with composed remap.
-  bool iterValid = CheckTopologicalValidity(rIter, eIn, rIter.inputRemap,
+  bool iterValid = CheckTopologicalValidity(rIter, eIn, rIter.inputVert2Merged,
                                             rIter.numMergedVerts);
   std::cerr << "Iterated topology valid: " << (iterValid ? "YES" : "NO")
             << "\n";
@@ -645,7 +661,7 @@ void Diagnose(uint64_t seed, int kPow = 30, int n = 50) {
   // RemoveOverlaps2D pipeline, NOT the legacy diagnostic above).
   std::cerr << "\n=== Pass 1 (RemoveOverlaps2D, the production path) ===\n";
   auto pass1 = RemoveOverlaps2D(vIn, eIn, eps);
-  bool pass1Valid = CheckTopologicalValidity(pass1, eIn, pass1.inputRemap,
+  bool pass1Valid = CheckTopologicalValidity(pass1, eIn, pass1.inputVert2Merged,
                                              pass1.numMergedVerts);
   std::cerr << "Pass 1 verts=" << pass1.verts.size()
             << " edges=" << pass1.edges.size()
@@ -656,10 +672,10 @@ void Diagnose(uint64_t seed, int kPow = 30, int n = 50) {
   if (!pass1Valid) {
     std::cerr << "\n=== Imbalanced vert analysis ===\n";
     // Compute expected balance from input edges remapped through
-    // pass1.inputRemap (same as CheckTopologicalValidity).
+    // pass1.inputVert2Merged (same as CheckTopologicalValidity).
     std::vector<EdgeM> remapped;
     for (const auto& ie : eIn) {
-      int a = pass1.inputRemap[ie.v0], b = pass1.inputRemap[ie.v1];
+      int a = pass1.inputVert2Merged[ie.v0], b = pass1.inputVert2Merged[ie.v1];
       if (a != b) remapped.push_back({a, b, ie.mult});
     }
     auto exp = ComputeBalance(remapped);
@@ -698,7 +714,7 @@ void Diagnose(uint64_t seed, int kPow = 30, int n = 50) {
     // Note: pass1.edges is after winding filtering; we need the
     // canonicalized edges. So re-run.
     auto m3 = MergeVerts(vIn, eps);
-    auto e3 = RemapAndCollapse(eIn, m3.remap);
+    auto e3 = RemapAndCollapse(eIn, m3.inputVert2Merged);
     std::vector<Box2> e3Boxes(e3.size());
     for (size_t i = 0; i < e3.size(); ++i)
       e3Boxes[i] = BoxOf2DEdge(m3.verts[e3[i].v0], m3.verts[e3[i].v1], eps);
@@ -808,9 +824,9 @@ void Diagnose(uint64_t seed, int kPow = 30, int n = 50) {
   }
   // Also report what the test is expecting per-vertex.
   std::cerr << "Composed remap (original input vert → final vert idx):\n";
-  for (size_t i = 0; i < rIter.inputRemap.size(); ++i) {
-    if (i < 10 || i == rIter.inputRemap.size() - 1)
-      std::cerr << "  v" << i << " → " << rIter.inputRemap[i] << "\n";
+  for (size_t i = 0; i < rIter.inputVert2Merged.size(); ++i) {
+    if (i < 10 || i == rIter.inputVert2Merged.size() - 1)
+      std::cerr << "  v" << i << " → " << rIter.inputVert2Merged[i] << "\n";
   }
 }
 // =============================================================================
@@ -899,7 +915,7 @@ inline void RunCorpus(const std::string& path) {
     auto [v, e] = PolygonsToInput(entry.polys);
     auto r = RemoveOverlaps2D(v, e, eps);
     bool topoOk =
-        CheckTopologicalValidity(r, e, r.inputRemap, r.numMergedVerts);
+        CheckTopologicalValidity(r, e, r.inputVert2Merged, r.numMergedVerts);
     if (topoOk)
       ++topo_ok;
     else
@@ -1236,8 +1252,8 @@ inline void RunClipper2Corpus(const std::string& path) {
     auto [v, e] = PolygonsToInput(out);
     if (!v.empty()) {
       auto r2 = RemoveOverlaps2D(v, e, eps);
-      bool topo =
-          CheckTopologicalValidity(r2, e, r2.inputRemap, r2.numMergedVerts);
+      bool topo = CheckTopologicalValidity(r2, e, r2.inputVert2Merged,
+                                           r2.numMergedVerts);
       // For a valid output, re-running RemoveOverlaps2D should be a no-op
       // (idempotent under sub-eps drift). Topology failure here flags
       // either an invalid output or a corner case the pipeline mishandles
@@ -1760,8 +1776,8 @@ inline void RunMfogelCorpus(const std::string& dir) {
       auto [v, e] = PolygonsToInput(out);
       if (!v.empty()) {
         auto r2 = RemoveOverlaps2D(v, e, eps);
-        bool topo =
-            CheckTopologicalValidity(r2, e, r2.inputRemap, r2.numMergedVerts);
+        bool topo = CheckTopologicalValidity(r2, e, r2.inputVert2Merged,
+                                             r2.numMergedVerts);
         if (topo)
           ++topoOk;
         else
@@ -1961,7 +1977,8 @@ inline void RunJtsCorpus(const std::string& path) {
         auto [v, e] = PolygonsToInput(fa);
         if (!v.empty()) {
           auto r2 = RemoveOverlaps2D(v, e, eps);
-          if (CheckTopologicalValidity(r2, e, r2.inputRemap, r2.numMergedVerts))
+          if (CheckTopologicalValidity(r2, e, r2.inputVert2Merged,
+                                       r2.numMergedVerts))
             ++topoOk;
           else
             ++topoFail;
@@ -1997,7 +2014,8 @@ inline void RunJtsCorpus(const std::string& path) {
       auto [v, e] = PolygonsToInput(unionAB);
       if (!v.empty()) {
         auto r2 = RemoveOverlaps2D(v, e, eps);
-        if (CheckTopologicalValidity(r2, e, r2.inputRemap, r2.numMergedVerts))
+        if (CheckTopologicalValidity(r2, e, r2.inputVert2Merged,
+                                     r2.numMergedVerts))
           ++topoOk;
         else
           ++topoFail;
@@ -2926,7 +2944,7 @@ void DeepFuzz(int seedsPerCell) {
 
         auto pass1 = RemoveOverlaps2D(v, e, eps);
         const bool pass1Valid = CheckTopologicalValidity(
-            pass1, e, pass1.inputRemap, pass1.numMergedVerts);
+            pass1, e, pass1.inputVert2Merged, pass1.numMergedVerts);
         if (!pass1Valid) ++firstPassFail;
 
         // Polygons round-trip: convert (v, e) (which is a single closed
@@ -2967,12 +2985,12 @@ void DeepFuzz(int seedsPerCell) {
         auto rIter =
             IterateToFixedPoint(v, e, eps, /*maxIter=*/8, &iters, &status);
         ++iterDist[iters];
-        // Note: rIter.inputRemap is the LAST iteration's remap, not the
+        // Note: rIter.inputVert2Merged is the LAST iteration's remap, not the
         // composed original->final. The fuzz inputs are random topological
         // polygons where vertex merging produces an identity remap (no input
         // verts merge), so this is OK here.
         const bool convergedValid = CheckTopologicalValidity(
-            rIter, e, rIter.inputRemap, rIter.numMergedVerts);
+            rIter, e, rIter.inputVert2Merged, rIter.numMergedVerts);
         if (convergedValid) {
           ++convergedPassValid;
           if (!pass1Valid) ++iter_repaired;
@@ -3387,7 +3405,7 @@ void OffsetFuzz(int seedsPerCell) {
               const double eps = InferEps(out, {});
               auto [ov, oe] = PolygonsToInput(out);
               auto r2 = RemoveOverlaps2D(ov, oe, eps);
-              if (!CheckTopologicalValidity(r2, oe, r2.inputRemap,
+              if (!CheckTopologicalValidity(r2, oe, r2.inputVert2Merged,
                                             r2.numMergedVerts)) {
                 ++topologyInvalid;
                 if (topoList.size() < 10)
@@ -4134,7 +4152,7 @@ int main(int argc, char** argv) {
     auto p2_mrg = MergeVerts(pass1.verts, eps);
     std::cerr << "  vertex merge: " << pass1.verts.size() << "→"
               << p2_mrg.verts.size() << "\n";
-    auto p2_e = RemapAndCollapse(p2in, p2_mrg.remap);
+    auto p2_e = RemapAndCollapse(p2in, p2_mrg.inputVert2Merged);
     std::cerr << "  edge collapse: " << p2in.size() << "→" << p2_e.size()
               << " edges\n";
     std::vector<Box2> p2_eBoxes(p2_e.size());
@@ -4424,7 +4442,7 @@ int main(int argc, char** argv) {
     std::cout << "  Output: " << r.verts.size() << " verts, " << r.edges.size()
               << " edges" << std::endl;
     bool topoOk =
-        CheckTopologicalValidity(r, e, r.inputRemap, r.numMergedVerts);
+        CheckTopologicalValidity(r, e, r.inputVert2Merged, r.numMergedVerts);
     if (mode == NMExpect::ClosedTopo) {
       std::cout << "  Topological validity: " << (topoOk ? "PASS" : "FAIL")
                 << std::endl;
@@ -4641,7 +4659,8 @@ int main(int argc, char** argv) {
     for (uint64_t seed = 0; seed < 50; ++seed) {
       auto [v, e] = RandomTopologicalPolygon(n, seed);
       auto r = RemoveOverlaps2D(v, e, EpsilonFromScale(1.0));
-      bool ok = CheckTopologicalValidity(r, e, r.inputRemap, r.numMergedVerts);
+      bool ok =
+          CheckTopologicalValidity(r, e, r.inputVert2Merged, r.numMergedVerts);
       if (ok) {
         ++fuzzPass;
       } else {
@@ -4669,8 +4688,8 @@ int main(int argc, char** argv) {
         Displace(&v, offset);
         // Single-pass: topological validity only.
         auto r = RemoveOverlaps2D(v, e, eps);
-        bool ok =
-            CheckTopologicalValidity(r, e, r.inputRemap, r.numMergedVerts);
+        bool ok = CheckTopologicalValidity(r, e, r.inputVert2Merged,
+                                           r.numMergedVerts);
         if (ok) {
           ++dispPass;
         } else {
@@ -4701,13 +4720,14 @@ int main(int argc, char** argv) {
             ++iterMaxedOut;
             break;
         }
-        // Topological validity on the iterated result. NOTE: rIter.inputRemap
-        // is the LAST iteration's input->output remap, not the composed
-        // original->final. Works for the random-topology displaced inputs
-        // here because vertex merging produces an identity remap when no input
-        // verts merge (true for these inputs); a production version of
-        // IterateToFixedPoint should compose remaps across iterations.
-        if (!CheckTopologicalValidity(rIter, e, rIter.inputRemap,
+        // Topological validity on the iterated result. NOTE:
+        // rIter.inputVert2Merged is the LAST iteration's input->output remap,
+        // not the composed original->final. Works for the random-topology
+        // displaced inputs here because vertex merging produces an identity
+        // remap when no input verts merge (true for these inputs); a production
+        // version of IterateToFixedPoint should compose remaps across
+        // iterations.
+        if (!CheckTopologicalValidity(rIter, e, rIter.inputVert2Merged,
                                       rIter.numMergedVerts)) {
           std::cout << "  ITER FAIL: kPow=" << kPow << " n=" << n
                     << " seed=" << seed << std::endl;
