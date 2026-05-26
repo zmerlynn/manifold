@@ -5,8 +5,8 @@ default backend remains `clipper2`; this branch only adds the Boolean2 library
 and a staged, empty-returning `boolean2` backend translation unit. A later PR
 wires that translation unit into the public `CrossSection` methods.
 
-Boolean2 is a manifold-native 2D arrangement pipeline for polygon fill,
-Boolean, and XOR operations. Sibling utilities in
+Boolean2 is a manifold-native 2D arrangement pipeline for polygon fill and
+Boolean operations. Sibling utilities in
 `src/cross_section/boolean2/` provide the decomposition and offset pieces that
 the follow-up backend wiring uses to cover the rest of the public
 `CrossSection` API. The current branch keeps the implementation reviewable by

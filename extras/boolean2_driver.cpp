@@ -2985,10 +2985,8 @@ void DeepFuzz(int seedsPerCell) {
         auto rIter =
             IterateToFixedPoint(v, e, eps, /*maxIter=*/8, &iters, &status);
         ++iterDist[iters];
-        // Note: rIter.inputVert2Merged is the LAST iteration's remap, not the
-        // composed original->final. The fuzz inputs are random topological
-        // polygons where vertex merging produces an identity remap (no input
-        // verts merge), so this is OK here.
+        // IterateToFixedPoint composes inputVert2Merged back to the original
+        // input, so the validity check can use the original edge list.
         const bool convergedValid = CheckTopologicalValidity(
             rIter, e, rIter.inputVert2Merged, rIter.numMergedVerts);
         if (convergedValid) {
@@ -4090,7 +4088,7 @@ int main(int argc, char** argv) {
     };
     row("vertex merge", P.mergeNs.load());
     row("edge collapse", P.remapNs.load());
-    row("edge-vertex lists", P.edgeVertListsNs.load());
+    row("combined narrow phase", P.narrowPhaseNs.load());
     row("intersection insertion", P.findIxNs.load());
     row("duplicate ix merge", P.duplicateIxMergeNs.load());
     row("canonicalization", P.canonNs.load());
@@ -4720,13 +4718,8 @@ int main(int argc, char** argv) {
             ++iterMaxedOut;
             break;
         }
-        // Topological validity on the iterated result. NOTE:
-        // rIter.inputVert2Merged is the LAST iteration's input->output remap,
-        // not the composed original->final. Works for the random-topology
-        // displaced inputs here because vertex merging produces an identity
-        // remap when no input verts merge (true for these inputs); a production
-        // version of IterateToFixedPoint should compose remaps across
-        // iterations.
+        // IterateToFixedPoint composes inputVert2Merged back to the original
+        // input, so the validity check can use the original edge list.
         if (!CheckTopologicalValidity(rIter, e, rIter.inputVert2Merged,
                                       rIter.numMergedVerts)) {
           std::cout << "  ITER FAIL: kPow=" << kPow << " n=" << n
