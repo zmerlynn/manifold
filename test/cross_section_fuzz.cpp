@@ -60,6 +60,7 @@ extern "C" int ManifoldCrossSectionBackendIsBoolean2();
 #include "manifold/common.h"
 #include "manifold/cross_section.h"
 #include "manifold/manifold.h"
+#include "manifold/polygon.h"
 
 using namespace fuzztest;
 
@@ -187,11 +188,37 @@ void ExpectBoolean2TopologyValid(const manifold::Polygons& polys) {
                                        result.numMergedVerts));
 }
 
+// Run the polygon triangulator on `polys` with intermediateChecks +
+// processOverlaps=false to exercise TriangulateIdxHalfedges topology
+// asserts and CCW geometry checks (debug-only). Catches non-simple or
+// wrongly-oriented output polygons that pass the area/finite checks
+// but break downstream Manifold consumers. Params are saved and
+// restored even on throw so concurrent fuzz workers don't see flipped
+// state.
+void ExpectTriangulationValid(const manifold::Polygons& polys) {
+  auto& params = manifold::ManifoldParams();
+  const bool savedChecks = params.intermediateChecks;
+  const bool savedOverlaps = params.processOverlaps;
+  params.intermediateChecks = true;
+  params.processOverlaps = false;
+  try {
+    (void)manifold::Triangulate(polys);
+  } catch (const std::exception& e) {
+    params.intermediateChecks = savedChecks;
+    params.processOverlaps = savedOverlaps;
+    ADD_FAILURE() << "Triangulate failed on CrossSection output: " << e.what();
+    return;
+  }
+  params.intermediateChecks = savedChecks;
+  params.processOverlaps = savedOverlaps;
+}
+
 void ExpectCrossSectionValid(const manifold::CrossSection& crossSection) {
   EXPECT_TRUE(std::isfinite(crossSection.Area()));
   const auto polys = crossSection.ToPolygons();
   ExpectFinite(polys);
   ExpectBoolean2TopologyValid(polys);
+  ExpectTriangulationValid(polys);
 
   // Sanity check Simplify produces a finite, valid result.
   //
