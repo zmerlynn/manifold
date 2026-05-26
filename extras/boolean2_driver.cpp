@@ -473,16 +473,16 @@ void Diagnose(uint64_t seed, int kPow = 30, int n = 50) {
   std::cerr << "After intersections: " << merge.verts.size() << " verts (added "
             << (afterIntersections - beforeIntersections) << ")\n";
 
-  // Duplicate-intersection merge is omitted here: production
+  // Nearby-intersection merge is omitted here: production
   // RemoveOverlaps2D uses union-find over verts that share a parent edge
   // and fall within 10*eps. The diagnostic shows the post-intersection
-  // (pre-duplicate-intersection-merge) state so any residual near-coincident
+  // (pre-nearby-intersection-merge) state so any residual near-coincident
   // intersection clusters surface in the dump below.
-  std::cerr << "After duplicate-intersection merge: skipped (production uses "
-               "duplicate-intersection merge; see RemoveOverlaps2D)\n";
+  std::cerr << "After nearby-intersection merge: skipped (production uses "
+               "nearby-intersection merge; see RemoveOverlaps2D)\n";
 
   CanonicalSubEdges canon;
-  Canonicalize(edges, lists, &canon);
+  canon = Canonicalize(edges, lists);
   std::cerr << "After canonicalization: " << canon.edges.size()
             << " sub-edges (after multiplicity collapse)\n";
 
@@ -624,7 +624,7 @@ void Diagnose(uint64_t seed, int kPow = 30, int n = 50) {
     }
   }
 
-  // Cluster proximity: how many distinct verts are within eps of each other?
+  // Cluster proximity in the skipped pre-nearby-intersection-merge state.
   int closeCount = 0;
   const double eps2 = eps * eps;
   for (int i = 0; i < static_cast<int>(merge.verts.size()); ++i) {
@@ -633,7 +633,7 @@ void Diagnose(uint64_t seed, int kPow = 30, int n = 50) {
       if (dot(d, d) <= eps2) ++closeCount;
     }
   }
-  std::cerr << "After duplicate-intersection merge: " << closeCount
+  std::cerr << "Before nearby-intersection merge: " << closeCount
             << " pairs of distinct verts within eps of each other\n";
 
   // Now run iterate-to-fixed-point and report on the iterated result.
@@ -776,7 +776,7 @@ void Diagnose(uint64_t seed, int kPow = 30, int n = 50) {
       }
     }
     CanonicalSubEdges canon;
-    Canonicalize(e3, l3, &canon);
+    canon = Canonicalize(e3, l3);
     std::cerr << "  canonical sub-edges: " << canon.edges.size() << "\n";
 
     // For each imbalanced vert, dump every canonical edge touching it and
@@ -4090,7 +4090,7 @@ int main(int argc, char** argv) {
     row("edge collapse", P.remapNs.load());
     row("combined narrow phase", P.narrowPhaseNs.load());
     row("intersection insertion", P.findIxNs.load());
-    row("duplicate ix merge", P.duplicateIxMergeNs.load());
+    row("nearby ix merge", P.nearbyIxMergeNs.load());
     row("canonicalization", P.canonNs.load());
     row("winding filter", P.filterHalfedgeNs.load());
     std::cout << "\n  Shared broad-phase work (% of pipeline total):\n";
@@ -4173,7 +4173,7 @@ int main(int argc, char** argv) {
                                p2_eBoxes, p2_bvh, p2_ix);
     std::cerr << "  intersections: " << p2_mrg.verts.size() << " verts after\n";
     CanonicalSubEdges p2_canon;
-    Canonicalize(p2_e, p2_l, &p2_canon);
+    p2_canon = Canonicalize(p2_e, p2_l);
     std::cerr << "  canonicalization: " << p2_canon.edges.size()
               << " sub-edges\n";
 
@@ -4548,10 +4548,10 @@ int main(int argc, char** argv) {
   // (8) Adversarial 4+ concurrent edges: 4 line segments all passing
   // through origin at different orientations. Intersection insertion produces
   // C(4, 2) = 6 pairwise intersections that should all snap to one
-  // point in the duplicate-intersection merge. Some pairs share no edge in
+  // point in the nearby-intersection merge. Some pairs share no edge in
   // their incidence
   // sets (e.g. seg AB×CD vs seg EF×GH share no input edge), so that merge's
-  // duplicate-intersection gate cannot merge them directly. The iterate-to-
+  // nearby-intersection gate cannot merge them directly. The iterate-to-
   // fixed-point pass picks up any leftover near-duplicates. Open
   // input → empty output (no enclosed region).
   {
