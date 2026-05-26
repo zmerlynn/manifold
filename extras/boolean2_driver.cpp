@@ -34,8 +34,8 @@
 //
 //   [Issue289] https://github.com/elalish/manifold/issues/289
 //             elalish's BVH-adapted sketch (no sweep line),
-//             which this driver implements with Smith's symbolic
-//             perturbation as the FP-robust core.
+//             with deterministic local tie handling around tolerance-scale
+//             equalities.
 //
 // Algorithm shape (matches manifold internals where possible):
 //   - Spatial queries via boolean2's 2D BVH (Morton-sorted leaves).
@@ -440,8 +440,10 @@ void Diagnose(uint64_t seed, int kPow = 30, int n = 50) {
   std::vector<std::pair<int, int>> diagPairs;
   CollectIntersectionPairs(edges, merge.verts, eps, diagEdgeBoxes, diagBvh,
                            &diagPairs);
-  auto lists =
-      BuildEdgeVertListsFromEdgePairs(edges, merge.verts, eps, diagPairs);
+  std::vector<std::vector<int>> lists;
+  std::vector<IntersectionPoint> diagIntersections;
+  BuildListsAndFindIntersections(edges, merge.verts, eps, diagPairs, &lists,
+                                 &diagIntersections);
   size_t totalListSize = 0;
   for (const auto& l : lists) totalListSize += l.size();
   std::cerr << "After near-vertex indexing: " << totalListSize
@@ -450,18 +452,18 @@ void Diagnose(uint64_t seed, int kPow = 30, int n = 50) {
   const int beforeIntersections = static_cast<int>(merge.verts.size());
   std::vector<std::vector<int>> vertEdges;
   FindAndInsertIntersections(edges, &merge.verts, &lists, &vertEdges, eps,
-                             diagEdgeBoxes, diagBvh, diagPairs);
+                             diagEdgeBoxes, diagBvh, diagIntersections);
   const int afterIntersections = static_cast<int>(merge.verts.size());
   std::cerr << "After intersections: " << merge.verts.size() << " verts (added "
             << (afterIntersections - beforeIntersections) << ")\n";
 
-  // Structural merge is omitted here: production
+  // Duplicate-intersection merge is omitted here: production
   // RemoveOverlaps2D uses union-find over verts that share a parent edge
   // and fall within 10*eps. The diagnostic shows the post-intersection
-  // (pre-structural-merge) state so any residual near-coincident
+  // (pre-duplicate-intersection-merge) state so any residual near-coincident
   // intersection clusters surface in the dump below.
-  std::cerr << "After structural re-merge: skipped (production uses "
-               "structural merge; see RemoveOverlaps2D)\n";
+  std::cerr << "After duplicate-intersection merge: skipped (production uses "
+               "duplicate-intersection merge; see RemoveOverlaps2D)\n";
 
   CanonicalSubEdges canon;
   Canonicalize(edges, lists, &canon);
@@ -615,7 +617,7 @@ void Diagnose(uint64_t seed, int kPow = 30, int n = 50) {
       if (dot(d, d) <= eps2) ++closeCount;
     }
   }
-  std::cerr << "After structural re-merge: " << closeCount
+  std::cerr << "After duplicate-intersection merge: " << closeCount
             << " pairs of distinct verts within eps of each other\n";
 
   // Now run iterate-to-fixed-point and report on the iterated result.
@@ -689,9 +691,9 @@ void Diagnose(uint64_t seed, int kPow = 30, int n = 50) {
     // For each imbalanced vert, find canonical sub-edges incident to it,
     // and check how the winding filter voted on each.
     std::cerr << "\n=== Winding-filter verdicts for imbalanced verts ===\n";
-    // Re-run the production pipeline to canonical sub-edges (structural
-    // structural re-merge included; same as RemoveOverlaps2D through
-    // canonicalization.
+    // Re-run the production pipeline to canonical sub-edges (duplicate-
+    // intersection merge included; same as RemoveOverlaps2D through
+    // canonicalization).
     // We want canon as the production pipeline produces it.
     // Note: pass1.edges is after winding filtering; we need the
     // canonicalized edges. So re-run.
@@ -703,11 +705,13 @@ void Diagnose(uint64_t seed, int kPow = 30, int n = 50) {
     BVH e3Bvh = BVHBuildFromBoxes(e3Boxes);
     std::vector<std::pair<int, int>> e3Pairs;
     CollectIntersectionPairs(e3, m3.verts, eps, e3Boxes, e3Bvh, &e3Pairs);
-    auto l3 = BuildEdgeVertListsFromEdgePairs(e3, m3.verts, eps, e3Pairs);
+    std::vector<std::vector<int>> l3;
+    std::vector<IntersectionPoint> ix3;
+    BuildListsAndFindIntersections(e3, m3.verts, eps, e3Pairs, &l3, &ix3);
     std::vector<std::vector<int>> ve3;
     FindAndInsertIntersections(e3, &m3.verts, &l3, &ve3, eps, e3Boxes, e3Bvh,
-                               e3Pairs);
-    // Structural re-merge (copy of the production code).
+                               ix3);
+    // Duplicate-intersection merge (copy of the production code).
     {
       DisjointSets uf(static_cast<int>(m3.verts.size()));
       const double mergeThresh2 = (10.0 * eps) * (10.0 * eps);
@@ -964,7 +968,7 @@ inline void RunCorpus(const std::string& path) {
 //
 // i.e. each input is independently canonicalized to a CCW arrangement
 // under the declared fill rule, then the boolean op combines them. The
-// boolean2's public Simplify/Boolean2D/Xor APIs assume CCW-canonical
+// boolean2's public Simplify/Boolean2D APIs assume CCW-canonical
 // input (predicates use Smith's w>0 union convention), so they don't
 // match Clipper2's semantics directly when inputs are self-intersecting
 // or in screen-coord (y-down → CW in y-up math) orientation.
@@ -4070,7 +4074,7 @@ int main(int argc, char** argv) {
     row("edge collapse", P.remapNs.load());
     row("edge-vertex lists", P.edgeVertListsNs.load());
     row("intersection insertion", P.findIxNs.load());
-    row("structural re-merge", P.restructNs.load());
+    row("duplicate ix merge", P.duplicateIxMergeNs.load());
     row("canonicalization", P.canonNs.load());
     row("winding filter", P.filterHalfedgeNs.load());
     std::cout << "\n  Shared broad-phase work (% of pipeline total):\n";
@@ -4141,14 +4145,16 @@ int main(int argc, char** argv) {
     std::vector<std::pair<int, int>> p2_pairs;
     CollectIntersectionPairs(p2_e, p2_mrg.verts, eps, p2_eBoxes, p2_bvh,
                              &p2_pairs);
-    auto p2_l =
-        BuildEdgeVertListsFromEdgePairs(p2_e, p2_mrg.verts, eps, p2_pairs);
+    std::vector<std::vector<int>> p2_l;
+    std::vector<IntersectionPoint> p2_ix;
+    BuildListsAndFindIntersections(p2_e, p2_mrg.verts, eps, p2_pairs, &p2_l,
+                                   &p2_ix);
     int p2_totalList = 0;
     for (auto& l : p2_l) p2_totalList += l.size();
     std::cerr << "  near-vertex lists: " << p2_totalList << " total entries\n";
     std::vector<std::vector<int>> p2_ve;
     FindAndInsertIntersections(p2_e, &p2_mrg.verts, &p2_l, &p2_ve, eps,
-                               p2_eBoxes, p2_bvh, p2_pairs);
+                               p2_eBoxes, p2_bvh, p2_ix);
     std::cerr << "  intersections: " << p2_mrg.verts.size() << " verts after\n";
     CanonicalSubEdges p2_canon;
     Canonicalize(p2_e, p2_l, &p2_canon);
@@ -4293,22 +4299,17 @@ int main(int argc, char** argv) {
     auto add = Boolean2D(a, b, OpType::Add, eps);
     auto sub = Boolean2D(a, b, OpType::Subtract, eps);
     auto isec = Boolean2D(a, b, OpType::Intersect, eps);
-    auto xorOp = Xor(a, b, eps);
     const double areaAdd = TotalSignedArea(add);
     const double areaSub = TotalSignedArea(sub);
     const double areaIsec = TotalSignedArea(isec);
-    const double areaXor = TotalSignedArea(xorOp);
     // Expected: A area 4, B area 4, overlap 1.
     // Add: 4 + 4 - 1 = 7.  Subtract: 4 - 1 = 3.  Intersect: 1.
-    // Xor (symmetric difference): (A | B) - (A & B) = 7 - 1 = 6.
     auto near = [](double a, double b) { return std::fabs(a - b) < 1e-9; };
-    bool ok = near(areaAdd, 7.0) && near(areaSub, 3.0) && near(areaIsec, 1.0) &&
-              near(areaXor, 6.0);
+    bool ok = near(areaAdd, 7.0) && near(areaSub, 3.0) && near(areaIsec, 1.0);
     std::cout << "=== Boolean2D area regression: diagonal squares ===\n";
     std::cout << "  Add area:       " << areaAdd << " (expect 7)\n";
     std::cout << "  Subtract area:  " << areaSub << " (expect 3)\n";
     std::cout << "  Intersect area: " << areaIsec << " (expect 1)\n";
-    std::cout << "  Xor area:       " << areaXor << " (expect 6)\n";
     std::cout << "  " << (ok ? "PASS" : "FAIL") << "\n";
     if (!ok) allPass = false;
     std::cout << std::endl;
@@ -4531,9 +4532,10 @@ int main(int argc, char** argv) {
   // (8) Adversarial 4+ concurrent edges: 4 line segments all passing
   // through origin at different orientations. Intersection insertion produces
   // C(4, 2) = 6 pairwise intersections that should all snap to one
-  // point in the structural merge. Some pairs share no edge in their incidence
+  // point in the duplicate-intersection merge. Some pairs share no edge in
+  // their incidence
   // sets (e.g. seg AB×CD vs seg EF×GH share no input edge), so that merge's
-  // structural gate cannot merge them directly. The iterate-to-
+  // duplicate-intersection gate cannot merge them directly. The iterate-to-
   // fixed-point pass picks up any leftover near-duplicates. Open
   // input → empty output (no enclosed region).
   {
