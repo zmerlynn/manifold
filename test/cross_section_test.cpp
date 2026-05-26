@@ -34,6 +34,7 @@
 #include "../src/cross_section/boolean2/boolean2.h"
 #include "../src/cross_section/boolean2/diagnostics.h"
 #include "../src/cross_section/boolean2/driver.h"
+#include "../src/cross_section/boolean2/edge_vert_lists.h"
 #include "../src/cross_section/boolean2/intersections.h"
 #include "../src/cross_section/boolean2/predicates.h"
 #include "../src/cross_section/boolean2/vertex_merge.h"
@@ -653,9 +654,11 @@ TEST(CrossSection, ConcurrentIndependentEdgePairs) {
 TEST(CrossSection, PropagatesShallowIndependentIntersections) {
   using boolean2::Box2;
   using boolean2::BoxOf2DEdge;
+  using boolean2::BuildListsAndFindIntersections;
   using boolean2::BVH;
   using boolean2::EdgeM;
   using boolean2::FindAndInsertIntersections;
+  using boolean2::IntersectionPoint;
 
   constexpr double eps = 1e-3;
   std::vector<vec2> verts = {{-1., 0.},
@@ -675,12 +678,15 @@ TEST(CrossSection, PropagatesShallowIndependentIntersections) {
   for (const EdgeM& edge : edges) {
     edgeBoxes.push_back(BoxOf2DEdge(verts[edge.v0], verts[edge.v1], eps));
   }
-  std::vector<std::vector<int>> lists(edges.size());
+  std::vector<std::vector<int>> lists;
+  std::vector<IntersectionPoint> intersections;
   std::vector<std::vector<int>> vertEdges;
   const std::vector<std::pair<int, int>> pairs = {{0, 1}, {2, 3}};
 
+  BuildListsAndFindIntersections(edges, verts, eps, pairs, &lists,
+                                 &intersections);
   FindAndInsertIntersections(edges, &verts, &lists, &vertEdges, eps, edgeBoxes,
-                             BVH{}, pairs);
+                             BVH{}, intersections);
 
   ASSERT_EQ(verts.size(), 12);
   EXPECT_EQ(lists[4].size(), 2);
