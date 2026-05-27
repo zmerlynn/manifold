@@ -3376,27 +3376,44 @@ TEST(CrossSection, OutEdgesToPolygonsClosesSimpleRing) {
 }
 
 TEST(CrossSection, OutEdgesToPolygonsSplitsExactRepeatedVertex) {
-  const std::vector<vec2> verts = {{0, 0}, {1, 0}, {1, 1}, {2, 1}, {1, -1}};
-  const std::vector<boolean2::OutEdge> edges = {{1, 2}, {2, 3}, {3, 1},
-                                                {1, 4}, {4, 0}, {0, 1}};
+  const std::vector<vec2> verts = {{0, 0}, {1, 0}, {1, -1}, {2, -1}, {1, 1}};
+  const std::vector<boolean2::OutEdge> edges = {{0, 1}, {1, 2}, {2, 3},
+                                                {3, 1}, {1, 4}, {4, 0}};
   const auto polys = boolean2::OutEdgesToPolygons(verts, edges);
   ASSERT_EQ(polys.size(), 2u);
   EXPECT_EQ(polys[0].size(), 3u);
   EXPECT_EQ(polys[1].size(), 3u);
+  EXPECT_NEAR(boolean2::TotalSignedArea(polys), 1.0, 1e-12);
 }
 
 TEST(CrossSection, OutEdgesToPolygonsKeepsNearDistinctVertex) {
-  const std::vector<vec2> verts = {{0, 0}, {1, 0},  {1, 1},
-                                   {2, 1}, {1, -1}, {1 + 1e-12, 0}};
-  const std::vector<boolean2::OutEdge> edges = {{1, 2}, {2, 3}, {3, 5},
-                                                {5, 4}, {4, 0}, {0, 1}};
+  constexpr double kDelta = 1e-12;
+  const std::vector<vec2> verts = {{0, 0},  {1, 0}, {1, -1},
+                                   {2, -1}, {1, 1}, {1 + kDelta, 0}};
+  const std::vector<boolean2::OutEdge> edges = {{0, 1}, {1, 2}, {2, 3},
+                                                {3, 5}, {5, 4}, {4, 0}};
   const auto polys = boolean2::OutEdgesToPolygons(verts, edges);
   ASSERT_EQ(polys.size(), 1u);
   EXPECT_EQ(polys[0].size(), 6u);
+  EXPECT_NEAR(boolean2::TotalSignedArea(polys), 1.0 + kDelta, 1e-12);
 
   const CrossSection reconsumed(polys, CrossSection::FillRule::NonZero);
   EXPECT_FALSE(reconsumed.IsEmpty());
-  EXPECT_GT(std::fabs(reconsumed.Area()), 0.0);
+  EXPECT_NEAR(reconsumed.Area(), 1.0, 1e-9);
+  const Manifold solid = Manifold::Extrude(reconsumed.ToPolygons(), 1.0);
+  EXPECT_EQ(solid.Status(), Manifold::Error::NoError);
+  EXPECT_NEAR(solid.Volume(), reconsumed.Area(), 1e-9);
+}
+
+TEST(CrossSection, Boolean2DKeepsNearDistinctPresentationVertex) {
+  constexpr double kDelta = 1e-12;
+  const Polygons input = {
+      {{0, 0}, {1, 0}, {1, -1}, {2, -1}, {1 + kDelta, 0}, {1, 1}}};
+  const auto polys = boolean2::Boolean2D(input, {}, OpType::Add, /*eps=*/1e-15,
+                                         /*tolerance=*/1e-9);
+  ASSERT_EQ(polys.size(), 1u);
+  EXPECT_EQ(polys[0].size(), 6u);
+  EXPECT_NEAR(boolean2::TotalSignedArea(polys), 1.0 + kDelta, 1e-12);
 }
 
 TEST(CrossSection, RemoveOverlapsMergesExactDuplicateCoordinates) {
@@ -3407,6 +3424,11 @@ TEST(CrossSection, RemoveOverlapsMergesExactDuplicateCoordinates) {
   const auto overlap =
       boolean2::RemoveOverlaps2D(verts, edges, eps, /*tolerance=*/0.0,
                                  /*debug=*/false, boolean2::WindRule::Add);
+  ASSERT_EQ(overlap.inputVert2Merged.size(), verts.size());
+  ASSERT_GE(overlap.inputVert2Merged[0], 0);
+  ASSERT_LT(overlap.inputVert2Merged[0], overlap.numMergedVerts);
+  ASSERT_GE(overlap.inputVert2Merged[3], 0);
+  ASSERT_LT(overlap.inputVert2Merged[3], overlap.numMergedVerts);
   EXPECT_EQ(overlap.inputVert2Merged[0], overlap.inputVert2Merged[3]);
 }
 #endif
