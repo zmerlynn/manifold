@@ -3374,6 +3374,41 @@ TEST(CrossSection, OutEdgesToPolygonsClosesSimpleRing) {
   ASSERT_EQ(polys.size(), 1u);
   EXPECT_EQ(polys[0].size(), 4u);
 }
+
+TEST(CrossSection, OutEdgesToPolygonsSplitsExactRepeatedVertex) {
+  const std::vector<vec2> verts = {{0, 0}, {1, 0}, {1, 1}, {2, 1}, {1, -1}};
+  const std::vector<boolean2::OutEdge> edges = {{1, 2}, {2, 3}, {3, 1},
+                                                {1, 4}, {4, 0}, {0, 1}};
+  const auto polys = boolean2::OutEdgesToPolygons(verts, edges);
+  ASSERT_EQ(polys.size(), 2u);
+  EXPECT_EQ(polys[0].size(), 3u);
+  EXPECT_EQ(polys[1].size(), 3u);
+}
+
+TEST(CrossSection, OutEdgesToPolygonsKeepsNearDistinctVertex) {
+  const std::vector<vec2> verts = {{0, 0}, {1, 0},  {1, 1},
+                                   {2, 1}, {1, -1}, {1 + 1e-12, 0}};
+  const std::vector<boolean2::OutEdge> edges = {{1, 2}, {2, 3}, {3, 5},
+                                                {5, 4}, {4, 0}, {0, 1}};
+  const auto polys = boolean2::OutEdgesToPolygons(verts, edges);
+  ASSERT_EQ(polys.size(), 1u);
+  EXPECT_EQ(polys[0].size(), 6u);
+
+  const CrossSection reconsumed(polys, CrossSection::FillRule::NonZero);
+  EXPECT_FALSE(reconsumed.IsEmpty());
+  EXPECT_GT(std::fabs(reconsumed.Area()), 0.0);
+}
+
+TEST(CrossSection, RemoveOverlapsMergesExactDuplicateCoordinates) {
+  const Polygons polys = {{{0, 0}, {1, 0}, {0, 1}}, {{0, 0}, {-1, 0}, {0, -1}}};
+  const auto [verts, edges] = boolean2::PolygonsToInput(polys);
+  ASSERT_EQ(verts.size(), 6u);
+  const double eps = boolean2::InferEps(polys, {});
+  const auto overlap =
+      boolean2::RemoveOverlaps2D(verts, edges, eps, /*tolerance=*/0.0,
+                                 /*debug=*/false, boolean2::WindRule::Add);
+  EXPECT_EQ(overlap.inputVert2Merged[0], overlap.inputVert2Merged[3]);
+}
 #endif
 
 TEST(CrossSection, BooleanOperatorAssignments) {
