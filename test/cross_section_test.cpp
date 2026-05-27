@@ -1093,10 +1093,7 @@ TEST(CrossSection, DISABLED_Boolean2TraceDegenerateCoincidentVertexUnion) {
                                            /*debug=*/false,
                                            boolean2::WindRule::Add, &trace);
 
-  // Match BinaryOpByRule's nearRepeatedVertexTol so the loop walker sees
-  // what production sees.
-  Polygons final =
-      boolean2::OutEdgesToPolygons(result.verts, result.edges, 2.0 * eps);
+  Polygons final = boolean2::OutEdgesToPolygons(result.verts, result.edges);
   auto& phase = trace.AddPhase("final_polygons");
   for (int i = 0; i < static_cast<int>(final.size()); ++i) {
     phase.polygons.push_back({std::string("poly") + std::to_string(i), final[i],
