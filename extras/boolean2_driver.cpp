@@ -991,8 +991,8 @@ inline void RunCorpus(const std::string& path) {
 //
 // To fairly compare, we run each case through a pre-fill stage:
 //
-//   - FILLRULE: NONZERO → RemoveOverlaps2D with predicate w != 0
-//   - FILLRULE: EVENODD → RemoveOverlaps2D with predicate w & 1
+//   - FILLRULE: NONZERO → RemoveOverlaps2D with WindRule::NonZero
+//   - FILLRULE: EVENODD → RemoveOverlaps2D with WindRule::EvenOdd
 //   - FILLRULE: NEGATIVE/POSITIVE → unsupported (6 cases skipped).
 //
 // After pre-fill, both sides are CCW-canonical, and we combine via:
@@ -1149,8 +1149,8 @@ inline Clipper2Reach ClassifyCase(const Clipper2Case& c) {
 }
 
 // Pre-fill polys under the declared fill rule. Output is a CCW-canonical
-// arrangement (no self-overlap). Reuses RemoveOverlaps2D with a custom
-// predicate so we don't perturb the public API surface.
+// arrangement (no self-overlap). Reuses RemoveOverlaps2D with the
+// corresponding WindRule so we don't perturb the public API surface.
 inline manifold::Polygons FillUnderRule(const manifold::Polygons& polys,
                                         const std::string& rule, double eps) {
   if (polys.empty()) return {};
@@ -3865,15 +3865,17 @@ int main(int argc, char** argv) {
                 << edges.size() << " edges\n";
       const char* ruleEnv = std::getenv("BOOLEAN2_RULE");
       std::string rule = ruleEnv ? std::string(ruleEnv) : "positive";
-      auto rPred = [&](int w) {
-        if (rule == "nonzero") return w != 0;
-        if (rule == "evenodd") return (w & 1) != 0;
-        if (rule == "negative") return w < 0;
-        return w > 0;  // positive (default)
-      };
+      WindRule windRule = WindRule::Add;  // positive (default)
+      if (rule == "nonzero") {
+        windRule = WindRule::NonZero;
+      } else if (rule == "evenodd") {
+        windRule = WindRule::EvenOdd;
+      } else if (rule == "negative") {
+        windRule = WindRule::Negative;
+      }
       std::cout << "  rule=" << rule << "\n";
       auto r = RemoveOverlaps2D(verts, edges, eps, /*tolerance=*/0.0,
-                                /*debug=*/true, rPred);
+                                /*debug=*/true, windRule);
       auto out = OutEdgesToPolygons(r.verts, r.edges);
       std::cout << "  Pipeline output: " << r.verts.size() << " verts, "
                 << r.edges.size() << " edges, " << out.size() << " polygons\n";
