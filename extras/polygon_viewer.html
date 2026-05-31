@@ -1,0 +1,860 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Polygon Viewer</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f6f6f2;
+      --panel: #ffffff;
+      --ink: #202523;
+      --muted: #66716e;
+      --line: #ccd5d0;
+      --accent: #0d7668;
+      --grid: #e5ebe7;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      height: 100vh;
+      overflow: hidden;
+      background: var(--bg);
+      color: var(--ink);
+      font: 14px/1.4 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    .app {
+      display: grid;
+      grid-template-columns: 320px minmax(0, 1fr) 360px;
+      height: 100vh;
+    }
+
+    aside {
+      overflow: auto;
+      padding: 16px;
+      background: var(--panel);
+      border-right: 1px solid var(--line);
+    }
+
+    aside.data {
+      border-right: 0;
+      border-left: 1px solid var(--line);
+    }
+
+    h1 {
+      margin: 0 0 12px;
+      font-size: 18px;
+      font-weight: 650;
+    }
+
+    h2 {
+      margin: 20px 0 8px;
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+
+    button, input[type="file"] {
+      width: 100%;
+      min-height: 34px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fff;
+      color: var(--ink);
+      font: inherit;
+    }
+
+    button {
+      cursor: pointer;
+    }
+
+    button:hover {
+      border-color: var(--accent);
+    }
+
+    textarea {
+      width: 100%;
+      min-height: 160px;
+      resize: vertical;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 8px;
+      color: var(--ink);
+      background: #fff;
+      font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+
+    pre {
+      margin: 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+
+    .row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      margin-top: 8px;
+    }
+
+    .hint, .meta, .status {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .status {
+      min-height: 18px;
+      margin: 8px 0 0;
+    }
+
+    label.toggle {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      margin: 8px 0;
+    }
+
+    label.toggle input {
+      width: 16px;
+      height: 16px;
+      margin: 0;
+    }
+
+    .polygon-list {
+      display: grid;
+      gap: 8px;
+      margin-top: 8px;
+    }
+
+    .group-title {
+      margin: 14px 0 4px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+
+    .poly-item {
+      display: grid;
+      grid-template-columns: 18px minmax(0, 1fr) auto 18px;
+      gap: 8px;
+      align-items: center;
+      min-height: 28px;
+    }
+
+    .poly-item input {
+      width: 16px;
+      height: 16px;
+      margin: 0;
+    }
+
+    .swatch {
+      width: 14px;
+      height: 14px;
+      border: 1px solid rgba(0, 0, 0, 0.18);
+      border-radius: 3px;
+    }
+
+    .poly-name {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .poly-count {
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    main {
+      position: relative;
+      min-width: 0;
+      overflow: hidden;
+      background:
+        linear-gradient(var(--grid) 1px, transparent 1px),
+        linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+      background-size: 28px 28px;
+    }
+
+    svg {
+      display: block;
+      width: 100%;
+      height: 100%;
+      user-select: none;
+    }
+
+    .poly {
+      vector-effect: non-scaling-stroke;
+      cursor: pointer;
+    }
+
+    .edge {
+      stroke-linecap: round;
+      vector-effect: non-scaling-stroke;
+      cursor: pointer;
+    }
+
+    .vertex {
+      vector-effect: non-scaling-stroke;
+      cursor: pointer;
+    }
+
+    .axis {
+      vector-effect: non-scaling-stroke;
+      pointer-events: none;
+    }
+
+    .label {
+      font-size: 11px;
+      paint-order: stroke;
+      stroke: #fff;
+      stroke-width: 3px;
+      stroke-linejoin: round;
+      pointer-events: none;
+    }
+
+    .tooltip {
+      position: absolute;
+      display: none;
+      max-width: 360px;
+      padding: 8px 10px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: rgba(255, 255, 255, 0.96);
+      box-shadow: 0 6px 24px rgba(0, 0, 0, 0.12);
+      pointer-events: none;
+      font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      z-index: 5;
+    }
+
+    @media (max-width: 980px) {
+      .app {
+        grid-template-columns: 1fr;
+        grid-template-rows: auto minmax(0, 1fr) 240px;
+      }
+
+      aside {
+        max-height: 260px;
+        border-right: 0;
+        border-bottom: 1px solid var(--line);
+      }
+
+      aside.data {
+        border-left: 0;
+        border-top: 1px solid var(--line);
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <aside>
+      <h1>Polygon Viewer</h1>
+      <p class="hint">
+        Load grouped polygon JSON, or pass <code>?polys=</code>,
+        <code>?data=</code>, or <code>?url=</code>.
+      </p>
+
+      <h2>Geometry</h2>
+      <input id="file" type="file" accept="application/json,.json">
+      <textarea id="input" spellcheck="false"></textarea>
+      <div class="row">
+        <button id="load" type="button">Load JSON</button>
+        <button id="copyUrl" type="button">Copy URL</button>
+      </div>
+      <p id="status" class="status"></p>
+
+      <h2>Layers</h2>
+      <label class="toggle"><input id="showFill" type="checkbox" checked> fill</label>
+      <label class="toggle"><input id="showEdges" type="checkbox" checked> edges</label>
+      <label class="toggle"><input id="showVerts" type="checkbox" checked> vertices</label>
+      <label class="toggle"><input id="showLabels" type="checkbox" checked> labels</label>
+      <label class="toggle"><input id="showAxes" type="checkbox" checked> axes</label>
+
+      <h2>View</h2>
+      <div class="row">
+        <button id="zoomIn" type="button">Zoom In</button>
+        <button id="zoomOut" type="button">Zoom Out</button>
+      </div>
+      <div class="row">
+        <button id="fit" type="button">Fit</button>
+        <button id="example" type="button">Example</button>
+      </div>
+
+      <h2>Polygons</h2>
+      <div id="polygonList" class="polygon-list"></div>
+    </aside>
+
+    <main id="canvas">
+      <svg id="svg" role="img" aria-label="Polygon visualization"></svg>
+      <div id="tooltip" class="tooltip"></div>
+    </main>
+
+    <aside class="data">
+      <h2>Selection</h2>
+      <pre id="selection">Nothing selected.</pre>
+      <h2>Raw Data</h2>
+      <pre id="rawData">No data loaded.</pre>
+    </aside>
+  </div>
+
+  <script>
+    const palette = [
+      '#1f77b4', '#d1495b', '#0b6e4f', '#9467bd', '#b7791f',
+      '#008b8b', '#c75100', '#5b6c8f', '#6b8e23', '#8c564b',
+    ];
+
+    const exampleData = {
+      title: 'Raw to constructed polygons',
+      groups: [
+        {
+          id: 'A -> ca',
+          polygons: [
+            {
+              id: 'raw A',
+              points: [
+                [1.1169016983060247, 0],
+                [500.05000000000013, 866.11200632481712],
+                [-0.54999999999999982, 0.95262794416288266],
+                [-578.95382959129938, 7.0901395426308701e-14],
+                [-0.050000000000000044, -0.086602540378443837],
+                [0.050000000000000017, -0.086602540378443865],
+              ],
+            },
+            {
+              id: 'ca[0]',
+              points: [
+                [1.1169016983060231, 0],
+                [500.05000000000018, 866.11200632481712],
+                [-0.54999999999999716, 0.95262794416288443],
+                [-578.95382959129938, 5.6843418860808015e-14],
+                [-0.049999999999997158, -0.08660254037846471],
+                [0.049999999999997158, -0.08660254037846471],
+              ],
+            },
+          ],
+        },
+        {
+          id: 'B -> cb',
+          polygons: [
+            {
+              id: 'raw B',
+              points: [
+                [0.10303783015507798, 0],
+                [500.05303783015518, 866.11200632481712],
+                [-499.96237803534592, 865.96550230635103],
+                [-7.3728380503639697, 9.0328427879858178e-16],
+                [500.05000000000013, 866.11200632481712],
+                [1.993411455666563, -3.4474282454309608],
+              ],
+            },
+            {
+              id: 'cb[0]',
+              points: [
+                [500.04999974215514, 866.1120058797319],
+                [-499.96237803534598, 865.96550230635103],
+                [-7.3728380503639697, 0],
+              ],
+            },
+            {
+              id: 'cb[1]',
+              points: [
+                [499.66038873910634, 865.43178211833663],
+                [500.05303783015518, 866.11200632481712],
+                [500.04999974215514, 866.1120058797319],
+              ],
+            },
+          ],
+        },
+      ],
+    };
+
+    const state = {
+      data: null,
+      polygons: [],
+      hidden: new Set(),
+      viewBox: null,
+      renderScale: 1,
+      drag: null,
+    };
+
+    const kRenderExtent = 1000;
+
+    const els = {
+      file: document.getElementById('file'),
+      input: document.getElementById('input'),
+      load: document.getElementById('load'),
+      copyUrl: document.getElementById('copyUrl'),
+      status: document.getElementById('status'),
+      polygonList: document.getElementById('polygonList'),
+      showFill: document.getElementById('showFill'),
+      showEdges: document.getElementById('showEdges'),
+      showVerts: document.getElementById('showVerts'),
+      showLabels: document.getElementById('showLabels'),
+      showAxes: document.getElementById('showAxes'),
+      zoomIn: document.getElementById('zoomIn'),
+      zoomOut: document.getElementById('zoomOut'),
+      fit: document.getElementById('fit'),
+      example: document.getElementById('example'),
+      canvas: document.getElementById('canvas'),
+      svg: document.getElementById('svg'),
+      tooltip: document.getElementById('tooltip'),
+      selection: document.getElementById('selection'),
+      rawData: document.getElementById('rawData'),
+    };
+
+    function svgEl(name, attrs = {}) {
+      const node = document.createElementNS('http://www.w3.org/2000/svg', name);
+      for (const [key, value] of Object.entries(attrs)) {
+        node.setAttribute(key, value);
+      }
+      return node;
+    }
+
+    function base64UrlEncode(text) {
+      const bytes = new TextEncoder().encode(text);
+      let binary = '';
+      for (const byte of bytes) binary += String.fromCharCode(byte);
+      return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+    }
+
+    function base64UrlDecode(text) {
+      const padded = text.replace(/-/g, '+').replace(/_/g, '/') +
+        '='.repeat((4 - text.length % 4) % 4);
+      const binary = atob(padded);
+      const bytes = Uint8Array.from(binary, (ch) => ch.charCodeAt(0));
+      return new TextDecoder().decode(bytes);
+    }
+
+    function finitePoint(point) {
+      return Array.isArray(point) &&
+        point.length >= 2 &&
+        Number.isFinite(Number(point[0])) &&
+        Number.isFinite(Number(point[1]));
+    }
+
+    function normalizeInput(data) {
+      if (Array.isArray(data)) data = { polygons: data };
+      if (!data || typeof data !== 'object') {
+        throw new Error('Expected an object, array of polygons, or grouped polygon data.');
+      }
+
+      const groups = Array.isArray(data.groups)
+        ? data.groups
+        : [{ id: data.group || '', polygons: data.polygons || [] }];
+      const polygons = [];
+      for (const group of groups) {
+        const groupId = group.id || group.name || '';
+        for (const poly of group.polygons || []) {
+          const rawPoints = poly.points || poly.verts || poly.coordinates;
+          if (!Array.isArray(rawPoints)) continue;
+          const points = rawPoints
+            .filter(finitePoint)
+            .map((p) => [Number(p[0]), Number(p[1])]);
+          if (points.length < 2) continue;
+          polygons.push({
+            id: poly.id || poly.name || `polygon ${polygons.length}`,
+            group: poly.group || groupId,
+            points,
+            closed: poly.closed !== false,
+            color: poly.color || palette[polygons.length % palette.length],
+            fill: poly.fill !== false,
+          });
+        }
+      }
+      return {
+        title: data.title || 'Polygon set',
+        polygons,
+        raw: data,
+      };
+    }
+
+    function polygonArea(poly) {
+      const pts = poly.points || [];
+      if (pts.length < 3 || poly.closed === false) return 0;
+      let area = 0;
+      for (let i = 0; i < pts.length; ++i) {
+        const a = pts[i];
+        const b = pts[(i + 1) % pts.length];
+        area += a[0] * b[1] - b[0] * a[1];
+      }
+      return area * 0.5;
+    }
+
+    function allVisiblePoints() {
+      const pts = [];
+      for (const poly of state.polygons) {
+        if (state.hidden.has(poly.id)) continue;
+        pts.push(...poly.points);
+      }
+      return pts;
+    }
+
+    function viewBoxForPoints(pts) {
+      if (!pts.length) return [-1, -1, 2, 2];
+      let minX = pts[0][0], minY = pts[0][1], maxX = minX, maxY = minY;
+      for (const [x, y] of pts) {
+        minX = Math.min(minX, x);
+        minY = Math.min(minY, y);
+        maxX = Math.max(maxX, x);
+        maxY = Math.max(maxY, y);
+      }
+      const w = Math.max(maxX - minX, 1e-9);
+      const h = Math.max(maxY - minY, 1e-9);
+      const pad = 0.08 * Math.max(w, h);
+      return [minX - pad, -maxY - pad, w + 2 * pad, h + 2 * pad];
+    }
+
+    function setViewBox(vb) {
+      state.viewBox = vb;
+      state.renderScale = kRenderExtent / Math.max(vb[2], vb[3]);
+      els.svg.setAttribute(
+        'viewBox',
+        [0, 0, vb[2] * state.renderScale, vb[3] * state.renderScale].join(' '),
+      );
+    }
+
+    function fitView() {
+      setViewBox(viewBoxForPoints(allVisiblePoints()));
+      render();
+    }
+
+    function pt([x, y]) {
+      if (!state.viewBox) return [x, -y];
+      return [
+        (x - state.viewBox[0]) * state.renderScale,
+        (-y - state.viewBox[1]) * state.renderScale,
+      ];
+    }
+
+    function bindInspect(node, item) {
+      node.addEventListener('mouseenter', (event) => {
+        els.tooltip.style.display = 'block';
+        els.tooltip.textContent = `${item.id}\n${item.group || ''}`;
+        moveTooltip(event);
+      });
+      node.addEventListener('mousemove', moveTooltip);
+      node.addEventListener('mouseleave', () => {
+        els.tooltip.style.display = 'none';
+      });
+      node.addEventListener('click', (event) => {
+        event.stopPropagation();
+        els.selection.textContent = JSON.stringify(item, null, 2);
+      });
+    }
+
+    function moveTooltip(event) {
+      els.tooltip.style.left = `${event.clientX + 12}px`;
+      els.tooltip.style.top = `${event.clientY + 12}px`;
+    }
+
+    function renderAxes(group) {
+      if (!els.showAxes.checked || !state.viewBox) return;
+      const [x, y, w, h] = state.viewBox;
+      const minX = x;
+      const maxX = x + w;
+      const maxY = -y;
+      const minY = -(y + h);
+      if (minY <= 0 && 0 <= maxY) {
+        const a = pt([minX, 0]);
+        const b = pt([maxX, 0]);
+        group.appendChild(svgEl('line', {
+          x1: a[0], y1: a[1], x2: b[0], y2: b[1],
+          class: 'axis', stroke: '#88948f', 'stroke-width': '1',
+        }));
+      }
+      if (minX <= 0 && 0 <= maxX) {
+        const a = pt([0, minY]);
+        const b = pt([0, maxY]);
+        group.appendChild(svgEl('line', {
+          x1: a[0], y1: a[1], x2: b[0], y2: b[1],
+          class: 'axis', stroke: '#88948f', 'stroke-width': '1',
+        }));
+      }
+    }
+
+    function renderPolygon(group, poly) {
+      if (state.hidden.has(poly.id)) return;
+      const points = poly.points.map((p) => pt(p));
+      const pointText = points.map(([x, y]) => `${x},${y}`).join(' ');
+      if (els.showFill.checked && poly.closed && points.length >= 3 && poly.fill) {
+        const node = svgEl('polygon', {
+          points: pointText,
+          class: 'poly',
+          fill: poly.color,
+          'fill-opacity': '0.12',
+          stroke: poly.color,
+          'stroke-width': '1.5',
+        });
+        bindInspect(node, poly);
+        group.appendChild(node);
+      }
+      if (els.showEdges.checked) {
+        const edgeCount = poly.closed ? points.length : points.length - 1;
+        for (let i = 0; i < edgeCount; ++i) {
+          const a = points[i];
+          const b = points[(i + 1) % points.length];
+          const edge = svgEl('line', {
+            x1: a[0], y1: a[1], x2: b[0], y2: b[1],
+            class: 'edge',
+            stroke: poly.color,
+            'stroke-width': '2',
+          });
+          bindInspect(edge, {
+            id: `${poly.id}.e${i}`,
+            group: poly.group,
+            a: poly.points[i],
+            b: poly.points[(i + 1) % poly.points.length],
+          });
+          group.appendChild(edge);
+        }
+      }
+      if (els.showVerts.checked) {
+        for (let i = 0; i < points.length; ++i) {
+          const [x, y] = points[i];
+          const vertex = svgEl('circle', {
+            cx: x,
+            cy: y,
+            r: '2',
+            class: 'vertex',
+            fill: poly.color,
+            stroke: '#fff',
+            'stroke-width': '0.8',
+          });
+          bindInspect(vertex, {
+            id: `${poly.id}[${i}]`,
+            group: poly.group,
+            point: poly.points[i],
+          });
+          group.appendChild(vertex);
+          if (els.showLabels.checked) {
+            const label = svgEl('text', {
+              x,
+              y,
+              dx: 4,
+              dy: -4,
+              class: 'label',
+              fill: poly.color,
+            });
+            label.textContent = `${poly.id}[${i}]`;
+            group.appendChild(label);
+          }
+        }
+      }
+    }
+
+    function renderPolygonList() {
+      els.polygonList.replaceChildren();
+      const groups = new Map();
+      for (const poly of state.polygons) {
+        const key = poly.group || 'Polygons';
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(poly);
+      }
+      for (const [groupId, polys] of groups) {
+        const title = document.createElement('div');
+        title.className = 'group-title';
+        title.textContent = groupId;
+        els.polygonList.appendChild(title);
+        for (const poly of polys) {
+          const row = document.createElement('label');
+          row.className = 'poly-item';
+          const swatch = document.createElement('span');
+          swatch.className = 'swatch';
+          swatch.style.background = poly.color;
+          const name = document.createElement('span');
+          name.className = 'poly-name';
+          name.textContent = poly.id;
+          const count = document.createElement('span');
+          count.className = 'poly-count';
+          count.textContent = `${poly.points.length}v`;
+          const checkbox = document.createElement('input');
+          checkbox.type = 'checkbox';
+          checkbox.checked = !state.hidden.has(poly.id);
+          checkbox.addEventListener('change', () => {
+            if (checkbox.checked) state.hidden.delete(poly.id);
+            else state.hidden.add(poly.id);
+            fitView();
+          });
+          row.append(swatch, name, count, checkbox);
+          els.polygonList.appendChild(row);
+        }
+      }
+    }
+
+    function render() {
+      els.svg.replaceChildren();
+      const group = svgEl('g');
+      renderAxes(group);
+      for (const poly of state.polygons) renderPolygon(group, poly);
+      els.svg.appendChild(group);
+      renderPolygonList();
+      els.rawData.textContent = state.data
+        ? JSON.stringify(state.data.raw, null, 2)
+        : 'No data loaded.';
+    }
+
+    function loadData(data, source = '') {
+      const normalized = normalizeInput(data);
+      state.data = normalized;
+      state.polygons = normalized.polygons;
+      state.hidden = new Set();
+      els.input.value = JSON.stringify(normalized.raw, null, 2);
+      els.selection.textContent = normalized.polygons.length
+        ? `${normalized.title}\n${normalized.polygons.length} polygons loaded.`
+        : 'No valid polygons loaded.';
+      els.status.textContent = source || `${normalized.polygons.length} polygons loaded.`;
+      fitView();
+    }
+
+    function loadJsonText(text, source = '') {
+      loadData(JSON.parse(text), source);
+    }
+
+    async function loadFromUrl(url) {
+      const response = await fetch(url);
+      if (!response.ok) throw new Error(`HTTP ${response.status} loading ${url}`);
+      loadData(await response.json(), url);
+    }
+
+    function deepLink() {
+      const json = els.input.value.trim();
+      if (!json) throw new Error('No JSON loaded.');
+      JSON.parse(json);
+      const url = new URL(window.location.href);
+      url.search = '';
+      url.searchParams.set('polys', base64UrlEncode(json));
+      return url.href;
+    }
+
+    function zoomAt(factor, anchor = null) {
+      if (!state.viewBox) return;
+      const [x, y, w, h] = state.viewBox;
+      let ax = x + w / 2;
+      let ay = y + h / 2;
+      if (anchor) {
+        ax = x + anchor[0] / state.renderScale;
+        ay = y + anchor[1] / state.renderScale;
+      }
+      const nw = w * factor;
+      const nh = h * factor;
+      const nx = ax - (ax - x) * factor;
+      const ny = ay - (ay - y) * factor;
+      setViewBox([nx, ny, nw, nh]);
+      render();
+    }
+
+    function svgPoint(event) {
+      const p = els.svg.createSVGPoint();
+      p.x = event.clientX;
+      p.y = event.clientY;
+      return p.matrixTransform(els.svg.getScreenCTM().inverse());
+    }
+
+    els.load.addEventListener('click', () => {
+      try {
+        loadJsonText(els.input.value, 'Loaded from editor.');
+      } catch (error) {
+        els.status.textContent = error.message;
+      }
+    });
+
+    els.file.addEventListener('change', async () => {
+      const file = els.file.files[0];
+      if (!file) return;
+      try {
+        loadJsonText(await file.text(), file.name);
+      } catch (error) {
+        els.status.textContent = error.message;
+      }
+    });
+
+    els.copyUrl.addEventListener('click', async () => {
+      try {
+        const link = deepLink();
+        await navigator.clipboard.writeText(link);
+        els.status.textContent = 'Copied deep link.';
+      } catch (error) {
+        els.status.textContent = error.message;
+      }
+    });
+
+    els.example.addEventListener('click', () => loadData(exampleData, 'Loaded example.'));
+    els.fit.addEventListener('click', fitView);
+    els.zoomIn.addEventListener('click', () => zoomAt(0.75));
+    els.zoomOut.addEventListener('click', () => zoomAt(1.33));
+
+    for (const id of ['showFill', 'showEdges', 'showVerts', 'showLabels', 'showAxes']) {
+      els[id].addEventListener('change', render);
+    }
+
+    els.svg.addEventListener('click', () => {
+      els.selection.textContent = 'Nothing selected.';
+    });
+
+    els.svg.addEventListener('wheel', (event) => {
+      event.preventDefault();
+      const p = svgPoint(event);
+      zoomAt(event.deltaY < 0 ? 0.85 : 1.18, [p.x, p.y]);
+    }, { passive: false });
+
+    els.svg.addEventListener('mousedown', (event) => {
+      if (!state.viewBox) return;
+      state.drag = {
+        clientX: event.clientX,
+        clientY: event.clientY,
+        viewBox: state.viewBox.slice(),
+        renderScale: state.renderScale,
+      };
+    });
+
+    window.addEventListener('mousemove', (event) => {
+      if (!state.drag) return;
+      const svgRect = els.svg.getBoundingClientRect();
+      const renderWidth = state.drag.viewBox[2] * state.drag.renderScale;
+      const renderHeight = state.drag.viewBox[3] * state.drag.renderScale;
+      const dx =
+        (state.drag.clientX - event.clientX) * renderWidth /
+        (svgRect.width * state.drag.renderScale);
+      const dy =
+        (state.drag.clientY - event.clientY) * renderHeight /
+        (svgRect.height * state.drag.renderScale);
+      const [x, y, w, h] = state.drag.viewBox;
+      setViewBox([x + dx, y + dy, w, h]);
+      render();
+    });
+
+    window.addEventListener('mouseup', () => {
+      state.drag = null;
+    });
+
+    async function loadInitial() {
+      const params = new URLSearchParams(window.location.search);
+      try {
+        if (params.has('polys')) {
+          loadJsonText(base64UrlDecode(params.get('polys')), 'Loaded from ?polys.');
+        } else if (params.has('data')) {
+          loadJsonText(params.get('data'), 'Loaded from ?data.');
+        } else if (params.has('url')) {
+          await loadFromUrl(params.get('url'));
+        } else {
+          loadData(exampleData, 'Loaded example.');
+        }
+      } catch (error) {
+        els.status.textContent = error.message;
+        loadData(exampleData, 'Loaded example after query error.');
+      }
+    }
+
+    loadInitial();
+  </script>
+</body>
+</html>
