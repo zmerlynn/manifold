@@ -107,6 +107,16 @@
       font-size: 13px;
     }
 
+    .phase-description {
+      margin: 8px 0 0;
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #f9faf8;
+      color: var(--ink);
+      font-size: 13px;
+    }
+
     main {
       position: relative;
       min-width: 0;
@@ -209,6 +219,7 @@
         <button id="next" type="button">Next</button>
       </div>
       <p id="phaseMeta" class="meta">No trace loaded.</p>
+      <p id="phaseDescription" class="phase-description">Load a trace to see the phase narrative.</p>
 
       <h2>Layers</h2>
       <label class="toggle"><input id="showPolygons" type="checkbox" checked> polygons</label>
@@ -257,6 +268,7 @@
       file: document.getElementById('file'),
       phase: document.getElementById('phase'),
       phaseMeta: document.getElementById('phaseMeta'),
+      phaseDescription: document.getElementById('phaseDescription'),
       svg: document.getElementById('svg'),
       canvas: document.getElementById('canvas'),
       tooltip: document.getElementById('tooltip'),
@@ -293,6 +305,39 @@
       if (item.mult < 0 || text.includes('clip')) return 'var(--clip)';
       if (item.mult > 0 || text.includes('input')) return 'var(--subject)';
       return '#47524d';
+    }
+
+    const phaseNarratives = {
+      seed_metadata:
+        'Trace notes for the seed. This phase is metadata only; the visible geometry starts in the next phase.',
+      input:
+        'Input to this boolean2 operation. For constructor-driven fixtures this is already the regularized CrossSection polygon data, not necessarily the raw fuzzer polygon.',
+      merged_vertices:
+        'Vertices close enough under eps have been merged and the original input vertex ids are remapped to their representatives.',
+      collapsed_edges:
+        'Input edges after vertex merging. Edges whose endpoints collapsed are removed before intersection discovery.',
+      broad_phase_pairs:
+        'AABB overlap candidates for edge-edge and edge-vertex work. Dashed candidate edges show pairs that will be checked by the narrow phase.',
+      edge_vert_lists:
+        'Per-edge split lists after the narrow phase records vertices and proper intersections that lie on each edge.',
+      inserted_intersections:
+        'Arrangement edges after inserting the split vertices found by the edge-vertex and edge-edge narrow phase.',
+      nearby_intersection_merge:
+        'Nearby generated intersection vertices are consolidated before canonical edge construction.',
+      canonical_subedges:
+        'Directed split edges are canonicalized into undirected subedges with multiplicities, canceling exact opposites.',
+      halfedge_faces:
+        'The canonical subedges have been walked into faces. Winding and inside annotations decide which boundaries survive the selected boolean rule.',
+      filtered_output_edges:
+        'Edges retained after comparing the inside state on the two incident faces for the selected boolean rule.',
+      final_polygons:
+        'Final contours materialized from the retained output edges.',
+    };
+
+    function describePhase(phase) {
+      if (!phase) return 'No phase loaded.';
+      return phaseNarratives[phase.name] ||
+        'No built-in narrative for this phase. Inspect annotations and selected geometry for details.';
     }
 
     function phasePoints(phase) {
@@ -534,6 +579,7 @@
       els.svg.replaceChildren();
       if (!state.trace) {
         els.phaseMeta.textContent = 'No trace loaded.';
+        els.phaseDescription.textContent = 'Load a trace to see the phase narrative.';
         els.annotations.textContent = 'No phase loaded.';
         return;
       }
@@ -549,6 +595,7 @@
         `${state.phaseIndex + 1}/${phases.length}: ${phase.name} - ` +
         `${(phase.points || []).length} points, ${(phase.segments || []).length} segments, ` +
         `${(phase.polygons || []).length} polygons`;
+      els.phaseDescription.textContent = describePhase(phase);
       els.annotations.textContent = (phase.annotations || []).length
         ? JSON.stringify(phase.annotations, null, 2)
         : 'No annotations for this phase.';

@@ -1082,12 +1082,13 @@ TEST(CrossSection, DISABLED_Boolean2TraceDegenerateCoincidentVertexUnion) {
       {"shared_vertex",
        "Raw input b[4] = a[1] = (" + std::to_string(aRing[1].x) + ", " +
            std::to_string(aRing[1].y) +
-           "); persists through per-polygon FillByRule into a multi-source "
-           "merged vertex v1 in the BinaryOpByRule arrangement"});
+           "). This trace starts after per-polygon CrossSection construction: "
+           "B regularizes into nearby repaired vertices instead of preserving "
+           "that exact forced vertex as its emitted representative."});
   seedPhase.annotations.push_back(
       {"cluster_scale",
-       "Expected cluster spread ~5.2e-7 from v1 in local frame "
-       "(delta * sin(theta) = 0.003 * 9.7e-5)"});
+       "Expected cluster spread ~5.2e-7 around the formerly shared vertex "
+       "location in local frame (delta * sin(theta) = 0.003 * 9.7e-5)"});
 
   auto result = boolean2::RemoveOverlaps2D(verts, edges, eps, /*tolerance=*/0.0,
                                            /*debug=*/false,
