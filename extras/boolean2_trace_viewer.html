@@ -225,7 +225,7 @@
       <label class="toggle"><input id="showPolygons" type="checkbox" checked> polygons</label>
       <label class="toggle"><input id="showSegments" type="checkbox" checked> segments</label>
       <label class="toggle"><input id="showPoints" type="checkbox" checked> points</label>
-      <label class="toggle"><input id="showLabels" type="checkbox"> labels</label>
+      <label class="toggle"><input id="showLabels" type="checkbox" checked> labels</label>
       <label class="toggle"><input id="showGhost" type="checkbox" checked> previous phase ghost</label>
 
       <h2>View</h2>
@@ -311,7 +311,7 @@
       seed_metadata:
         'Trace notes for the seed. This phase is metadata only; the visible geometry starts in the next phase.',
       input:
-        'Input to this boolean2 operation. For constructor-driven fixtures this is already the regularized CrossSection polygon data, not necessarily the raw fuzzer polygon.',
+        'Input to this boolean2 operation, recorded as edges rather than filled polygon records. For constructor-driven fixtures this is already the regularized CrossSection polygon data, not necessarily the raw fuzzer polygon.',
       merged_vertices:
         'Vertices close enough under eps have been merged and the original input vertex ids are remapped to their representatives.',
       collapsed_edges:
