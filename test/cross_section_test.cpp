@@ -2607,7 +2607,7 @@ TEST(CrossSection, BooleanDistributivityLargeInputsResidual) {
 //   yet the union absorbs ~2710 extra area. Likely the coincident
 //   vertex is mis-classified during merge, creating phantom area
 //   in the union or losing it from the intersection).
-TEST(CrossSection, DISABLED_DegenerateCoincidentVertexUnion) {
+TEST(CrossSection, DegenerateCoincidentVertexUnion) {
   auto starPolygon = [](const std::vector<double>& radii) {
     SimplePolygon ring;
     const int n = static_cast<int>(radii.size());
@@ -2644,6 +2644,92 @@ TEST(CrossSection, DISABLED_DegenerateCoincidentVertexUnion) {
   const double tol = 1e-5 * (1.0 + std::fabs(ca.Area()) + std::fabs(cb.Area()));
   EXPECT_NEAR(unionAB.Area(), sum, tol)
       << "Inclusion-exclusion violated on coincident-vertex degenerate input";
+}
+
+// Reduced from DegenerateCoincidentVertexUnion after constructor round-trip:
+// already-regularized inputs still reproduce the original ~2710 area residual.
+// This keeps both B triangles and drops two A vertices.
+TEST(CrossSection, DegenerateCoincidentVertexUnionReduced) {
+  const Polygons a = {{
+      {500.05000000000018, 866.11200632481712},
+      {-0.54999999999999716, 0.95262794416288443},
+      {-578.95382959129938, 5.6843418860808015e-14},
+      {-0.049999999999997158, -0.08660254037846471},
+  }};
+  const Polygons b = {
+      {{500.04999974215514, 866.1120058797319},
+       {-499.96237803534598, 865.96550230635103},
+       {-7.3728380503639697, 0}},
+      {{500.04999974215514, 866.1120058797319},
+       {499.66038873910634, 865.43178211833663},
+       {500.05303783015518, 866.11200632481712}},
+  };
+
+  const CrossSection ca(a);
+  const CrossSection cb(b);
+  const auto unionAB = ca + cb;
+  const auto intersectAB = ca.Boolean(cb, OpType::Intersect);
+  const CrossSection combined(Polygons{a[0], b[0], b[1]});
+  const double sum = ca.Area() + cb.Area() - intersectAB.Area();
+  const double tol = 1e-5 * (1.0 + std::fabs(ca.Area()) + std::fabs(cb.Area()));
+  EXPECT_NEAR(unionAB.Area(), sum, tol)
+      << "Inclusion-exclusion violated on reduced coincident-vertex input";
+  EXPECT_NEAR(combined.Area(), sum, tol)
+      << "Constructor edge soup lost area on reduced coincident-vertex input";
+}
+
+// Smaller 4+3 reduction from the same parked seed: keeping only the tiny top
+// B triangle isolates the near-corner edge-vertex double-hit that used to make
+// both binary union and single-constructor edge soup lose the large A contour.
+TEST(CrossSection, DegenerateCoincidentVertexUnionTinyTriangle) {
+  const Polygons a = {{
+      {500.05000000000018, 866.11200632481712},
+      {-0.54999999999999716, 0.95262794416288443},
+      {-578.95382959129938, 5.6843418860808015e-14},
+      {-0.049999999999997158, -0.08660254037846471},
+  }};
+  const Polygons b = {{
+      {500.04999974215514, 866.1120058797319},
+      {499.66038873910634, 865.43178211833663},
+      {500.05303783015518, 866.11200632481712},
+  }};
+
+  auto translate = [](Polygons polys, double delta) {
+    for (auto& loop : polys) {
+      for (vec2& p : loop) {
+        p.x += delta;
+        p.y += delta;
+      }
+    }
+    return polys;
+  };
+
+  for (double offset : {0.0, 1024.0, 4096.0, 8192.0}) {
+    SCOPED_TRACE(offset);
+    const Polygons shiftedA = translate(a, offset);
+    const Polygons shiftedB = translate(b, offset);
+    const CrossSection ca(shiftedA);
+    const CrossSection cb(shiftedB);
+    const auto unionAB = ca + cb;
+    const auto intersectAB = ca.Boolean(cb, OpType::Intersect);
+    const CrossSection combined(Polygons{shiftedA[0], shiftedB[0]});
+    const double sum = ca.Area() + cb.Area() - intersectAB.Area();
+    const double tol =
+        1e-5 * (1.0 + std::fabs(ca.Area()) + std::fabs(cb.Area()));
+    const double tinyContributionTol = 0.01 * cb.Area();
+    EXPECT_GT(cb.Area(), 1e-4);
+    EXPECT_GT(unionAB.Area(), ca.Area() + 0.5 * cb.Area())
+        << "Binary union dropped most of the tiny triangle contribution";
+    EXPECT_GT(combined.Area(), ca.Area() + 0.5 * cb.Area())
+        << "Constructor edge soup dropped most of the tiny triangle "
+           "contribution";
+    EXPECT_NEAR(unionAB.Area(), sum, tol)
+        << "Inclusion-exclusion violated on tiny-triangle reduction";
+    EXPECT_NEAR(unionAB.Area(), sum, tinyContributionTol)
+        << "Binary union dropped the tiny triangle contribution";
+    EXPECT_NEAR(combined.Area(), sum, tinyContributionTol)
+        << "Constructor edge soup dropped the tiny triangle contribution";
+  }
 }
 
 // Seed: BooleanRobustness topology-validity failure (2026-05-23
