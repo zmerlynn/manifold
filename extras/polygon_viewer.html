@@ -81,7 +81,7 @@
 
     textarea {
       width: 100%;
-      min-height: 160px;
+      min-height: 120px;
       resize: vertical;
       border: 1px solid var(--line);
       border-radius: 6px;
@@ -112,7 +112,39 @@
 
     .status {
       min-height: 18px;
-      margin: 8px 0 0;
+      margin: 4px 0 12px;
+    }
+
+    .status strong {
+      display: block;
+      color: var(--ink);
+      font-size: 14px;
+      font-weight: 650;
+    }
+
+    details {
+      margin-top: 12px;
+      border-top: 1px solid var(--line);
+      padding-top: 10px;
+    }
+
+    details:first-of-type {
+      margin-top: 0;
+      border-top: 0;
+      padding-top: 0;
+    }
+
+    summary {
+      cursor: pointer;
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 700;
+      text-transform: uppercase;
+      user-select: none;
+    }
+
+    details > *:not(summary) {
+      margin-top: 8px;
     }
 
     label.toggle {
@@ -131,11 +163,11 @@
     .polygon-list {
       display: grid;
       gap: 8px;
-      margin-top: 8px;
+      margin-top: 6px;
     }
 
     .group-title {
-      margin: 14px 0 4px;
+      margin: 10px 0 4px;
       color: var(--muted);
       font-size: 12px;
       font-weight: 700;
@@ -258,19 +290,20 @@
   <div class="app">
     <aside>
       <h1>Polygon Viewer</h1>
-      <p class="hint">
-        Load grouped polygon JSON, or pass <code>?polys=</code>,
-        <code>?data=</code>, or <code>?url=</code>.
-      </p>
-
-      <h2>Geometry</h2>
-      <input id="file" type="file" accept="application/json,.json">
-      <textarea id="input" spellcheck="false"></textarea>
-      <div class="row">
-        <button id="load" type="button">Load JSON</button>
-        <button id="copyUrl" type="button">Copy URL</button>
-      </div>
       <p id="status" class="status"></p>
+
+      <h2>Polygons</h2>
+      <div id="polygonList" class="polygon-list"></div>
+
+      <h2>View</h2>
+      <div class="row">
+        <button id="fit" type="button">Fit</button>
+        <button id="zoomIn" type="button">Zoom In</button>
+      </div>
+      <div class="row">
+        <button id="zoomOut" type="button">Zoom Out</button>
+        <button id="example" type="button">Example</button>
+      </div>
 
       <h2>Layers</h2>
       <label class="toggle"><input id="showFill" type="checkbox" checked> fill</label>
@@ -279,18 +312,19 @@
       <label class="toggle"><input id="showLabels" type="checkbox" checked> labels</label>
       <label class="toggle"><input id="showAxes" type="checkbox" checked> axes</label>
 
-      <h2>View</h2>
-      <div class="row">
-        <button id="zoomIn" type="button">Zoom In</button>
-        <button id="zoomOut" type="button">Zoom Out</button>
-      </div>
-      <div class="row">
-        <button id="fit" type="button">Fit</button>
-        <button id="example" type="button">Example</button>
-      </div>
-
-      <h2>Polygons</h2>
-      <div id="polygonList" class="polygon-list"></div>
+      <details>
+        <summary>Data</summary>
+        <p class="hint">
+          Load grouped polygon JSON, or pass <code>?polys=</code>,
+          <code>?data=</code>, or <code>?url=</code>.
+        </p>
+        <input id="file" type="file" accept="application/json,.json">
+        <textarea id="input" spellcheck="false"></textarea>
+        <div class="row">
+          <button id="load" type="button">Load JSON</button>
+          <button id="copyUrl" type="button">Copy URL</button>
+        </div>
+      </details>
     </aside>
 
     <main id="canvas">
@@ -301,8 +335,10 @@
     <aside class="data">
       <h2>Selection</h2>
       <pre id="selection">Nothing selected.</pre>
-      <h2>Raw Data</h2>
-      <pre id="rawData">No data loaded.</pre>
+      <details>
+        <summary>Raw Data</summary>
+        <pre id="rawData">No data loaded.</pre>
+      </details>
     </aside>
   </div>
 
@@ -711,7 +747,12 @@
       els.selection.textContent = normalized.polygons.length
         ? `${normalized.title}\n${normalized.polygons.length} polygons loaded.`
         : 'No valid polygons loaded.';
-      els.status.textContent = source || `${normalized.polygons.length} polygons loaded.`;
+      els.status.replaceChildren();
+      const title = document.createElement('strong');
+      title.textContent = normalized.title;
+      const detail = document.createElement('span');
+      detail.textContent = source || `${normalized.polygons.length} polygons loaded.`;
+      els.status.append(title, document.createTextNode(' '), detail);
       fitView();
     }
 
