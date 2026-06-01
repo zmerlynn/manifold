@@ -49,6 +49,7 @@ extern "C" int ManifoldCrossSectionBackendIsBoolean2();
 #include "../src/cross_section/boolean2/boolean2.h"
 #include "../src/cross_section/boolean2/bvh.h"
 #include "../src/cross_section/boolean2/canonicalize.h"
+#include "../src/cross_section/boolean2/driver.h"
 #include "../src/cross_section/boolean2/predicates.h"
 #include "../src/cross_section/boolean2/vertex_merge.h"
 #include "fuzztest/fuzztest.h"
