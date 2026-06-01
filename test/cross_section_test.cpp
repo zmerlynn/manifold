@@ -3448,6 +3448,79 @@ TEST(CrossSection, BooleanRobustnessDirectCastKeepsExpectedArea) {
               1e-10 * (1.0 + 1678.2538553263785));
 }
 
+// Seed: SubtractInvariants (2026-06-01 CI fuzz run 26752003779,
+//   post-clean-Boolean2-casts tip 66282382)
+// Counterexample-hash: 6c9e9b1aeb6ebe01
+// Suspected owner: pr/boolean2-core (A is a 37-vertex star with
+//   many zero-radius vertices producing a dense near-degenerate
+//   shape; B is a 5-vertex star translated by ~5e-5 in x. The
+//   intersection A ∩ B returns area=0 even though both inputs are
+//   non-empty and overlap geometrically. (A - B) + (A ∩ B) ends up
+//   at 39605 versus a.Area=90895, missing ~51290 area units. The
+//   tiny x translation puts B's vertices just inside the eps band
+//   of A's; the intersect path appears to mis-classify the overlap
+//   region as empty).
+TEST(CrossSection, DISABLED_SubtractInvariantsEmptyIntersectionDrop) {
+  auto starPolygon = [](const std::vector<double>& radii) {
+    SimplePolygon ring;
+    const int n = static_cast<int>(radii.size());
+    constexpr double kPi = 3.14159265358979323846;
+    for (int i = 0; i < n; ++i) {
+      const double r = 0.1 + std::fabs(radii[i]);
+      const double th = 2.0 * kPi * i / n;
+      ring.push_back({r * std::cos(th), r * std::sin(th)});
+    }
+    return ring;
+  };
+  const std::vector<double> rA = {1000.,
+                                  0.,
+                                  1000.,
+                                  1000.,
+                                  68.955135217866953,
+                                  0.,
+                                  1.,
+                                  0.,
+                                  0.,
+                                  0.,
+                                  0.,
+                                  0.,
+                                  0.,
+                                  0.,
+                                  0.,
+                                  0.,
+                                  805.7907155879783,
+                                  1.,
+                                  0.,
+                                  0.,
+                                  0.,
+                                  0.,
+                                  0.,
+                                  4.7952714181195555,
+                                  0.,
+                                  0.,
+                                  0.,
+                                  1.2064064151490697,
+                                  0.,
+                                  3.2013961172280205,
+                                  0.,
+                                  0.,
+                                  0.,
+                                  13.934542696929423,
+                                  363.29755584701081,
+                                  0.,
+                                  0.};
+  const std::vector<double> rB = {1000., 731.51526963704362, 680.25141414501888,
+                                  1000., 571.57429580441226};
+  const CrossSection a(starPolygon(rA));
+  const CrossSection b =
+      CrossSection(starPolygon(rB)).Translate({-4.725175119801861e-05, -0.0});
+  const auto aMinusB = a - b;
+  const auto aIntersectB = a.Boolean(b, OpType::Intersect);
+  const double tol = 1e-6 * (1.0 + std::fabs(a.Area()) + std::fabs(b.Area()));
+  EXPECT_NEAR(aMinusB.Area() + aIntersectB.Area(), a.Area(), tol)
+      << "area(A - B) + area(A ∩ B) != area(A)";
+}
+
 // Regression: a single closed directed ring must round-trip through
 // OutEdgesToPolygons. Earlier closure logic detected closure by trying to
 // re-select the start edge as `next`, which is skipped by the visited guard;
