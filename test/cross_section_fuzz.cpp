@@ -1659,6 +1659,118 @@ void DegenerateInputFuzz(const std::vector<double>& radiiA,
       << " idxA=" << idxA << " idxB=" << idxB << ")";
 }
 
+// Tiny-feature-near-corner parity. Two shapes drove the parked seed
+// DegenerateCoincidentVertexUnion: a "host" polygon ~570k area and a
+// "feature" of ~0.5 area whose vertex was set coincident to a corner
+// of the host. The reduced regressions
+// (DegenerateCoincidentVertexUnionTinyTriangle) showed that BOTH the
+// binary boolean path (ca + cb) AND the edge-soup constructor
+// (CrossSection(Polygons{a, b})) dropped the feature's
+// contribution. This dim mass-produces that shape and asserts:
+//   1. inclusion-exclusion: area(A union B) == A + B - A intersect B
+//   2. constructor parity: CrossSection(Polygons{a, b}).Area() ==
+//      (ca + cb).Area() within tol
+// The "feature non-dropping" check from the reduced regression isn't
+// asserted here because the generator can't guarantee the feature
+// sticks out of the host - if it's contained, union == A and the
+// check would fire spuriously. The constructor-parity check is the
+// novel piece: no other dim asserts the edge-soup path matches the
+// binary boolean path.
+// Translation offset sweeps {0, 1024, 4096} to cover the scale-mix
+// path that surfaced in the original counterexample.
+void TinyFeatureNearCorner(const std::vector<double>& hostRadii,
+                           const std::vector<double>& featureRadii, int idxHost,
+                           int epsBandIdx, double dirX, double dirY) {
+  if (!std::isfinite(dirX) || !std::isfinite(dirY)) return;
+  if (hostRadii.size() < 4 || featureRadii.size() < 3) return;
+
+  manifold::SimplePolygon host = StarPolygon(hostRadii);
+  manifold::SimplePolygon feature = StarPolygon(featureRadii);
+
+  // Shrink the feature to make it small relative to the host. The
+  // host radii are in [100, 1000]; we want the feature to be roughly
+  // 1e-3 to 1e-1 of host scale to mimic the seeded counterexample.
+  for (auto& v : feature) {
+    v.x *= 1e-3;
+    v.y *= 1e-3;
+  }
+
+  // Pick a host vertex to "anchor" the feature near. The feature's
+  // first vertex goes to host[i] + eps * dir. The eps sweep is
+  // critical - 0 reproduces exact-coincidence, others probe the band
+  // around it.
+  const int nHost = static_cast<int>(host.size());
+  const int i = ((idxHost % nHost) + nHost) % nHost;
+  static constexpr double kEpsLadder[] = {0.0,  1e-15, 1e-12, 1e-9,
+                                          1e-6, 1e-3,  1.0};
+  const int nEps = static_cast<int>(sizeof(kEpsLadder) / sizeof(double));
+  const double eps = kEpsLadder[((epsBandIdx % nEps) + nEps) % nEps];
+
+  // Normalize the direction vector. If degenerate, use (1,0).
+  double dlen = std::sqrt(dirX * dirX + dirY * dirY);
+  if (!(dlen > 0)) {
+    dirX = 1.0;
+    dirY = 0.0;
+    dlen = 1.0;
+  }
+  const manifold::vec2 anchor{host[i].x + eps * dirX / dlen,
+                              host[i].y + eps * dirY / dlen};
+
+  // Translate the feature so its first vertex lands at anchor.
+  const manifold::vec2 shift{anchor.x - feature[0].x, anchor.y - feature[0].y};
+  for (auto& v : feature) {
+    v.x += shift.x;
+    v.y += shift.y;
+  }
+
+  for (double offset : {0.0, 1024.0, 4096.0}) {
+    manifold::SimplePolygon shiftedHost = host;
+    manifold::SimplePolygon shiftedFeature = feature;
+    for (auto& v : shiftedHost) {
+      v.x += offset;
+      v.y += offset;
+    }
+    for (auto& v : shiftedFeature) {
+      v.x += offset;
+      v.y += offset;
+    }
+
+    const manifold::CrossSection ca(shiftedHost);
+    const manifold::CrossSection cb(shiftedFeature);
+    if (ca.IsEmpty() || cb.IsEmpty()) continue;
+
+    const auto unionAB = ca + cb;
+    const auto intersectAB = ca.Boolean(cb, manifold::OpType::Intersect);
+    ExpectCrossSectionValid(unionAB);
+    ExpectCrossSectionValid(intersectAB);
+
+    // Edge-soup constructor path - the constructor takes the
+    // polygons as one collection and runs cleanup itself.
+    const manifold::CrossSection combined(
+        manifold::Polygons{shiftedHost, shiftedFeature});
+    ExpectCrossSectionValid(combined);
+
+    const double sum = ca.Area() + cb.Area() - intersectAB.Area();
+    // Inclusion-exclusion is loose here because the corner-coincidence
+    // shape concentrates rounding into a few near-degenerate edges -
+    // same presentation-sensitivity the consumer accepted on
+    // BooleanDistributivityExtremeMagStars.
+    const double looseTol =
+        1e-4 * (1.0 + std::fabs(ca.Area()) + std::fabs(cb.Area()));
+    EXPECT_NEAR(unionAB.Area(), sum, looseTol)
+        << "Inclusion-exclusion violated (offset=" << offset << " eps=" << eps
+        << " i=" << i << ")";
+    // Constructor parity must hold tightly: both paths run the same
+    // boolean2 pipeline on the same input edges, just packaged
+    // differently. Any disagreement is a pipeline-routing bug.
+    const double tightTol =
+        1e-5 * (1.0 + std::fabs(ca.Area()) + std::fabs(cb.Area()));
+    EXPECT_NEAR(combined.Area(), unionAB.Area(), tightTol)
+        << "Edge-soup constructor disagrees with binary union (offset="
+        << offset << " eps=" << eps << " i=" << i << ")";
+  }
+}
+
 // Decompose/Compose round-trip on a HOLED CrossSection. The existing
 // DecomposeComposeAndHull covers separated stars (no negative-orientation
 // rings), which doesn't exercise hole containment in the decompose
@@ -2312,6 +2424,10 @@ FUZZ_TEST(CrossSectionFuzz, DegenerateInputFuzz)
     .WithDomains(StarRadiiDomain(), StarRadiiDomain(), InRange(0, 100),
                  InRange(0, 100), InRange(0, 100), InRange(-5.0, 5.0),
                  InRange(-5.0, 5.0));
+
+FUZZ_TEST(CrossSectionFuzz, TinyFeatureNearCorner)
+    .WithDomains(StarRadiiDomain(), StarRadiiDomain(), InRange(0, 100),
+                 InRange(0, 20), InRange(-1.0, 1.0), InRange(-1.0, 1.0));
 
 #if defined(MANIFOLD_PAR) && MANIFOLD_PAR == 1
 FUZZ_TEST(CrossSectionFuzz, RemoveOverlapsDeterminismAcrossThreadCounts)
