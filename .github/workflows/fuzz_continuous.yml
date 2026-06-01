@@ -101,6 +101,7 @@ jobs:
           - InputLoopOrderInvariance
           - LargeEdgeCountSelfUnion
           - DegenerateInputFuzz
+          - TinyFeatureNearCorner
           - RemoveOverlapsDeterminismAcrossThreadCounts
           - SimplePositiveOffset
           - OffsetExtrudeRoundTrip
