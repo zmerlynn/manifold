@@ -658,7 +658,8 @@ TEST(CrossSection, PropagatesShallowIndependentIntersections) {
   using boolean2::BVH;
   using boolean2::EdgeM;
   using boolean2::FindAndInsertIntersections;
-  using boolean2::IntersectionPoint;
+  using boolean2::IntersectionInsertion;
+  using boolean2::NarrowPhaseResult;
 
   constexpr double eps = 1e-3;
   std::vector<vec2> verts = {{-1., 0.},
@@ -678,18 +679,16 @@ TEST(CrossSection, PropagatesShallowIndependentIntersections) {
   for (const EdgeM& edge : edges) {
     edgeBoxes.push_back(BoxOf2DEdge(verts[edge.v0], verts[edge.v1], eps));
   }
-  std::vector<std::vector<int>> lists;
-  std::vector<IntersectionPoint> intersections;
-  std::vector<std::vector<int>> vertEdges;
   const std::vector<std::pair<int, int>> pairs = {{0, 1}, {2, 3}};
 
-  BuildListsAndFindIntersections(edges, verts, eps, pairs, &lists,
-                                 &intersections);
-  FindAndInsertIntersections(edges, &verts, &lists, &vertEdges, eps, edgeBoxes,
-                             BVH{}, intersections);
+  NarrowPhaseResult narrow =
+      BuildListsAndFindIntersections(edges, verts, eps, pairs);
+  IntersectionInsertion inserted = FindAndInsertIntersections(
+      edges, std::move(verts), std::move(narrow.lists), eps, edgeBoxes, BVH{},
+      narrow.intersections);
 
-  ASSERT_EQ(verts.size(), 12);
-  EXPECT_EQ(lists[4].size(), 2);
+  ASSERT_EQ(inserted.verts.size(), 12);
+  EXPECT_EQ(inserted.lists[4].size(), 2);
 }
 #endif
 
