@@ -3501,6 +3501,23 @@ TEST(CrossSection, Boolean2DKeepsNearDistinctPresentationVertex) {
   EXPECT_NEAR(boolean2::TotalSignedArea(polys), 1.0 + kDelta, 1e-12);
 }
 
+TEST(CrossSection, Boolean2DTinyNestedSquaresClassifiesSymbolicSeed) {
+  const double outer = 2e-162;
+  const double inner = 1e-162;
+  const Polygons a = {
+      {{-outer, -outer}, {outer, -outer}, {outer, outer}, {-outer, outer}}};
+  const Polygons b = {
+      {{-inner, -inner}, {inner, -inner}, {inner, inner}, {-inner, inner}}};
+
+  const auto add = boolean2::Boolean2D(a, b, OpType::Add);
+  const auto intersect = boolean2::Boolean2D(a, b, OpType::Intersect);
+
+  EXPECT_EQ(add.size(), 1u);
+  EXPECT_EQ(intersect.size(), 1u);
+  EXPECT_NEAR(boolean2::TotalSignedArea(add), 4.0 * outer * outer, 0.0);
+  EXPECT_NEAR(boolean2::TotalSignedArea(intersect), 4.0 * inner * inner, 0.0);
+}
+
 TEST(CrossSection, Boolean2NewOldToleranceMergesGeneratedNearEndpoint) {
   constexpr double eps = 1e-6;
   constexpr double tolerance = 1e-3;
