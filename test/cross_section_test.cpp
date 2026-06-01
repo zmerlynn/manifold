@@ -3502,6 +3502,43 @@ TEST(CrossSection, Boolean2DKeepsNearDistinctPresentationVertex) {
   EXPECT_NEAR(boolean2::TotalSignedArea(polys), 1.0 + kDelta, 1e-12);
 }
 
+TEST(CrossSection, Boolean2NewOldToleranceMergesGeneratedNearEndpoint) {
+  constexpr double eps = 1e-6;
+  constexpr double tolerance = 1e-3;
+  const Polygons a = {{{0, 0}, {10, 0}, {10, 1}, {0, 1}}};
+  const Polygons b = {{{5e-4, -0.5}, {0.5, -0.5}, {0.5, 0.5}, {5e-4, 0.5}}};
+  const auto [verts, edges] = CombinedInput(a, b, /*bMult=*/1);
+
+  const auto withoutPrior =
+      boolean2::RemoveOverlaps2D(verts, edges, eps, /*tolerance=*/eps,
+                                 /*debug=*/false, boolean2::WindRule::Add);
+  const auto withPrior =
+      boolean2::RemoveOverlaps2D(verts, edges, eps, tolerance,
+                                 /*debug=*/false, boolean2::WindRule::Add);
+
+  auto countNear = [](const std::vector<vec2>& points, vec2 target,
+                      double radius) {
+    int count = 0;
+    const double radius2 = radius * radius;
+    for (const vec2& p : points) {
+      const vec2 d = p - target;
+      if (dot(d, d) <= radius2) ++count;
+    }
+    return count;
+  };
+
+  const vec2 generatedNearOld{5e-4, 0.0};
+  EXPECT_GT(countNear(withoutPrior.verts, generatedNearOld, 10 * eps), 0)
+      << "baseline should retain the generated crossing as distinct";
+  EXPECT_EQ(countNear(withPrior.verts, generatedNearOld, 10 * eps), 0)
+      << "propagated tolerance should merge the generated crossing into the "
+         "nearby old endpoint";
+  EXPECT_EQ(withPrior.verts.size() + 1, withoutPrior.verts.size());
+  EXPECT_TRUE(CheckRetainedGraphValidity(withPrior, edges,
+                                         withPrior.inputVert2Merged,
+                                         withPrior.numMergedVerts, eps));
+}
+
 TEST(CrossSection, RemoveOverlapsMergesExactDuplicateCoordinates) {
   const Polygons polys = {{{0, 0}, {1, 0}, {0, 1}}, {{0, 0}, {-1, 0}, {0, -1}}};
   const auto [verts, edges] = boolean2::PolygonsToInput(polys);
