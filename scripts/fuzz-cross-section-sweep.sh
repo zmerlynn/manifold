@@ -74,6 +74,7 @@ targets=(
   CrossSectionFuzz.InputLoopOrderInvariance
   CrossSectionFuzz.LargeEdgeCountSelfUnion
   CrossSectionFuzz.DegenerateInputFuzz
+  CrossSectionFuzz.TinyFeatureNearCorner
   CrossSectionFuzz.SimplePositiveOffset
   CrossSectionFuzz.OffsetExtrudeRoundTrip
   CrossSectionFuzz.ManifoldHoledExtrudeRoundTrip
