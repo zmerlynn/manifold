@@ -3460,7 +3460,7 @@ TEST(CrossSection, BooleanRobustnessDirectCastKeepsExpectedArea) {
 //   tiny x translation puts B's vertices just inside the eps band
 //   of A's; the intersect path appears to mis-classify the overlap
 //   region as empty).
-TEST(CrossSection, DISABLED_SubtractInvariantsEmptyIntersectionDrop) {
+TEST(CrossSection, SubtractInvariantsEmptyIntersectionDrop) {
   auto starPolygon = [](const std::vector<double>& radii) {
     SimplePolygon ring;
     const int n = static_cast<int>(radii.size());
