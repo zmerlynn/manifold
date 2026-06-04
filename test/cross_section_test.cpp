@@ -850,11 +850,11 @@ TEST(CrossSection, ManyPolygonsShareCenterVertex) {
 
 // Seed: SimplePositiveOffset (2026-05-16 iteration #3)
 // Counterexample-hash: 50ede5b9d980d52c
-// Suspected owner: pr/boolean2-core (20-gon with extreme-magnitude
-//   radii alternating between O(0.1) and O(8.9); Offset(7.21, Bevel)
-//   returns a polygon with area ~ input.Area() instead of expanding -
-//   effectively a no-op. Likely b2::Offset's normal/miter calc breaks
-//   on the near-zero edges produced by the +0.1 floor on tiny radii).
+// Regression owner: pr/boolean2-offset-decompose (20-gon with
+//   extreme-magnitude radii alternating between O(0.1) and O(8.9)).
+//   Strict Positive-only cleanup with the old single-miter concave raw-offset
+//   emission returned a polygon with area ~ input.Area(), effectively a no-op.
+//   Clipper2-style concave emission should let the positive cleanup expand it.
 TEST(CrossSection, OffsetPositiveOnExtremeRadiusStar) {
   const std::vector<double> radii = {0.,
                                      0.40098345505108085,
