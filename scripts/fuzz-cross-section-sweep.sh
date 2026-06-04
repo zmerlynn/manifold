@@ -70,7 +70,6 @@ targets=(
   CrossSectionFuzz.CanonicalSubEdgeIdempotence
   CrossSectionFuzz.WindingFilterStarburstStress
   CrossSectionFuzz.PredicatesIdentities
-  CrossSectionFuzz.FillRuleAllCCWIdentities
   CrossSectionFuzz.InputLoopOrderInvariance
   CrossSectionFuzz.LargeEdgeCountSelfUnion
   CrossSectionFuzz.DegenerateInputFuzz
