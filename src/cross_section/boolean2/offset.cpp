@@ -236,7 +236,11 @@ SimplePolygon OffsetContour(const SimplePolygon& contour, double delta,
         // case where we'd clamp anyway).
         const double dotN = nPrev.x * nNext.x + nPrev.y * nNext.y;
         const double miterCosThresh = 2.0 / (miterLimit * miterLimit) - 1.0;
-        if (dotN < miterCosThresh) {
+        // Equality is allowed by the miter limit. `dotN` comes from rounded
+        // unit normals, so use only the baseline unit-scale predicate epsilon
+        // to avoid squaring a corner that is exactly on the limit.
+        const double miterTieTol = EpsilonFromScale(1.0, /*k_budget=*/0);
+        if (dotN + miterTieTol < miterCosThresh) {
           AppendSquareJoin(out, V, nPrev, nNext, delta);
         } else {
           out.push_back(MiterPoint(V, nPrev, nNext, delta));
