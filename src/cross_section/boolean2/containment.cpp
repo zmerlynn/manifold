@@ -88,9 +88,6 @@ RingInfo Summarize(const SimplePolygon& ring) {
     r.bmax.y = std::max(r.bmax.y, v.y);
   }
   r.area = SignedArea(ring);
-  // Empty rings are dropped by Positive regularization before reaching this
-  // path in production; the guard here is for direct callers of
-  // DecomposeByContainment that may pass raw Polygons.
   return r;
 }
 
@@ -114,11 +111,16 @@ bool RingInside(const SimplePolygon& a, const SimplePolygon& b) {
 // Decompose regularized simple loops into outer-ring components with their
 // directly contained holes.
 std::vector<Polygons> DecomposeByContainment(const Polygons& polys) {
-  const int n = static_cast<int>(polys.size());
+  Polygons rings;
+  rings.reserve(polys.size());
+  for (const auto& r : polys) {
+    if (r.size() >= 3) rings.push_back(r);
+  }
+  const int n = static_cast<int>(rings.size());
   if (n == 0) return {};
   std::vector<RingInfo> info;
   info.reserve(n);
-  for (const auto& r : polys) info.push_back(Summarize(r));
+  for (const auto& r : rings) info.push_back(Summarize(r));
 
   // For each ring, find its parent: the smallest-area ring (by |area|)
   // that contains it. O(n^2) bbox/ring-in-poly check; fine for the
@@ -129,7 +131,7 @@ std::vector<Polygons> DecomposeByContainment(const Polygons& polys) {
     for (int j = 0; j < n; ++j) {
       if (i == j) continue;
       if (!BoxInside(info[i], info[j])) continue;
-      if (!RingInside(polys[i], polys[j])) continue;
+      if (!RingInside(rings[i], rings[j])) continue;
       const double aj = std::fabs(info[j].area);
       if (aj < bestParentArea) {
         bestParentArea = aj;
@@ -152,7 +154,7 @@ std::vector<Polygons> DecomposeByContainment(const Polygons& polys) {
     if (p < 0 || info[p].area < 0) {
       compOf[i] = static_cast<int>(components.size());
       components.emplace_back();
-      components.back().push_back(polys[i]);
+      components.back().push_back(rings[i]);
     }
   }
   // Pass 2: holes attach to their positive parent's component.
@@ -168,7 +170,7 @@ std::vector<Polygons> DecomposeByContainment(const Polygons& polys) {
       p = parent[p];
     }
     if (p < 0 || compOf[p] < 0) continue;  // orphan hole; drop
-    components[compOf[p]].push_back(polys[i]);
+    components[compOf[p]].push_back(rings[i]);
   }
   return components;
 }

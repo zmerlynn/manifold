@@ -205,6 +205,18 @@ TEST(CrossSection, Boolean2DecomposeContainmentBboxUsesTolerance) {
   ASSERT_EQ(components.size(), 1);
   ASSERT_EQ(components[0].size(), 2);
 }
+
+TEST(CrossSection, Boolean2DecomposeContainmentDropsDegenerateRings) {
+  SimplePolygon outer = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
+  SimplePolygon line = {{0.25, 0.25}, {0.75, 0.75}};
+
+  std::vector<Polygons> components =
+      boolean2::DecomposeByContainment({outer, {}, line});
+
+  ASSERT_EQ(components.size(), 1);
+  ASSERT_EQ(components[0].size(), 1);
+  EXPECT_EQ(components[0][0].size(), outer.size());
+}
 #endif
 
 TEST(CrossSection, FillRule) {
