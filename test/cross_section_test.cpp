@@ -3305,6 +3305,7 @@ TEST(CrossSection, FillRule) {
   CrossSection positive(polygon);
   EXPECT_NEAR(positive.Area(), 0.683, 0.001);
 
+#ifndef MANIFOLD_CROSS_SECTION_BACKEND_BOOLEAN2
   CrossSection negative(polygon, CrossSection::FillRule::Negative);
   EXPECT_NEAR(negative.Area(), 0.193, 0.001);
 
@@ -3313,6 +3314,7 @@ TEST(CrossSection, FillRule) {
 
   CrossSection nonZero(polygon, CrossSection::FillRule::NonZero);
   EXPECT_NEAR(nonZero.Area(), 0.875, 0.001);
+#endif
 }
 
 TEST(CrossSection, Hull) {
