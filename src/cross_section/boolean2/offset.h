@@ -22,7 +22,8 @@ namespace boolean2 {
 enum class JoinType { Square, Round, Miter, Bevel };
 
 Polygons Offset(const Polygons& in, double delta, JoinType jt,
-                double miterLimit = 2.0, double arcTol = 0.0);
+                double miterLimit = 2.0, double arcTol = 0.0,
+                double tolerance = 0.0);
 
 }  // namespace boolean2
 }  // namespace manifold

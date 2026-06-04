@@ -14,7 +14,7 @@
 //
 // Standalone polygon utilities used by `CrossSection::Decompose`
 // (containment grouping). Not part of the boolean-overlap algorithm
-// pipeline; operates on already-regularized `Polygons` produced by FillByRule.
+// pipeline; operates on already-regularized Positive `Polygons`.
 
 #include "containment.h"
 
@@ -88,7 +88,7 @@ RingInfo Summarize(const SimplePolygon& ring) {
     r.bmax.y = std::max(r.bmax.y, v.y);
   }
   r.area = SignedArea(ring);
-  // Empty rings are dropped by FillByRule before reaching this code path
+  // Empty rings are dropped by Positive regularization before reaching this path
   // in production; the guard here is for direct callers of
   // DecomposeByContainment that may pass raw Polygons.
   return r;
@@ -155,7 +155,8 @@ std::vector<Polygons> DecomposeByContainment(const Polygons& polys) {
     if (info[i].area > 0) continue;  // skip outers
     int p = parent[i];
     // Walk up until we find a positive ring; that's the containing component.
-    // Simple-loop output from FillByRule shouldn't produce hole-inside-hole,
+    // Simple-loop output from Positive regularization shouldn't produce
+    // hole-inside-hole,
     // but a malformed parent chain would loop here forever; bound by the ring
     // count.
     for (int hops = 0; p >= 0 && info[p].area < 0 && hops <= n; ++hops) {
