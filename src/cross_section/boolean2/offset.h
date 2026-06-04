@@ -19,9 +19,9 @@
 namespace manifold {
 namespace boolean2 {
 
-enum class JoinType { Square, Round, Miter, Bevel };
+enum class OffsetJoinType { Square, Round, Miter, Bevel };
 
-Polygons Offset(const Polygons& in, double delta, JoinType jt,
+Polygons Offset(const Polygons& in, double delta, OffsetJoinType jt,
                 double miterLimit = 2.0, double arcTol = 0.0,
                 double tolerance = 0.0);
 
