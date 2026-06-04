@@ -36,28 +36,6 @@ constexpr double kMiterLimitDotTolUlp = 64.0;
 constexpr double kDefaultArcTolRadiusFraction = 1e-3;
 constexpr int kMaxFullCircleChordCount = 4096;
 
-double Perimeter(const SimplePolygon& loop) {
-  if (loop.size() < 2) return 0.0;
-  double total = 0.0;
-  for (size_t i = 0; i < loop.size(); ++i) {
-    total += length(loop[(i + 1) % loop.size()] - loop[i]);
-  }
-  return total;
-}
-
-double TotalPerimeter(const Polygons& polys) {
-  double total = 0.0;
-  for (const auto& loop : polys) total += Perimeter(loop);
-  return total;
-}
-
-double AreaComparisonTol(const Polygons& a, const Polygons& b, double eps) {
-  // If boundary vertices drift by O(eps), the induced first-order area change
-  // is bounded by perimeter * eps. Use both operands' perimeters because this
-  // epsilon compares two already-regularized polygon sets.
-  return eps * (TotalPerimeter(a) + TotalPerimeter(b)) + eps * eps;
-}
-
 // Outward normal of a directed edge (right-perpendicular, unit length).
 // For a CCW polygon, this points away from the interior.
 vec2 OutwardNormal(vec2 edge) {
@@ -71,8 +49,6 @@ vec2 RotateDegrees(vec2 v, double angle) {
   const double s = sind(angle);
   return vec2(v.x * c - v.y * s, v.x * s + v.y * c);
 }
-
-double Cross(vec2 a, vec2 b) { return a.x * b.y - a.y * b.x; }
 
 // Number of chords in a full circle at radius `r` such that each chord's
 // perpendicular sagitta error stays <= arcTol. Since sagitta decreases
@@ -100,7 +76,7 @@ int FullCircleChordCount(double r, double arcTol) {
 }
 
 bool BeforeSweepTarget(vec2 dir, vec2 target, double rotSign) {
-  const double cross = Cross(dir, target);
+  const double cross = la::cross(dir, target);
   return rotSign > 0 ? cross > 0 : cross < 0;
 }
 
@@ -223,10 +199,11 @@ SimplePolygon OffsetContour(const SimplePolygon& contour, double delta,
       continue;
     }
     if (convex < 0) {
-      // Concave for this offset direction: the two offset edges cross.
-      // Emit a single miter point. The union pass downstream cleans up
-      // any self-overlap if the miter pokes through the polygon.
-      out.push_back(MiterPoint(V, nPrev, nNext, delta));
+      // Concave joins intentionally create a negative region that the final
+      // Positive union removes, matching Clipper2's offset cleanup.
+      out.push_back(endPrev);
+      out.push_back(V);
+      out.push_back(startNext);
       continue;
     }
     // Convex corner: apply join.
@@ -278,13 +255,11 @@ Polygons RemoveCollinear(Polygons polys, double eps) {
     if (loop.size() < 3) continue;
     SimplePolygon kept;
     kept.reserve(loop.size());
-    const int n = (int)loop.size();
+    const int n = static_cast<int>(loop.size());
     for (int i = 0; i < n; ++i) {
       const vec2 P = kept.empty() ? loop[(i + n - 1) % n] : kept.back();
       const vec2 V = loop[i];
-      // Find first non-degenerate forward neighbour to compare against
-      // (so a run of collinear verts collapses to a single vertex).
-      vec2 N = loop[(i + 1) % n];
+      const vec2 N = loop[(i + 1) % n];
       const vec2 ePrev = vec2(V.x - P.x, V.y - P.y);
       const vec2 eNext = vec2(N.x - V.x, N.y - V.y);
       if (dot(ePrev, ePrev) < eps2) continue;  // zero-length back-edge
@@ -334,15 +309,13 @@ Polygons RemoveCollinear(Polygons polys, double eps) {
 // as Clipper2's `arc_tolerance`.
 //
 // Each input contour produces one offset ring, then all rings are regularized
-// with the fill strategy below: positive offsets use Add with NonZero fallback;
-// negative offsets use NonZero with Negative fallback. A final pass strips
-// collinear vertices (matching Clipper2's `InflatePaths` finishing behaviour
-// so callers see the same NumVert).
+// with Positive/Add filling. A final pass strips collinear vertices (matching
+// Clipper2's `InflatePaths` finishing behaviour so callers see the same
+// NumVert).
 Polygons Offset(const Polygons& in, double delta, JoinType jt,
-                double miterLimit, double arcTol) {
+                double miterLimit, double arcTol, double tolerance) {
   if (delta == 0 || in.empty()) return in;
-  // Reject NaN/Inf input; miterLimit and arcTol are clamped inside
-  // OffsetContour to match existing CrossSection tolerance behavior.
+  // Reject NaN/Inf delta and input coordinates.
   if (!std::isfinite(delta)) return {};
   for (const auto& ring : in) {
     for (const auto& v : ring) {
@@ -359,35 +332,9 @@ Polygons Offset(const Polygons& in, double delta, JoinType jt,
   const double eps = InferEps(offsetRings, {});
   // Resolve self-intersecting offset rings (e.g. when delta exceeds a
   // thin feature's half-width and the offset pinches itself into multiple
-  // loops). Positive offsets keep the positive filled side; NonZero would
-  // also preserve opposite-winding lobes from inverted concave joins.
-  // Negative offsets normally use NonZero so holes and surviving inset
-  // islands keep their winding, then fall back only when the inset has
-  // impossibly grown in area.
-  Polygons unioned;
-  if (delta > 0) {
-    unioned = FillByRule(offsetRings, WindRule::Add, eps);
-    // A true outward offset cannot reduce the filled area. Extreme concave
-    // bevel joins can invert large portions of the raw offset ring, causing
-    // Add to keep only small positive-winding islands. NonZero preserves the
-    // regularized expanded boundary in that case.
-    const double inArea = std::fabs(TotalSignedArea(in));
-    const double outArea = std::fabs(TotalSignedArea(unioned));
-    if (outArea + AreaComparisonTol(in, unioned, eps) < inArea) {
-      unioned = FillByRule(offsetRings, WindRule::NonZero, eps);
-    }
-  } else {
-    unioned = FillByRule(offsetRings, WindRule::NonZero, eps);
-    // A true inset cannot increase the filled area. If NonZero preserved
-    // inverted runaway lobes from a collapsed contour, retry with the
-    // opposite winding side, which regularizes the collapse to empty or to
-    // the remaining interior islands.
-    const double inArea = std::fabs(TotalSignedArea(in));
-    const double outArea = std::fabs(TotalSignedArea(unioned));
-    if (outArea > inArea + AreaComparisonTol(in, unioned, eps)) {
-      unioned = FillByRule(offsetRings, WindRule::Negative, eps);
-    }
-  }
+  // loops). CrossSection storage is normal-oriented before reaching Offset,
+  // so Positive/Add cleanup keeps the filled side for both dilation and inset.
+  Polygons unioned = Simplify(offsetRings, eps, tolerance);
   return RemoveCollinear(std::move(unioned), eps);
 }
 
