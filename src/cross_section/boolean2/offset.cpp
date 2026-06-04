@@ -33,6 +33,8 @@ namespace {
 // For a CCW polygon, this points away from the interior.
 vec2 OutwardNormal(vec2 edge) {
   const double len = std::sqrt(edge.x * edge.x + edge.y * edge.y);
+  // Keep this exact: public CrossSection inputs are regularized before
+  // Offset, and a local eps threshold here can erase valid tiny-edge corners.
   if (len == 0) return vec2(0, 0);
   return vec2(edge.y / len, -edge.x / len);
 }
