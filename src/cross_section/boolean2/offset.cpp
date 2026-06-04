@@ -236,12 +236,7 @@ SimplePolygon OffsetContour(const SimplePolygon& contour, double delta,
         // case where we'd clamp anyway).
         const double dotN = nPrev.x * nNext.x + nPrev.y * nNext.y;
         const double miterCosThresh = 2.0 / (miterLimit * miterLimit) - 1.0;
-        // Equality is permitted by the miter limit. Use the local epsilon
-        // helper on the unitless dot threshold so rounded unit normals do not
-        // spuriously square an exactly-on-limit join.
-        const double miterTol =
-            EpsilonFromScale(std::max(1.0, std::fabs(miterCosThresh)), 2);
-        if (dotN + miterTol < miterCosThresh) {
+        if (dotN < miterCosThresh) {
           AppendSquareJoin(out, V, nPrev, nNext, delta);
         } else {
           out.push_back(MiterPoint(V, nPrev, nNext, delta));
