@@ -56,18 +56,18 @@ Polygons FilterSmallContours(const Polygons& paths, double epsilon) {
   return filtered;
 }
 
-b2::JoinType JoinTypeOf(CrossSection::JoinType jointype) {
+b2::OffsetJoinType JoinTypeOf(CrossSection::JoinType jointype) {
   switch (jointype) {
     case CrossSection::JoinType::Square:
-      return b2::JoinType::Square;
+      return b2::OffsetJoinType::Square;
     case CrossSection::JoinType::Round:
-      return b2::JoinType::Round;
+      return b2::OffsetJoinType::Round;
     case CrossSection::JoinType::Miter:
-      return b2::JoinType::Miter;
+      return b2::OffsetJoinType::Miter;
     case CrossSection::JoinType::Bevel:
-      return b2::JoinType::Bevel;
+      return b2::OffsetJoinType::Bevel;
   }
-  return b2::JoinType::Square;
+  return b2::OffsetJoinType::Square;
 }
 
 // ||M||_2; callers pass the linear part of an affine 2D transform.
@@ -419,7 +419,7 @@ CrossSection CrossSection::Offset(double delta, JoinType jt, double miterLimit,
     arcTolerance = (1.0 - cosd(180.0 / n)) * absDelta;
   }
   Polygons offset = b2::Offset(GetPaths()->paths_, delta, JoinTypeOf(jt),
-                               miterLimit, arcTolerance);
+                               miterLimit, arcTolerance, tolerance_);
   CrossSection out(shared_paths(std::move(offset)));
   // Max, not sum: chained Offset must not grow tolerance unboundedly.
   out.tolerance_ = std::max(
