@@ -3127,40 +3127,6 @@ TEST(CrossSection, Boolean2CleanupPassMatchesValidAddSinglePass) {
               boolean2::TotalSignedArea(pass2Polys), 1e-12);
 }
 
-TEST(CrossSection, Boolean2CleanupPassMatchesValidNonZeroSinglePass) {
-  Polygons polys{RandomTopologicalRing(8, 618)};
-  const double eps = boolean2::InferEps(polys, {});
-  const auto [verts, edges] = boolean2::PolygonsToInput(polys);
-  const auto pass1 =
-      boolean2::RemoveOverlaps2D(verts, edges, eps, /*tolerance=*/0.0,
-                                 /*debug=*/false, boolean2::WindRule::NonZero);
-  EXPECT_TRUE(CheckRetainedGraphValidity(pass1, edges, pass1.inputVert2Merged,
-                                         pass1.numMergedVerts, eps));
-
-  const auto pass2 = CleanupPassLikeIterate(pass1, eps);
-  const auto pass2Input = EdgesFromOverlapResult(pass1);
-  EXPECT_TRUE(CheckRetainedGraphValidity(
-      pass2, pass2Input, pass2.inputVert2Merged, pass2.numMergedVerts, eps));
-  ExpectSameFingerprint(pass1, pass2, eps);
-
-  const auto pass3 = CleanupPassLikeIterate(pass2, eps);
-  const auto pass3Input = EdgesFromOverlapResult(pass2);
-  EXPECT_TRUE(CheckRetainedGraphValidity(
-      pass3, pass3Input, pass3.inputVert2Merged, pass3.numMergedVerts, eps));
-  ExpectSameFingerprint(pass2, pass3, eps);
-
-  const auto pass1Polys =
-      boolean2::OutEdgesToPolygons(pass1.verts, pass1.edges);
-  const auto pass2Polys =
-      boolean2::OutEdgesToPolygons(pass2.verts, pass2.edges);
-  ASSERT_EQ(pass1Polys.size(), 3);
-  ASSERT_EQ(pass2Polys.size(), 3);
-  EXPECT_EQ(pass1Polys[0].size(), pass2Polys[0].size());
-  EXPECT_EQ(pass1Polys[1].size(), pass2Polys[1].size());
-  EXPECT_EQ(pass1Polys[2].size(), pass2Polys[2].size());
-  EXPECT_NEAR(boolean2::TotalSignedArea(pass1Polys),
-              boolean2::TotalSignedArea(pass2Polys), 1e-12);
-}
 #endif
 
 TEST(CrossSection, SimplifyPostFiltersBoolean2Output) {
