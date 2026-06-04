@@ -16,11 +16,18 @@
 
 #include <gtest/gtest.h>
 
+#include <cmath>
 #include <vector>
 
 #include "manifold/common.h"
 #include "manifold/manifold.h"
 #include "test.h"
+
+#ifdef MANIFOLD_CROSS_SECTION_BACKEND_BOOLEAN2
+#include "../src/cross_section/boolean2/containment.h"
+#include "../src/cross_section/boolean2/offset.h"
+#include "../src/cross_section/boolean2/predicates.h"
+#endif
 
 using namespace manifold;
 
@@ -170,6 +177,35 @@ TEST(CrossSection, Decompose) {
   Identical(Manifold::Extrude(ab.ToPolygons(), 1.).GetMeshGL(),
             Manifold::Extrude(recomp.ToPolygons(), 1.).GetMeshGL());
 }
+
+#ifdef MANIFOLD_CROSS_SECTION_BACKEND_BOOLEAN2
+TEST(CrossSection, Boolean2OffsetRoundArcToleranceUsesRequestedSegments) {
+  SimplePolygon square = {{0, 0}, {20, 0}, {20, 20}, {0, 20}};
+  const int segments = 20;
+  const double delta = 5.0;
+  const double arcTol = (std::cos(kPi / segments) - 1.0) * -std::fabs(delta);
+
+  Polygons rounded = boolean2::Offset(
+      {square}, delta, boolean2::OffsetJoinType::Round, 2.0, arcTol);
+
+  ASSERT_EQ(rounded.size(), 1);
+  EXPECT_EQ(rounded[0].size(), segments + 4);
+}
+
+TEST(CrossSection, Boolean2DecomposeContainmentBboxUsesTolerance) {
+  const double eps = boolean2::EpsilonFromScale(0.5);
+  const double d = 0.25 * eps;
+  SimplePolygon outer = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
+  SimplePolygon hole = {
+      {1 + d, 0.25}, {0.25, 0.25}, {0.25, 0.75}, {1 + d, 0.75}};
+
+  std::vector<Polygons> components =
+      boolean2::DecomposeByContainment({outer, hole});
+
+  ASSERT_EQ(components.size(), 1);
+  ASSERT_EQ(components[0].size(), 2);
+}
+#endif
 
 TEST(CrossSection, FillRule) {
   SimplePolygon polygon = {

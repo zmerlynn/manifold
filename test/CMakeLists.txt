@@ -61,6 +61,10 @@ if(EMSCRIPTEN)
 endif()
 
 target_compile_options(manifold_test PRIVATE ${MANIFOLD_FLAGS})
+if(MANIFOLD_CROSS_SECTION AND MANIFOLD_CROSS_SECTION_BACKEND STREQUAL "boolean2")
+  target_compile_definitions(manifold_test
+                             PRIVATE MANIFOLD_CROSS_SECTION_BACKEND_BOOLEAN2)
+endif()
 exportbin(manifold_test)
 
 if(WIN32)

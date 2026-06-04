@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <vector>
 
 #include "boolean2.h"
@@ -27,14 +28,6 @@ namespace manifold {
 namespace boolean2 {
 
 namespace {
-
-constexpr double kStraightAngleSinTol = 1e-12;
-// denom = 1 + dot(normals) = 2*cos^2(half-angle). Below this, the miter
-// extension is at least ~1.4e6 * |delta|, so treat the corner as a reversal.
-constexpr double kNearOppositeNormalsDenomTol = 1e-12;
-constexpr double kMiterLimitDotTolUlp = 64.0;
-constexpr double kDefaultArcTolRadiusFraction = 1e-3;
-constexpr int kMaxFullCircleChordCount = 4096;
 
 // Outward normal of a directed edge (right-perpendicular, unit length).
 // For a CCW polygon, this points away from the interior.
@@ -50,19 +43,44 @@ vec2 RotateDegrees(vec2 v, double angle) {
   return vec2(v.x * c - v.y * s, v.x * s + v.y * c);
 }
 
+bool StraightTurn(vec2 ePrev, vec2 eNext) {
+  const double prevLen2 = dot(ePrev, ePrev);
+  const double nextLen2 = dot(eNext, eNext);
+  const double maxLen2 = std::max(prevLen2, nextLen2);
+  if (maxLen2 == 0) return true;
+  const double eps = EpsilonFromScale(std::sqrt(maxLen2));
+  const double cross = la::cross(ePrev, eNext);
+  return 4.0 * cross * cross <= maxLen2 * eps * eps;
+}
+
 // Number of chords in a full circle at radius `r` such that each chord's
-// perpendicular sagitta error stays <= arcTol. Since sagitta decreases
-// monotonically with more chords, a binary search against deterministic cosd
-// gives a stable minimal integer count.
+// perpendicular sagitta error stays <= arcTol. The public Offset() path derives
+// arcTol from a segment count with the same sagitta formula; use the analytic
+// inverse as a search bound, then evaluate the formula directly to recover the
+// exact minimal integer count despite trig roundoff.
 int FullCircleChordCount(double r, double arcTol) {
   if (!std::isfinite(r) || r <= 0) return 1;
   if (!std::isfinite(arcTol) || arcTol <= 0) {
-    arcTol = r * kDefaultArcTolRadiusFraction;
+    return Quality::GetCircularSegments(r);
   }
   if (arcTol >= 2.0 * r) return 1;
   auto withinTol = [&](int n) { return (1.0 - cosd(180.0 / n)) * r <= arcTol; };
-  int hi = 2;
-  while (!withinTol(hi) && hi < kMaxFullCircleChordCount) hi *= 2;
+  const double cosHalfStep = std::clamp(1.0 - arcTol / r, -1.0, 1.0);
+  const double halfStep = std::acos(cosHalfStep);
+  if (!std::isfinite(halfStep) || halfStep <= 0) {
+    return Quality::GetCircularSegments(r);
+  }
+  const double estimate = std::ceil(kPi / halfStep);
+  if (!std::isfinite(estimate) || estimate > std::numeric_limits<int>::max()) {
+    return std::numeric_limits<int>::max();
+  }
+  int hi = std::max(2, static_cast<int>(estimate));
+  while (!withinTol(hi)) {
+    if (hi > std::numeric_limits<int>::max() / 2) {
+      return std::numeric_limits<int>::max();
+    }
+    hi *= 2;
+  }
   int lo = 1;
   while (lo + 1 < hi) {
     const int mid = lo + (hi - lo) / 2;
@@ -134,13 +152,17 @@ vec2 MiterPoint(vec2 V, vec2 nPrev, vec2 nNext, double delta) {
   // the bisector at distance delta / cos(half-angle).
   const double dotN = nPrev.x * nNext.x + nPrev.y * nNext.y;
   const double denom = 1.0 + dotN;
-  if (denom <= kNearOppositeNormalsDenomTol) {
-    // Nearly opposite normals (sharp ~180-degree corner); miter is
-    // unbounded. Caller should detect and fall back.
+  if (denom <= 0) {
+    // Opposite normals make the miter unbounded. The caller's miter-limit
+    // check handles near-opposite normals before this point.
     return V + delta * nPrev;
   }
   return V +
          delta * vec2((nPrev.x + nNext.x) / denom, (nPrev.y + nNext.y) / denom);
+}
+
+double ValidMiterLimit(double miterLimit) {
+  return std::isfinite(miterLimit) && miterLimit >= 2.0 ? miterLimit : 2.0;
 }
 
 // Offset a single input contour. Positive `delta` inflates the solid
@@ -154,10 +176,12 @@ vec2 MiterPoint(vec2 V, vec2 nPrev, vec2 nNext, double delta) {
 // the solid for delta > 0, regardless of ring orientation, and the
 // convex/concave decision depends only on `cross * sign(delta)`.
 SimplePolygon OffsetContour(const SimplePolygon& contour, double delta,
-                            JoinType jt, double miterLimit, double arcTol) {
+                            OffsetJoinType jt, double miterLimit,
+                            double arcTol) {
   const int n = static_cast<int>(contour.size());
   if (n < 3 || delta == 0) return contour;
   const double deltaSign = (delta >= 0) ? 1.0 : -1.0;
+  miterLimit = ValidMiterLimit(miterLimit);
 
   SimplePolygon out;
   out.reserve(static_cast<size_t>(n) * 2);
@@ -180,20 +204,9 @@ SimplePolygon OffsetContour(const SimplePolygon& contour, double delta,
     // shrinking-corner that needs a miter), hence the `* deltaSign`.
     const double cross = ePrev.x * eNext.y - ePrev.y * eNext.x;
     const double convex = cross * deltaSign;
-    // Scale-invariant collinearity gate: sin^2(theta) < 1e-24, i.e.
-    // angle within ~1e-12 rad of straight. `cross` magnitude is
-    // O(|ePrev| * |eNext| * sin(theta)) so the natural unitless gate is
-    // cross^2 < tol^2 * |ePrev|^2 * |eNext|^2. Using a raw fabs(cross)
-    // < 1e-12 threshold here would scale wrong with input magnitude:
-    // large-coord inputs (GIS or millimeter-scale CAD parts pre-scaled
-    // up) carry FP rounding O(1e-16 * coord^2) in cross, which can
-    // exceed any absolute threshold even when the corner is exactly
-    // collinear, leaving spurious mid-corner vertices in the output
-    // until RemoveCollinear cleans them up downstream.
-    const double ePrevLen2 = dot(ePrev, ePrev);
-    const double eNextLen2 = dot(eNext, eNext);
-    if (cross * cross <
-        kStraightAngleSinTol * kStraightAngleSinTol * ePrevLen2 * eNextLen2) {
+    // Use the same scale-derived collinearity shape as CCW(): the tolerance is
+    // a length from the larger adjacent edge, not an absolute cross-product.
+    if (StraightTurn(ePrev, eNext)) {
       // Collinear: nPrev == nNext, endPrev == startNext.
       out.push_back(endPrev);
       continue;
@@ -209,10 +222,10 @@ SimplePolygon OffsetContour(const SimplePolygon& contour, double delta,
     // Convex corner: apply join.
     out.push_back(endPrev);
     switch (jt) {
-      case JoinType::Round:
+      case OffsetJoinType::Round:
         AppendRoundJoin(out, V, nPrev, nNext, delta, arcTol);
         break;
-      case JoinType::Miter: {
+      case OffsetJoinType::Miter: {
         // miterLen / |delta| = 1 / cos(half_angle) =
         // sqrt(2 / (1 + dot(nPrev, nNext))). The limit
         // miterLen <= miterLimit * |delta| rearranges to
@@ -223,14 +236,11 @@ SimplePolygon OffsetContour(const SimplePolygon& contour, double delta,
         // case where we'd clamp anyway).
         const double dotN = nPrev.x * nNext.x + nPrev.y * nNext.y;
         const double miterCosThresh = 2.0 / (miterLimit * miterLimit) - 1.0;
-        // Equality is permitted by the miter limit. Regular triangles at the
-        // default limit sit exactly on this boundary; allow a small ULP margin
-        // so rounded unit normals do not spuriously square the join.
+        // Equality is permitted by the miter limit. Use the local epsilon
+        // helper on the unitless dot threshold so rounded unit normals do not
+        // spuriously square an exactly-on-limit join.
         const double miterTol =
-            std::isfinite(miterCosThresh)
-                ? kMiterLimitDotTolUlp * kU *
-                      std::max(1.0, std::fabs(miterCosThresh))
-                : 0.0;
+            EpsilonFromScale(std::max(1.0, std::fabs(miterCosThresh)), 2);
         if (dotN + miterTol < miterCosThresh) {
           AppendSquareJoin(out, V, nPrev, nNext, delta);
         } else {
@@ -238,10 +248,10 @@ SimplePolygon OffsetContour(const SimplePolygon& contour, double delta,
         }
         break;
       }
-      case JoinType::Square:
+      case OffsetJoinType::Square:
         AppendSquareJoin(out, V, nPrev, nNext, delta);
         break;
-      case JoinType::Bevel:
+      case OffsetJoinType::Bevel:
         break;
     }
     out.push_back(startNext);
@@ -312,7 +322,7 @@ Polygons RemoveCollinear(Polygons polys, double eps) {
 // with Positive/Add filling. A final pass strips collinear vertices (matching
 // Clipper2's `InflatePaths` finishing behaviour so callers see the same
 // NumVert).
-Polygons Offset(const Polygons& in, double delta, JoinType jt,
+Polygons Offset(const Polygons& in, double delta, OffsetJoinType jt,
                 double miterLimit, double arcTol, double tolerance) {
   if (delta == 0 || in.empty()) return in;
   // Reject NaN/Inf delta and input coordinates.

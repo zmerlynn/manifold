@@ -88,15 +88,20 @@ RingInfo Summarize(const SimplePolygon& ring) {
     r.bmax.y = std::max(r.bmax.y, v.y);
   }
   r.area = SignedArea(ring);
-  // Empty rings are dropped by Positive regularization before reaching this path
-  // in production; the guard here is for direct callers of
+  // Empty rings are dropped by Positive regularization before reaching this
+  // path in production; the guard here is for direct callers of
   // DecomposeByContainment that may pass raw Polygons.
   return r;
 }
 
+double BoxScale(const RingInfo& r) {
+  return 0.5 * std::max(r.bmax.x - r.bmin.x, r.bmax.y - r.bmin.y);
+}
+
 bool BoxInside(const RingInfo& a, const RingInfo& b) {
-  return a.bmin.x >= b.bmin.x && a.bmin.y >= b.bmin.y && a.bmax.x <= b.bmax.x &&
-         a.bmax.y <= b.bmax.y;
+  const double eps = EpsilonFromScale(BoxScale(b));
+  return a.bmin.x >= b.bmin.x - eps && a.bmin.y >= b.bmin.y - eps &&
+         a.bmax.x <= b.bmax.x + eps && a.bmax.y <= b.bmax.y + eps;
 }
 
 bool RingInside(const SimplePolygon& a, const SimplePolygon& b) {
