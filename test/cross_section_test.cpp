@@ -3291,6 +3291,51 @@ TEST(CrossSection, Boolean2DecomposeContainmentDropsDegenerateRings) {
   ASSERT_EQ(components[0].size(), 1);
   EXPECT_EQ(components[0][0].size(), outer.size());
 }
+
+TEST(CrossSection, Boolean2OffsetSquareInsetCapStaysOnSolidSide) {
+  // L-shape: 2x2 square minus the top-right [1,2]x[1,2] quadrant (CCW). The
+  // reflex corner at (1,1) routes through the square join when inset.
+  SimplePolygon L = {{0, 0}, {2, 0}, {2, 1}, {1, 1}, {1, 2}, {0, 2}};
+
+  Polygons out = boolean2::Offset({L}, -0.25, boolean2::OffsetJoinType::Square);
+
+  // Load-bearing: the square cap belongs on the inset (solid) side, never in
+  // the removed notch (1,2)x(1,2). The wrong-side bug puts cap vertices at
+  // ~(1.25,1.10)/(1.10,1.25), strictly inside the notch.
+  for (const SimplePolygon& ring : out) {
+    for (const vec2& v : ring) {
+      const bool inNotch = v.x > 1.0 && v.x < 2.0 && v.y > 1.0 && v.y < 2.0;
+      EXPECT_FALSE(inNotch) << "cap vertex (" << v.x << ", " << v.y
+                            << ") is in the removed notch";
+    }
+  }
+  // Secondary (coarse): the wrong-side cap inflates the area (~1.40 buggy vs
+  // ~1.26 correct). Upper bound discriminates the two; not an equality.
+  EXPECT_LT(std::fabs(boolean2::TotalSignedArea(out)), 1.35);
+
+  // Dilate is unchanged by the fix (delta == absDelta); guard it stays sane.
+  Polygons grown =
+      boolean2::Offset({L}, 0.25, boolean2::OffsetJoinType::Square);
+  EXPECT_GT(std::fabs(boolean2::TotalSignedArea(grown)), 3.0);
+}
+
+TEST(CrossSection, Boolean2OffsetLargeMiterLimitStaysBounded) {
+  // Thin spike: apex (0,1e6) with near-antiparallel edge normals (1+dotN ~ 1
+  // ULP), so the apex miter is near-unbounded. A huge miter_limit must not let
+  // MiterPoint escape; the square fallback must engage.
+  SimplePolygon spike = {{-0.01291544, 0}, {0.01291544, 0}, {0, 1e6}};
+
+  Polygons out =
+      boolean2::Offset({spike}, 1.0, boolean2::OffsetJoinType::Miter, 1e10);
+
+  double maxCoord = 0;
+  for (const SimplePolygon& ring : out)
+    for (const vec2& v : ring)
+      maxCoord = std::max(maxCoord, std::max(std::fabs(v.x), std::fabs(v.y)));
+  // Apex sits at y=1e6; a capped corner stays near that scale. The unclamped
+  // miter escapes to ~6e7.
+  EXPECT_LT(maxCoord, 1.0e7) << "miter escaped to " << maxCoord;
+}
 #endif
 
 TEST(CrossSection, FillRule) {
