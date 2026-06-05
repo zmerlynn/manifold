@@ -57,16 +57,19 @@ bool StraightTurn(vec2 ePrev, vec2 eNext) {
 
 // Number of chords in a full circle at radius `r` such that each chord's
 // perpendicular sagitta error stays <= arcTol. The public Offset() path derives
-// arcTol from a segment count with the same sagitta formula; use the analytic
-// inverse as a search bound, then evaluate the formula directly to recover the
-// exact minimal integer count despite trig roundoff.
+// arcTol from a requested segment count via the same deterministic
+// math::cos(kPi/n) sagitta formula `withinTol` uses below, so the round-trip is
+// exact; use the analytic inverse as a search bound, then evaluate the formula
+// directly to recover the minimal integer count despite roundoff.
 int FullCircleChordCount(double r, double arcTol) {
   if (!std::isfinite(r) || r <= 0) return 1;
   if (!std::isfinite(arcTol) || arcTol <= 0) {
     return Quality::GetCircularSegments(r);
   }
   if (arcTol >= 2.0 * r) return 1;
-  auto withinTol = [&](int n) { return (1.0 - cosd(180.0 / n)) * r <= arcTol; };
+  auto withinTol = [&](int n) {
+    return (1.0 - math::cos(kPi / n)) * r <= arcTol;
+  };
   const double cosHalfStep = std::clamp(1.0 - arcTol / r, -1.0, 1.0);
   const double halfStep = std::acos(cosHalfStep);
   if (!std::isfinite(halfStep) || halfStep <= 0) {
