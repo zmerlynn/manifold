@@ -214,8 +214,13 @@ SimplePolygon OffsetContour(const SimplePolygon& contour, double delta,
     // Use the same scale-derived collinearity shape as CCW(): the tolerance is
     // a length from the larger adjacent edge, not an absolute cross-product.
     if (StraightTurn(ePrev, eNext)) {
-      // Collinear: nPrev == nNext, endPrev == startNext.
+      // Zero cross is either a straight continuation (dot >= 0: nPrev == nNext,
+      // so endPrev == startNext - one point suffices) or an antiparallel
+      // reversal (dot < 0: nPrev == -nNext, so the offset endpoints are
+      // distinct and on opposite sides). Emit both for the reversal to bevel
+      // across the spike instead of collapsing it to a single point.
       out.push_back(endPrev);
+      if (dot(ePrev, eNext) < 0) out.push_back(startNext);
       continue;
     }
     if (convex < 0) {
