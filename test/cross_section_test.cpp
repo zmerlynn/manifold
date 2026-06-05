@@ -3336,6 +3336,73 @@ TEST(CrossSection, Boolean2OffsetLargeMiterLimitStaysBounded) {
   // miter escapes to ~6e7.
   EXPECT_LT(maxCoord, 1.0e7) << "miter escaped to " << maxCoord;
 }
+
+TEST(CrossSection, Boolean2OffsetReversalSpikeKeepsFarCap) {
+  // A near-zero-width spike whose tip edges are antiparallel triggers the
+  // StraightTurn branch; the offset must still cap the far side rather than
+  // collapse the tip to a single point.
+  SimplePolygon spike = {
+      {-100, -100}, {100, -100}, {100, -1}, {1100, -1}, {100, -1 + 5.63085e-10},
+      {100, 100},   {-100, 100}};
+  Polygons out =
+      boolean2::Offset({spike}, 5.0, boolean2::OffsetJoinType::Miter);
+  // The tip's far offset endpoint is ~(1100, 4); only the near side (1100,-6)
+  // survives if the reversal cap is dropped.
+  bool farCap = false;
+  for (const SimplePolygon& ring : out)
+    for (const vec2& v : ring)
+      if (v.x > 1090.0 && v.y > 0.0) farCap = true;
+  EXPECT_TRUE(farCap) << "far side of the reversal spike was dropped";
+}
+
+TEST(CrossSection, Boolean2DecomposeContainmentDropsZeroAreaRing) {
+  SimplePolygon outer = {{0, 0}, {10, 0}, {10, 10}, {0, 10}};
+  SimplePolygon collinear = {{1, 1}, {2, 1}, {3, 1}};  // zero area, size 3
+  auto comps = boolean2::DecomposeByContainment({outer, collinear});
+  ASSERT_EQ(comps.size(), 1);
+  EXPECT_EQ(comps[0].size(), 1);  // sliver dropped, not leaked as a hole
+}
+
+TEST(CrossSection, Boolean2DecomposeContainmentKeepsNestedPositiveRing) {
+  SimplePolygon A = {{0, 0}, {10, 0}, {10, 10}, {0, 10}};  // +100
+  SimplePolygon B = {{3, 3}, {7, 3}, {7, 7}, {3, 7}};      // +16, inside A
+  SimplePolygon H = {{4, 4}, {4, 6}, {6, 6}, {6, 4}};      // -4, inside B
+  auto comps = boolean2::DecomposeByContainment({A, B, H});
+  double retained = 0;
+  for (const auto& c : comps) retained += boolean2::TotalSignedArea(c);
+  // No silent area loss: the nested positive ring and its hole are kept.
+  EXPECT_NEAR(retained, 112.0, 1e-9);
+}
+
+TEST(CrossSection, Boolean2OffsetRoundArcRoundTripExactAtMismatchCount) {
+  // A requested segment count whose cosd(180/n) and std::cos(kPi/n) sagitta
+  // differ by a ULP must still round-trip exactly, with no extra segment.
+  SimplePolygon square = {{0, 0}, {20, 0}, {20, 20}, {0, 20}};
+  const int segments = 420;
+  const double delta = 5.0;
+  const double arcTol = (std::cos(kPi / segments) - 1.0) * -std::fabs(delta);
+  Polygons rounded = boolean2::Offset(
+      {square}, delta, boolean2::OffsetJoinType::Round, 2.0, arcTol);
+  ASSERT_EQ(rounded.size(), 1);
+  EXPECT_EQ(rounded[0].size(), segments + 4);
+}
+
+TEST(CrossSection, Boolean2DecomposeContainmentToleranceIsSizeScaledOffOrigin) {
+  // Off-origin rings: the containment epsilon must scale with the bbox SIZE,
+  // not the coordinate magnitude. A hole sticking out by 1e-10 (above the
+  // size-scaled eps, below a position-scaled one) is not contained, so it is
+  // dropped. A position-based scale would inflate eps and wrongly attach it.
+  const double k = 1000.0;
+  const double d = 1e-10;
+  SimplePolygon outer = {{k, k}, {k + 1, k}, {k + 1, k + 1}, {k, k + 1}};
+  SimplePolygon hole = {{k + 1 + d, k + 0.25},
+                        {k + 0.25, k + 0.25},
+                        {k + 0.25, k + 0.75},
+                        {k + 1 + d, k + 0.75}};
+  auto comps = boolean2::DecomposeByContainment({outer, hole});
+  ASSERT_EQ(comps.size(), 1);
+  EXPECT_EQ(comps[0].size(), 1);  // hole sticks out past the size-scaled eps
+}
 #endif
 
 TEST(CrossSection, FillRule) {
