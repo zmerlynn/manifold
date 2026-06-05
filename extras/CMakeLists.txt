@@ -50,6 +50,15 @@ if(MANIFOLD_CROSS_SECTION_BACKEND STREQUAL "boolean2")
   exportbin(measureDrift)
 endif()
 
+# Renders offset scenarios through whichever CrossSection backend is configured;
+# render_offset_c2_b2.sh builds both and composes a comparison HTML.
+if(MANIFOLD_CROSS_SECTION)
+  add_executable(renderOffsetScenarios render_offset_scenarios.cpp)
+  target_link_libraries(renderOffsetScenarios manifold)
+  target_compile_options(renderOffsetScenarios PRIVATE ${MANIFOLD_FLAGS})
+  exportbin(renderOffsetScenarios)
+endif()
+
 if(MANIFOLD_DEBUG)
   add_executable(minimizeTestcase minimize_testcase.cpp)
   target_link_libraries(
