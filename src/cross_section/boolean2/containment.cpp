@@ -24,6 +24,7 @@
 #include <vector>
 
 #include "../../utils.h"
+#include "manifold/optional_assert.h"
 #include "predicates.h"
 
 namespace manifold {
@@ -37,27 +38,14 @@ bool PointOnSegment(vec2 p, vec2 a, vec2 b, double eps) {
          p.y >= std::min(a.y, b.y) - eps && p.y <= std::max(a.y, b.y) + eps;
 }
 
-double RingScale(const SimplePolygon& ring) {
-  if (ring.empty()) return 0.0;
-  vec2 bmin(std::numeric_limits<double>::infinity(),
-            std::numeric_limits<double>::infinity());
-  vec2 bmax(-bmin.x, -bmin.y);
-  for (const vec2& v : ring) {
-    bmin.x = std::min(bmin.x, v.x);
-    bmin.y = std::min(bmin.y, v.y);
-    bmax.x = std::max(bmax.x, v.x);
-    bmax.y = std::max(bmax.y, v.y);
-  }
-  return std::max(bmax.x - bmin.x, bmax.y - bmin.y) * 0.5;
-}
-
 // Standard ray-cast point-in-polygon: cast +x ray from `p`, count
 // crossings of `ring`'s edges. Returns true when `p` is inside `ring`
 // or on its boundary. Boundary inclusion matters for containment
 // grouping: boolean output can contain a hole ring touching its outer
 // ring at a vertex, and that hole still belongs to the outer component.
-bool PointInRing(vec2 p, const SimplePolygon& ring) {
-  const double eps = EpsilonFromScale(RingScale(ring));
+// `eps` is `ring`'s scale-derived tolerance, hoisted in by the caller so it
+// is computed once per ring rather than once per query point.
+bool PointInRing(vec2 p, const SimplePolygon& ring, double eps) {
   bool inside = false;
   const int n = static_cast<int>(ring.size());
   for (int i = 0, j = n - 1; i < n; j = i++) {
@@ -71,39 +59,40 @@ bool PointInRing(vec2 p, const SimplePolygon& ring) {
   return inside;
 }
 
+// Half the larger bbox extent: the length scale feeding EpsilonFromScale.
+// This is a SIZE scale (extent), deliberately not Rect::Scale() (which is the
+// max absolute coordinate); the two diverge for rings far from the origin.
+double BoxScale(const Rect& box) {
+  const vec2 size = box.Size();
+  return 0.5 * std::max(size.x, size.y);
+}
+
 struct RingInfo {
-  vec2 bmin, bmax;  // bbox
-  double area;      // signed; CCW > 0, CW (hole) < 0
+  Rect box;     // bbox
+  double area;  // signed; CCW > 0, CW (hole) < 0
+  double eps;   // scale-derived tolerance, EpsilonFromScale(BoxScale(box))
 };
 
 RingInfo Summarize(const SimplePolygon& ring) {
   RingInfo r;
-  r.bmin = vec2(std::numeric_limits<double>::infinity(),
-                std::numeric_limits<double>::infinity());
-  r.bmax = vec2(-r.bmin.x, -r.bmin.y);
-  for (const auto& v : ring) {
-    r.bmin.x = std::min(r.bmin.x, v.x);
-    r.bmin.y = std::min(r.bmin.y, v.y);
-    r.bmax.x = std::max(r.bmax.x, v.x);
-    r.bmax.y = std::max(r.bmax.y, v.y);
-  }
+  for (const vec2& v : ring) r.box.Union(v);
   r.area = SignedArea(ring);
+  r.eps = EpsilonFromScale(BoxScale(r.box));
   return r;
 }
 
-double BoxScale(const RingInfo& r) {
-  return 0.5 * std::max(r.bmax.x - r.bmin.x, r.bmax.y - r.bmin.y);
-}
-
+// Tolerant bbox containment prefilter: is a's box inside b's box, inflated by
+// b's epsilon? Uses the same eps as the later ring test so it is never
+// stricter than that test.
 bool BoxInside(const RingInfo& a, const RingInfo& b) {
-  const double eps = EpsilonFromScale(BoxScale(b));
-  return a.bmin.x >= b.bmin.x - eps && a.bmin.y >= b.bmin.y - eps &&
-         a.bmax.x <= b.bmax.x + eps && a.bmax.y <= b.bmax.y + eps;
+  const double eps = b.eps;
+  return a.box.min.x >= b.box.min.x - eps && a.box.min.y >= b.box.min.y - eps &&
+         a.box.max.x <= b.box.max.x + eps && a.box.max.y <= b.box.max.y + eps;
 }
 
-bool RingInside(const SimplePolygon& a, const SimplePolygon& b) {
+bool RingInside(const SimplePolygon& a, const SimplePolygon& b, double bEps) {
   return std::all_of(a.begin(), a.end(),
-                     [&](const vec2& p) { return PointInRing(p, b); });
+                     [&](const vec2& p) { return PointInRing(p, b, bEps); });
 }
 
 }  // namespace
@@ -112,15 +101,23 @@ bool RingInside(const SimplePolygon& a, const SimplePolygon& b) {
 // directly contained holes.
 std::vector<Polygons> DecomposeByContainment(const Polygons& polys) {
   Polygons rings;
+  std::vector<RingInfo> info;
   rings.reserve(polys.size());
+  info.reserve(polys.size());
   for (const auto& r : polys) {
-    if (r.size() >= 3) rings.push_back(r);
+    if (r.size() < 3) continue;  // sub-3 rings bound no area
+    RingInfo ri = Summarize(r);
+    // Drop near-zero-area (collinear/sliver) rings before they leak as
+    // degenerate hole contours. Area is length^2, so the threshold is
+    // length * epsilon (scale-consistent), matching the CrossSection
+    // area-drop idiom rather than comparing an area against a length eps.
+    const vec2 size = ri.box.Size();
+    if (std::fabs(ri.area) <= std::max(size.x, size.y) * ri.eps) continue;
+    rings.push_back(r);
+    info.push_back(ri);
   }
   const int n = static_cast<int>(rings.size());
   if (n == 0) return {};
-  std::vector<RingInfo> info;
-  info.reserve(n);
-  for (const auto& r : rings) info.push_back(Summarize(r));
 
   // For each ring, find its parent: the smallest-area ring (by |area|)
   // that contains it. O(n^2) bbox/ring-in-poly check; fine for the
@@ -131,7 +128,7 @@ std::vector<Polygons> DecomposeByContainment(const Polygons& polys) {
     for (int j = 0; j < n; ++j) {
       if (i == j) continue;
       if (!BoxInside(info[i], info[j])) continue;
-      if (!RingInside(rings[i], rings[j])) continue;
+      if (!RingInside(rings[i], rings[j], info[j].eps)) continue;
       const double aj = std::fabs(info[j].area);
       if (aj < bestParentArea) {
         bestParentArea = aj;
@@ -139,38 +136,35 @@ std::vector<Polygons> DecomposeByContainment(const Polygons& polys) {
       }
     }
   }
-  // Each outermost positive ring (no parent, or parent is negative)
-  // seeds a component. Hole rings join the component of their (positive)
-  // parent. Positive rings nested inside negatives become new
-  // components.
+  // Every positive ring seeds a component, regardless of its parent's sign.
+  // For regularized Positive input a positive ring never nests directly in
+  // another positive ring, so this is the ordinary even-odd nesting; for raw
+  // input it makes positive-in-positive a deliberate double-region rather than
+  // a silent area drop.
   std::vector<int> compOf(n, -1);
   std::vector<Polygons> components;
-  // Pass 1: positive rings whose parent is negative-or-absent become
-  // component seeds.
   for (int i = 0; i < n; ++i) {
-    const bool positive = info[i].area > 0;
-    if (!positive) continue;
-    const int p = parent[i];
-    if (p < 0 || info[p].area < 0) {
-      compOf[i] = static_cast<int>(components.size());
-      components.emplace_back();
-      components.back().push_back(rings[i]);
-    }
+    if (info[i].area <= 0) continue;
+    compOf[i] = static_cast<int>(components.size());
+    components.emplace_back();
+    components.back().push_back(rings[i]);
   }
-  // Pass 2: holes attach to their positive parent's component.
+  // Hole rings attach to the component of their nearest positive ancestor.
   for (int i = 0; i < n; ++i) {
     if (info[i].area > 0) continue;  // skip outers
     int p = parent[i];
     // Walk up until we find a positive ring; that's the containing component.
-    // Simple-loop output from Positive regularization shouldn't produce
-    // hole-inside-hole,
-    // but a malformed parent chain would loop here forever; bound by the ring
-    // count.
+    // Bounded by the ring count in case a malformed parent chain loops.
     for (int hops = 0; p >= 0 && info[p].area < 0 && hops <= n; ++hops) {
       p = parent[p];
     }
     if (p < 0 || compOf[p] < 0) continue;  // orphan hole; drop
     components[compOf[p]].push_back(rings[i]);
+  }
+  // Seeding every positive ring above leaves none without a component.
+  for (int i = 0; i < n; ++i) {
+    DEBUG_ASSERT(info[i].area <= 0 || compOf[i] >= 0, logicErr,
+                 "positive ring left without a component");
   }
   return components;
 }
