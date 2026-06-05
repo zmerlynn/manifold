@@ -244,7 +244,16 @@ SimplePolygon OffsetContour(const SimplePolygon& contour, double delta,
         // unit normals, so use only the baseline unit-scale predicate epsilon
         // to avoid squaring a corner that is exactly on the limit.
         const double miterTieTol = EpsilonFromScale(1.0, /*k_budget=*/0);
-        if (dotN + miterTieTol < miterCosThresh) {
+        // Near-opposite normals make MiterPoint unbounded (it scales as
+        // 1/(1 + dotN)), and the miterLimit gate stops bounding it once
+        // 2/miterLimit^2 underflows miterTieTol (i.e. for very large
+        // miterLimit). Independently square such degenerate-sharp corners so
+        // the emitted coordinate stays bounded by sqrt(2 / kMinMiterDenom) *
+        // |delta|; 2e-12 caps it at ~1e6 * |delta|, far beyond any meaningful
+        // miter, so honest finite limits are unaffected.
+        constexpr double kMinMiterDenom = 2e-12;
+        if (dotN + miterTieTol < miterCosThresh ||
+            1.0 + dotN < kMinMiterDenom) {
           AppendSquareJoin(out, V, nPrev, nNext, delta);
         } else {
           out.push_back(MiterPoint(V, nPrev, nNext, delta));
