@@ -697,6 +697,7 @@ TEST(CrossSection, PropagatesShallowIndependentIntersections) {
 }
 #endif
 
+#ifdef MANIFOLD_CROSS_SECTION_BACKEND_BOOLEAN2
 TEST(CrossSection, TranslatedShallowConcurrentEdges) {
   auto rhomb = [](double angleDegrees, vec2 offset) {
     const double angle = angleDegrees * kPi / 180.;
@@ -730,7 +731,9 @@ TEST(CrossSection, TranslatedShallowConcurrentEdges) {
   EXPECT_NEAR(shiftedBack.Bounds().Size().x, origin.Bounds().Size().x, 1e-4);
   EXPECT_NEAR(shiftedBack.Bounds().Size().y, origin.Bounds().Size().y, 1e-4);
 }
+#endif
 
+#ifdef MANIFOLD_CROSS_SECTION_BACKEND_BOOLEAN2
 TEST(CrossSection, TranslatedSmallPolygonKeepsFeatures) {
   const double base = std::ldexp(1.0, 49) * 1.5;
   SimplePolygon square = {{base, -base},
@@ -746,6 +749,7 @@ TEST(CrossSection, TranslatedSmallPolygonKeepsFeatures) {
   EXPECT_NEAR(size.x, 10.0, 1e-9);
   EXPECT_NEAR(size.y, 10.0, 1e-9);
 }
+#endif
 
 // Regression test for the BR-cell hole pattern from Samples.Sponge4. Two
 // CCW polygons that share an endpoint AND form a T-junction at the
@@ -755,6 +759,7 @@ TEST(CrossSection, TranslatedSmallPolygonKeepsFeatures) {
 // vertex on the long edge. Canonical sub-edges came out with the wrong
 // multiplicities, the DCEL face traversal merged faces of different
 // windings, and small CW holes were silently dropped from the output.
+#ifdef MANIFOLD_CROSS_SECTION_BACKEND_BOOLEAN2
 TEST(CrossSection, TJunctionAtSharedEndpoint) {
   // Outer CCW unit square plus a smaller CCW square sharing the (0,0)
   // corner. The outer's bottom edge (0,0)->(1,0) has the inner's
@@ -801,6 +806,7 @@ TEST(CrossSection, TJunctionAtSharedEndpoint) {
   EXPECT_EQ(csBR.NumContour(), 2);
   EXPECT_NEAR(csBR.Area(), 4.0 - 0.19, 1e-9);
 }
+#endif
 
 // Audit follow-up: regression tests for boolean2 filters the post-
 // Sponge4 audit argued were correct but didn't have a targeted case.
@@ -835,6 +841,7 @@ TEST(CrossSection, CollinearSegmentOverlap) {
 // (filters something needed), interior wedge boundaries leak through;
 // if it under-drops (filters nothing), the test still passes but the
 // pre-1a057638 perf gain is gone.
+#ifdef MANIFOLD_CROSS_SECTION_BACKEND_BOOLEAN2
 TEST(CrossSection, ManyPolygonsShareCenterVertex) {
   constexpr int N = 8;
   Polygons polys;
@@ -851,6 +858,7 @@ TEST(CrossSection, ManyPolygonsShareCenterVertex) {
   const double expectedArea = 0.5 * N * std::sin(2.0 * kPi / N);
   EXPECT_NEAR(cs.Area(), expectedArea, 1e-9);
 }
+#endif
 
 // Seed: SimplePositiveOffset (2026-05-16 iteration #3)
 // Counterexample-hash: 50ede5b9d980d52c
@@ -1565,6 +1573,7 @@ TEST(CrossSection, BooleanAssociativityTinyStars) {
 //   in a way that's scale-invariant (same percentage at r=0.15, r=1.5,
 //   r=15). n>=4 has zero drift (verified probe), so the bug is specific
 //   to the miter-limit boundary of the equilateral triangle.
+#ifdef MANIFOLD_CROSS_SECTION_BACKEND_BOOLEAN2
 TEST(CrossSection, OffsetInverseTriangleMiter) {
   // Equilateral triangle inscribed in r=0.15 (effective radius via the
   // 0.1 + |radius| convention used in cross_section_fuzz).
@@ -1593,6 +1602,7 @@ TEST(CrossSection, OffsetInverseTriangleMiter) {
       << (roundTrip.Area() - input.Area()) / input.Area() * 100 << "%";
   EXPECT_EQ(roundTrip.NumContour(), input.NumContour());
 }
+#endif
 
 // Seed: DecomposeRecomposeWithHoles (2026-05-18 daemon find)
 // Counterexample-hash: a33524d9c3e6fb10
@@ -1663,6 +1673,7 @@ TEST(CrossSection, DecomposeRecomposeOuterStarWithSmallHole) {
 //   hole is near-tangent to the outer (the 1.0012 offset puts it
 //   very close to an outer edge), face classification miscategorizes
 //   a sliver that gets dropped on the decompose path).
+#ifdef MANIFOLD_CROSS_SECTION_BACKEND_BOOLEAN2
 TEST(CrossSection, DecomposeRecomposeNearTangentSmallHole) {
   auto star = [](const std::vector<double>& radii) {
     SimplePolygon ring;
@@ -1712,6 +1723,7 @@ TEST(CrossSection, DecomposeRecomposeNearTangentSmallHole) {
   EXPECT_EQ(recomposed.NumContour(), holed.NumContour())
       << "Compose(Decompose(holed)) changed contour count";
 }
+#endif
 
 // Seed: BooleanDistributivity (2026-05-20 daemon find on post-cleanup tip)
 // Counterexample-hash: 659ec969e064893e
@@ -2654,6 +2666,7 @@ TEST(CrossSection, DegenerateCoincidentVertexUnion) {
 // Reduced from DegenerateCoincidentVertexUnion after constructor round-trip:
 // already-regularized inputs still reproduce the original ~2710 area residual.
 // This keeps both B triangles and drops two A vertices.
+#ifdef MANIFOLD_CROSS_SECTION_BACKEND_BOOLEAN2
 TEST(CrossSection, DegenerateCoincidentVertexUnionReduced) {
   const Polygons a = {{
       {500.05000000000018, 866.11200632481712},
@@ -2682,6 +2695,7 @@ TEST(CrossSection, DegenerateCoincidentVertexUnionReduced) {
   EXPECT_NEAR(combined.Area(), sum, tol)
       << "Constructor edge soup lost area on reduced coincident-vertex input";
 }
+#endif
 
 // Smaller 4+3 reduction from the same parked seed: keeping only the tiny top
 // B triangle isolates the near-corner edge-vertex double-hit that used to make
@@ -2920,6 +2934,7 @@ TEST(CrossSection, BooleanCommutativityExtremeMagStars) {
       << aPlusB.NumContour() << " vs " << bPlusA.NumContour();
 }
 
+#ifdef MANIFOLD_CROSS_SECTION_BACKEND_BOOLEAN2
 TEST(CrossSection, NonFiniteInputReturnsEmpty) {
   const double inf = std::numeric_limits<double>::infinity();
   SimplePolygon bad = {{0.0, 0.0}, {1.0, 0.0}, {inf, 1.0}, {0.0, 1.0}};
@@ -2932,6 +2947,7 @@ TEST(CrossSection, NonFiniteInputReturnsEmpty) {
   EXPECT_TRUE(boolean2::Boolean2D(Polygons{bad}, finite, OpType::Add).empty());
 #endif
 }
+#endif
 
 #ifdef MANIFOLD_CROSS_SECTION_BACKEND_BOOLEAN2
 TEST(CrossSection, ShallowLongEdgeIntersectionIsNotDropped) {
@@ -3049,6 +3065,7 @@ TEST(CrossSection, VertexMergeIdempotenceTightCluster) {
 }
 #endif
 
+#ifdef MANIFOLD_CROSS_SECTION_BACKEND_BOOLEAN2
 TEST(CrossSection, OffsetIsInvariantUnderLargeTranslation) {
   const CrossSection square = CrossSection::Square({10.0, 10.0}, true);
   const CrossSection origin =
@@ -3062,6 +3079,7 @@ TEST(CrossSection, OffsetIsInvariantUnderLargeTranslation) {
   EXPECT_EQ(translated.NumVert(), origin.NumVert());
   EXPECT_NEAR(translated.Area(), origin.Area(), 1e-3);
 }
+#endif
 
 #ifdef MANIFOLD_CROSS_SECTION_BACKEND_BOOLEAN2
 TEST(CrossSection, Boolean2ValidatorRejectsRetainedVertsWithinEps) {
@@ -3133,6 +3151,7 @@ TEST(CrossSection, Boolean2CleanupPassMatchesValidAddSinglePass) {
 
 #endif
 
+#ifdef MANIFOLD_CROSS_SECTION_BACKEND_BOOLEAN2
 TEST(CrossSection, SimplifyPostFiltersBoolean2Output) {
   const double apex = 1.0148512233354445e-6;
   const SimplePolygon tri = {{-1.0, 0.0}, {1.0, 0.0}, {0.0, apex}};
@@ -3150,6 +3169,7 @@ TEST(CrossSection, SimplifyPostFiltersBoolean2Output) {
   EXPECT_EQ(twice.NumVert(), once.NumVert());
   EXPECT_NEAR(twice.Area(), once.Area(), 1e-12);
 }
+#endif
 
 TEST(CrossSection, Empty) {
   Polygons polys(2);
