@@ -567,7 +567,10 @@ TEST(CrossSection, MiterOffset) {
 TEST(CrossSection, OffsetWithHole) {
   SimplePolygon outer = {{-10, -10}, {10, -10}, {10, 10}, {-10, 10}};
   SimplePolygon hole = {{-2, -2}, {-2, 2}, {2, 2}, {2, -2}};
-  CrossSection cs({outer, hole}, CrossSection::FillRule::EvenOdd);
+  // CCW outer + CW hole are already oriented for Positive fill, which yields
+  // the same annulus as EvenOdd here and is the only rule the boolean2 backend
+  // supports.
+  CrossSection cs({outer, hole}, CrossSection::FillRule::Positive);
 
   auto inflated = cs.Offset(1., CrossSection::JoinType::Miter);
   EXPECT_NEAR(inflated.Area(), 484. - 4., 0.01);
@@ -611,7 +614,7 @@ TEST(CrossSection, FourConcurrentEdges) {
 
   Polygons polys;
   for (double angle : {0., 45., 90., 135.}) polys.push_back(rhomb(angle));
-  CrossSection cs(polys, CrossSection::FillRule::NonZero);
+  CrossSection cs(polys, CrossSection::FillRule::Positive);
 
   EXPECT_EQ(cs.NumContour(), 1);
   EXPECT_NEAR(cs.Area(), 0.644423, 1e-4);
@@ -639,7 +642,7 @@ TEST(CrossSection, ConcurrentIndependentEdgePairs) {
 
   Polygons polys;
   for (double angle : {0., 30., 90., 120.}) polys.push_back(rhomb(angle));
-  CrossSection cs(polys, CrossSection::FillRule::NonZero);
+  CrossSection cs(polys, CrossSection::FillRule::Positive);
 
   EXPECT_EQ(cs.NumContour(), 1);
   EXPECT_NEAR(cs.Area(), 0.527482, 1e-4);
@@ -715,8 +718,9 @@ TEST(CrossSection, TranslatedShallowConcurrentEdges) {
   };
 
   const double base = std::ldexp(1.0, 40);
-  CrossSection origin(polysAt({0., 0.}), CrossSection::FillRule::NonZero);
-  CrossSection shifted(polysAt({base, -base}), CrossSection::FillRule::NonZero);
+  CrossSection origin(polysAt({0., 0.}), CrossSection::FillRule::Positive);
+  CrossSection shifted(polysAt({base, -base}),
+                       CrossSection::FillRule::Positive);
   CrossSection shiftedBack = shifted.Translate({-base, base});
 
   EXPECT_EQ(origin.NumContour(), 1);
@@ -815,7 +819,7 @@ TEST(CrossSection, CollinearSegmentOverlap) {
   SimplePolygon A = {{0.0, 0.0}, {10.0, 0.0}, {10.0, 1.0}, {0.0, 1.0}};
   SimplePolygon B = {{3.0, 0.0}, {7.0, 0.0}, {7.0, 2.0}, {3.0, 2.0}};
 
-  CrossSection cs(Polygons{A, B}, CrossSection::FillRule::NonZero);
+  CrossSection cs(Polygons{A, B}, CrossSection::FillRule::Positive);
 
   EXPECT_EQ(cs.NumContour(), 1);
   // A = 10, B = 8, overlap (4x1 strip on shared bottom) = 4, union = 14.
@@ -841,7 +845,7 @@ TEST(CrossSection, ManyPolygonsShareCenterVertex) {
                      {std::cos(a1), std::sin(a1)},
                      {std::cos(a2), std::sin(a2)}});
   }
-  CrossSection cs(polys, CrossSection::FillRule::NonZero);
+  CrossSection cs(polys, CrossSection::FillRule::Positive);
 
   EXPECT_EQ(cs.NumContour(), 1);
   const double expectedArea = 0.5 * N * std::sin(2.0 * kPi / N);
@@ -3135,7 +3139,7 @@ TEST(CrossSection, SimplifyPostFiltersBoolean2Output) {
   const SimplePolygon quad = {
       {-0.05, -1.0}, {0.05, -1.0}, {0.05, 2.0}, {-0.05, 2.0}};
   const CrossSection input(Polygons{tri, quad},
-                           CrossSection::FillRule::NonZero);
+                           CrossSection::FillRule::Positive);
 
   const CrossSection once = input.Simplify();
   const CrossSection twice = once.Simplify();
@@ -3229,7 +3233,7 @@ TEST(CrossSection, DecomposeNestedHoleAndIsland) {
   SimplePolygon outer = {{-5, -5}, {5, -5}, {5, 5}, {-5, 5}};
   SimplePolygon hole = {{-3, -3}, {-3, 3}, {3, 3}, {3, -3}};
   SimplePolygon island = {{-1, -1}, {1, -1}, {1, 1}, {-1, 1}};
-  CrossSection input({outer, hole, island}, CrossSection::FillRule::EvenOdd);
+  CrossSection input({outer, hole, island}, CrossSection::FillRule::Positive);
 
   auto components = input.Decompose();
   ASSERT_EQ(components.size(), 2);
@@ -3257,7 +3261,7 @@ TEST(CrossSection, Boolean2OffsetRoundArcToleranceUsesRequestedSegments) {
   SimplePolygon square = {{0, 0}, {20, 0}, {20, 20}, {0, 20}};
   const int segments = 20;
   const double delta = 5.0;
-  const double arcTol = (std::cos(kPi / segments) - 1.0) * -std::fabs(delta);
+  const double arcTol = (math::cos(kPi / segments) - 1.0) * -std::fabs(delta);
 
   Polygons rounded = boolean2::Offset(
       {square}, delta, boolean2::OffsetJoinType::Round, 2.0, arcTol);
@@ -3375,12 +3379,12 @@ TEST(CrossSection, Boolean2DecomposeContainmentKeepsNestedPositiveRing) {
 }
 
 TEST(CrossSection, Boolean2OffsetRoundArcRoundTripExactAtMismatchCount) {
-  // A requested segment count whose cosd(180/n) and std::cos(kPi/n) sagitta
-  // differ by a ULP must still round-trip exactly, with no extra segment.
+  // A requested segment count where the old cosd(180/n) basis differed by a ULP
+  // from the public path's math::cos(kPi/n) must still round-trip exactly.
   SimplePolygon square = {{0, 0}, {20, 0}, {20, 20}, {0, 20}};
   const int segments = 420;
   const double delta = 5.0;
-  const double arcTol = (std::cos(kPi / segments) - 1.0) * -std::fabs(delta);
+  const double arcTol = (math::cos(kPi / segments) - 1.0) * -std::fabs(delta);
   Polygons rounded = boolean2::Offset(
       {square}, delta, boolean2::OffsetJoinType::Round, 2.0, arcTol);
   ASSERT_EQ(rounded.size(), 1);
@@ -3678,7 +3682,7 @@ TEST(CrossSection, OutEdgesToPolygonsKeepsNearDistinctVertex) {
   EXPECT_EQ(polys[0].size(), 6u);
   EXPECT_NEAR(boolean2::TotalSignedArea(polys), 1.0 + kDelta, 1e-12);
 
-  const CrossSection reconsumed(polys, CrossSection::FillRule::NonZero);
+  const CrossSection reconsumed(polys, CrossSection::FillRule::Positive);
   EXPECT_FALSE(reconsumed.IsEmpty());
   EXPECT_NEAR(reconsumed.Area(), 1.0, 1e-9);
   const Manifold solid = Manifold::Extrude(reconsumed.ToPolygons(), 1.0);
