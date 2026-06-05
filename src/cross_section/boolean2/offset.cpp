@@ -206,7 +206,7 @@ SimplePolygon OffsetContour(const SimplePolygon& contour, double delta,
     // concave indent = solid's convex bulge into the hole). Negative
     // delta flips the offset role (a solid-convex corner becomes a
     // shrinking-corner that needs a miter), hence the `* deltaSign`.
-    const double cross = ePrev.x * eNext.y - ePrev.y * eNext.x;
+    const double cross = la::cross(ePrev, eNext);
     const double convex = cross * deltaSign;
     // Use the same scale-derived collinearity shape as CCW(): the tolerance is
     // a length from the larger adjacent edge, not an absolute cross-product.
@@ -291,7 +291,7 @@ Polygons RemoveCollinear(Polygons polys, double eps) {
       const vec2 pn = vec2(N.x - P.x, N.y - P.y);
       const double pnLen2 = dot(pn, pn);
       if (pnLen2 > 0) {
-        const double cross = ePrev.x * eNext.y - ePrev.y * eNext.x;
+        const double cross = la::cross(ePrev, eNext);
         if (cross * cross < eps2 * pnLen2) continue;
       }
       kept.push_back(V);
@@ -306,7 +306,7 @@ Polygons RemoveCollinear(Polygons polys, double eps) {
       const vec2 eNext = vec2(N.x - V.x, N.y - V.y);
       const vec2 pn = vec2(N.x - P.x, N.y - P.y);
       const double pnLen2 = dot(pn, pn);
-      const double cross = ePrev.x * eNext.y - ePrev.y * eNext.x;
+      const double cross = la::cross(ePrev, eNext);
       if (pnLen2 > 0 && cross * cross < eps2 * pnLen2) {
         kept.erase(kept.begin());
       } else {
