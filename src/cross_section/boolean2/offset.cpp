@@ -139,8 +139,10 @@ void AppendSquareJoin(SimplePolygon& out, vec2 V, vec2 nPrev, vec2 nNext,
   if (cosHalf <= 0) return;  // reflex; convex caller should not invoke this
   const double sinHalf = std::sqrt(std::max(0.0, 1.0 - cosHalf * cosHalf));
   const double half = std::fabs(delta) * sinHalf / (1.0 + cosHalf);
-  const double absDelta = std::fabs(delta);
-  const vec2 mid = V + absDelta * bis;
+  // Signed delta: the cap follows the offset side (outward for delta > 0,
+  // inward for inset). Using std::fabs here would mirror the cap to the wrong
+  // side for inset, which the Positive union cannot recover.
+  const vec2 mid = V + delta * bis;
   out.push_back(mid - half * tang);
   out.push_back(mid + half * tang);
 }
