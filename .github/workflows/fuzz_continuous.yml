@@ -1,0 +1,203 @@
+# Continuous fuzz on this fork. Public-repo Actions is free with no minute
+# budget, so this runs each CrossSectionFuzz target for ~40 min every hour,
+# parallelised across the targets. Corpus accumulates between runs via
+# actions/cache. Reproducers from any failing run are uploaded as artifacts.
+# Failure notification is handled via the repo's email notifications - no
+# issues are filed.
+#
+# Fuzz engine: FuzzTest's libFuzzer compatibility mode
+# (-DFUZZTEST_COMPATIBILITY_MODE=libfuzzer). FuzzTest's own engine doesn't
+# persist its in-memory corpus to disk, which made the actions/cache save
+# step a no-op (build/fuzz-corpus stayed empty). libFuzzer writes every
+# new coverage-expanding input as one file per input in the positional
+# corpus_dir arg, so cache restore + save actually carry coverage forward.
+#
+# Parallelism: -DMANIFOLD_PAR=ON enables the TBB-parallelized boolean2
+# paths; -DMANIFOLD_USE_BUILTIN_TBB=ON pulls oneTBB v2022.3.0 from upstream
+# (system libtbb was built without sanitizer support); -DTBB_SANITIZE=
+# address makes oneTBB sanitizer-aware so ASan can see across fiber
+# switches without false positives. Adds ~5 min to the build step
+# (oneTBB FetchContent + compile), so total is ~10m build + 40m fuzz =
+# ~50m, comfortably under the 60m timeout. Validated locally on the
+# daemon clone (1 full 38-target cycle clean, no sanitizer complaints).
+#
+# Why 35 min and not 40+: with 40m fuzz + 5-8m build + 2-3m setup we ended
+# up at 45-48m per job - inside the 60m timeout-minutes, but the slack
+# against the next hourly cron was only 12-15m. Add cron jitter (GitHub
+# best-effort can slip 5-10m) and a single job that runs 50m starves the
+# next run's same-target job of its per-target concurrency.group slot.
+# That kicks off a queue cascade where runs pile up 3-4 deep. 35 min fuzz
+# + 8m build = 43m total, leaves 17m clear slack each hour, so the
+# pipeline self-equilibrates after one cron cycle.
+#
+# WHERE THIS LIVES: this file is intentionally NOT on the upstream-bound PR
+# branches. Keep it on a fork-only branch (default branch for the fork) so
+# it doesn't leak into PRs.
+
+name: fuzz-continuous
+
+on:
+  schedule:
+    # Hourly. Cron is best-effort; expect occasional skipped slots.
+    - cron: '0 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  fuzz:
+    name: ${{ matrix.target }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    # Per-target concurrency: don't kill an in-flight fuzz to launch the
+    # next scheduled run. With --fuzz_for=40m + ~5m build, total job time
+    # is ~45m, so overlaps should be rare in practice.
+    # Lives at job scope (not workflow scope) so `matrix.target` resolves.
+    concurrency:
+      group: fuzz-continuous-${{ matrix.target }}
+      cancel-in-progress: false
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - BooleanRobustness
+          - OffsetRobustness
+          - ManifoldExtrudeRoundTrip
+          - ManifoldSimpleExtrudeRoundTrip
+          - BooleanExtrudeRoundTrip
+          - PrismBooleanMatchesCrossSection
+          - ManifoldTransformedExtrudeRoundTrip
+          - DecomposeComposeAndHull
+          - BatchBooleanSeparated
+          - DecomposedExtrusionsRecompose
+          - TranslatedExtrusionSliceMatchesCrossSection
+          - RotatedExtrusionSliceMatchesCrossSection
+          - HoledBooleanExtrudeRoundTrip
+          - WarpAffineEquivalence
+          - MirrorExtrudeRoundTrip
+          - SimpleBooleanIdentities
+          - ApexSkipNearLine
+          - TranslationInvariance
+          - SubtractInvariants
+          - BooleanCommutativity
+          - BooleanAssociativity
+          - BooleanDistributivity
+          - ScaleInvariance
+          - RotationInvariance
+          - OffsetIdentityAtZero
+          - EmptyIdentities
+          - DoubleMirrorIdentity
+          - DecomposeRecomposeWithHoles
+          - OffsetInverseConvex
+          - HullIdempotence
+          - VertexMergeIdempotence
+          - BVHPairEnumerationMatchesBruteForce
+          - CanonicalSubEdgeIdempotence
+          - WindingFilterStarburstStress
+          - PredicatesIdentities
+          - InputLoopOrderInvariance
+          - LargeEdgeCountSelfUnion
+          - DegenerateInputFuzz
+          - TinyFeatureNearCorner
+          - RemoveOverlapsDeterminismAcrossThreadCounts
+          - SimplePositiveOffset
+          - OffsetExtrudeRoundTrip
+          - ManifoldHoledExtrudeRoundTrip
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install apt packages
+        uses: awalsh128/cache-apt-pkgs-action@v1.6.0
+        with:
+          packages: libgtest-dev clang cmake libtbb-dev
+          version: 1
+
+      - name: Clone fuzztest
+        uses: ./.github/actions/git-clone
+        with:
+          name: fuzztest
+          url: https://github.com/google/fuzztest.git
+          rev: f1e26613f66997aa09d3026762e275de22b2daae
+
+      # Corpus accumulates across runs as one-file-per-input (libFuzzer
+      # format). Save under a run-specific key, restore from the most-
+      # recent matching prefix. Per-target path so each fuzzer owns its
+      # own corpus directory.
+      - name: Restore fuzz corpus
+        uses: actions/cache/restore@v4
+        with:
+          path: build/fuzz-corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: |
+            fuzz-corpus-${{ matrix.target }}-
+
+      - name: Build (RelWithDebInfo + ASan + UBSan + libFuzzer-compat)
+        run: |
+          cmake \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_C_FLAGS="-fsanitize=address,undefined" \
+            -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined" \
+            -DCMAKE_SHARED_LINKER_FLAGS="-fsanitize=address,undefined" \
+            -DMANIFOLD_STRICT=ON \
+            -DMANIFOLD_DEBUG=ON \
+            -DMANIFOLD_FUZZ=ON \
+            -DMANIFOLD_PYBIND=OFF \
+            -DCMAKE_C_COMPILER=clang \
+            -DCMAKE_CXX_COMPILER=clang++ \
+            -DMANIFOLD_CROSS_SECTION=ON \
+            -DFUZZTEST_COMPATIBILITY_MODE=libfuzzer \
+            -DMANIFOLD_PAR=ON \
+            -DMANIFOLD_USE_BUILTIN_TBB=ON \
+            -DTBB_SANITIZE=address \
+            -DFETCHCONTENT_SOURCE_DIR_FUZZTEST=fuzztest \
+            . -B build
+          # Request the cross_section_fuzz target explicitly. If CMake's
+          # `if(MANIFOLD_CROSS_SECTION)` block in test/CMakeLists.txt
+          # silently didn't add the target (it has happened in cross-
+          # repo configurations), the build fails loudly here rather
+          # than silently producing no binary.
+          ASAN_OPTIONS=detect_container_overflow=0 \
+            cmake --build build -j$(nproc) --target cross_section_fuzz
+
+      - name: Fuzz ${{ matrix.target }} (40 min)
+        id: fuzz
+        run: |
+          export ASAN_OPTIONS=detect_container_overflow=0:halt_on_error=0:abort_on_error=0
+          export UBSAN_OPTIONS=halt_on_error=0:print_stacktrace=0
+          mkdir -p build/fuzz-corpus/${{ matrix.target }}
+          mkdir -p build/fuzz-artifacts/${{ matrix.target }}
+          # libFuzzer-compat invocation. Positional arg is the corpus
+          # dir (read at startup, written as new coverage-expanding
+          # inputs are discovered). -artifact_prefix is where crash
+          # inputs land. --fuzz= selects which FUZZ_TEST in this binary.
+          ./build/test/cross_section_fuzz \
+            --fuzz=CrossSectionFuzz.${{ matrix.target }} \
+            build/fuzz-corpus/${{ matrix.target }} \
+            -max_total_time=2100 \
+            -timeout=60 \
+            -artifact_prefix=build/fuzz-artifacts/${{ matrix.target }}/ \
+            -print_final_stats=1
+
+      # Always save the corpus (success or failure) so coverage carries forward.
+      - name: Save fuzz corpus
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: build/fuzz-corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+
+      - name: Upload reproducer on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reproducer-${{ matrix.target }}-${{ github.run_id }}
+          path: |
+            build/fuzz-artifacts/${{ matrix.target }}/crash-*
+            build/fuzz-artifacts/${{ matrix.target }}/oom-*
+            build/fuzz-artifacts/${{ matrix.target }}/timeout-*
+            build/fuzz-artifacts/${{ matrix.target }}/leak-*
+          if-no-files-found: warn
+          retention-days: 30
