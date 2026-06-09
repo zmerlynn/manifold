@@ -18,6 +18,7 @@
 #include "csg_tree.h"
 #include "execution_impl.h"
 #include "impl.h"
+#include "overlap_removal.h"
 #include "parallel.h"
 #include "shared.h"
 
@@ -406,6 +407,25 @@ Manifold Manifold::Simplify(double tolerance) const {
   impl->SortGeometry();
   impl->tolerance_ = oldTolerance;
   return Manifold(impl);
+}
+
+/**
+ * Removes geometric self-intersection pierces from this Manifold.
+ *
+ * Routes to overlap_removal::RunOverlapRemoval which composes the
+ * full pipeline (steps 1-13 of Emmett #289 + pair-sym +
+ * pierce/drift guard). Pierce-monotonicity guarantee enforced by
+ * the guard: returned manifold's pierce count never exceeds input's.
+ * Falls back to merged input when pipeline output is non-manifold
+ * or has unacceptable volume drift.
+ */
+Manifold Manifold::RemoveSelfIntersections() const {
+  auto leafImpl = GetCsgLeafNode().GetImpl();
+  if (leafImpl->status_ != Error::NoError)
+    return PropagateStatus(leafImpl->status_);
+  auto [out, dbg] = overlap_removal::RunOverlapRemoval(*this);
+  (void)dbg;
+  return out;
 }
 
 /**

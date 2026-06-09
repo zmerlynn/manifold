@@ -351,6 +351,12 @@ ManifoldManifold* manifold_simplify(void* mem, ManifoldManifold* m,
   return to_c(new (mem) Manifold(simplified));
 }
 
+ManifoldManifold* manifold_remove_self_intersections(void* mem,
+                                                     ManifoldManifold* m) {
+  auto cleaned = from_c(m)->RemoveSelfIntersections();
+  return to_c(new (mem) Manifold(cleaned));
+}
+
 ManifoldManifold* manifold_empty(void* mem) {
   return to_c(new (mem) Manifold());
 }

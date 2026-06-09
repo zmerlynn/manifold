@@ -637,12 +637,20 @@ TEST(CBIND, tolerance) {
   EXPECT_EQ(manifold_status(simplified), MANIFOLD_NO_ERROR);
   EXPECT_LE(manifold_num_tri(simplified), manifold_num_tri(sphere));
 
+  // RemoveSelfIntersections on a clean sphere is a no-op (= no
+  // self-intersections to remove); should return a valid manifold.
+  ManifoldManifold* clean =
+      manifold_remove_self_intersections(alloc_manifold_buffer(), sphere);
+  EXPECT_EQ(manifold_status(clean), MANIFOLD_NO_ERROR);
+
   manifold_destruct_manifold(sphere);
   manifold_destruct_manifold(with_tol);
   manifold_destruct_manifold(simplified);
+  manifold_destruct_manifold(clean);
   free(sphere);
   free(with_tol);
   free(simplified);
+  free(clean);
 }
 
 TEST(CBIND, num_prop_vert) {

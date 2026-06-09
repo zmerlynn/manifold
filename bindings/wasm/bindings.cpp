@@ -208,6 +208,7 @@ EMSCRIPTEN_BINDINGS(whatever) {
       .function("tolerance", &Manifold::GetTolerance)
       .function("setTolerance", &Manifold::SetTolerance)
       .function("_Simplify", &Manifold::Simplify)
+      .function("_RemoveSelfIntersections", &Manifold::RemoveSelfIntersections)
       .function("genus", &Manifold::Genus)
       .function("volume", &Manifold::Volume)
       .function("surfaceArea", &Manifold::SurfaceArea)

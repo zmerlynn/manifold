@@ -43,10 +43,12 @@ set(
   impl.cpp
   manifold.cpp
   minkowski.cpp
+  overlap_removal.cpp
   polygon.cpp
   properties.cpp
   quickhull.cpp
   sdf.cpp
+  self_mesh_analysis.cpp
   smoothing.cpp
   sort.cpp
   subdivision.cpp
@@ -75,6 +77,7 @@ set(
   impl.h
   iters.h
   mesh_fixes.h
+  overlap_removal.h
   parallel.h
   polygon_internal.h
   quickhull.h

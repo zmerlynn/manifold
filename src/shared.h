@@ -30,6 +30,47 @@ inline double MaxEpsilon(double minEpsilon, const Box& bBox) {
   return std::isfinite(epsilon) ? epsilon : -1;
 }
 
+/**
+ * Smith's alpha-budget epsilon formula (UCAM-CL-TR-766 §8):
+ *
+ *     eps = (k_budget + 1) * sqrt(153) * u * L_pow2
+ *
+ * where u = 2^-53 (double-precision unit roundoff), sqrt(153) ~= 12.37
+ * is Smith's per-intersection coefficient bound, k_budget is the
+ * caller's expected upper bound on how many times any one edge may be
+ * adjusted (default 1000), and L_pow2 is the scale L rounded up to the
+ * nearest power of 2 (Smith's analysis assumes this).
+ *
+ * Distinct from `MaxEpsilon` / `kPrecision * scale` above:
+ * - `MaxEpsilon` returns the minimum representable position spacing
+ *   at this scale (~ulp-floor), used for "are these two verts the
+ *   same point?" decisions.
+ * - `AlphaBudgetEpsilon` returns the maximum cumulative position drift
+ *   bound over k_budget operations, used for "is this geometric
+ *   feature still resolved after k operations?" decisions.
+ *
+ * For a single boolean operation on inputs at scale L, both sit in the
+ * same order of magnitude (L * 1e-12 vs. L * 1e-9). Smith's bound is
+ * larger by ~k_budget * sqrt(153) ~= 12000x because it budgets
+ * iterated operations.
+ *
+ * Used by the 2D overlap-removal prototype in extras/overlap2d_proto.cpp
+ * (Smith framework is the correctness story there); also wraps for
+ * the 3D spike in extras/overlap3d_proto.cpp. See docs/Overlap2D.md
+ * and docs/Overlap3D.md.
+ */
+inline double AlphaBudgetEpsilon(double L, int k_budget = 1000) {
+  // u = 2^-53 for double-precision IEEE 754.
+  constexpr double kU = 1.110223024625156540423631668e-16;
+  // Smith's per-intersection coefficient bound: sqrt(153) ~= 12.37.
+  constexpr double kAlphaCoeff = 12.37;
+  if (L <= 0) return 0;
+  int expBits;
+  std::frexp(L, &expBits);
+  const double L_pow2 = std::ldexp(1.0, expBits);
+  return (k_budget + 1) * kAlphaCoeff * kU * L_pow2;
+}
+
 inline int NextHalfedge(int current) {
   current += current % 3 == 2 ? -2 : 1;
   return current;

@@ -214,6 +214,47 @@ class Manifold {
   Manifold WarpBatch(std::function<void(VecView<vec3>)>) const;
   Manifold SetTolerance(double) const;
   Manifold Simplify(double tolerance = 0) const;
+
+  /**
+   * Removes geometric self-intersection pierces from this Manifold.
+   *
+   * Boolean operations produce topology-manifold output (= every
+   * edge is shared by exactly two triangles) but the result may
+   * still contain geometric self-intersections — pairs of triangles
+   * whose interiors cross. This method attempts to remove those
+   * pierces while preserving topology manifold-ness.
+   *
+   * Guarantees:
+   *   - Pierce-monotonicity: the returned manifold's self-
+   *     intersection count never exceeds the input's. If the
+   *     pipeline cannot produce a strictly improved output, the
+   *     input is returned unchanged.
+   *   - Fallback semantics: returns merged input on any of these:
+   *     pipeline output is non-manifold, output volume drift > 50%,
+   *     output volume sign-flipped, or any internal exception.
+   *
+   * Coverage notes: clean Boolean results, offset compositions, and
+   * single-Subtract carve-outs typically reach zero residual pierces.
+   * Two known classes of input fall back to input by design:
+   *   1. Inputs whose `tolerance_` was inflated by an upstream
+   *      Boolean op involving extreme-scale geometry (= the Boolean
+   *      engine inherits the larger operand's tolerance instead of
+   *      re-inferring from the result's bbox; tracked separately as
+   *      a Boolean-engine bug).
+   *   2. Inputs with dense near-coincident face boundaries that
+   *      produce many sliver triangles in the chord region. The cap
+   *      walker can absorb a small number of slivers but not
+   *      hundreds; tracked as a Boolean-engine sliver bug.
+   * See `docs/Overlap3D.md` for the named regression-fixture
+   * battery and per-fixture history.
+   *
+   * Algorithm: implements Emmett Lalish's #289 13-step sketch with
+   * a per-vert two-sided winding classifier (`AnalyzeSelfMesh`) +
+   * pair-symmetric chord enforcement + pierce-aware cap walker +
+   * pre/post-cap pierce reducers + pierce/drift gate with sign-flip
+   * recovery. Internal pipeline lives in `src/overlap_removal.{h,cpp}`.
+   */
+  Manifold RemoveSelfIntersections() const;
   ///@}
 
   /** @name Boolean

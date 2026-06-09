@@ -15,269 +15,66 @@
 #include "boolean3.h"
 
 #include <limits>
-#include <unordered_set>
 
-#include "disjoint_sets.h"
 #include "parallel.h"
 #include "shared.h"
+#include "winding03.h"
 
 #if (MANIFOLD_PAR == 1)
 #include <tbb/combinable.h>
 #endif
 
+// =============================================================================
+// 3D boolean implementation: Smith framework mapping.
+//
+// This file is the BVH-on-Smith 3D analog of the prototype in
+// extras/overlap2d_proto.cpp. It implements the kernel cascade that
+// finds geometric intersections (Kernel11 = edge-edge, Kernel02 =
+// vert-in-face, Kernel12 = edge-in-face) and the winding-classification
+// step (Winding03). See docs/Overlap3D.md for the mapping between
+// Emmett Lalish's 13-step #289 sketch and the actual entry points
+// here. Brief vocabulary table:
+//
+//   `Shadows` (in shared.h)            symbolic-perturbation orientation
+//                                      predicate (Edelsbrunner-Mucke SoS
+//                                      via withSign-flagged signs).
+//   `Interpolate` (in shared.h)        FP-stable axis-overlap interpolation
+//                                      with smaller-|dy| basepoint, used
+//                                      by Shadow01 / Kernel11 / etc.
+//   `Shadow01` / `Kernel11`            edge-edge (1D-1D) intersection;
+//                                      Smith chapter 8 §8.1.
+//   `Kernel02` / `Shadow02`            vert-in-face (0D-2D) classification.
+//   `Kernel12` / `Intersect12`         edge-face (1D-2D) intersection;
+//                                      the main producer of new verts.
+//   `AddNewEdgeVerts` (boolean_result) eager propagation of new
+//                                      intersection verts to all
+//                                      relevant halfedge lists. 2D
+//                                      analog: extras/overlap2d_proto.cpp
+//                                      step 4 propagation phase.
+//   `Winding03`                        per-vert winding-number
+//                                      classification (the "isInside"
+//                                      decision per face). Standard
+//                                      arrangement-classify pattern.
+//   `CollapseShortEdges` (edge_op)     post-boolean cleanup of near-
+//                                      duplicate verts. 2D analog:
+//                                      extras/overlap2d_proto.cpp
+//                                      step 4b structural re-merge.
+//
+// Eps story: Manifold::Impl::epsilon_ and tolerance_ track per-instance
+// position-precision bounds. Smith's alpha-budget formula (eps = (k+1) *
+// sqrt(153) * u * L) lives in shared.h as `EpsilonFromScale`; this file
+// uses whatever epsilon the Impl already carries. See docs/Overlap3D.md.
+// =============================================================================
+
 using namespace manifold;
 
 namespace {
 
-struct FaceEdge {
-  int edge;
-  int start;
-  int end;
-  bool isForward;
-};
-
-inline void LoadFaceEdges(const Halfedges& halfedges, int tri,
-                          FaceEdge edge[3]) {
-  for (const int i : {0, 1, 2}) {
-    const int halfedge = 3 * tri + i;
-    const int start = halfedges.Start(halfedge);
-    const int end = halfedges.Start(3 * tri + Next3(i));
-    if (start < end) {
-      edge[i] = {halfedge, start, end, true};
-    } else {
-      edge[i] = {halfedges.Pair(halfedge), end, start, false};
-    }
-  }
-}
-
-template <bool expandP, bool forward>
-inline std::pair<int, vec2> Shadow01(const int a0, const int b1, const int b1s,
-                                     const int b1e, const Manifold::Impl& inA,
-                                     const Manifold::Impl& inB) {
-  const double a0x = inA.vertPos_[a0].x;
-  const double b1sx = inB.vertPos_[b1s].x;
-  const double b1ex = inB.vertPos_[b1e].x;
-  const double a0xp = inA.vertNormal_[a0].x;
-  const double b1sxp = inB.vertNormal_[b1s].x;
-  const double b1exp = inB.vertNormal_[b1e].x;
-  int s01 = forward ? Shadows(a0x, b1ex, withSign(expandP, a0xp) - b1exp) -
-                          Shadows(a0x, b1sx, withSign(expandP, a0xp) - b1sxp)
-                    : Shadows(b1sx, a0x, withSign(expandP, b1sxp) - a0xp) -
-                          Shadows(b1ex, a0x, withSign(expandP, b1exp) - a0xp);
-  vec2 yz01(NAN);
-
-  if (s01 != 0) {
-    yz01 =
-        Interpolate(inB.vertPos_[b1s], inB.vertPos_[b1e], inA.vertPos_[a0].x);
-    const int b1pair = inB.halfedge_.Pair(b1);
-    const double dir =
-        inB.faceNormal_[b1 / 3].y + inB.faceNormal_[b1pair / 3].y;
-    if (forward) {
-      if (!Shadows(inA.vertPos_[a0].y, yz01[0], -dir)) s01 = 0;
-    } else {
-      if (!Shadows(yz01[0], inA.vertPos_[a0].y, withSign(expandP, dir)))
-        s01 = 0;
-    }
-  }
-  return std::make_pair(s01, yz01);
-}
-
-template <bool expandP>
-struct Kernel11 {
-  const Manifold::Impl& inP;
-  const Manifold::Impl& inQ;
-
-  std::pair<int, vec4> operator()(int p1, int p1s, int p1e, int q1, int q1s,
-                                  int q1e) {
-    vec4 xyzz11 = vec4(NAN);
-    int s11 = 0;
-
-    // For pRL[k], qRL[k], k==0 is the left and k==1 is the right.
-    int k = 0;
-    vec3 pRL[2], qRL[2];
-    // Either the left or right must shadow, but not both. This ensures the
-    // intersection is between the left and right.
-    bool shadows = false;
-    s11 = 0;
-
-    const int p0[2] = {p1s, p1e};
-    for (int i : {0, 1}) {
-      const auto [s01, yz01] =
-          Shadow01<expandP, true>(p0[i], q1, q1s, q1e, inP, inQ);
-      // If the value is NaN, then these do not overlap.
-      if (std::isfinite(yz01[0])) {
-        s11 += s01 * (i == 0 ? -1 : 1);
-        if (k < 2 && (k == 0 || (s01 != 0) != shadows)) {
-          shadows = s01 != 0;
-          pRL[k] = inP.vertPos_[p0[i]];
-          qRL[k] = vec3(pRL[k].x, yz01.x, yz01.y);
-          ++k;
-        }
-      }
-    }
-
-    const int q0[2] = {q1s, q1e};
-    for (int i : {0, 1}) {
-      const auto [s10, yz10] =
-          Shadow01<expandP, false>(q0[i], p1, p1s, p1e, inQ, inP);
-      // If the value is NaN, then these do not overlap.
-      if (std::isfinite(yz10[0])) {
-        s11 += s10 * (i == 0 ? -1 : 1);
-        if (k < 2 && (k == 0 || (s10 != 0) != shadows)) {
-          shadows = s10 != 0;
-          qRL[k] = inQ.vertPos_[q0[i]];
-          pRL[k] = vec3(qRL[k].x, yz10.x, yz10.y);
-          ++k;
-        }
-      }
-    }
-
-    if (s11 == 0) {  // No intersection
-      xyzz11 = vec4(NAN);
-    } else {
-      DEBUG_ASSERT(k == 2, logicErr, "Boolean manifold error: s11");
-      xyzz11 = Intersect(pRL[0], pRL[1], qRL[0], qRL[1]);
-
-      const int p1pair = inP.halfedge_.Pair(p1);
-      const double dirP =
-          inP.faceNormal_[p1 / 3].z + inP.faceNormal_[p1pair / 3].z;
-      const int q1pair = inQ.halfedge_.Pair(q1);
-      const double dirQ =
-          inQ.faceNormal_[q1 / 3].z + inQ.faceNormal_[q1pair / 3].z;
-      if (!Shadows(xyzz11.z, xyzz11.w, withSign(expandP, dirP) - dirQ)) s11 = 0;
-    }
-
-    return std::make_pair(s11, xyzz11);
-  }
-};
-
-template <bool expandP, bool forward>
-struct Kernel02 {
-  const Manifold::Impl& inA;
-  const Manifold::Impl& inB;
-
-  std::pair<int, double> operator()(int a0, int b2) {
-    FaceEdge edgeB[3];
-    LoadFaceEdges(inB.halfedge_, b2, edgeB);
-    return (*this)(a0, b2, edgeB);
-  }
-
-  std::pair<int, double> operator()(int a0, int b2, const FaceEdge edgeB[3]) {
-    int s02 = 0;
-    double z02 = 0.0;
-
-    // For yzzLR[k], k==0 is the left and k==1 is the right.
-    int k = 0;
-    vec3 yzzRL[2];
-    // Either the left or right must shadow, but not both. This ensures the
-    // intersection is between the left and right.
-    bool shadows = false;
-
-    for (const int i : {0, 1, 2}) {
-      const auto syz01 = Shadow01<expandP, forward>(
-          a0, edgeB[i].edge, edgeB[i].start, edgeB[i].end, inA, inB);
-      const int s01 = syz01.first;
-      const vec2 yz01 = syz01.second;
-      // If the value is NaN, then these do not overlap.
-      if (std::isfinite(yz01[0])) {
-        s02 += s01 * (forward == edgeB[i].isForward ? -1 : 1);
-        if (k < 2 && (k == 0 || (s01 != 0) != shadows)) {
-          shadows = s01 != 0;
-          yzzRL[k++] = vec3(yz01[0], yz01[1], yz01[1]);
-        }
-      }
-    }
-
-    if (s02 == 0) {  // No intersection
-      z02 = NAN;
-    } else {
-      DEBUG_ASSERT(k == 2, logicErr, "Boolean manifold error: s02");
-      vec3 vertPosA = inA.vertPos_[a0];
-      z02 = Interpolate(yzzRL[0], yzzRL[1], vertPosA.y)[1];
-      if (forward) {
-        if (!Shadows(vertPosA.z, z02, -inB.faceNormal_[b2].z)) s02 = 0;
-      } else {
-        if (!Shadows(z02, vertPosA.z, withSign(expandP, inB.faceNormal_[b2].z)))
-          s02 = 0;
-      }
-    }
-    return std::make_pair(s02, z02);
-  }
-};
-
-template <bool expandP, bool forward>
-struct Kernel12 {
-  const Manifold::Impl& inA;
-  const Manifold::Impl& inB;
-  Kernel02<expandP, forward> k02;
-  Kernel11<expandP> k11;
-
-  std::pair<int, vec3> operator()(int a1, int b2) {
-    int x12 = 0;
-    vec3 v12 = vec3(NAN);
-
-    // For xzyLR-[k], k==0 is the left and k==1 is the right.
-    int k = 0;
-    vec3 xzyLR0[2];
-    vec3 xzyLR1[2];
-    // Either the left or right must shadow, but not both. This ensures the
-    // intersection is between the left and right.
-    bool shadows = false;
-    x12 = 0;
-
-    const int edgeAStart = inA.halfedge_.Start(a1);
-    const int edgeAEnd = inA.halfedge_.End(a1);
-    FaceEdge edgeB[3];
-    LoadFaceEdges(inB.halfedge_, b2, edgeB);
-
-    for (int vertA : {edgeAStart, edgeAEnd}) {
-      const auto [s, z] = k02(vertA, b2, edgeB);
-      if (std::isfinite(z)) {
-        x12 += s * ((vertA == edgeAStart) == forward ? 1 : -1);
-        if (k < 2 && (k == 0 || (s != 0) != shadows)) {
-          shadows = s != 0;
-          xzyLR0[k] = inA.vertPos_[vertA];
-          std::swap(xzyLR0[k].y, xzyLR0[k].z);
-          xzyLR1[k] = xzyLR0[k];
-          xzyLR1[k][1] = z;
-          k++;
-        }
-      }
-    }
-
-    for (const int i : {0, 1, 2}) {
-      const auto [s, xyzz] = forward
-                                 ? k11(a1, edgeAStart, edgeAEnd, edgeB[i].edge,
-                                       edgeB[i].start, edgeB[i].end)
-                                 : k11(edgeB[i].edge, edgeB[i].start,
-                                       edgeB[i].end, a1, edgeAStart, edgeAEnd);
-      if (std::isfinite(xyzz[0])) {
-        x12 -= s * (edgeB[i].isForward ? 1 : -1);
-        if (k < 2 && (k == 0 || (s != 0) != shadows)) {
-          shadows = s != 0;
-          xzyLR0[k][0] = xyzz.x;
-          xzyLR0[k][1] = xyzz.z;
-          xzyLR0[k][2] = xyzz.y;
-          xzyLR1[k] = xzyLR0[k];
-          xzyLR1[k][1] = xyzz.w;
-          if (!forward) std::swap(xzyLR0[k][1], xzyLR1[k][1]);
-          k++;
-        }
-      }
-    }
-
-    if (x12 == 0) {  // No intersection
-      v12 = vec3(NAN);
-    } else {
-      DEBUG_ASSERT(k == 2, logicErr, "Boolean manifold error: v12");
-      const vec4 xzyy = Intersect(xzyLR0[0], xzyLR0[1], xzyLR1[0], xzyLR1[1]);
-      v12.x = xzyy[0];
-      v12.y = xzyy[2];
-      v12.z = xzyy[1];
-    }
-    return std::make_pair(x12, v12);
-  }
-};
+// `withSign`, `Interpolate`, `Intersect`, and `Shadows` are in shared.h
+// (upstream #1708 lifted them for Boolean2 reuse).
+// `Shadow01`, `Kernel02`, `Kernel11`, `Kernel12`, `Winding03_`, `Winding03`
+// are in winding03.h (branch lift so overlap_removal can reuse them; see
+// issues #1640, #289, #1445).
 
 template <bool expandP, bool forward>
 struct Kernel12Recorder {
@@ -334,6 +131,12 @@ struct Kernel12Recorder {
   }
 };
 
+// Run all edge-face intersection queries between inP's edges and
+// inQ's faces (or vice versa, when forward = false), via the BVH
+// `Collider` broad phase. Returns the per-pair intersection results
+// permuted into edge-major order so downstream `AddNewEdgeVerts` can
+// scan contiguously per edge. This is the BVH-based 3D analog of the
+// 2D prototype's step 4 pair iteration.
 template <bool expandP, bool forward>
 Intersections Intersect12_(const Manifold::Impl& inP, const Manifold::Impl& inQ,
                            ExecutionContext::Impl* ctx) {
@@ -384,6 +187,10 @@ Intersections Intersect12(const Manifold::Impl& inP, const Manifold::Impl& inQ,
     return Intersect12_<false, forward>(inP, inQ, ctx);
 }
 
+// boolean3.cpp keeps its own Winding03_/Winding03 here (vs the
+// branch's winding03.h copy) because this version threads
+// ExecutionContext for mid-Boolean cancellation. The winding03.h
+// copy is the one overlap_removal / self_mesh_analysis use.
 template <bool expandP, bool forward>
 Vec<int> Winding03_(const Manifold::Impl& inP, const Manifold::Impl& inQ,
                     const VecView<std::array<int, 2>> p1q2,

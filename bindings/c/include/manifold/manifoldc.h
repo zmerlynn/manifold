@@ -177,6 +177,8 @@ ManifoldManifold* manifold_set_tolerance(void* mem, ManifoldManifold* m,
                                          double tolerance);
 ManifoldManifold* manifold_simplify(void* mem, ManifoldManifold* m,
                                     double tolerance);
+ManifoldManifold* manifold_remove_self_intersections(void* mem,
+                                                     ManifoldManifold* m);
 
 // Manifold Shapes / Constructors
 
