@@ -78,9 +78,11 @@ set(
   iters.h
   mesh_fixes.h
   overlap_removal.h
+  overlap_removal_internal.h
   parallel.h
   polygon_internal.h
   quickhull.h
+  self_mesh_analysis.h
   shared.h
   svd.h
   tree2d.h

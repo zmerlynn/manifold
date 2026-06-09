@@ -54,10 +54,8 @@ inline double MaxEpsilon(double minEpsilon, const Box& bBox) {
  * larger by ~k_budget * sqrt(153) ~= 12000x because it budgets
  * iterated operations.
  *
- * Used by the 2D overlap-removal prototype in extras/overlap2d_proto.cpp
- * (Smith framework is the correctness story there); also wraps for
- * the 3D spike in extras/overlap3d_proto.cpp. See docs/Overlap2D.md
- * and docs/Overlap3D.md.
+ * Used by the overlap-removal pipeline (Smith's framework is the
+ * correctness story). See docs/OverlapRemoval.md.
  */
 inline double AlphaBudgetEpsilon(double L, int k_budget = 1000) {
   // u = 2^-53 for double-precision IEEE 754.

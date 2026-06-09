@@ -386,6 +386,10 @@ Module.setup = function() {
     return this._Simplify(tolerance);
   };
 
+  Module.Manifold.prototype.removeSelfIntersections = function() {
+    return this._RemoveSelfIntersections();
+  };
+
   class Mesh {
     constructor({
       numProp = 3,

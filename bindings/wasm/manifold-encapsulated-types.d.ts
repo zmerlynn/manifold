@@ -1120,6 +1120,16 @@ export class Manifold {
   simplify(tolerance?: number): Manifold;
 
   /**
+   * Removes geometric self-intersection pierces from this Manifold, returning a
+   * new Manifold whose self-intersection count never exceeds the input's. If
+   * the pipeline cannot improve the mesh it returns the input. See the C++ docs
+   * for the full pierce-monotonicity contract and known fallback cases.
+   *
+   * @group Transformations
+   */
+  removeSelfIntersections(): Manifold;
+
+  /**
    * The genus is a topological property of the manifold, representing the
    * number of "handles". A sphere is 0, torus 1, etc. It is only meaningful for
    * a single mesh, so it is best to call Decompose() first.

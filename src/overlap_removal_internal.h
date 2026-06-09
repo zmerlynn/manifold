@@ -16,9 +16,8 @@
 
 // Internal data structures + helper-function declarations for the
 // overlap-removal pipeline. Used by src/overlap_removal.cpp itself
-// and by no production caller — kept out of src/overlap_removal.h
-// so the public-to-src interface is a tiny RunOverlapRemoval +
-// RemoveSelfIntersectionsStats.
+// and by no production caller - kept out of src/overlap_removal.h so
+// the public-to-src interface is just RunOverlapRemoval.
 
 #include <functional>  // for PolygonClassifierFn
 #include <map>
@@ -28,7 +27,7 @@
 #include "collider.h"           // for Collider, Box
 #include "manifold/common.h"    // vec3 alias
 #include "manifold/manifold.h"  // for Manifold
-#include "overlap_removal.h"    // for RemoveSelfIntersectionsStats
+#include "overlap_removal.h"    // for RunOverlapRemoval
 
 namespace manifold {
 namespace overlap_removal {
@@ -38,7 +37,7 @@ namespace overlap_removal {
 // against pathological inputs. Companion caps for non-parametric
 // loops live in overlap_removal.cpp's anonymous namespace.
 //
-// kMergeVertsMaxIter: ε-merge passes. Each pass moves merged verts
+// kMergeVertsMaxIter: eps-merge passes. Each pass moves merged verts
 //   to centroid, iterates if any pair moved or unioned. Converges
 //   in 1-3 passes for working fixtures.
 // kPierceReducerMaxIter, kDropExcessOuterMax, kTrimOrphansMaxRounds:
@@ -59,7 +58,7 @@ struct Edge {
   int halfedgePaired;   // its pair (= -1 only on non-manifold edges)
 };
 
-// Verts that lie within ε of an Edge (strictly between its endpoints).
+// Verts that lie within eps of an Edge (strictly between its endpoints).
 // Built by BuildOnEdgeVertLists in step 4. Sorted by parametric `t`
 // along the edge, t in (0, 1). Used by the polygon walker to subdivide
 // the edge's halfedges into sub-edges.
@@ -68,21 +67,21 @@ struct EdgeVertList {
   std::vector<double> ts;  // parametric position 0 < t < 1
 };
 
-// Verts that lie within ε of a triangle's interior (strictly inside
+// Verts that lie within eps of a triangle's interior (strictly inside
 // the barycentric simplex). Built by BuildOnTriVertLists in step 5.
 // Used by step 6 (FindEdgeTriIntersections) to skip events at
 // already-snapped verts, and by step 8 (AddInteriorVertsToNewEdges)
 // to propagate verts onto chord edges.
 struct TriVertList {
-  std::vector<int> verts;  // verts within ε of interior
-  std::vector<vec3> bary;  // barycentric (b0, b1, b2) — all > 0
+  std::vector<int> verts;  // verts within eps of interior
+  std::vector<vec3> bary;  // barycentric (b0, b1, b2) - all > 0
 };
 
 // One edge-pierces-triangle event. Step 6 (FindEdgeTriIntersections)
-// emits these via BVH broad phase + Möller-Trumbore narrow phase.
+// emits these via BVH broad phase + Moller-Trumbore narrow phase.
 // `s` is the parameter along the edge (0 < s < 1, strict interior),
 // `bary` is the barycentric on the triangle (all > 0). `snapTo` is
-// the vert id this event resolves to if within ε of an existing
+// the vert id this event resolves to if within eps of an existing
 // vert; -1 if a fresh new vert needs allocating.
 struct EdgeTriIntersection {
   int edgeIdx;    // index into edges[]
@@ -90,7 +89,7 @@ struct EdgeTriIntersection {
   vec3 position;  // intersection point in 3D
   double s;       // parameter along the edge (0 < s < 1)
   vec3 bary;      // barycentric on the triangle (all > 0)
-  int snapTo;     // -1 = new vert, ≥0 = snap to existing vert
+  int snapTo;     // -1 = new vert, >=0 = snap to existing vert
 };
 
 // A "chord" edge between two intersecting triangles. Step 7 phase 2
@@ -112,21 +111,12 @@ struct ChordEdges {
   std::vector<PiercedNewEdge> newEdges;
   // Parallel to the EdgeTriIntersection input passed to
   // GenerateChordEdges. resolvedIds[i] is the vert id that
-  // event i became — `snapTo` if ≥0 in the input, otherwise a
-  // freshly allocated id (≥ NumVert) post-dedup. Used by
+  // event i became - `snapTo` if >=0 in the input, otherwise a
+  // freshly allocated id (>= NumVert) post-dedup. Used by
   // PropagateNewVertsToOnEdgeLists to add the new verts to the
   // on-edge lists of their piercing edges.
   std::vector<int> resolvedIds;
   int droppedTriTriPairsWithBadEndpointCount = 0;
-  // 1-endpoint tri-tri pairs (= edge-tip-in-interior, no through-
-  // pierce) record their endpoint as an interior vert of the tri.
-  // The triangulation step (currently opt-in via
-  // OVERLAP3D_FAN_INTERIOR=1 in the spike) fan-triangulates each
-  // affected tri around its interior vert(s), eliminating the
-  // T-junction. Full handling needs edge-subdivision of the
-  // piercing edge with coordinated re-triangulation
-  // (= multi-session feature).
-  std::map<int, std::set<int>> interiorVertsPerTri;
 };
 
 // Step 8 (AddInteriorVertsToNewEdges) augments each PiercedNewEdge
@@ -166,7 +156,7 @@ struct PerTriHalfedgeGraph {
 // sub-polygons of one tri after splitting by chord edges. Degenerate
 // 2-vert "sub-polygons" (= chord pairs with both endpoints interior
 // to the parent triangle) are kept separate so the classifier and
-// triangulator only see ≥ 3-vert polygons; pair-sym Phase 1 still
+// triangulator only see >= 3-vert polygons; pair-sym Phase 1 still
 // consults degenerates to enforce chord-pair constraints when one
 // corner is degenerate.
 struct PolygonWalkResult {
@@ -184,12 +174,8 @@ struct TriangulationResult {
   int trisDroppedTooSmall;
   int polygonsKept = 0;
   int polygonsDropped = 0;
-  int polygonsReversed = 0;
   int polygonsAutoKept = 0;  // skipped classifier (1-poly tris)
 };
-
-// (RemoveSelfIntersectionsStats lives in overlap_removal.h since
-// it's part of RunOverlapRemoval's signature.)
 
 // Morton-sorted BVH builder shared across pipeline stages. Each
 // stage that does broad-phase BVH overlap (MergeVertsEps,
@@ -217,12 +203,10 @@ struct SortedBVH {
 // Empty input returns a SortedBVH with an empty Collider.
 SortedBVH BuildSortedBVH(VecView<const Box> leafBoxes);
 
-// Setup helper: scale-invariant ε derived from a manifold's bounding-
-// box scale via AlphaBudgetEpsilon (in src/shared.h). Larger meshes
-// get larger ε; a single-input call uses the manifold's own scale,
-// the two-input form takes the max for symmetry.
+// Setup helper: scale-invariant eps derived from a manifold's bounding-
+// box scale via AlphaBudgetEpsilon (in src/shared.h). Larger meshes get
+// larger eps.
 double InferEps(const Manifold& m);
-double InferEps(const Manifold& a, const Manifold& b);
 
 // Result of MergeVertsEps below.
 struct MergeVertsResult {
@@ -230,14 +214,14 @@ struct MergeVertsResult {
   int mergedCount = 0;
 };
 
-// Step 1 of the overlap-removal pipeline: merges all verts within ε
+// Step 1 of the overlap-removal pipeline: merges all verts within eps
 // of each other. Iterates broad-phase Collider self-collisions +
 // DisjointSets union, applies cluster-centroid positions, emits the
 // merge hints via MeshGL64 mergeFromVert/mergeToVert. Returns the
 // merged manifold and the count of merged pairs.
 //
 // `mergedCount` is the authoritative answer to "did anything get
-// merged?" — `Manifold::NumVert()` may not reflect the merge if the
+// merged?" - `Manifold::NumVert()` may not reflect the merge if the
 // merged verts didn't cause any tri collapse (Manifold's
 // RemoveUnreferencedVerts sets unreferenced positions to NaN
 // without compacting vertPos_).
@@ -251,7 +235,7 @@ MergeVertsResult MergeVertsEps(const Manifold& in, double eps,
 std::vector<Edge> EnumerateEdges(const Manifold::Impl& impl);
 
 // Step 4 of the pipeline: for each edge, find verts that lie within
-// ε of its interior segment. Uses BVH broad phase + closest-point
+// eps of its interior segment. Uses BVH broad phase + closest-point
 // narrow phase. Skips edge endpoints, and skips verts that are
 // neighbors of BOTH endpoints (= thin-tri apex case where the
 // "near" vert is just a structural neighbor, not a real overlap).
@@ -260,21 +244,20 @@ std::vector<EdgeVertList> BuildOnEdgeVertLists(const Manifold::Impl& impl,
                                                double eps);
 
 // Step 5 of the pipeline: for each triangle, find verts that lie
-// strictly inside its barycentric interior (within ε of the plane,
+// strictly inside its barycentric interior (within eps of the plane,
 // all barycentrics > 0). Uses BVH broad phase + plane-distance +
 // strict barycentric narrow phase. Skips the triangle's own 3 verts.
 std::vector<TriVertList> BuildOnTriVertLists(const Manifold::Impl& impl,
                                              double eps);
 
 // Step 6 of the pipeline: edge-pierces-triangle events via BVH +
-// Möller-Trumbore narrow phase. Strict-interior gates on segment
+// Moller-Trumbore narrow phase. Strict-interior gates on segment
 // parameter (0 < s < 1) AND barycentric (all > 0). Snaps the pierce
-// point to an existing vert if within ε.
+// point to an existing vert if within eps.
 //
-// By default, includes pierces where the edge endpoint coincides
-// with a tri vert (= the shared-vert pierce case post-Boolean
-// merge). Opt-out via OVERLAP3D_SKIP_SHARED_VERT_PIERCES=1 to
-// restore the classic Emmett #289 step 6 behavior.
+// Includes pierces where the edge endpoint coincides with a tri vert
+// (= the shared-vert pierce case post-Boolean merge), which the classic
+// Emmett #289 step 6 behavior would miss.
 std::vector<EdgeTriIntersection> FindEdgeTriIntersections(
     const Manifold::Impl& impl, const std::vector<Edge>& edges,
     const std::vector<EdgeVertList>& onEdgeLists,
@@ -283,17 +266,17 @@ std::vector<EdgeTriIntersection> FindEdgeTriIntersections(
 // Step 7 phase 2 of the pipeline: resolve etIsect events to vert
 // ids (snapping or allocating fresh), group by tri-tri pair, and
 // emit chord edges. Pairs with:
-//   - 2 endpoints → new chord edge between the two pierce points.
-//   - 1 endpoint  → record as an interior vert of both tris in
+//   - 2 endpoints -> new chord edge between the two pierce points.
+//   - 1 endpoint  -> record as an interior vert of both tris in
 //     the pair (= T-junction; needs fan triangulation).
-//   - 0 or ≥ 3   → dropped (counted in dropped_n_not_2).
+//   - 0 or >= 3   -> dropped (counted in dropped_n_not_2).
 ChordEdges GenerateChordEdges(const Manifold::Impl& impl,
                               const std::vector<Edge>& edges,
                               const std::vector<EdgeTriIntersection>& etIsects,
                               double eps);
 
 // Step 8 of the pipeline: per chord edge, find original-mesh verts
-// that lie within ε of its interior segment. Candidates are the
+// that lie within eps of its interior segment. Candidates are the
 // union of in-tri verts of triA and triB (= step 5 onTriList
 // outputs). Emits NewEdgeWithExtras (chord + sorted interior verts).
 std::vector<NewEdgeWithExtras> AddInteriorVertsToNewEdges(
@@ -307,11 +290,11 @@ std::vector<NewEdgeWithExtras> AddInteriorVertsToNewEdges(
 // that are already edge endpoints or already in the list.
 void PropagateNewVertsToOnEdgeLists(
     const std::vector<EdgeTriIntersection>& etIsects,
-    const std::vector<int>& resolvedIds, int baseId,
-    const std::vector<Edge>& edges, std::vector<EdgeVertList>& onEdgeLists);
+    const std::vector<int>& resolvedIds, const std::vector<Edge>& edges,
+    std::vector<EdgeVertList>& onEdgeLists);
 
 // Position lookup helper that handles both original-mesh verts (id
-// < baseId, into impl.vertPos_) and step-7 chord verts (id ≥
+// < baseId, into impl.vertPos_) and step-7 chord verts (id >=
 // baseId, into newVertPositions). Used in many pipeline functions.
 vec3 GetPos3(int id, int baseId, const Manifold::Impl& impl,
              const std::vector<vec3>& newVertPositions);
@@ -341,7 +324,7 @@ void AddNextPointers(const Manifold::Impl& impl,
 
 // Step 11 phase 3 of the pipeline: walk the polygon cycles in each
 // per-tri graph using nextHalfedge. Each cycle = one sub-polygon
-// (with ≥ 3 verts) or a degenerate 2-vert cycle (= chord pair with
+// (with >= 3 verts) or a degenerate 2-vert cycle (= chord pair with
 // both endpoints interior to the parent triangle).
 //
 // Per-graph and batch overloads.
@@ -361,13 +344,9 @@ struct ChordPartnerMap {
 ChordPartnerMap BuildChordPartnerMap(
     const std::vector<PiercedNewEdge>& newEdges);
 
-// Conversion helpers: Manifold ↔ Impl via MeshGL64 round-trip. Used
-// by the pipeline to access internal halfedge / face-normal data.
-// Note: the Manifold→Impl direction goes through the public
-// GetMeshGL64() API; the Impl→Manifold direction uses the internal
-// GetMeshGLImpl helper.
+// Conversion helper: Manifold -> Impl via the public GetMeshGL64() API,
+// to access internal halfedge / face-normal data.
 Manifold::Impl ImplFromManifold(const Manifold& m);
-Manifold ManifoldFromImpl(const Manifold::Impl& impl);
 
 // Geometric pierce predicate: does segment a-b strictly pierce
 // triangle interior (v0, v1, v2)? Returns the pierce magnitude
@@ -386,28 +365,6 @@ Manifold ManifoldFromImpl(const Manifold::Impl& impl);
 // computation.
 double SegmentPiercesTriInterior(vec3 a, vec3 b, vec3 v0, vec3 v1, vec3 v2,
                                  double relTol = 1e-12);
-
-// SoS-clean alternative: builds mini-Impls for the segment and
-// triangle and queries the lifted Kernel12. Returns 1.0 if the
-// kernel's symbolic-perturbation sign is non-zero, 0.0 otherwise.
-// Magnitude is not meaningful (Kernel12 doesn't compute one), so 1.0
-// is a placeholder.
-//
-// FOOTGUN: not appropriate as a self-intersection metric for a mesh
-// the overlap-removal pipeline produced. The pipeline ADDS new
-// vertices at edge-face intersection points by construction, so the
-// output has many vertices that lie exactly on existing triangle
-// edges. SoS counts those as boundary-graze pierces (because perturbed
-// they would resolve one way or the other), inflating the pierce count
-// vs the relTol predicate which excludes them. Empirically: for
-// self-intersect, this counts 661 pipeline-output pierces where the
-// relTol predicate counts 13 — the relTol number is the meaningful
-// one for "is the output clean."
-//
-// Use this only when no constructed-on-edge vertices are present
-// (e.g., a fresh mesh from a non-Manifold source) and SoS-clean
-// classification is genuinely desired.
-double SegmentPiercesTriInteriorSoS(vec3 a, vec3 b, vec3 v0, vec3 v1, vec3 v2);
 
 // Diagnostic for self-intersections in a Manifold. Counts piercing
 // triangle pairs via BVH broad phase + SegmentPiercesTriInterior
@@ -449,7 +406,7 @@ bool AnalyticalKeep(int triId, const std::vector<int>& polyVerts,
 // Surface-cap walker: closes k=1 cycles in the current `out` mesh
 // by fan-triangulation (with conflict-aware fan-apex selection) +
 // greedy ear-clip fallback. Pierce-aware: refuses fan/ear tris
-// that would pierce existing geometry (Möller-Trumbore against a
+// that would pierce existing geometry (Moller-Trumbore against a
 // BVH built per call). Forbidden-triple-aware: refuses tris whose
 // vert triplet is in `forbiddenTriples` (= dropped by the post-cap
 // pierce reducer; prevents drop+re-cap loops).
@@ -457,11 +414,14 @@ bool AnalyticalKeep(int triId, const std::vector<int>& polyVerts,
 // Mutates `out.triVerts` (appends fan/ear tris). Returns
 // (closed cycles, total tris added).
 //
-// Env vars:
-//   OVERLAP3D_NO_PIERCE_CAP=1   — disable pierce check (= classic
-//                                  cap, may introduce new pierces).
-//   OVERLAP3D_NO_PIERCE_REBUILD=1 — skip per-cycle BVH rebuild
-//                                    (= miss within-pass cap-vs-cap).
+// Known limitation: k=1 cycles are non-planar space polygons, filled by
+// pure combinatorial fan/ear-clip selected on edge-incidence and
+// pierce-vs-existing-geometry only - there is no triangle orientation,
+// planarity, or area check, so a badly-shaped cycle can over-inflate the
+// surface (the documented cray volume blowup) or leave slivers. The
+// post-pipeline volume-drift gate catches the gross case and falls back;
+// sub-threshold inflation is the residual. A best-fit-plane projection +
+// projected-simplicity check is the principled fix (tracked under #289).
 std::pair<int, int> DoCapPass(
     MeshGL64& out, const std::set<std::array<int, 3>>& forbiddenTriples);
 
@@ -470,14 +430,11 @@ std::pair<int, int> DoCapPass(
 // the pierce-aware cap doesn't see (cap only checks NEW cap tris
 // vs existing geometry).
 //
-// Algorithm: build BVH, find piercing pairs via Möller-Trumbore,
+// Algorithm: build BVH, find piercing pairs via Moller-Trumbore,
 // drop one tri per pair (heuristic: higher pierce-count wins =
-// more "load-bearing" to remove; ties → lower triId). Iterate up
+// more "load-bearing" to remove; ties -> lower triId). Iterate up
 // to maxIters or until no pierces. Mutates out.triVerts in place.
 // Returns total tris dropped.
-//
-// Env vars:
-//   OVERLAP3D_NO_PIERCE_REDUCER=1 — disable entirely.
 int PierceAwareReducer(MeshGL64& out, int maxIters = kPierceReducerMaxIter);
 
 // Pierce-aware reducer (POST-cap, with re-cap loop): same algorithm
@@ -489,10 +446,6 @@ int PierceAwareReducer(MeshGL64& out, int maxIters = kPierceReducerMaxIter);
 //
 // Mutates out.triVerts AND forbiddenTriples (output param). Returns
 // total tris dropped.
-//
-// Env vars:
-//   OVERLAP3D_NO_POST_CAP_PIERCE_REDUCER=1 — disable entirely.
-//   OVERLAP3D_POST_CAP_ITERS=N — override iter cap (default 8).
 int PostCapPierceReducer(MeshGL64& out,
                          std::set<std::array<int, 3>>& forbiddenTriples);
 
@@ -528,13 +481,12 @@ EdgeReducerResult TrimOrphans(
     MeshGL64& out, const std::set<std::array<int, 3>>& forbiddenTriples,
     int maxRounds = kTrimOrphansMaxRounds);
 
-// Per-polygon classifier function type. Returns keep + reverse
-// flags plus optional winding numbers (used in some classifier
-// variants). Called by TriangulateAndEmit for polygons of multi-
+// Per-polygon classifier function type. Returns a keep flag plus
+// optional winding numbers (used in some classifier variants).
+// Called by TriangulateAndEmit for polygons of multi-
 // poly tris (single-poly tris are auto-kept).
 struct PolygonClassification {
   bool keep;
-  bool reverse;
   int windingUp;
   int windingDown;
 };
@@ -552,18 +504,15 @@ using PolygonClassifierFn = std::function<PolygonClassification(
 //   4. PierceAwareReducer (drops post-classifier overlapping tris).
 //   5. DoCapPass (close k=1 cycles).
 //   6. DropExcessHalfedgeContributors (drop excess directional contributors).
-//   7. TrimOrphans (opt-in).
+//   7. TrimOrphans (default-on; drop tris orphaned by the reducers).
 //   8. PostCapPierceReducer (with re-cap loop, forbidden tracking).
 //   9. Construct Manifold from out MeshGL64.
 //
 // classifier: optional. If null, all polygons are kept.
-// interiorVertsPerTri: optional. Currently used only by the opt-in
-//   fan post-pass (= OVERLAP3D_FAN_INTERIOR=1, broken — see history).
 TriangulationResult TriangulateAndEmit(
     const Manifold::Impl& impl, const std::vector<vec3>& newVertPositions,
     const std::vector<PolygonWalkResult>& walks,
-    PolygonClassifierFn classifier = nullptr,
-    const std::map<int, std::set<int>>* interiorVertsPerTri = nullptr);
+    PolygonClassifierFn classifier = nullptr);
 
 }  // namespace overlap_removal
 }  // namespace manifold

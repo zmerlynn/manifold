@@ -54,6 +54,7 @@ const manifoldMemberFunctions = [
   'setProperties',
   'setTolerance',
   'simplify',
+  'removeSelfIntersections',
   'asOriginal',
   'trimByPlane',
   'split',

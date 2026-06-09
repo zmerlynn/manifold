@@ -42,19 +42,6 @@ target_link_libraries(largeSceneTest manifold)
 target_compile_options(largeSceneTest PRIVATE ${MANIFOLD_FLAGS})
 exportbin(largeSceneTest)
 
-# 3D overlap-removal spike (companion to overlap2d_proto.cpp). See
-# docs/Overlap3D.md. Demonstrates assembling Smith-framework-shaped
-# wrappers (AlphaBudgetEpsilon, Simplify, Boolean3D) on top of the
-# existing 3D pipeline; runs ~890 cases of fuzz + adversarial probes
-# in <2s. Builds against the manifold target.
-add_executable(overlap3d_proto overlap3d_proto.cpp)
-target_link_libraries(
-  overlap3d_proto
-  manifold
-  $<$<BOOL:${MANIFOLD_PAR}>:TBB::tbb>
-)
-target_compile_options(overlap3d_proto PRIVATE ${MANIFOLD_FLAGS})
-
 if(MANIFOLD_DEBUG)
   add_executable(minimizeTestcase minimize_testcase.cpp)
   target_link_libraries(

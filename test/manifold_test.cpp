@@ -22,6 +22,7 @@
 #include <thread>
 
 #include "../src/execution_impl.h"
+#include "../src/overlap_removal_internal.h"
 #include "manifold/cross_section.h"
 #include "test.h"
 
@@ -1062,6 +1063,13 @@ TEST(Manifold, Simplify) {
   if (options.exportModels) WriteTestOBJ("torus.obj", simplified);
 }
 
+// White-box interior-pierce count via the internal checker (external
+// linkage in the linked manifold library), used to assert the
+// pierce-monotonicity contract that the public API does not expose.
+int InteriorPierces(const Manifold& m) {
+  return overlap_removal::CheckSelfIntersection(m, 1e-12).interiorPierces;
+}
+
 TEST(Manifold, RemoveSelfIntersectionsApi) {
   // API smoke: a clean cube has no self-intersections; output should
   // be a valid manifold equivalent to input (volume preserved).
@@ -1081,11 +1089,10 @@ TEST(Manifold, RemoveSelfIntersectionsCleanInputUnchanged) {
 }
 
 TEST(Manifold, RemoveSelfIntersectionsBooleanResult) {
-  // Compose two interpenetrating cubes via Add — the result should
-  // be a valid manifold (Boolean3 guarantees that). This is the
-  // core use case for RemoveSelfIntersections: the input manifold
-  // is well-formed but may contain self-intersecting tris from the
-  // Boolean operation.
+  // The common case: a clean Boolean output round-trips unchanged. Two
+  // interpenetrating cubes via Add produce a manifold with no pierces, so
+  // the cleaned result must also have none and preserve volume. (HullMask
+  // and SelfIntersect below cover the actually-piercing paths.)
   Manifold a = Manifold::Cube({2, 2, 2}, true);
   Manifold b = Manifold::Cube({2, 2, 2}, true)
                    .Translate({1, 0.5, 0.3})
@@ -1094,42 +1101,40 @@ TEST(Manifold, RemoveSelfIntersectionsBooleanResult) {
   EXPECT_EQ(result.Status(), Manifold::Error::NoError);
   Manifold cleaned = result.RemoveSelfIntersections();
   EXPECT_EQ(cleaned.Status(), Manifold::Error::NoError);
-  // Pierce-monotonicity: cleaned never has more pierces than input.
-  // (Don't try to verify pierce count directly here; that requires
-  // an internal helper not exposed to the public API. Smoke test:
-  // output should be a valid manifold with same-sign volume.)
+  EXPECT_EQ(InteriorPierces(cleaned),
+            InteriorPierces(result));  // clean -> clean
   EXPECT_GT(cleaned.Volume(), 0);
   EXPECT_LT(std::abs(cleaned.Volume() - result.Volume()) / result.Volume(),
             0.5);  // < 50% drift
 }
 
 TEST(Manifold, RemoveSelfIntersectionsHullMaskFixture) {
-  // Real-world adversarial fixture: hull-body Subtract hull-mask.
-  // Boolean3 produces a self-intersecting manifold; the production
-  // pipeline reduces pierces to 0 (verified via spike at parity).
+  // Real-world adversarial fixture: hull-body Subtract hull-mask. Boolean3
+  // produces a self-intersecting manifold (~31 interior pierces); the
+  // pipeline reduces them to zero.
   Manifold body = Manifold(ReadTestMeshGL64OBJ("hull-body.obj"));
   Manifold mask = Manifold(ReadTestMeshGL64OBJ("hull-mask.obj"));
   Manifold result = body - mask;
   EXPECT_EQ(result.Status(), Manifold::Error::NoError);
+  ASSERT_GT(InteriorPierces(result), 0);  // premise: input actually pierces
   const double inVol = result.Volume();
   Manifold cleaned = result.RemoveSelfIntersections();
   EXPECT_EQ(cleaned.Status(), Manifold::Error::NoError);
-  // Pierce-monotonicity proxy: small drift, same volume sign.
+  EXPECT_EQ(InteriorPierces(cleaned), 0);  // pipeline clears every pierce here
   EXPECT_GT(cleaned.Volume(), 0);
   EXPECT_LT(std::abs(cleaned.Volume() - inVol) / inVol, 0.01);
 }
 
 TEST(Manifold, RemoveSelfIntersectionsSelfIntersectFixture) {
-  // self_intersect: Add of two interpenetrating ovoids. Pipeline
-  // reduces 661 pierces to 0 (full reduction after pair-sym Phase 3).
+  // self_intersect: Add of two interpenetrating ovoids (661 interior
+  // pierces). This is the dense-sliver fallback class - the pipeline
+  // cannot cleanly reduce it, so it falls back to the input unchanged,
+  // which still satisfies pierce-monotonicity (output <= input).
   //
-  // test_main.cpp sets ManifoldParams().processOverlaps = false
-  // for stricter validation in the standard test suite. That
-  // enables a CCW-check assertion in Boolean3's internal
-  // Triangulate that fires on this fixture's intermediate output.
-  // The spike runs with the default processOverlaps=true so
-  // doesn't hit this. Locally restore the default for this test.
-  const bool savedProcessOverlaps = ManifoldParams().processOverlaps;
+  // test_main.cpp sets ManifoldParams().processOverlaps = false for
+  // stricter validation; that enables a CCW-check assertion in Boolean3's
+  // Triangulate that fires on this fixture. Restore the default here.
+  ManifoldParamGuard guard;
   ManifoldParams().processOverlaps = true;
   std::filesystem::path file(__FILE__);
   std::filesystem::path modelsDir = file.parent_path() / "models";
@@ -1141,12 +1146,76 @@ TEST(Manifold, RemoveSelfIntersectionsSelfIntersectFixture) {
   ASSERT_EQ(b.Status(), Manifold::Error::NoError);
   Manifold result = a + b;
   EXPECT_EQ(result.Status(), Manifold::Error::NoError);
+  ASSERT_GT(InteriorPierces(result), 0);  // premise: input genuinely pierces
   const double inVol = result.Volume();
   Manifold cleaned = result.RemoveSelfIntersections();
   EXPECT_EQ(cleaned.Status(), Manifold::Error::NoError);
+  EXPECT_LE(InteriorPierces(cleaned), InteriorPierces(result));
   EXPECT_GT(cleaned.Volume(), 0);
   EXPECT_LT(std::abs(cleaned.Volume() - inVol) / inVol, 0.05);
-  ManifoldParams().processOverlaps = savedProcessOverlaps;
+}
+
+TEST(Manifold, RemoveSelfIntersectionsEmptyInput) {
+  // Empty input round-trips to empty without error.
+  Manifold empty;
+  Manifold cleaned = empty.RemoveSelfIntersections();
+  EXPECT_TRUE(cleaned.IsEmpty());
+  EXPECT_EQ(cleaned.Status(), Manifold::Error::NoError);
+}
+
+TEST(Manifold, RemoveSelfIntersectionsIdempotent) {
+  // A genuinely-piercing input is reduced on the first pass, and a second
+  // pass is a fixed point (same triangulation + volume).
+  Manifold body = Manifold(ReadTestMeshGL64OBJ("hull-body.obj"));
+  Manifold mask = Manifold(ReadTestMeshGL64OBJ("hull-mask.obj"));
+  Manifold input = body - mask;
+  ASSERT_GT(InteriorPierces(input), 0);
+  Manifold once = input.RemoveSelfIntersections();
+  ASSERT_EQ(once.Status(), Manifold::Error::NoError);
+  EXPECT_LE(InteriorPierces(once), InteriorPierces(input));
+  Manifold twice = once.RemoveSelfIntersections();
+  EXPECT_EQ(twice.Status(), Manifold::Error::NoError);
+  EXPECT_EQ(twice.NumTri(), once.NumTri());
+  EXPECT_NEAR(once.Volume(), twice.Volume(), once.Volume() * 1e-6);
+}
+
+TEST(Manifold, RemoveSelfIntersectionsDeterministic) {
+  // The pipeline is deterministic: repeated runs on the same input produce
+  // identical output. Guards against the documented per-vert / pair-sym
+  // ordering regressions.
+  Manifold body = Manifold(ReadTestMeshGL64OBJ("hull-body.obj"));
+  Manifold mask = Manifold(ReadTestMeshGL64OBJ("hull-mask.obj"));
+  Manifold result = body - mask;
+  ASSERT_GT(InteriorPierces(result), 0);  // premise: pipeline does real work
+  Manifold first = result.RemoveSelfIntersections();
+  ASSERT_EQ(first.Status(), Manifold::Error::NoError);
+  const MeshGL64 firstMesh = first.GetMeshGL64();
+  for (int i = 0; i < 4; ++i) {
+    Manifold again = result.RemoveSelfIntersections();
+    const MeshGL64 againMesh = again.GetMeshGL64();
+    EXPECT_EQ(againMesh.triVerts, firstMesh.triVerts);
+    EXPECT_EQ(againMesh.vertProperties, firstMesh.vertProperties);
+  }
+}
+
+TEST(Manifold, RemoveSelfIntersectionsFarFromOrigin) {
+  // ProbeMeshScale (shared by the per-vert and per-polygon classifiers)
+  // uses Box::Scale, not the bbox diagonal, so the probe stays usable far
+  // from the origin. Run a genuinely self-intersecting input (hull Subtract,
+  // ~31 pierces) translated to 1e4 and require strict reduction: the old
+  // bbox-diagonal form mis-scales the probe ~1150x and falls back unchanged
+  // (leaving all ~31), so a strict drop proves the probe still does real
+  // work. It does not fully clear at 1e4 (some precision is lost vs the ~0 it
+  // reaches at the origin), so this asserts reduction, not zero.
+  Manifold body = Manifold(ReadTestMeshGL64OBJ("hull-body.obj"));
+  Manifold mask = Manifold(ReadTestMeshGL64OBJ("hull-mask.obj"));
+  Manifold result = (body - mask).Translate({1e4, 1e4, 1e4});
+  ASSERT_EQ(result.Status(), Manifold::Error::NoError);
+  ASSERT_GT(InteriorPierces(result), 0);
+  Manifold cleaned = result.RemoveSelfIntersections();
+  EXPECT_EQ(cleaned.Status(), Manifold::Error::NoError);
+  EXPECT_LT(InteriorPierces(cleaned), InteriorPierces(result));
+  EXPECT_GT(cleaned.Volume(), 0);
 }
 
 TEST(Manifold, MeshID) {

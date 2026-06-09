@@ -21,21 +21,21 @@
 // Two-sided winding analysis for the polygon-keep classifier in
 // src/overlap_removal.cpp. Reuses the production Winding03_ flood-fill
 // structure (DisjointSets + component decomposition) but substitutes a
-// literal geometric ε-offset ray-cast for the per-component
+// literal geometric eps-offset ray-cast for the per-component
 // classification step. Reasons:
 //
-//   1. Boolean3 itself can't be called with M==M — its SoS perturbation
+//   1. Boolean3 itself can't be called with M==M - its SoS perturbation
 //      collapses at shared verts (= why `m.Boolean(m, OpType::Add)`
 //      doesn't work as a self-union shortcut).
-//   2. The SoS-perturbed Winding03_ from src/winding03.h gives one
+//   2. The SoS-perturbed Winding03_ in boolean3.cpp gives one
 //      z-projection winding number per vert; the `expandP` template
 //      parameter controls a tiebreaker, not a geometric "above" vs
 //      "below" probe direction. Confirmed empirically on the .obj
 //      battery: Winding03_<true> and Winding03_<false> produce nearly
 //      identical results for self-mesh.
 //   3. A polygon-keep classifier needs both above and below windings
-//      to decide "is this polygon on the boundary of the (winding ≥ 1)
-//      region of M?" The clean answer is to probe at v ± ε * n(v) and
+//      to decide "is this polygon on the boundary of the (winding >= 1)
+//      region of M?" The clean answer is to probe at v +/- eps * n(v) and
 //      ray-cast.
 //
 // Flood-fill validity: verts connected by intact halfedges share the
@@ -52,10 +52,10 @@
 namespace manifold {
 
 struct SelfMeshAnalysis {
-  // Per-vert winding number of M evaluated at v ± ε * n(v). Length =
+  // Per-vert winding number of M evaluated at v +/- eps * n(v). Length =
   // M.NumVert(). For a clean (non-self-intersecting) closed manifold,
   // w_above=1 / w_below=0 (or the reverse) for every vert. For
-  // self-intersecting M, both may be ≥ 1 inside overlap regions; the
+  // self-intersecting M, both may be >= 1 inside overlap regions; the
   // surface separates regions where |w_above - w_below| = 1 from the
   // exterior (w=0).
   Vec<int> w_above;
@@ -66,7 +66,7 @@ struct SelfMeshAnalysis {
 // edge-face pierce list (= the "broken halfedge" set).
 //
 // p1q2[i] = {forward halfedge index in M, pierced face index in M},
-// sorted by halfedge index ascending — same shape Winding03_ expects
+// sorted by halfedge index ascending - same shape Winding03_ expects
 // for its flood-fill component decomposition.
 //
 // Per-component flood-fill (DisjointSets) + per-component representative
@@ -77,41 +77,46 @@ SelfMeshAnalysis AnalyzeSelfMesh(const Manifold::Impl& M,
 // Compute the signed winding number of M at a single 3D point `origin`
 // by casting a ray in `direction` (must be unit length) of length
 // `length` (should comfortably exceed the mesh diameter), summing
-// signed face crossings via Möller-Trumbore. Convention: "inside = +1",
+// signed face crossings via Moller-Trumbore. Convention: "inside = +1",
 // "outside = 0" (= matches the standard outward-normal-oriented closed
 // manifold convention).
 //
 // For the polygon-keep classifier in overlap_removal: probe at
-// (poly_centroid ± ε * n_T) with ray direction picked to avoid
+// (poly_centroid +/- eps * n_T) with ray direction picked to avoid
 // axis-grazing, and read both windings to decide if the polygon is
-// on the boundary of M's winding ≥ 1 region.
+// on the boundary of M's winding >= 1 region.
 int WindingAt(const Manifold::Impl& M, vec3 origin, vec3 direction,
               double length);
 
+// Shared probe scale: Box::Scale() (absolute-largest coordinate, the
+// manifold convention) when bBox_ is finite, else the vertPos_ diagonal;
+// 0 for degenerate input. Used by both AnalyzeSelfMesh and
+// overlap_removal's polygon-keep classifier so the per-vert and
+// per-polygon probes derive identical eps and ray length.
+double ProbeMeshScale(const Manifold::Impl& M);
+
 // Probe-direction + scaling constants shared between AnalyzeSelfMesh
-// (per-vert ε-offset ray-cast) and overlap_removal's polygon-keep
-// classifier (per-polygon centroid ε-offset ray-cast). Keeping a
+// (per-vert eps-offset ray-cast) and overlap_removal's polygon-keep
+// classifier (per-polygon centroid eps-offset ray-cast). Keeping a
 // single source-of-truth so the two probes always agree.
 //
 // kProbeRayDir: irrational unit-vector chosen to minimize the chance
 //   of axis-grazing through the mesh's BVH (= each component is a
 //   distinct non-rational fraction; pre-normalized to unit length to
 //   avoid an FP normalize() call in the hot loop).
-// kProbeOffsetCoeff: ε-offset distance from probe origin to ray
+// kProbeOffsetCoeff: eps-offset distance from probe origin to ray
 //   start, expressed as a fraction of the mesh's bbox scale. Small
 //   enough that the offset doesn't cross any mesh feature for normal
 //   inputs; large enough to clear FP noise around exact-on-surface
 //   verts.
 // kProbeRayLengthCoeff: ray length, as a fraction of bbox scale.
 //   Must comfortably exceed the mesh diameter (= 4x bbox is
-//   conservative since mesh diameter ≤ sqrt(3)·bbox edge ≈ 1.73x).
-// kProbeRayDir is `inline const` (not constexpr) because vec3's
-// scalar-divide is not constexpr in linalg.h. The divisor is the
-// L2 norm of the numerator; computed once at startup, no hot-path
-// cost.
-inline const vec3 kProbeRayDir =
-    vec3(0.7234, 0.4567, 0.5191) /
-    1.0244252050829727;  // = sqrt(0.7234^2 + 0.4567^2 + 0.5191^2)
+//   conservative since mesh diameter <= sqrt(3)*bbox edge ~= 1.73x).
+// kProbeRayDir is `inline const` (not constexpr) because la::normalize
+// is not constexpr in linalg.h. Computed once at startup, no hot-path
+// cost. The direction is arbitrary but off-axis to avoid axis-aligned
+// ray degeneracies.
+inline const vec3 kProbeRayDir = la::normalize(vec3(0.7234, 0.4567, 0.5191));
 constexpr double kProbeOffsetCoeff = 1e-9;
 constexpr double kProbeRayLengthCoeff = 4.0;
 

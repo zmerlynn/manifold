@@ -24,7 +24,6 @@
 #include "overlap_removal_internal.h"
 #include "self_mesh_analysis.h"  // AnalyzeSelfMesh + WindingAt
 #include "shared.h"              // for AlphaBudgetEpsilon
-#include "winding03.h"           // for Kernel02/Kernel11/Kernel12
 
 // Internal pipeline implementation for Manifold::RemoveSelfIntersections().
 // Implements Emmett Lalish's #289 13-step sketch with a per-vert two-sided
@@ -40,13 +39,13 @@ namespace {
 // tuning + audits can change one value, not grep-and-replace.
 //
 // kPipelineRelTol: relative tolerance for SegmentPiercesTriInterior's
-//   boundary-graze gate. 1e-12 lets ε-perturbed verts on tri edges
+//   boundary-graze gate. 1e-12 lets eps-perturbed verts on tri edges
 //   (within FP noise) NOT count as pierces, while keeping real
 //   intersections detectable.
 // kVolumeFloor: divide-by-zero floor when computing relative drift of
 //   a tiny-volume mesh. 1e-12 = near machine precision for doubles.
 // kDriftCutoff: relative volume change above which the post-pipeline
-//   gate falls back to input. 50% is conservative — geometry-altering
+//   gate falls back to input. 50% is conservative - geometry-altering
 //   pipelines (= the cap walker fills holes / drops slivers) typically
 //   change volume by < 5%; > 50% means something pathological happened.
 // kPostCapIters: how many iterations of PostCapPierceReducer to run.
@@ -54,7 +53,7 @@ namespace {
 //   plateau within 3-4 iters, the extra 4 are headroom.
 // kBarycentricFloor: minimum allowed barycentric coordinate when
 //   classifying a point as strictly inside a triangle. 1e-12 rejects
-//   points "on the boundary" (= one barycentric coord ≈ 0) without
+//   points "on the boundary" (= one barycentric coord ~= 0) without
 //   bumping into FP noise. Used by BuildOnTriVertLists and
 //   FindEdgeTriIntersections.
 constexpr double kPipelineRelTol = 1e-12;
@@ -71,7 +70,7 @@ constexpr double kBarycentricFloor = 1e-12;
 //
 // kPairSymPhase3MaxIter / kPairSymPhase35MaxIter: monotonic
 //   drop / re-key passes in pair-sym Phase 3 / 3.5. Strict upper
-//   bound is the polygon count (each pass changes ≥1 polygon or
+//   bound is the polygon count (each pass changes >=1 polygon or
 //   exits). For typical mesh sizes (tens of thousands of polygons)
 //   we converge in < 16 iters; cap at 64 catches a 4x slowdown
 //   pathology without allowing 30k-poly meshes to grind for minutes.
@@ -123,24 +122,15 @@ double InferEps(const Manifold& m) {
   return AlphaBudgetEpsilon(m.BoundingBox().Scale(), 1000);
 }
 
-double InferEps(const Manifold& a, const Manifold& b) {
-  return AlphaBudgetEpsilon(
-      std::max(a.BoundingBox().Scale(), b.BoundingBox().Scale()), 1000);
-}
-
 Manifold::Impl ImplFromManifold(const Manifold& m) {
   return Manifold::Impl(m.GetMeshGL64());
-}
-
-Manifold ManifoldFromImpl(const Manifold::Impl& impl) {
-  return Manifold(GetMeshGLImpl<double, uint64_t>(impl, /*normalIdx=*/-1));
 }
 
 MergeVertsResult MergeVertsEps(const Manifold& in, double eps, int maxIter) {
   if (in.IsEmpty()) return {in, 0};
 
   // Pull positions and triangles out via MeshGL64. Layout:
-  // vertProperties = [x0,y0,z0, x1,y1,z1, ...], numProp ≥ 3.
+  // vertProperties = [x0,y0,z0, x1,y1,z1, ...], numProp >= 3.
   MeshGL64 mesh = in.GetMeshGL64();
   const size_t n = mesh.NumVert();
   std::vector<vec3> verts(n);
@@ -150,8 +140,8 @@ MergeVertsResult MergeVertsEps(const Manifold& in, double eps, int maxIter) {
                     mesh.vertProperties[mesh.numProp * i + 2]);
   }
 
-  // Per-pass: build ε/2-padded boxes, run Collider self-collision,
-  // narrow-phase dist² < eps², unite via DisjointSets. Move each
+  // Per-pass: build eps/2-padded boxes, run Collider self-collision,
+  // narrow-phase dist^2 < eps^2, unite via DisjointSets. Move each
   // cluster to its centroid and repeat until stable.
   int iter = 0;
   bool converged = false;
@@ -215,7 +205,7 @@ MergeVertsResult MergeVertsEps(const Manifold& in, double eps, int maxIter) {
                "MergeVertsEps: hit kMergeVertsMaxIter without converging");
 
   // Apply merges via MeshGL64 hints. Same path manifold's sort.cpp
-  // uses for ε-merging during construction, so result is consistent
+  // uses for eps-merging during construction, so result is consistent
   // with other Manifold-producing paths. Also overwrite each merged
   // vert's position with its cluster centroid.
   for (size_t i = 0; i < n; ++i) {
@@ -240,7 +230,7 @@ MergeVertsResult MergeVertsEps(const Manifold& in, double eps, int maxIter) {
       ++mergedCount;
     }
   }
-  // Avoid round-trip when nothing was merged: GetMeshGL64 → Manifold
+  // Avoid round-trip when nothing was merged: GetMeshGL64 -> Manifold
   // is lossy for Subtract-derived inputs (back-side / run-transform
   // info doesn't fully survive, observed as sign-flipped volume on
   // Cray). When no merges to apply, the input is already correct.
@@ -273,8 +263,8 @@ std::vector<EdgeVertList> BuildOnEdgeVertLists(const Manifold::Impl& impl,
   std::vector<EdgeVertList> out(nE);
   if (nE == 0 || nV == 0) return out;
 
-  // vert→neighbor adjacency for the thin-tri-apex skip (see comment
-  // in GenerateChordEdges' caller in extras/overlap3d_proto.cpp).
+  // vert->neighbor adjacency for the thin-tri-apex skip in
+  // GenerateChordEdges.
   std::vector<std::set<int>> adj(nV);
   for (size_t i = 0; i < impl.halfedge_.size(); ++i) {
     const int s = impl.halfedge_.Start(i);
@@ -283,7 +273,7 @@ std::vector<EdgeVertList> BuildOnEdgeVertLists(const Manifold::Impl& impl,
     adj[e].insert(s);
   }
 
-  // Per-edge ε-padded AABB (BVH leaves) and per-vert ε-padded AABB
+  // Per-edge eps-padded AABB (BVH leaves) and per-vert eps-padded AABB
   // (queries).
   std::vector<Box> edgeBoxes(nE);
   for (size_t i = 0; i < nE; ++i) {
@@ -458,8 +448,9 @@ std::vector<EdgeTriIntersection> FindEdgeTriIntersections(
     const size_t triIdx = triIdxQ;
     const size_t edgeIdx = bvh.perm[edgeIdxL];
     const Edge& edge = edges[edgeIdx];
-    if (static_cast<int>(triIdx) == edges[edgeIdx].halfedgeForward / 3 ||
-        static_cast<int>(triIdx) == edges[edgeIdx].halfedgePaired / 3)
+    if (static_cast<int>(triIdx) == edge.halfedgeForward / 3 ||
+        (edge.halfedgePaired >= 0 &&
+         static_cast<int>(triIdx) == edge.halfedgePaired / 3))
       return;
     const int t0 = impl.halfedge_.Start(3 * triIdx + 0);
     const int t1 = impl.halfedge_.Start(3 * triIdx + 1);
@@ -476,7 +467,11 @@ std::vector<EdgeTriIntersection> FindEdgeTriIntersections(
     const double denom = dot(n, d);
     const double nMag2 = dot(n, n);
     if (nMag2 == 0) return;
-    if (std::fabs(denom) <= 1e-30) return;
+    // Scale-relative parallel-edge reject (denom has units length^3 =
+    // |n| * |d|), matching the rest of the pipeline's relative tolerances.
+    if (std::fabs(denom) <=
+        kPipelineRelTol * std::sqrt(nMag2) * std::sqrt(dot(d, d)))
+      return;
     const double s = -dot(n, a - p0) / denom;
     if (s <= 0.0 || s >= 1.0) return;
     const vec3 pos = a + s * d;
@@ -530,7 +525,7 @@ ChordEdges GenerateChordEdges(const Manifold::Impl& impl,
   const int baseId = static_cast<int>(impl.NumVert());
 
   // Resolve each etIsect to a vert id, deduping new positions
-  // against each other within ε.
+  // against each other within eps.
   r.resolvedIds.assign(etIsects.size(), -1);
   std::vector<int>& resolvedId = r.resolvedIds;
   for (size_t i = 0; i < etIsects.size(); ++i) {
@@ -571,7 +566,7 @@ ChordEdges GenerateChordEdges(const Manifold::Impl& impl,
   }
 
   // Emit chords (= 2-endpoint pairs) or interior vert records (= 1-
-  // endpoint pairs); drop 0 / ≥ 3.
+  // endpoint pairs); drop 0 / >= 3.
   for (auto& [key, eps_set] : pairEndpoints) {
     if (eps_set.size() == 2) {
       auto it = eps_set.begin();
@@ -581,9 +576,8 @@ ChordEdges GenerateChordEdges(const Manifold::Impl& impl,
       const int v1 = std::max(a, b);
       r.newEdges.push_back({v0, v1, key.first, key.second});
     } else if (eps_set.size() == 1) {
-      const int v = *eps_set.begin();
-      r.interiorVertsPerTri[key.first].insert(v);
-      r.interiorVertsPerTri[key.second].insert(v);
+      // Single shared endpoint (edge-tip touch, no through-pierce): no
+      // chord edge is emitted and nothing further is recorded.
     } else {
       ++r.droppedTriTriPairsWithBadEndpointCount;
     }
@@ -667,13 +661,12 @@ std::vector<NewEdgeWithExtras> AddInteriorVertsToNewEdges(
 
 void PropagateNewVertsToOnEdgeLists(
     const std::vector<EdgeTriIntersection>& etIsects,
-    const std::vector<int>& resolvedIds, int baseId,
-    const std::vector<Edge>& edges, std::vector<EdgeVertList>& onEdgeLists) {
-  // For each etIsect, add the resolved vert id to the on-edge list
-  // of the piercing edge with parameter t = x.s. Skip if the vert
-  // is the edge's endpoint or already in the list. baseId param
-  // unused — kept for spike-API parity.
-  (void)baseId;
+    const std::vector<int>& resolvedIds, const std::vector<Edge>& edges,
+    std::vector<EdgeVertList>& onEdgeLists) {
+  // For each etIsect, add the resolved vert id to the on-edge list of the
+  // piercing edge with parameter t = x.s. Skip if the vert is the edge's
+  // endpoint or already in the list.
+  std::vector<int> touched;
   for (size_t i = 0; i < etIsects.size(); ++i) {
     const auto& x = etIsects[i];
     auto& list = onEdgeLists[x.edgeIdx];
@@ -683,6 +676,29 @@ void PropagateNewVertsToOnEdgeLists(
       continue;
     list.verts.push_back(v);
     list.ts.push_back(x.s);
+    touched.push_back(x.edgeIdx);
+  }
+  // BuildOnEdgeVertLists left each list sorted by t, but the appends above
+  // are unordered. Step 11 (BuildPerTriHalfedgeGraphs) consumes verts in
+  // stored order to build consecutive sub-edges assuming monotone t, so
+  // re-sort each touched list by t (carrying verts along).
+  std::sort(touched.begin(), touched.end());
+  touched.erase(std::unique(touched.begin(), touched.end()), touched.end());
+  for (int e : touched) {
+    auto& list = onEdgeLists[e];
+    std::vector<size_t> perm(list.verts.size());
+    std::iota(perm.begin(), perm.end(), 0);
+    std::stable_sort(perm.begin(), perm.end(), [&](size_t i, size_t j) {
+      return list.ts[i] < list.ts[j];
+    });
+    std::vector<int> sortedV(list.verts.size());
+    std::vector<double> sortedT(list.ts.size());
+    for (size_t k = 0; k < perm.size(); ++k) {
+      sortedV[k] = list.verts[perm[k]];
+      sortedT[k] = list.ts[perm[k]];
+    }
+    list.verts = std::move(sortedV);
+    list.ts = std::move(sortedT);
   }
 }
 
@@ -701,7 +717,7 @@ std::vector<PerTriHalfedgeGraph> BuildPerTriHalfedgeGraphs(
       halfedgeToEdge[edges[e].halfedgePaired] = static_cast<int>(e);
   }
 
-  // Original edges → one halfedge per sub-edge in T's CCW direction.
+  // Original edges -> one halfedge per sub-edge in T's CCW direction.
   for (size_t t = 0; t < nT; ++t) {
     for (int k : {0, 1, 2}) {
       const int h = static_cast<int>(3 * t + k);
@@ -798,7 +814,7 @@ void AddNextPointers(const Manifold::Impl& impl,
   }
 
   // For each h, next(h) = outgoing-from-h.endVert with smallest CW
-  // angle from θ_rev = h.angle + π. CW (not CCW) is correct for
+  // angle from theta_rev = h.angle + pi. CW (not CCW) is correct for
   // "face on the LEFT" walk.
   g.nextHalfedge.assign(g.halfedges.size(), -1);
   constexpr double kTwoPi = 6.283185307179586;
@@ -852,10 +868,17 @@ PolygonWalkResult WalkPolygons(const PerTriHalfedgeGraph& g) {
       polygon.push_back(g.halfedges[cur].startVert);
       cur = g.nextHalfedge[cur];
     }
-    if (!stalled && polygon.size() >= 3) {
+    // Only accept walks that returned to `start` (a closed cycle). A walk
+    // that ran into a different already-visited halfedge is an open path
+    // and must not be emitted as a polygon - Triangulate would treat it as
+    // closed. The cap walker applies the same `cur == start` guard.
+    const bool closed = (cur == static_cast<int>(start));
+    if (!stalled && closed && polygon.size() >= 3) {
       r.polygons.push_back(std::move(polygon));
-    } else if (!stalled && polygon.size() == 2) {
+    } else if (!stalled && closed && polygon.size() == 2) {
       r.degeneratePolygons.push_back(std::move(polygon));
+    } else if (!stalled) {
+      r.stalledHalfedges += static_cast<int>(polygon.size());
     }
   }
   return r;
@@ -908,61 +931,6 @@ double SegmentPiercesTriInterior(vec3 a, vec3 b, vec3 v0, vec3 v1, vec3 v2,
   const double bTol = relTol * nMag * nMag;
   if (!(d0 > bTol && d1 > bTol && d2 > bTol)) return 0.0;
   return std::min(std::fabs(dA), std::fabs(dB)) / nMag;
-}
-
-double SegmentPiercesTriInteriorSoS(vec3 a, vec3 b, vec3 v0, vec3 v1, vec3 v2) {
-  using la::cross;
-  using la::dot;
-  const vec3 n = cross(v1 - v0, v2 - v0);
-  const double nMag = std::sqrt(dot(n, n));
-  if (nMag == 0) return 0.0;
-  const vec3 nrm = n / nMag;
-
-  // Build a 1-edge Impl for the segment a-b. Same shape as
-  // Manifold::Impl::RayCast (boolean3.cpp:438). vertNormal_ left at
-  // zero so the segment side contributes no SoS perturbation; the
-  // tiebreaker comes entirely from the triangle side.
-  Manifold::Impl segImpl;
-  segImpl.vertPos_.resize(2);
-  segImpl.vertPos_[0] = a;
-  segImpl.vertPos_[1] = b;
-  segImpl.vertNormal_.resize(2, vec3(0.0));
-  // Halfedges is a SoA class (upstream #1709). For this 2-halfedge
-  // segment Impl, End(0) = Start(NextHalfedge(0)) = Start(1) = 1
-  // gives the right endVert for halfedge 0; End(1) is never called
-  // (k12 is only invoked with a1=0 below).
-  segImpl.halfedge_.resize(2);
-  segImpl.halfedge_.Set(0, /*startVert=*/0, /*paired=*/1, /*propVert=*/0);
-  segImpl.halfedge_.Set(1, /*startVert=*/1, /*paired=*/0, /*propVert=*/0);
-  segImpl.faceNormal_.resize(1, vec3(0.0));
-
-  // Build a 1-triangle Impl. Three boundary halfedges (no pair) is
-  // not legal for a manifold, so we self-pair each halfedge — this
-  // makes IsForward() return true and the (b1pair == b1) case in the
-  // dirP/dirQ computations harmless. faceNormal_ is the geometric
-  // normal so SoS picks the same side the segment-side calculation
-  // would choose at degeneracies.
-  Manifold::Impl triImpl;
-  triImpl.vertPos_.resize(3);
-  triImpl.vertPos_[0] = v0;
-  triImpl.vertPos_[1] = v1;
-  triImpl.vertPos_[2] = v2;
-  triImpl.vertNormal_.resize(3, vec3(0.0));
-  // SoA storage; endVerts are derived via NextHalfedge (mod-3 wrap
-  // within this single-triangle face). Self-pair each halfedge so
-  // Pair(i) returns i, matching the original layout.
-  triImpl.halfedge_.resize(3);
-  triImpl.halfedge_.Set(0, /*startVert=*/0, /*paired=*/0, /*propVert=*/0);
-  triImpl.halfedge_.Set(1, /*startVert=*/1, /*paired=*/1, /*propVert=*/0);
-  triImpl.halfedge_.Set(2, /*startVert=*/2, /*paired=*/2, /*propVert=*/0);
-  triImpl.faceNormal_.resize(1);
-  triImpl.faceNormal_[0] = nrm;
-
-  Kernel02<false, true> k02{segImpl, triImpl};
-  Kernel11<false> k11{segImpl, triImpl};
-  Kernel12<false, true> k12{segImpl, triImpl, k02, k11};
-  const auto [s, v] = k12(0, 0);
-  return (s != 0 && std::isfinite(v.x)) ? 1.0 : 0.0;
 }
 
 SelfIntersectionResult CheckSelfIntersection(const Manifold& m, double relTol) {
@@ -1097,7 +1065,7 @@ bool AnalyticalKeep(int triId, const std::vector<int>& polyVerts,
       nonChordPts.push_back(fallbackPt);
     }
   }
-  // Scale-relative threshold: bbox.Scale × 1e-6 ignores borderline.
+  // Scale-relative threshold: bbox.Scale x 1e-6 ignores borderline.
   const double thresh = impl.bBox_.Scale() * 1e-6;
   for (int triB : boundingPartners) {
     const int v0 = impl.halfedge_.Start(3 * triB);
@@ -1168,6 +1136,24 @@ std::pair<int, int> DoCapPass(
         BuildSortedBVH(VecView<const Box>(triBoxes.data(), triBoxes.size()));
   };
   rebuildCapBVH();
+  // Resync the symmetric edge-incidence counts from the current
+  // out.triVerts. Called at the top of each cap cycle so cross-cycle counts
+  // stay exact regardless of within-cycle fan/ear/rollback bookkeeping
+  // (the ear-clip rollback and last-ear paths do not perfectly maintain ec;
+  // this mirrors the rebuildCapBVH() resync).
+  auto rebuildEc = [&]() {
+    ec.clear();
+    for (size_t t = 0; t < out.triVerts.size() / 3; ++t) {
+      const int v[3] = {static_cast<int>(out.triVerts[3 * t]),
+                        static_cast<int>(out.triVerts[3 * t + 1]),
+                        static_cast<int>(out.triVerts[3 * t + 2])};
+      for (int e : {0, 1, 2}) {
+        int sa = v[e], sb = v[(e + 1) % 3];
+        if (sa > sb) std::swap(sa, sb);
+        ++ec[{sa, sb}];
+      }
+    }
+  };
 
   auto wouldPierce = [&](int a, int b, int c) -> bool {
     if (capTris.empty()) return false;
@@ -1299,6 +1285,8 @@ std::pair<int, int> DoCapPass(
     if (visited.count(start)) continue;
     auto cyc = dfs(start);
     if (cyc.size() < 3) continue;
+    // Resync ec from current geometry before this cycle's conflict checks.
+    rebuildEc();
     size_t chosenApex = SIZE_MAX;
     for (size_t a = 0; a < cyc.size(); ++a) {
       if (wouldFanConflict(cyc, a)) continue;
@@ -1331,16 +1319,16 @@ std::pair<int, int> DoCapPass(
       rebuildCapBVH();
       continue;
     }
-    // Fan failed — try greedy ear-clipping.
+    // Fan failed - try greedy ear-clipping.
     std::vector<int> remaining(cyc.begin(), cyc.end());
     int earTrisAdded = 0;
     int earGuard = 0;
     while (remaining.size() >= 3 && earGuard++ < kEarClipGuard) {
       const size_t m = remaining.size();
       if (m == 3) {
-        // Last ear — emit unconditionally (see spike comment about
-        // not applying forbidden check at 3-cycle: trades small
-        // residual pierce for HUGE fallback regression).
+        // Last ear - emit unconditionally. Applying the forbidden-triple
+        // check at the final 3-cycle trades a small residual pierce for a
+        // large fallback regression, so skip it here.
         out.triVerts.push_back(remaining[0]);
         out.triVerts.push_back(remaining[1]);
         out.triVerts.push_back(remaining[2]);
@@ -1405,8 +1393,7 @@ std::pair<int, int> DoCapPass(
 namespace {
 // Helper for both pierce reducers: build BVH over current
 // out.triVerts and find piercing pairs. Returns (piercePairs,
-// pierceCount) — same algorithm as the spike's per-iter inline
-// code. tris[] and perm[] are passed back so callers can resolve
+// pierceCount). tris[] and perm[] are passed back so callers can resolve
 // pair indices to vert triplets for forbidden-set management.
 struct PierceScanResult {
   std::set<std::pair<int, int>> piercePairs;
@@ -1474,7 +1461,7 @@ inline PierceScanResult ScanForPiercingPairs(const MeshGL64& out) {
 }
 
 // Common drop logic: pick which tri to drop per pair (higher
-// pierce-count wins; tie → lower idx) and produce dropMask.
+// pierce-count wins; tie -> lower idx) and produce dropMask.
 inline std::vector<bool> ComputeDropMask(const PierceScanResult& scan,
                                          size_t nT) {
   std::vector<bool> dropMask(nT, false);
@@ -1559,7 +1546,7 @@ int PostCapPierceReducer(MeshGL64& out,
 }
 
 namespace {
-// Compute current edge-incidence map (sorted edge → count) from
+// Compute current edge-incidence map (sorted edge -> count) from
 // out.triVerts. Used by both DropExcessHalfedgeContributors and TrimOrphans.
 inline std::map<std::pair<int, int>, int> ComputeEdgeIncidence(
     const MeshGL64& out) {
@@ -1600,7 +1587,7 @@ EdgeReducerResult DropExcessHalfedgeContributors(
     {
       // Per-iteration: drop ALL excess directional contributors
       // simultaneously. heMap[(a,b)] = list of tri indices emitting
-      // halfedge (a→b). Score-based keeper pick (= prefer keeping
+      // halfedge (a->b). Score-based keeper pick (= prefer keeping
       // the most "load-bearing" tri).
       std::map<std::pair<int, int>, std::vector<int>> heMap;
       auto ecCur = ComputeEdgeIncidence(out);
@@ -1668,8 +1655,8 @@ EdgeReducerResult DropExcessHalfedgeContributors(
 
 TriangulationResult TriangulateAndEmit(
     const Manifold::Impl& impl, const std::vector<vec3>& newVertPositions,
-    const std::vector<PolygonWalkResult>& walks, PolygonClassifierFn classifier,
-    const std::map<int, std::set<int>>* interiorVertsPerTri) {
+    const std::vector<PolygonWalkResult>& walks,
+    PolygonClassifierFn classifier) {
   using la::cross;
   using la::dot;
   TriangulationResult r{Manifold(), 0, 0, 0};
@@ -1696,23 +1683,20 @@ TriangulationResult TriangulateAndEmit(
 
   // Phase 1: tentative classification.
   std::vector<std::vector<bool>> keepFlags(walks.size());
-  std::vector<std::vector<bool>> reverseFlags(walks.size());
   std::vector<bool> autoKeepFlags(walks.size(), false);
   for (size_t triId = 0; triId < walks.size(); ++triId) {
     const auto& w = walks[triId];
     const vec3 n = impl.faceNormal_[triId];
     autoKeepFlags[triId] = (w.polygons.size() == 1);
     keepFlags[triId].assign(w.polygons.size(), true);
-    reverseFlags[triId].assign(w.polygons.size(), false);
     if (classifier && !autoKeepFlags[triId]) {
       for (size_t pi = 0; pi < w.polygons.size(); ++pi) {
         auto c = classifier(w.polygons[pi], n, static_cast<int>(triId));
         keepFlags[triId][pi] = c.keep;
-        reverseFlags[triId][pi] = c.reverse;
       }
     }
   }
-  // Phase 2: cascade-drop forward — drop auto-kept 1-poly tris whose
+  // Phase 2: cascade-drop forward - drop auto-kept 1-poly tris whose
   // sub-edges are all on the k=1 boundary. Iterate until stable.
   int pass = 0;
   for (; pass < kCascadeDropMaxPass; ++pass) {
@@ -1779,24 +1763,34 @@ TriangulationResult TriangulateAndEmit(
       const auto& poly = w.polygons[pi];
       ++r.polygonsTriangulated;
       const bool keep = keepFlags[triId][pi];
-      bool reverse = reverseFlags[triId][pi];
       if (!keep) {
         ++r.polygonsDropped;
         continue;
       }
+      // Drop sub-polygons collapsed to a line/point in projection (pinched
+      // cycles or coincident verts): ~zero projected area. They would
+      // otherwise throw inside Triangulate (caught, but noisy under
+      // MANIFOLD_DEBUG) or feed the fan a degenerate apex.
+      {
+        double area2x = 0.0, ext = 0.0;
+        const vec2 p0 = getPos2(poly[0]);
+        for (size_t i = 0; i < poly.size(); ++i) {
+          const vec2 a = getPos2(poly[i]);
+          const vec2 b = getPos2(poly[(i + 1) % poly.size()]);
+          area2x += a.x * b.y - b.x * a.y;
+          ext = std::max(ext, la::length(a - p0));
+        }
+        if (std::fabs(area2x) <= ext * ext * 1e-12) {
+          ++r.trisDroppedTooSmall;
+          continue;
+        }
+      }
       ++r.polygonsKept;
       if (autoKeepFlags[triId] && classifier) ++r.polygonsAutoKept;
-      if (reverse) ++r.polygonsReversed;
       auto emit = [&](int a, int b, int c) {
-        if (reverse) {
-          out.triVerts.push_back(a);
-          out.triVerts.push_back(c);
-          out.triVerts.push_back(b);
-        } else {
-          out.triVerts.push_back(a);
-          out.triVerts.push_back(b);
-          out.triVerts.push_back(c);
-        }
+        out.triVerts.push_back(a);
+        out.triVerts.push_back(b);
+        out.triVerts.push_back(c);
         ++r.trianglesEmitted;
       };
       if (poly.size() == 3) {
@@ -1828,10 +1822,31 @@ TriangulationResult TriangulateAndEmit(
       if (fanIdx >= 0) {
         const int v0 = fanIdx;
         const int N = static_cast<int>(poly.size());
-        for (int i = 1; i + 1 < N; ++i) {
-          emit(poly[v0], poly[(v0 + i) % N], poly[(v0 + i + 1) % N]);
+        // The fan is valid only if no triangle is inverted relative to the
+        // polygon's projected orientation (a polygon concave away from the
+        // apex would self-overlap). The collinear apex itself is allowed
+        // (zero-area tris); only strictly-opposite tris veto. If vetoed,
+        // fall through to Triangulate, which handles concave polygons.
+        double polyArea2 = 0.0;
+        for (int i = 0; i < N; ++i) {
+          const vec2 a = getPos2(poly[i]);
+          const vec2 b = getPos2(poly[(i + 1) % N]);
+          polyArea2 += a.x * b.y - b.x * a.y;
         }
-        continue;
+        bool fanSimple = true;
+        for (int i = 1; i + 1 < N && fanSimple; ++i) {
+          const vec2 a = getPos2(poly[v0]);
+          const vec2 b = getPos2(poly[(v0 + i) % N]);
+          const vec2 c = getPos2(poly[(v0 + i + 1) % N]);
+          const double tri2 =
+              (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+          if (tri2 * polyArea2 < 0) fanSimple = false;
+        }
+        if (fanSimple) {
+          for (int i = 1; i + 1 < N; ++i)
+            emit(poly[v0], poly[(v0 + i) % N], poly[(v0 + i + 1) % N]);
+          continue;
+        }
       }
       SimplePolygon poly2;
       poly2.reserve(poly.size());
@@ -1846,18 +1861,12 @@ TriangulationResult TriangulateAndEmit(
     }
   }
 
-  // (interiorVertsPerTri / fan post-pass intentionally omitted —
-  // documented as broken in spike; opt-in via OVERLAP3D_FAN_INTERIOR
-  // there. Phase 4 can decide whether to bring it over.)
-  (void)interiorVertsPerTri;
-
   // Pre-cap pierce-aware reducer: drop classifier-output overlapping tris.
   std::set<std::array<int, 3>> forbiddenTriples;
   PierceAwareReducer(out);
 
-  // Surface cap + downstream cleanup. The spike's pipeline runs cap
-  // when there are k=1 cycles; we replicate that gate via a quick
-  // edge-incidence scan.
+  // Surface cap + downstream cleanup. Run the cap walker only when there
+  // are k=1 (open boundary) cycles, gated by a quick edge-incidence scan.
   {
     int k1 = 0;
     for (const auto& [_, c] : ComputeEdgeIncidence(out)) {
@@ -1885,55 +1894,36 @@ TriangulationResult TriangulateAndEmit(
 }
 
 namespace {
-// Pipeline body — separated from RunOverlapRemoval so the entry
+// Pipeline body - separated from RunOverlapRemoval so the entry
 // point can wrap it in a try/catch and fall back to input on any
 // internal exception (= e.g. Triangulate's CCW-check assertion
 // when the polygon walker emits a degenerate sub-polygon under
 // MANIFOLD_DEBUG builds).
-std::pair<Manifold, RemoveSelfIntersectionsStats> RunOverlapRemovalImpl(
-    const Manifold& input, double eps);
+Manifold RunOverlapRemovalImpl(const Manifold& input, double eps);
 }  // namespace
 
-std::pair<Manifold, RemoveSelfIntersectionsStats> RunOverlapRemoval(
-    const Manifold& input, double eps) {
-  // Outer try/catch: if any internal stage throws (= MANIFOLD_DEBUG
-  // assertion in Triangulate, or Manifold(out) constructor,
-  // etc.), fall back to merged input. This preserves the pierce-
-  // monotonicity guarantee even when the pipeline crashes.
+Manifold RunOverlapRemoval(const Manifold& input, double eps) {
+  // Outer try/catch: if any internal stage throws (= a MANIFOLD_DEBUG
+  // assertion in Triangulate, the Manifold(out) constructor, or
+  // std::bad_alloc), return the input unchanged. The input is already a
+  // valid manifold with no more self-intersections than itself, so this
+  // preserves pierce-monotonicity without running any further allocating
+  // or possibly-throwing work (MergeVertsEps both asserts and can produce
+  // a non-manifold result, so it must not run on the failure path).
   try {
     return RunOverlapRemovalImpl(input, eps);
-  } catch (const std::exception& e) {
-    if (std::getenv("OVERLAP3D_DEBUG_FALLBACK")) {
-      std::cerr << "[overlap_removal] caught exception, falling back: "
-                << e.what() << "\n";
-    }
-    RemoveSelfIntersectionsStats dbg{};
-    if (input.IsEmpty()) return {input, dbg};
-    if (eps <= 0.0) eps = InferEps(input);
-    auto mr = MergeVertsEps(input, eps);
-    return {mr.manifold, dbg};
   } catch (...) {
-    if (std::getenv("OVERLAP3D_DEBUG_FALLBACK")) {
-      std::cerr << "[overlap_removal] caught unknown exception, falling back\n";
-    }
-    RemoveSelfIntersectionsStats dbg{};
-    if (input.IsEmpty()) return {input, dbg};
-    if (eps <= 0.0) eps = InferEps(input);
-    auto mr = MergeVertsEps(input, eps);
-    return {mr.manifold, dbg};
+    return input;
   }
 }
 
 namespace {
-std::pair<Manifold, RemoveSelfIntersectionsStats> RunOverlapRemovalImpl(
-    const Manifold& input, double eps) {
-  RemoveSelfIntersectionsStats dbg{};
-  if (input.IsEmpty()) return {input, dbg};
+Manifold RunOverlapRemovalImpl(const Manifold& input, double eps) {
+  if (input.IsEmpty()) return input;
   if (eps <= 0.0) eps = InferEps(input);
 
-  // Step 1: ε-merge close verts.
+  // Step 1: eps-merge close verts.
   auto mr = MergeVertsEps(input, eps);
-  dbg.mergedVerts = mr.mergedCount;
 
   // Steps 2-8: setup + pipeline structural stages.
   auto impl = ImplFromManifold(mr.manifold);
@@ -1954,22 +1944,14 @@ std::pair<Manifold, RemoveSelfIntersectionsStats> RunOverlapRemovalImpl(
   }
   auto edges = EnumerateEdges(impl);
   auto onEdgeLists = BuildOnEdgeVertLists(impl, edges, eps);
-  for (const auto& l : onEdgeLists) dbg.vertsOnEdges += l.verts.size();
   auto onTriLists = BuildOnTriVertLists(impl, eps);
-  for (const auto& l : onTriLists) dbg.vertsInsideTris += l.verts.size();
   auto etIsects =
       FindEdgeTriIntersections(impl, edges, onEdgeLists, onTriLists, eps);
-  dbg.edgeTriIntersections = static_cast<int>(etIsects.size());
   auto chordOutput = GenerateChordEdges(impl, edges, etIsects, eps);
-  dbg.chordVerts = static_cast<int>(chordOutput.newVertPositions.size());
-  dbg.chordEdges = static_cast<int>(chordOutput.newEdges.size());
   auto chordsWithExtras =
       AddInteriorVertsToNewEdges(impl, chordOutput.newVertPositions,
                                  chordOutput.newEdges, onTriLists, eps);
-  for (const auto& nwe : chordsWithExtras)
-    dbg.vertsPropagatedToChords += nwe.extraVerts.size();
-  PropagateNewVertsToOnEdgeLists(etIsects, chordOutput.resolvedIds,
-                                 static_cast<int>(impl.NumVert()), edges,
+  PropagateNewVertsToOnEdgeLists(etIsects, chordOutput.resolvedIds, edges,
                                  onEdgeLists);
 
   // Steps 11p1+11p2+11p3: per-tri halfedge graphs + walk polygons.
@@ -1994,24 +1976,6 @@ std::pair<Manifold, RemoveSelfIntersectionsStats> RunOverlapRemovalImpl(
             });
   auto sma = AnalyzeSelfMesh(impl, VecView<const std::array<int, 2>>(
                                        sma_p1q2.data(), sma_p1q2.size()));
-  // OVERLAP3D_DEBUG_CLASSIFIER prints the (w_above, w_below) histogram
-  // across all verts. For a clean self-intersecting input, expected
-  // values are (0,1) (boundary) and a few (1,2) (overlap). Inputs
-  // where the histogram has neither (0,1) nor (1,0) — e.g. cray's
-  // {(0,0):68, (1,3):46, (-4,-4):9} — produce no boundary verts
-  // under the keepIfOnSurface predicate, and the pipeline falls back
-  // to input via the post-pipeline drift gate.
-  if (std::getenv("OVERLAP3D_DEBUG_CLASSIFIER")) {
-    std::map<std::pair<int, int>, int> wHist;
-    for (size_t v = 0; v < sma.w_above.size(); ++v) {
-      ++wHist[{sma.w_above[v], sma.w_below[v]}];
-    }
-    std::cerr << "[classifier] (wa,wb) histogram:";
-    for (const auto& [wp, n] : wHist)
-      std::cerr << " (" << wp.first << "," << wp.second << "):" << n;
-    std::cerr << "\n";
-  }
-
   // Per-polygon two-sided winding classifier (with centroid-probe
   // fallback when per-vert windings are all zero or undecidable).
   // kProbeRayDir / kProbeOffsetCoeff / kProbeRayLengthCoeff are
@@ -2019,8 +1983,7 @@ std::pair<Manifold, RemoveSelfIntersectionsStats> RunOverlapRemovalImpl(
   // per-vert and per-polygon probes always use the same direction
   // and scaling.
   using la::dot;
-  using la::length;
-  const double meshScale = length(impl.bBox_.max - impl.bBox_.min);
+  const double meshScale = ProbeMeshScale(impl);
   const double probeEps = meshScale * kProbeOffsetCoeff;
   const double rayLen = meshScale * kProbeRayLengthCoeff;
   auto keepIfOnSurface = [&](int triId, const std::vector<int>& poly) -> bool {
@@ -2041,7 +2004,7 @@ std::pair<Manifold, RemoveSelfIntersectionsStats> RunOverlapRemovalImpl(
     }
     // Per-vert tally was silent (= no verts had a clean (0,1)/(1,0)/
     // both-in/both-out signal). Fall back to centroid-probe: ray-cast
-    // ε above and below the polygon centroid along the tri normal.
+    // eps above and below the polygon centroid along the tri normal.
     vec3 c(0, 0, 0);
     for (int v : poly)
       c += GetPos3(v, baseId, impl, chordOutput.newVertPositions);
@@ -2098,6 +2061,18 @@ std::pair<Manifold, RemoveSelfIntersectionsStats> RunOverlapRemovalImpl(
     return static_cast<size_t>(pi) >= base;
   };
   // Pair-sym Phase 1: per-direction chord-pair enforcement (6 branches).
+  // Tie-breaks read from a snapshot of the classifier output taken before
+  // the loop, so Phase 1's tie-break decisions do not depend on the order
+  // chordOutput.newEdges happens to be in (no iteration sees a flag a
+  // previous iteration already flipped). Writes still update the live map
+  // that Phases 2-3.5 read, so the final kept set is not order-free - only
+  // this phase's reads are.
+  const std::map<std::pair<int, int>, bool> keepSnapshot = precomputedKeep;
+  auto getSnap = [&](int triId, int pi) -> bool {
+    if (pi < 0) return false;
+    auto it = keepSnapshot.find({triId, pi});
+    return it != keepSnapshot.end() && it->second;
+  };
   for (const auto& edge : chordOutput.newEdges) {
     int piA1 = findPolyHE(edge.triA, edge.v0, edge.v1);
     int piB1 = findPolyHE(edge.triB, edge.v1, edge.v0);
@@ -2112,6 +2087,10 @@ std::pair<Manifold, RemoveSelfIntersectionsStats> RunOverlapRemovalImpl(
     bool* kB1 = getKeep(edge.triB, piB1);
     bool* kA2 = getKeep(edge.triA, piA2);
     bool* kB2 = getKeep(edge.triB, piB2);
+    const bool snapA1 = getSnap(edge.triA, piA1);
+    const bool snapB1 = getSnap(edge.triB, piB1);
+    const bool snapA2 = getSnap(edge.triA, piA2);
+    const bool snapB2 = getSnap(edge.triB, piB2);
     const bool A1d = isDegenerate(edge.triA, piA1);
     const bool B1d = isDegenerate(edge.triB, piB1);
     const bool A2d = isDegenerate(edge.triA, piA2);
@@ -2124,7 +2103,7 @@ std::pair<Manifold, RemoveSelfIntersectionsStats> RunOverlapRemovalImpl(
     const int n_d1 = (A1c ? 1 : 0) + (B2c ? 1 : 0);
     const int n_d2 = (A2c ? 1 : 0) + (B1c ? 1 : 0);
     if (n_d1 == 0 && n_d2 == 0) {
-      // No contributors — nothing to enforce.
+      // No contributors - nothing to enforce.
     } else if (n_d1 == 0) {
       if (A2c) *kA2 = false;
       if (B1c) *kB1 = false;
@@ -2140,7 +2119,7 @@ std::pair<Manifold, RemoveSelfIntersectionsStats> RunOverlapRemovalImpl(
       if (A1c) *kA1 = true;
       if (B2c) *kB2 = true;
       if (A2c && B1c) {
-        if (*kA2 || !*kB1) {
+        if (snapA2 || !snapB1) {
           *kA2 = true;
           *kB1 = false;
         } else {
@@ -2152,7 +2131,7 @@ std::pair<Manifold, RemoveSelfIntersectionsStats> RunOverlapRemovalImpl(
       if (A2c) *kA2 = true;
       if (B1c) *kB1 = true;
       if (A1c && B2c) {
-        if (*kA1 || !*kB2) {
+        if (snapA1 || !snapB2) {
           *kA1 = true;
           *kB2 = false;
         } else {
@@ -2162,8 +2141,8 @@ std::pair<Manifold, RemoveSelfIntersectionsStats> RunOverlapRemovalImpl(
       }
     } else {
       // Full case (n_d1=2, n_d2=2): pair-level enforcement.
-      int p1Vote = (*kA1 ? 1 : 0) + (*kB1 ? 1 : 0);
-      int p2Vote = (*kA2 ? 1 : 0) + (*kB2 ? 1 : 0);
+      int p1Vote = (snapA1 ? 1 : 0) + (snapB1 ? 1 : 0);
+      int p2Vote = (snapA2 ? 1 : 0) + (snapB2 ? 1 : 0);
       bool p1Keep, p2Keep;
       if (p1Vote == 2 && p2Vote == 0) {
         p1Keep = true;
@@ -2322,7 +2301,7 @@ std::pair<Manifold, RemoveSelfIntersectionsStats> RunOverlapRemovalImpl(
     }
     DEBUG_ASSERT(iter < kPairSymPhase3MaxIter, logicErr,
                  "pair-sym Phase 3 hit kPairSymPhase3MaxIter without "
-                 "converging — drop loop should be monotonic");
+                 "converging - drop loop should be monotonic");
     // Phase 3.5: re-key pass. Phase 3 (above) DROPS kept polygons
     // with strict-majority unpaired halfedges. The symmetric problem
     // is dropped polygons whose halfedges would COMPLETE existing
@@ -2379,13 +2358,12 @@ std::pair<Manifold, RemoveSelfIntersectionsStats> RunOverlapRemovalImpl(
                 ++novel;
             }
             // Net change in unpaired count from re-keying P:
-            //   novel - pairedToKept (new unpaired added minus
-            //   existing unpaired closed). Re-key if net negative
-            //   (= reduces unpaired). Allow duplicates: they create
-            //   multi-owner halfedges (k>2 edges) that the recovery
-            //   sweep cleans by dropping excess. Cost is a slightly
-            //   larger MeshGL64 that recovery later trims.
-            if (pairedToKept > novel) {
+            //   novel - pairedToKept (new unpaired added minus existing
+            //   unpaired closed). Re-key only when it strictly reduces
+            //   unpaired (pairedToKept > novel) AND introduces no duplicate
+            //   (multi-owner) halfedge, so we never manufacture k>2 edges
+            //   the downstream reducer would then have to clean.
+            if (pairedToKept > novel && duplicate == 0) {
               it->second = true;
               ++rekeyed;
             }
@@ -2396,58 +2374,7 @@ std::pair<Manifold, RemoveSelfIntersectionsStats> RunOverlapRemovalImpl(
       }
       DEBUG_ASSERT(iter2 < kPairSymPhase35MaxIter, logicErr,
                    "pair-sym Phase 3.5 hit kPairSymPhase35MaxIter without "
-                   "converging — re-key loop should be monotonic");
-      if (std::getenv("OVERLAP3D_DEBUG_FALLBACK")) {
-        std::cerr << "[phase3.5] iter=" << iter2 << " rekeyed=" << totalRekeyed
-                  << "\n";
-      }
-    }
-    if (std::getenv("OVERLAP3D_DEBUG_FALLBACK")) {
-      // Measure the residual unpaired-halfedge count after Phase 3
-      // converges (= strict-majority drops are exhausted).
-      std::map<std::pair<int, int>, int> dirCnt;
-      int keptPolys = 0, droppedPolys = 0;
-      for (size_t triId = 0; triId < polygonWalks.size(); ++triId) {
-        const auto& polys = polygonWalks[triId].polygons;
-        for (size_t pi = 0; pi < polys.size(); ++pi) {
-          auto it = precomputedKeep.find(
-              {static_cast<int>(triId), static_cast<int>(pi)});
-          bool keep = (it == precomputedKeep.end()) ? true : it->second;
-          if (!keep) {
-            ++droppedPolys;
-            continue;
-          }
-          ++keptPolys;
-          const auto& poly = polys[pi];
-          for (size_t i = 0; i < poly.size(); ++i)
-            ++dirCnt[{poly[i], poly[(i + 1) % poly.size()]}];
-        }
-      }
-      int unpairedHE = 0;
-      for (const auto& [dir, n] : dirCnt) {
-        if (dirCnt.count({dir.second, dir.first}) == 0) unpairedHE += n;
-      }
-      int polysWithUnpaired = 0;
-      for (size_t triId = 0; triId < polygonWalks.size(); ++triId) {
-        const auto& polys = polygonWalks[triId].polygons;
-        for (size_t pi = 0; pi < polys.size(); ++pi) {
-          auto it = precomputedKeep.find(
-              {static_cast<int>(triId), static_cast<int>(pi)});
-          if (it == precomputedKeep.end() || !it->second) continue;
-          const auto& poly = polys[pi];
-          for (size_t i = 0; i < poly.size(); ++i) {
-            int a = poly[i], b = poly[(i + 1) % poly.size()];
-            if (dirCnt.count({b, a}) == 0) {
-              ++polysWithUnpaired;
-              break;
-            }
-          }
-        }
-      }
-      std::cerr << "[phase3] iter=" << iter << " dropped=" << totalDropped
-                << " kept=" << keptPolys << " dropped-final=" << droppedPolys
-                << " unpaired-he=" << unpairedHE
-                << " polys-with-unpaired=" << polysWithUnpaired << "\n";
+                   "converging - re-key loop should be monotonic");
     }
   }
   // Build the classifier closure that returns precomputedKeep[triId, pi]
@@ -2455,7 +2382,7 @@ std::pair<Manifold, RemoveSelfIntersectionsStats> RunOverlapRemovalImpl(
   PolygonClassifierFn classifier = [&](const std::vector<int>& poly,
                                        const vec3& triNormal,
                                        int triId) -> PolygonClassification {
-    PolygonClassification c{false, false, 0, 0};
+    PolygonClassification c{false, 0, 0};
     if (poly.size() < 3) return c;
     int pi = -1;
     const auto& polys = polygonWalks[triId].polygons;
@@ -2480,44 +2407,41 @@ std::pair<Manifold, RemoveSelfIntersectionsStats> RunOverlapRemovalImpl(
       c.keep = AnalyticalKeep(triId, poly, chordPartners,
                               chordOutput.newVertPositions, baseId, impl);
     }
-    c.reverse = false;
     (void)triNormal;
     return c;
   };
-  auto step13 =
-      TriangulateAndEmit(impl, chordOutput.newVertPositions, polygonWalks,
-                         classifier, &chordOutput.interiorVertsPerTri);
+  auto step13 = TriangulateAndEmit(impl, chordOutput.newVertPositions,
+                                   polygonWalks, classifier);
   Manifold out = step13.output;
+  // Fallback chooser shared by every gate-reject path. Returns the merged
+  // input only when it is itself a valid manifold with no more pierces
+  // than the original (MergeVertsEps can both produce a non-manifold and
+  // introduce pierces by eps-merging verts onto other faces); otherwise
+  // the original input, which is always valid and pierce-monotonicity-safe.
+  const auto pickFallback = [&]() -> Manifold {
+    if (mr.manifold.Status() == Manifold::Error::NoError &&
+        CheckSelfIntersection(mr.manifold, kPipelineRelTol).interiorPierces <=
+            CheckSelfIntersection(input, kPipelineRelTol).interiorPierces) {
+      return mr.manifold;
+    }
+    return input;
+  };
   if (out.Status() != Manifold::Error::NoError) {
-    // Pipeline output non-manifold → fallback. Check whether
-    // mr.manifold (= post-MergeVertsEps) introduced pierces vs the
-    // original input — if so, return the original input instead of
-    // mr.manifold. Returning mr.manifold would be a user-visible
-    // regression. Overnight fuzz (5000 seeds) found 317 worsened
-    // cases that triggered this exact pattern.
-    if (std::getenv("OVERLAP3D_DEBUG_FALLBACK")) {
-      std::cerr << "[overlap_removal] post-pipeline status="
-                << static_cast<int>(out.Status())
-                << " (NotManifold=2) -> falling back\n";
-    }
-    auto siInputFB = CheckSelfIntersection(input, 1e-12);
-    auto siMergeFB = CheckSelfIntersection(mr.manifold, 1e-12);
-    if (siMergeFB.interiorPierces > siInputFB.interiorPierces) {
-      return {input, dbg};
-    }
-    return {mr.manifold, dbg};
+    // Pipeline output non-manifold -> fall back to the safe input.
+    return pickFallback();
   }
   // Pierce-monotonicity guard: pipeline must not produce more pierces
   // than the input has. Volume-sanity: drift > kDriftCutoff or sign
   // flip also triggers fallback. This is a user-visible API contract,
   // not optional.
   //
-  // Compare pierces against the ORIGINAL input, not the merged
-  // mr.manifold: MergeVertsEps can introduce pierces by ε-merging
-  // close verts onto edges of other faces, so post-merge pierce
-  // counts may already exceed input. The user-visible regression is
-  // input vs out — that's what we gate against.
-  const double inVol = mr.manifold.Volume();
+  // Both gates anchor to the ORIGINAL input, not the merged
+  // mr.manifold: MergeVertsEps can introduce pierces (by eps-merging
+  // close verts onto edges of other faces) and shift volume, so
+  // post-merge counts may already differ from input. The user-visible
+  // regression is input vs out - that's what we gate (and the
+  // sign-flip baseline below) against.
+  const double inVol = input.Volume();
   const double outVol = out.Volume();
   auto siInput = CheckSelfIntersection(input, kPipelineRelTol);
   auto siOut = CheckSelfIntersection(out, kPipelineRelTol);
@@ -2544,21 +2468,14 @@ std::pair<Manifold, RemoveSelfIntersectionsStats> RunOverlapRemovalImpl(
       auto siFlip = CheckSelfIntersection(flipMan, kPipelineRelTol);
       if (flipSignOK && flipDrift <= kDriftCutoff &&
           siFlip.interiorPierces <= siInput.interiorPierces) {
-        return {flipMan, dbg};
+        return flipMan;
       }
     }
   }
   if (pierceWorse || driftBad) {
-    // Same protection as the post-pipeline non-manifold path:
-    // mr.manifold may have introduced pierces vs the original input;
-    // fall back to whichever has fewer.
-    auto siMerge = CheckSelfIntersection(mr.manifold, kPipelineRelTol);
-    if (siMerge.interiorPierces > siInput.interiorPierces) {
-      return {input, dbg};
-    }
-    return {mr.manifold, dbg};
+    return pickFallback();
   }
-  return {out, dbg};
+  return out;
 }
 }  // namespace
 

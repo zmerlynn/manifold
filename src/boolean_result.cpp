@@ -204,8 +204,8 @@ struct EdgePos {
 // Eager-propagation phase: for each edge*face intersection vert,
 // add the vert to all THREE relevant halfedge-list bins (the source
 // edge, plus the two new face*face edges adjacent to it). This is
-// the 3D analog of step 4's eager-propagation pass in
-// extras/overlap2d_proto.cpp. The propagation is what makes the
+// the 3D analog of step 4's eager-propagation pass. The
+// propagation is what makes the
 // pair-by-pair BVH approach correct for k>=3 edges concurrent at one
 // true point - without it, the third edge would never see the
 // intersection vert and step 5's canonicalization would emit it as

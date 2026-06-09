@@ -220,33 +220,35 @@ class Manifold {
    *
    * Boolean operations produce topology-manifold output (= every
    * edge is shared by exactly two triangles) but the result may
-   * still contain geometric self-intersections — pairs of triangles
+   * still contain geometric self-intersections - pairs of triangles
    * whose interiors cross. This method attempts to remove those
    * pierces while preserving topology manifold-ness.
    *
    * Guarantees:
-   *   - Pierce-monotonicity: the returned manifold's self-
-   *     intersection count never exceeds the input's. If the
-   *     pipeline cannot produce a strictly improved output, the
-   *     input is returned unchanged.
-   *   - Fallback semantics: returns merged input on any of these:
-   *     pipeline output is non-manifold, output volume drift > 50%,
-   *     output volume sign-flipped, or any internal exception.
+   *   - Pierce-monotonicity: the returned manifold's self-intersection
+   *     count never exceeds the input's. The count may stay equal while
+   *     the geometry is re-triangulated; a clean (pierce-free) input is
+   *     returned as an equivalent re-meshed manifold, not bit-identical.
+   *   - On an in-band gate reject (pipeline output non-manifold, output
+   *     volume drift > 50%, sign flip, or more pierces than the input), the
+   *     input is returned - either unchanged or in its epsilon-merged form,
+   *     whichever has no more self-intersections. A sign-flipped output is
+   *     first reverse-wound and re-checked before this fallback.
+   *   - On an internal exception (a debug assertion, allocation failure, or
+   *     a throwing constructor), the original input is returned unchanged;
+   *     no epsilon-merge is attempted on the throw path.
    *
-   * Coverage notes: clean Boolean results, offset compositions, and
-   * single-Subtract carve-outs typically reach zero residual pierces.
-   * Two known classes of input fall back to input by design:
-   *   1. Inputs whose `tolerance_` was inflated by an upstream
-   *      Boolean op involving extreme-scale geometry (= the Boolean
-   *      engine inherits the larger operand's tolerance instead of
-   *      re-inferring from the result's bbox; tracked separately as
-   *      a Boolean-engine bug).
-   *   2. Inputs with dense near-coincident face boundaries that
-   *      produce many sliver triangles in the chord region. The cap
-   *      walker can absorb a small number of slivers but not
-   *      hundreds; tracked as a Boolean-engine sliver bug.
-   * See `docs/Overlap3D.md` for the named regression-fixture
-   * battery and per-fixture history.
+   * Coverage: clean Boolean results, offset compositions, and single-
+   * Subtract carve-outs are typically reduced to few or no pierces. Two
+   * classes of input fall back by design:
+   *   1. Inputs whose `tolerance_` was inflated by an upstream Boolean op
+   *      on extreme-scale geometry (the Boolean engine inherits the larger
+   *      operand's tolerance instead of re-inferring from the result bbox;
+   *      a separate Boolean-engine issue).
+   *   2. Inputs with dense near-coincident face boundaries that produce
+   *      many sliver triangles in the chord region (a separate Boolean-
+   *      engine sliver issue).
+   * See `docs/OverlapRemoval.md` for the algorithm and known limitations.
    *
    * Algorithm: implements Emmett Lalish's #289 13-step sketch with
    * a per-vert two-sided winding classifier (`AnalyzeSelfMesh`) +
