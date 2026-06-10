@@ -267,9 +267,9 @@ std::vector<EdgeTriIntersection> FindEdgeTriIntersections(
 // ids (snapping or allocating fresh), group by tri-tri pair, and
 // emit chord edges. Pairs with:
 //   - 2 endpoints -> new chord edge between the two pierce points.
-//   - 1 endpoint  -> record as an interior vert of both tris in
-//     the pair (= T-junction; needs fan triangulation).
-//   - 0 or >= 3   -> dropped (counted in dropped_n_not_2).
+//   - 1 endpoint  -> edge-tip touch, no through-pierce: nothing is
+//     emitted or recorded.
+//   - 0 or >= 3   -> dropped (counted).
 ChordEdges GenerateChordEdges(const Manifold::Impl& impl,
                               const std::vector<Edge>& edges,
                               const std::vector<EdgeTriIntersection>& etIsects,
@@ -283,6 +283,33 @@ std::vector<NewEdgeWithExtras> AddInteriorVertsToNewEdges(
     const Manifold::Impl& impl, const std::vector<vec3>& newVertPositions,
     const std::vector<PiercedNewEdge>& newEdges,
     const std::vector<TriVertList>& onTriLists, double eps);
+
+// ---- Step 9: chord-chord crossings within each triangle ----
+// (docs/Step9Design.md; implemented incrementally.)
+
+// Step 9 grouping: chord indices incident to each face. A chord lies
+// on both its triA and triB, so it appears under both faces.
+std::vector<std::vector<int>> GroupChordsByFace(
+    const std::vector<PiercedNewEdge>& newEdges, int numTri);
+
+// Step 9 pass 0: endpoint-on-chord contacts - the on-chord analog of
+// the step-3 on-edge vert lists. A chord endpoint lying on another
+// same-face chord's interior, within tolerance + eps and outside the
+// endpoint-proximity zone in t-space (t in (snap/len, 1 - snap/len)),
+// is recorded for threading. These records are consulted by the
+// step-9 canonical-id resolution before any new vert is allocated;
+// without this pass, IntersectSegments' near-endpoint rejection would
+// silently drop these contacts (near-line slivers otherwise).
+struct OnChordContact {
+  int chord;   // chord index gaining the vert
+  int vertId;  // existing vert id inserted onto it
+  double t;    // parameter along that chord
+};
+std::vector<OnChordContact> FindOnChordEndpointContacts(
+    const Manifold::Impl& impl, const std::vector<NewEdgeWithExtras>& chords,
+    const std::vector<vec3>& newVertPositions,
+    const std::vector<std::vector<int>>& chordsByFace, double tolerance,
+    double eps);
 
 // Step 10 of the pipeline: propagate etIsect resolved verts onto
 // their piercing edges' on-edge lists, so the polygon walker
