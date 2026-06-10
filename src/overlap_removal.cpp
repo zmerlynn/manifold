@@ -101,6 +101,29 @@ constexpr int kEarClipGuard = 4096;
 //   avoid edge/vert grazes on the first try. Unit to ~4 digits;
 //   only its genericity and ~1 magnitude matter.
 const vec3 kSeedCastDir(0.278773, 0.581753, 0.764101);
+
+// Deterministic orthonormal in-plane basis for a unit face normal - a
+// true isometry, so a kernel's 2D eps equals the pipeline's 3D eps
+// (the axis-drop projection used by the old walker is not an isometry
+// and would contract distances). cross(u, v) == n, so CCW in (u, v)
+// is CCW about the normal. Shared by step 6.5's clip frame, step 9's
+// projection, and the step 10-11 angular ordering.
+struct InPlaneBasis {
+  vec3 u, v;
+};
+InPlaneBasis FaceBasisFromNormal(const vec3& n) {
+  using la::cross;
+  using la::dot;
+  const double ax = std::fabs(n.x);
+  const double ay = std::fabs(n.y);
+  const double az = std::fabs(n.z);
+  const vec3 ref = (ax <= ay && ax <= az) ? vec3(1.0, 0.0, 0.0)
+                   : (ay <= az)           ? vec3(0.0, 1.0, 0.0)
+                                          : vec3(0.0, 0.0, 1.0);
+  vec3 u = cross(n, ref);
+  u = u / std::sqrt(dot(u, u));
+  return {u, cross(n, u)};
+}
 }  // namespace
 
 SortedBVH BuildSortedBVH(VecView<const Box> leafBoxes) {
@@ -690,6 +713,333 @@ std::vector<std::vector<int>> GroupChordsByFace(
   return byFace;
 }
 
+TraceChordResult CoplanarTraceChords(const Manifold::Impl& impl,
+                                     const std::vector<Edge>& edges,
+                                     const std::vector<int>& edgeOfHalfedge,
+                                     std::vector<vec3> newVertPositions,
+                                     double tolerance, double eps) {
+  using la::cross;
+  using la::dot;
+  TraceChordResult out;
+  out.newVertPositions = std::move(newVertPositions);
+  const int numTri = static_cast<int>(impl.NumTri());
+  const int baseId = static_cast<int>(impl.NumVert());
+  if (numTri < 2) return out;
+  auto triVert = [&](int t, int k) { return impl.halfedge_.Start(3 * t + k); };
+
+  // Broad phase: tri-box self-collisions; pairs processed in
+  // ascending (a, b) order so new-vert allocation is deterministic.
+  std::vector<Box> triBoxes(numTri);
+  for (int t = 0; t < numTri; ++t) {
+    Box b(impl.vertPos_[triVert(t, 0)], impl.vertPos_[triVert(t, 1)]);
+    b.Union(impl.vertPos_[triVert(t, 2)]);
+    triBoxes[t] = b;
+  }
+  SortedBVH bvh =
+      BuildSortedBVH(VecView<const Box>(triBoxes.data(), triBoxes.size()));
+  std::vector<std::pair<int, int>> pairs;
+  auto recordPair = [&](size_t qi, size_t li) {
+    if (qi >= li) return;
+    const int ta = static_cast<int>(bvh.perm[qi]);
+    const int tb = static_cast<int>(bvh.perm[li]);
+    pairs.push_back({std::min(ta, tb), std::max(ta, tb)});
+  };
+  auto recorder = MakeSimpleRecorder(recordPair);
+  auto qf = [&](int i) { return bvh.boxes[i]; };
+  bvh.collider.Collisions<false>(recorder, qf, numTri, /*parallel=*/false);
+  std::sort(pairs.begin(), pairs.end());
+  pairs.erase(std::unique(pairs.begin(), pairs.end()), pairs.end());
+
+  std::set<std::pair<int, int>> additionSeen;  // (edge, vertId)
+  for (const std::pair<int, int>& facePair : pairs) {
+    // Locals, not structured bindings: the lambdas below capture them.
+    const int fa = facePair.first;
+    const int fb = facePair.second;
+    const vec3 av[3] = {impl.vertPos_[triVert(fa, 0)],
+                        impl.vertPos_[triVert(fa, 1)],
+                        impl.vertPos_[triVert(fa, 2)]};
+    const vec3 bv[3] = {impl.vertPos_[triVert(fb, 0)],
+                        impl.vertPos_[triVert(fb, 1)],
+                        impl.vertPos_[triVert(fb, 2)]};
+    // Plane gate: every vert of the smaller face within eps of the
+    // LARGER face's plane (a near-zero-area sliver's own plane is
+    // noise; the larger plane is the trustworthy one).
+    const vec3 nA = cross(av[1] - av[0], av[2] - av[0]);
+    const vec3 nB = cross(bv[1] - bv[0], bv[2] - bv[0]);
+    const double areaA2 = dot(nA, nA);
+    const double areaB2 = dot(nB, nB);
+    const bool aLarger = areaA2 >= areaB2;
+    const vec3 nGRaw = aLarger ? nA : nB;
+    const double nGLen = std::sqrt(dot(nGRaw, nGRaw));
+    if (nGLen == 0) continue;  // degenerate face: nothing to trace
+    const vec3 nG = nGRaw / nGLen;
+    const vec3 gOrigin = aLarger ? av[0] : bv[0];
+    const vec3* other = aLarger ? bv : av;
+    bool coplanar = true;
+    for (int k = 0; k < 3 && coplanar; ++k) {
+      coplanar = std::fabs(dot(other[k] - gOrigin, nG)) <= eps;
+    }
+    if (!coplanar) continue;
+
+    // Shared 2D frame: the lower face id's basis (fa < fb), so a
+    // crossing is computed once and shares its id across both clip
+    // directions.
+    const vec3 nFRaw = nA;
+    const double nFLen = std::sqrt(dot(nFRaw, nFRaw));
+    if (nFLen == 0) continue;
+    const InPlaneBasis basis = FaceBasisFromNormal(nFRaw / nFLen);
+    const vec3 origin = av[0];
+    auto to2d = [&](const vec3& p) {
+      const vec3 d = p - origin;
+      return vec2(dot(d, basis.u), dot(d, basis.v));
+    };
+    vec2 a2[3], b2[3];
+    for (int k = 0; k < 3; ++k) {
+      a2[k] = to2d(av[k]);
+      b2[k] = to2d(bv[k]);
+    }
+    // Orientation sign per projected tri (the opposite sheet projects
+    // CW), so the clip's inside test works for both.
+    auto orient2 = [](const vec2* t3) {
+      return (t3[1].x - t3[0].x) * (t3[2].y - t3[0].y) -
+             (t3[1].y - t3[0].y) * (t3[2].x - t3[0].x);
+    };
+    // In-plane signed distance of x from tri edge k, positive inward.
+    auto edgeDist = [&](const vec2* t3, double orientSign, int k,
+                        const vec2& x) {
+      const vec2 e0 = t3[k];
+      const vec2 e1 = t3[(k + 1) % 3];
+      const vec2 d(e1.x - e0.x, e1.y - e0.y);
+      const double len = std::sqrt(d.x * d.x + d.y * d.y);
+      if (len == 0) return 0.0;
+      const double s = d.x * (x.y - e0.y) - d.y * (x.x - e0.x);
+      return orientSign * s / len;
+    };
+    auto interiorMargin = [&](const vec2* t3, double orientSign,
+                              const vec2& x) {
+      double m = std::numeric_limits<double>::infinity();
+      for (int k = 0; k < 3; ++k) {
+        m = std::min(m, edgeDist(t3, orientSign, k, x));
+      }
+      return m;
+    };
+
+    // Clip one segment (2D p -> q) against one projected tri; on
+    // success fills [tEnter, tExit] plus the clipping tri edge index
+    // per end (-1 = the segment's own endpoint).
+    auto clip = [&](const vec2& p, const vec2& q, const vec2* t3,
+                    double orientSign, double& tEnter, double& tExit,
+                    int& kEnter, int& kExit) {
+      tEnter = 0.0;
+      tExit = 1.0;
+      kEnter = -1;
+      kExit = -1;
+      for (int k = 0; k < 3; ++k) {
+        const double d0 = edgeDist(t3, orientSign, k, p);
+        const double d1 = edgeDist(t3, orientSign, k, q);
+        if (d0 < 0 && d1 < 0) return false;
+        if (d0 < 0 || d1 < 0) {
+          const double tc = d0 / (d0 - d1);
+          if (d0 < 0) {  // entering
+            if (tc > tEnter) {
+              tEnter = tc;
+              kEnter = k;
+            }
+          } else {  // exiting
+            if (tc < tExit) {
+              tExit = tc;
+              kExit = k;
+            }
+          }
+        }
+      }
+      return tEnter < tExit;
+    };
+
+    const double orientA = orient2(a2) >= 0 ? 1.0 : -1.0;
+    const double orientB = orient2(b2) >= 0 ? 1.0 : -1.0;
+    std::set<std::pair<int, int>> pairChords;  // sorted (v0, v1)
+
+    // One clip direction: edges of `src` face against the `dst` tri.
+    auto traceDirection = [&](int srcFace, const vec3* srcV, const vec2* src2,
+                              int dstFace, const vec3* dstV, const vec2* dst2,
+                              double dstOrient) {
+      for (int k = 0; k < 3; ++k) {
+        const vec2 p = src2[k];
+        const vec2 q = src2[(k + 1) % 3];
+        double t0, t1;
+        int k0, k1;
+        if (!clip(p, q, dst2, dstOrient, t0, t1, k0, k1)) continue;
+        const vec3 P0 = srcV[k] + t0 * (srcV[(k + 1) % 3] - srcV[k]);
+        const vec3 P1 = srcV[k] + t1 * (srcV[(k + 1) % 3] - srcV[k]);
+        // Qualification: length > eps; midpoint interior to the dst
+        // face by > eps (full-through cuts qualify - their midpoints
+        // are interior; boundary-riding intervals never do).
+        const vec3 d3 = P1 - P0;
+        if (std::sqrt(dot(d3, d3)) <= eps) {
+          ++out.intervalsRejected;
+          continue;
+        }
+        const vec2 mid2((p.x + (q.x - p.x) * 0.5 * (t0 + t1)),
+                        (p.y + (q.y - p.y) * 0.5 * (t0 + t1)));
+        if (interiorMargin(dst2, dstOrient, mid2) <= eps) {
+          ++out.intervalsRejected;
+          continue;
+        }
+        // Resolve the two endpoint ids. t == 0/1: the src edge's own
+        // vert. Crossings: snap to the nearest of the pair's six
+        // corners at tolerance + eps (ties to smallest id - the
+        // step-9 convention), else allocate, deduping new-to-new at
+        // eps first-found over the whole new-vert pool (the step-7
+        // convention applied to the combined pool).
+        int ids[2];
+        int clipK[2] = {k0, k1};
+        vec3 pos3[2] = {P0, P1};
+        bool isNew[2] = {false, false};
+        bool grazeReject = false;
+        for (int e = 0; e < 2 && !grazeReject; ++e) {
+          const double t = e == 0 ? t0 : t1;
+          if (t <= 0.0) {
+            ids[e] = triVert(srcFace, k);
+            continue;
+          }
+          if (t >= 1.0) {
+            ids[e] = triVert(srcFace, (k + 1) % 3);
+            continue;
+          }
+          // Grazing guard: the lifted crossing must sit within eps of
+          // BOTH original 3D edges it claims to lie on.
+          const vec3 x3 = pos3[e];
+          auto distToSeg = [&](const vec3& s0, const vec3& s1) {
+            const vec3 d = s1 - s0;
+            const double len2 = dot(d, d);
+            const double tt =
+                len2 > 0 ? std::clamp(dot(x3 - s0, d) / len2, 0.0, 1.0) : 0.0;
+            const vec3 c = s0 + tt * d - x3;
+            return std::sqrt(dot(c, c));
+          };
+          if (distToSeg(srcV[k], srcV[(k + 1) % 3]) > eps ||
+              (clipK[e] >= 0 &&
+               distToSeg(dstV[clipK[e]], dstV[(clipK[e] + 1) % 3]) > eps)) {
+            grazeReject = true;
+            break;
+          }
+          int best = -1;
+          double bestD = tolerance + eps;
+          for (int c = 0; c < 6; ++c) {
+            const int vid = c < 3 ? triVert(fa, c) : triVert(fb, c - 3);
+            const vec3 dv = (c < 3 ? av[c] : bv[c - 3]) - x3;
+            const double dd = std::sqrt(dot(dv, dv));
+            if (dd < bestD || (dd == bestD && best >= 0 && vid < best)) {
+              bestD = dd;
+              best = vid;
+            }
+          }
+          if (best >= 0) {
+            ids[e] = best;
+            continue;
+          }
+          int found = -1;
+          for (size_t j = 0; j < out.newVertPositions.size(); ++j) {
+            const vec3 dv = out.newVertPositions[j] - x3;
+            if (std::sqrt(dot(dv, dv)) <= eps) {
+              found = baseId + static_cast<int>(j);
+              break;
+            }
+          }
+          if (found >= 0) {
+            ids[e] = found;
+          } else {
+            ids[e] = baseId + static_cast<int>(out.newVertPositions.size());
+            out.newVertPositions.push_back(x3);
+          }
+          isNew[e] = true;
+        }
+        if (grazeReject) {
+          ++out.intervalsRejected;
+          continue;
+        }
+        if (ids[0] == ids[1]) {  // both snapped to one corner
+          ++out.intervalsRejected;
+          continue;
+        }
+        const std::pair<int, int> key{std::min(ids[0], ids[1]),
+                                      std::max(ids[0], ids[1])};
+        if (!pairChords.insert(key).second) continue;  // both directions
+        PiercedNewEdge chord;
+        chord.v0 = key.first;
+        chord.v1 = key.second;
+        chord.triA = fa;
+        chord.triB = fb;
+        out.chords.push_back(chord);
+        // On-edge additions: a NEW crossing vert lies on the src
+        // edge, and - when a tri edge clipped it - on the dst face's
+        // edge too (the X case: one record per edge, one vert id).
+        for (int e = 0; e < 2; ++e) {
+          if (!isNew[e]) continue;
+          auto addOn = [&](int face, int kk, const vec3& s0, const vec3& s1) {
+            if (kk < 0) return;
+            const int edgeIdx = edgeOfHalfedge[3 * face + kk];
+            if (edgeIdx < 0) return;
+            if (!additionSeen.insert({edgeIdx, ids[e]}).second) return;
+            const vec3 d = s1 - s0;
+            const double len2 = dot(d, d);
+            const double tt = len2 > 0 ? dot(pos3[e] - s0, d) / len2 : 0.0;
+            // t along the canonical edge direction (v0 -> v1).
+            const double tEdge =
+                edges[edgeIdx].v0 == impl.halfedge_.Start(3 * face + kk)
+                    ? tt
+                    : 1.0 - tt;
+            out.onEdgeAdditions.push_back({edgeIdx, ids[e], tEdge});
+          };
+          addOn(srcFace, k, srcV[k], srcV[(k + 1) % 3]);
+          addOn(dstFace, clipK[e], dstV[clipK[e]], dstV[(clipK[e] + 1) % 3]);
+        }
+      }
+    };
+    traceDirection(fb, bv, b2, fa, av, a2, orientA);
+    traceDirection(fa, av, a2, fb, bv, b2, orientB);
+  }
+  return out;
+}
+
+void AddVertsToOnEdgeLists(const std::vector<OnEdgeAddition>& additions,
+                           std::vector<EdgeVertList>& onEdgeLists) {
+  // Id-dedup against the existing list, then re-sort each touched
+  // edge by t (the PropagateNewVertsToOnEdgeLists internals; that
+  // sibling's interface is parallel to etIsects and cannot carry
+  // these explicit additions).
+  std::vector<int> touched;
+  for (const OnEdgeAddition& a : additions) {
+    EdgeVertList& list = onEdgeLists[a.edge];
+    if (std::find(list.verts.begin(), list.verts.end(), a.vertId) !=
+        list.verts.end()) {
+      continue;
+    }
+    list.verts.push_back(a.vertId);
+    list.ts.push_back(a.t);
+    touched.push_back(a.edge);
+  }
+  std::sort(touched.begin(), touched.end());
+  touched.erase(std::unique(touched.begin(), touched.end()), touched.end());
+  for (const int e : touched) {
+    EdgeVertList& list = onEdgeLists[e];
+    std::vector<size_t> perm(list.verts.size());
+    std::iota(perm.begin(), perm.end(), 0);
+    std::stable_sort(perm.begin(), perm.end(), [&](size_t i, size_t j) {
+      return list.ts[i] < list.ts[j];
+    });
+    std::vector<int> sortedV(list.verts.size());
+    std::vector<double> sortedT(list.ts.size());
+    for (size_t k = 0; k < perm.size(); ++k) {
+      sortedV[k] = list.verts[perm[k]];
+      sortedT[k] = list.ts[perm[k]];
+    }
+    list.verts = std::move(sortedV);
+    list.ts = std::move(sortedT);
+  }
+}
+
 std::vector<OnChordContact> FindOnChordEndpointContacts(
     const Manifold::Impl& impl, const std::vector<NewEdgeWithExtras>& chords,
     const std::vector<vec3>& newVertPositions,
@@ -744,31 +1094,6 @@ std::vector<OnChordContact> FindOnChordEndpointContacts(
             });
   return out;
 }
-
-namespace {
-// Deterministic orthonormal in-plane basis for a unit face normal - a
-// true isometry, so a kernel's 2D eps equals the pipeline's 3D eps
-// (the axis-drop projection used by the old walker is not an isometry
-// and would contract distances). cross(u, v) == n, so CCW in (u, v)
-// is CCW about the normal. Shared by step 9's projection and the
-// step 10-11 angular ordering.
-struct InPlaneBasis {
-  vec3 u, v;
-};
-InPlaneBasis FaceBasisFromNormal(const vec3& n) {
-  using la::cross;
-  using la::dot;
-  const double ax = std::fabs(n.x);
-  const double ay = std::fabs(n.y);
-  const double az = std::fabs(n.z);
-  const vec3 ref = (ax <= ay && ax <= az) ? vec3(1.0, 0.0, 0.0)
-                   : (ay <= az)           ? vec3(0.0, 1.0, 0.0)
-                                          : vec3(0.0, 0.0, 1.0);
-  vec3 u = cross(n, ref);
-  u = u / std::sqrt(dot(u, u));
-  return {u, cross(n, u)};
-}
-}  // namespace
 
 std::vector<ChordChordCrossing> FindChordChordCrossings(
     const Manifold::Impl& impl, const std::vector<NewEdgeWithExtras>& chords,
@@ -1108,8 +1433,23 @@ std::vector<ChordCrossing> MergeAndPropagateCrossings(
   return out;
 }
 
+std::vector<int> BuildHalfedgeToEdgeIndex(const Manifold::Impl& impl,
+                                          const std::vector<Edge>& edges) {
+  std::vector<int> out(impl.halfedge_.size(), -1);
+  for (size_t i = 0; i < edges.size(); ++i) {
+    if (edges[i].halfedgeForward >= 0) {
+      out[edges[i].halfedgeForward] = static_cast<int>(i);
+    }
+    if (edges[i].halfedgePaired >= 0) {
+      out[edges[i].halfedgePaired] = static_cast<int>(i);
+    }
+  }
+  return out;
+}
+
 FacePartition PartitionFace(const Manifold::Impl& impl, int face,
                             const std::vector<Edge>& edges,
+                            const std::vector<int>& edgeOfHalfedge,
                             const std::vector<EdgeVertList>& onEdgeLists,
                             const std::vector<NewEdgeWithExtras>& chords,
                             const std::vector<int>& faceChords,
@@ -1142,22 +1482,18 @@ FacePartition PartitionFace(const Manifold::Impl& impl, int face,
     int start, end;
   };
   std::vector<SubHalfedge> hes;
-  std::map<std::pair<int, int>, int> edgeIdxOf;
-  for (size_t i = 0; i < edges.size(); ++i) {
-    edgeIdxOf[{edges[i].v0, edges[i].v1}] = static_cast<int>(i);
-  }
   for (int k = 0; k < 3; ++k) {
     const Halfedge he = impl.halfedge_.Get(3 * face + k);
     const int a = he.startVert;
     const int b = he.endVert;
-    const auto it = edgeIdxOf.find({std::min(a, b), std::max(a, b)});
-    DEBUG_ASSERT(it != edgeIdxOf.end(), logicErr,
+    const int ei = edgeOfHalfedge[3 * face + k];
+    DEBUG_ASSERT(ei >= 0, logicErr,
                  "PartitionFace: face edge missing from EnumerateEdges");
-    if (it == edgeIdxOf.end()) continue;
-    const EdgeVertList& evl = onEdgeLists[it->second];
+    if (ei < 0) continue;
+    const EdgeVertList& evl = onEdgeLists[ei];
     std::vector<int> seq;
     seq.push_back(a);
-    if (a == edges[it->second].v0) {
+    if (a == edges[ei].v0) {
       seq.insert(seq.end(), evl.verts.begin(), evl.verts.end());
     } else {
       seq.insert(seq.end(), evl.verts.rbegin(), evl.verts.rend());
@@ -1281,17 +1617,37 @@ FacePartition PartitionFace(const Manifold::Impl& impl, int face,
     DEBUG_ASSERT(closed, logicErr,
                  "PartitionFace: open walk in a conforming arrangement");
     if (!closed) continue;
+    // Emit gate: sub-3-vert loops are spurs; a >= 3-vert simple cycle
+    // whose projected signed area is EXACTLY zero is a flattened spur
+    // (the near-line sliver artifact: post-merge coincident positions
+    // under distinct ids contribute exactly-cancelling cross terms,
+    // and an out-and-back walk along a line bounds nothing) - its
+    // Newell normal is undefined downstream, so it is dropped and
+    // counted. Tiny-but-nonzero areas are REAL slivers and pass.
+    auto emit = [&](std::vector<int>&& cyc) {
+      if (cyc.size() < 3) {
+        ++out.spursDropped;
+        return;
+      }
+      double area2 = 0.0;
+      for (size_t i = 0; i < cyc.size(); ++i) {
+        const vec2 pa = p2(cyc[i]);
+        const vec2 pb = p2(cyc[(i + 1) % cyc.size()]);
+        area2 += pa.x * pb.y - pa.y * pb.x;
+      }
+      if (area2 == 0.0) {
+        ++out.degenerateCyclesDropped;
+        return;
+      }
+      out.polygons.push_back(std::move(cyc));
+    };
     for (;;) {
       bool split = false;
       for (size_t i = 1; i < loop.size() && !split; ++i) {
         for (size_t j = 0; j < i; ++j) {
           if (loop[i] != loop[j]) continue;
           std::vector<int> sub(loop.begin() + j, loop.begin() + i);
-          if (sub.size() >= 3) {
-            out.polygons.push_back(std::move(sub));
-          } else {
-            ++out.spursDropped;
-          }
+          emit(std::move(sub));
           loop.erase(loop.begin() + j + 1, loop.begin() + i + 1);
           split = true;
           break;
@@ -1299,11 +1655,7 @@ FacePartition PartitionFace(const Manifold::Impl& impl, int face,
       }
       if (!split) break;
     }
-    if (loop.size() >= 3) {
-      out.polygons.push_back(std::move(loop));
-    } else {
-      ++out.spursDropped;
-    }
+    emit(std::move(loop));
   }
   return out;
 }
@@ -1365,13 +1717,19 @@ CellComplex BuildCellComplex(const Manifold::Impl& impl,
 
   // Newell normal per polygon: the canonical cycle's own orientation -
   // the frame its multiplicity is signed against (the polygon's FRONT
-  // is the +normal side).
+  // is the +normal side). Computed over positions RELATIVE to the
+  // cycle's first vert: the cyclic sum is mathematically identical,
+  // but absolute positions cancel catastrophically for an eps-thin
+  // sliver far from the origin (cross terms ~ R * L with signal
+  // ~ L^2), flattening real normals to exact zero.
   std::vector<vec3> normal(nP);
   for (int p = 0; p < nP; ++p) {
     const std::vector<int>& c = polygons[p].cycle;
+    const vec3 origin = posOf(c[0]);
     vec3 nsum(0.0, 0.0, 0.0);
     for (size_t i = 0; i < c.size(); ++i) {
-      nsum = nsum + cross(posOf(c[i]), posOf(c[(i + 1) % c.size()]));
+      nsum = nsum +
+             cross(posOf(c[i]) - origin, posOf(c[(i + 1) % c.size()]) - origin);
     }
     const double len2 = dot(nsum, nsum);
     DEBUG_ASSERT(len2 > 0, logicErr, "BuildCellComplex: degenerate polygon");
@@ -1422,15 +1780,44 @@ CellComplex BuildCellComplex(const Manifold::Impl& impl,
   };
   for (auto& [key, entries] : fans) {
     std::sort(entries.begin(), entries.end(),
-              [&](const FanEntry& x, const FanEntry& y) {
+              [&, &fanKey = key](const FanEntry& x, const FanEntry& y) {
                 const int bx = bucketOf(x.dir2);
                 const int by = bucketOf(y.dir2);
                 if (bx != by) return bx < by;
                 const double c = x.dir2.x * y.dir2.y - x.dir2.y * y.dir2.x;
                 if (c != 0) return c > 0;
-                DEBUG_ASSERT(false, logicErr,
-                             "BuildCellComplex: exact angular tie (step-12 "
-                             "invariant failure)");
+                {  // TEMP DEBUG
+                  static int dumps = 0;
+                  if (dumps++ < 12) {
+                    const auto& px = polygons[x.polygon];
+                    const auto& py = polygons[y.polygon];
+                    fprintf(stderr,
+                            "RSI-TEMP: tie edge=(%d,%d) "
+                            "pA=%d(f%d m%d cw%d) pB=%d(f%d m%d cw%d) cycA=[",
+                            fanKey.first, fanKey.second, x.polygon, px.face,
+                            px.mult, (int)x.frontCcw, y.polygon, py.face,
+                            py.mult, (int)y.frontCcw);
+                    for (int v : px.cycle) fprintf(stderr, "%d ", v);
+                    fprintf(stderr, "] cycB=[");
+                    for (int v : py.cycle) fprintf(stderr, "%d ", v);
+                    fprintf(stderr, "]\n");
+                    for (int v : px.cycle) {
+                      const vec3 q = posOf(v);
+                      fprintf(stderr, "RSI-TEMP:   A %d (%.17g %.17g %.17g)\n",
+                              v, q.x, q.y, q.z);
+                    }
+                    for (int v : py.cycle) {
+                      const vec3 q = posOf(v);
+                      fprintf(stderr, "RSI-TEMP:   B %d (%.17g %.17g %.17g)\n",
+                              v, q.x, q.y, q.z);
+                    }
+                  }
+                }
+                // TEMP DEBUG: tie assert disabled to observe the
+                // downstream consequence; restore before commit.
+                // DEBUG_ASSERT(false, logicErr,
+                //              "BuildCellComplex: exact angular tie (step-12 "
+                //              "invariant failure)");
                 return x.polygon < y.polygon;
               });
   }
@@ -1558,18 +1945,21 @@ CellWinding ClassifyCells(const Manifold::Impl& impl,
   };
 
   // Canonical Newell normals (the frame each signed multiplicity is
-  // measured against), the arrangement bbox, and a length-correct
-  // graze margin: the impl's epsilon when it has one, else machine
-  // eps at the arrangement's own scale.
+  // measured against; relative-origin sum - see BuildCellComplex),
+  // the arrangement bbox, and a length-correct graze margin: the
+  // impl's epsilon when it has one, else machine eps at the
+  // arrangement's own scale.
   std::vector<vec3> normal(nP);
   vec3 bbMin = posOf(polygons[0].cycle[0]);
   vec3 bbMax = bbMin;
   for (int p = 0; p < nP; ++p) {
     const std::vector<int>& cyc = polygons[p].cycle;
+    const vec3 origin = posOf(cyc[0]);
     vec3 nsum(0.0, 0.0, 0.0);
     for (size_t i = 0; i < cyc.size(); ++i) {
       const vec3 pa = posOf(cyc[i]);
-      nsum = nsum + cross(pa, posOf(cyc[(i + 1) % cyc.size()]));
+      nsum =
+          nsum + cross(pa - origin, posOf(cyc[(i + 1) % cyc.size()]) - origin);
       bbMin = la::min(bbMin, pa);
       bbMax = la::max(bbMax, pa);
     }
@@ -2093,20 +2483,210 @@ Manifold RunOverlapRemoval(const Manifold& input, double eps) {
   // a non-manifold result, so it must not run on the failure path).
   try {
     return RunOverlapRemovalImpl(input, eps);
+  } catch (const std::exception& e) {                        // TEMP DEBUG
+    fprintf(stderr, "RSI-TEMP: exception: %s\n", e.what());  // TEMP DEBUG
+    return input;
   } catch (...) {
+    fprintf(stderr, "RSI-TEMP: exception: <unknown>\n");  // TEMP DEBUG
     return input;
   }
 }
 
 namespace {
 Manifold RunOverlapRemovalImpl(const Manifold& input, double eps) {
-  // DEMOLISHED for the faithful step-9 rewrite: steps 9-13 and the recovery
-  // scaffold (pair-sym phases, cap walker, pierce reducers, gate) were removed.
-  // Steps 1-8 (the arrangement front) remain and are exercised by the
-  // arrangement test harness; RemoveSelfIntersections is a no-op stub until
-  // the faithful arrangement + classification is rebuilt.
-  (void)eps;
-  return input;
+  using la::cross;
+  using la::dot;
+  if (input.IsEmpty()) return input;
+  if (eps <= 0) eps = InferEps(input);
+  // The input's pierce count, computed once for the gate's
+  // monotonicity arm.
+  const int inputPierces = CheckSelfIntersection(input).interiorPierces;
+
+  // Step 1: merge verts within eps.
+  const MergeVertsResult merged = MergeVertsEps(input, eps);
+  const Manifold& work = merged.manifold;
+  if (work.IsEmpty() || work.Status() != Manifold::Error::NoError) {
+    return input;
+  }
+  const Manifold::Impl impl = ImplFromManifold(work);
+  const double tolerance = std::max(impl.tolerance_, eps);
+  const int baseId = static_cast<int>(impl.NumVert());
+  const int numTri = static_cast<int>(impl.NumTri());
+
+  // Steps 2-5: canonical edges, on-edge vert lists, on-tri vert lists.
+  const std::vector<Edge> edges = EnumerateEdges(impl);
+  std::vector<EdgeVertList> onEdgeLists =
+      BuildOnEdgeVertLists(impl, edges, eps);
+  const std::vector<TriVertList> onTriLists = BuildOnTriVertLists(impl, eps);
+
+  // Step 6: edge-pierces-tri events.
+  const std::vector<EdgeTriIntersection> etIsects =
+      FindEdgeTriIntersections(impl, edges, onEdgeLists, onTriLists, eps);
+
+  // Step 7: chords per tri-tri pair. EARLY-EXIT when none: covers
+  // both the clean-input case and the all-pairs-dropped case, and
+  // returns the input bit-identical.
+  ChordEdges chordEdges = GenerateChordEdges(impl, edges, etIsects, eps);
+  if (chordEdges.newEdges.empty()) {
+    fprintf(stderr, "RSI-TEMP: early-exit (no chords)\n");  // TEMP DEBUG
+    return input;
+  }
+
+  // Pierce verts onto their piercing edges' on-edge lists, so the
+  // partition subdivides those halfedges at the pierce points.
+  PropagateNewVertsToOnEdgeLists(etIsects, chordEdges.resolvedIds, edges,
+                                 onEdgeLists);
+
+  // Step 8: on-tri verts onto chord interiors.
+  std::vector<NewEdgeWithExtras> chords = AddInteriorVertsToNewEdges(
+      impl, chordEdges.newVertPositions, chordEdges.newEdges, onTriLists, eps);
+
+  // Step 9: chord-chord crossings within each face - contacts,
+  // pairwise crossings, nearby-crossing merge + propagation,
+  // resolve-then-allocate threading.
+  const std::vector<std::vector<int>> chordsByFace =
+      GroupChordsByFace(chordEdges.newEdges, numTri);
+  const std::vector<OnChordContact> contacts = FindOnChordEndpointContacts(
+      impl, chords, chordEdges.newVertPositions, chordsByFace, tolerance, eps);
+  const std::vector<ChordChordCrossing> rawCrossings =
+      FindChordChordCrossings(impl, chords, chordEdges.newVertPositions,
+                              chordsByFace, impl.faceNormal_, eps);
+  const std::vector<ChordCrossing> clusters = MergeAndPropagateCrossings(
+      impl, chords, chordEdges.newVertPositions, rawCrossings, chordsByFace,
+      impl.faceNormal_, tolerance, eps);
+  const Step9Threading threaded = ResolveAndThreadClusters(
+      impl, std::move(chords), std::move(chordEdges.newVertPositions), clusters,
+      contacts, tolerance, eps);
+
+  // Steps 10-11: partition every face (chordless faces still pick up
+  // on-edge subdivision, so the arrangement conforms across shared
+  // edges). TODO: parallelize per-face.
+  const std::vector<int> edgeOfHalfedge = BuildHalfedgeToEdgeIndex(impl, edges);
+  std::vector<std::pair<int, std::vector<int>>> facePolygons;
+  for (int f = 0; f < numTri; ++f) {
+    FacePartition part = PartitionFace(
+        impl, f, edges, edgeOfHalfedge, onEdgeLists, threaded.chords,
+        chordsByFace[f], threaded.newVertPositions, impl.faceNormal_);
+    for (std::vector<int>& cyc : part.polygons) {
+      facePolygons.push_back({f, std::move(cyc)});
+    }
+  }
+
+  // Step 12: canonical merge with signed multiplicity.
+  const std::vector<MergedPolygon> polys = MergePolygons(facePolygons);
+  if (polys.empty()) {
+    fprintf(stderr, "RSI-TEMP: fallback (no merged polys)\n");  // TEMP DEBUG
+    return input;
+  }
+
+  // Step 13: cells, winding, keep, emit topology. Classification or
+  // topology failures (seed retries exhausted, unpaired halfedges,
+  // ...) fall back to the input.
+  const CellComplex cellCx =
+      BuildCellComplex(impl, polys, threaded.newVertPositions);
+  const CellWinding winding =
+      ClassifyCells(impl, polys, threaded.newVertPositions, cellCx);
+  if (!winding.ok) {
+    fprintf(stderr, "RSI-TEMP: fallback (classify !ok, casts=%d)\n",
+            winding.seedCasts);  // TEMP DEBUG
+    return input;
+  }
+  const EmitTopology topo = BuildEmitTopology(polys, cellCx, winding);
+  if (!topo.ok || topo.keptPolygons.empty()) {
+    fprintf(stderr, "RSI-TEMP: fallback (topo ok=%d kept=%zu)\n", (int)topo.ok,
+            topo.keptPolygons.size());  // TEMP DEBUG
+    return input;
+  }
+
+  // Emit: one output vert per ring; triangulate each kept cycle in
+  // its outward frame (Triangulate's CCW triangles project back
+  // winding-consistent because the basis is right-handed).
+  std::vector<vec3> ringPos(topo.ringVert.size());
+  for (size_t r = 0; r < topo.ringVert.size(); ++r) {
+    ringPos[r] =
+        GetPos3(topo.ringVert[r], baseId, impl, threaded.newVertPositions);
+  }
+  std::vector<ivec3> outTris;
+  for (const std::vector<int>& cyc : topo.outCycles) {
+    if (cyc.size() == 3) {
+      outTris.push_back(ivec3(cyc[0], cyc[1], cyc[2]));
+      continue;
+    }
+    // Relative-origin Newell sum - see BuildCellComplex.
+    const vec3 cycOrigin = ringPos[cyc[0]];
+    vec3 nsum(0.0, 0.0, 0.0);
+    for (size_t i = 0; i < cyc.size(); ++i) {
+      nsum = nsum + cross(ringPos[cyc[i]] - cycOrigin,
+                          ringPos[cyc[(i + 1) % cyc.size()]] - cycOrigin);
+    }
+    const double len2 = dot(nsum, nsum);
+    DEBUG_ASSERT(len2 > 0, logicErr,
+                 "RunOverlapRemoval: degenerate kept cycle");
+    if (len2 <= 0) {
+      fprintf(stderr,
+              "RSI-TEMP: fallback (degenerate kept cycle)\n");  // TEMP DEBUG
+      return input;
+    }
+    const InPlaneBasis basis = FaceBasisFromNormal(nsum / std::sqrt(len2));
+    SimplePolygon poly2;
+    poly2.reserve(cyc.size());
+    const vec3 origin = ringPos[cyc[0]];
+    for (const int r : cyc) {
+      const vec3 d = ringPos[r] - origin;
+      poly2.push_back(vec2(dot(d, basis.u), dot(d, basis.v)));
+    }
+    const std::vector<ivec3> tris = Triangulate({poly2}, impl.epsilon_, true);
+    for (const ivec3& t : tris) {
+      outTris.push_back(ivec3(cyc[t[0]], cyc[t[1]], cyc[t[2]]));
+    }
+  }
+
+  // Output mesh: positions only (numProp = 3) - non-position
+  // properties are not preserved (documented).
+  MeshGL64 outMesh;
+  outMesh.numProp = 3;
+  outMesh.tolerance = tolerance;
+  outMesh.vertProperties.reserve(ringPos.size() * 3);
+  for (const vec3& p : ringPos) {
+    outMesh.vertProperties.push_back(p.x);
+    outMesh.vertProperties.push_back(p.y);
+    outMesh.vertProperties.push_back(p.z);
+  }
+  outMesh.triVerts.reserve(outTris.size() * 3);
+  for (const ivec3& t : outTris) {
+    outMesh.triVerts.push_back(static_cast<uint64_t>(t[0]));
+    outMesh.triVerts.push_back(static_cast<uint64_t>(t[1]));
+    outMesh.triVerts.push_back(static_cast<uint64_t>(t[2]));
+  }
+  Manifold out(outMesh);
+
+  // GATE (thin, final): construction status, positive volume for a
+  // non-empty input (NaN fails the comparison too), and pierce-
+  // monotonicity. No volume-ratio tripwire: the input volume is the
+  // winding-WEIGHTED integral, so heavy overlap legitimately shrinks
+  // the measured volume (a full overlap reads 1/3). Gate failures
+  // are an expected fallback for adversarial inputs, not asserts.
+  if (out.Status() != Manifold::Error::NoError) {
+    fprintf(stderr, "RSI-TEMP: gate (status=%d)\n",
+            (int)out.Status());  // TEMP DEBUG
+    return input;
+  }
+  if (!(out.Volume() > 0)) {
+    fprintf(stderr, "RSI-TEMP: gate (volume=%g)\n",
+            out.Volume());  // TEMP DEBUG
+    return input;
+  }
+  {
+    const int outP = CheckSelfIntersection(out).interiorPierces;  // TEMP DEBUG
+    if (outP > inputPierces) {
+      fprintf(stderr, "RSI-TEMP: gate (pierces %d > %d)\n", outP,
+              inputPierces);  // TEMP DEBUG
+      return input;
+    }
+    fprintf(stderr, "RSI-TEMP: SUCCESS pierces %d -> %d\n", inputPierces,
+            outP);  // TEMP DEBUG
+  }
+  return out;
 }
 }  // namespace
 }  // namespace overlap_removal

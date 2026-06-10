@@ -1705,6 +1705,7 @@ bool Step10CycleIsSimple(const std::vector<int>& poly) {
 struct Step10Fixture {
   Manifold::Impl impl;
   std::vector<overlap_removal::Edge> edges;
+  std::vector<int> he2e;       // halfedge id -> edge index
   int face = -1;               // the z = 0 face, post-SortGeometry
   int A = -1, B = -1, C = -1;  // ids of (0,0,0), (1,0,0), (0,1,0)
 };
@@ -1717,6 +1718,7 @@ Step10Fixture MakeStep10Fixture() {
   m.triVerts = {0, 2, 1, 0, 1, 3, 1, 2, 3, 2, 0, 3};
   f.impl = Manifold::Impl(m);
   f.edges = overlap_removal::EnumerateEdges(f.impl);
+  f.he2e = overlap_removal::BuildHalfedgeToEdgeIndex(f.impl, f.edges);
   auto idAt = [&](double x, double y, double z) {
     for (size_t i = 0; i < f.impl.NumVert(); ++i) {
       const manifold::vec3 d = f.impl.vertPos_[i] - manifold::vec3(x, y, z);
@@ -1780,7 +1782,7 @@ TEST(OverlapRemoval, Step10XCrossingPartitionsIntoFour) {
                                               {0.5, 0.5, 0.0},
                                               {1.0 / 3.0, 1.0 / 6.0, 0.0}};
   const overlap_removal::FacePartition part = overlap_removal::PartitionFace(
-      fx.impl, fx.face, fx.edges, onEdgeLists, chords, {0, 1}, newPos,
+      fx.impl, fx.face, fx.edges, fx.he2e, onEdgeLists, chords, {0, 1}, newPos,
       fx.impl.faceNormal_);
   ASSERT_EQ(part.polygons.size(), 4u);
   EXPECT_EQ(part.spursDropped, 0);
@@ -1805,9 +1807,9 @@ TEST(OverlapRemoval, Step10DanglingChordSpurDropped) {
   const std::vector<overlap_removal::NewEdgeWithExtras> chords = {
       {{4, 5, fx.face, 99}, {}, {}}};  // p1 -> interior d, dangling
   const std::vector<manifold::vec3> newPos = {{0.5, 0.0, 0.0}, {0.3, 0.3, 0.0}};
-  const overlap_removal::FacePartition part =
-      overlap_removal::PartitionFace(fx.impl, fx.face, fx.edges, onEdgeLists,
-                                     chords, {0}, newPos, fx.impl.faceNormal_);
+  const overlap_removal::FacePartition part = overlap_removal::PartitionFace(
+      fx.impl, fx.face, fx.edges, fx.he2e, onEdgeLists, chords, {0}, newPos,
+      fx.impl.faceNormal_);
   ASSERT_EQ(part.polygons.size(), 1u);
   EXPECT_GE(part.spursDropped, 1);
   EXPECT_TRUE(Step10CycleIsSimple(part.polygons[0]));
@@ -1828,7 +1830,7 @@ TEST(OverlapRemoval, Step10CoincidentChordsDedup) {
       {{4, 5, fx.face, 99}, {}, {}}, {{4, 5, fx.face, 101}, {}, {}}};
   const std::vector<manifold::vec3> newPos = {{0.5, 0.0, 0.0}, {0.0, 0.5, 0.0}};
   const overlap_removal::FacePartition part = overlap_removal::PartitionFace(
-      fx.impl, fx.face, fx.edges, onEdgeLists, chords, {0, 1}, newPos,
+      fx.impl, fx.face, fx.edges, fx.he2e, onEdgeLists, chords, {0, 1}, newPos,
       fx.impl.faceNormal_);
   ASSERT_EQ(part.polygons.size(), 2u);
   for (const std::vector<int>& poly : part.polygons) {
@@ -1846,16 +1848,17 @@ TEST(OverlapRemoval, Step10ZeroLengthChordSkippedAndCleanFace) {
   const std::vector<overlap_removal::NewEdgeWithExtras> chords = {
       {{4, 4, fx.face, 99}, {}, {}}};
   const std::vector<manifold::vec3> newPos = {{0.5, 0.0, 0.0}};
-  const overlap_removal::FacePartition part =
-      overlap_removal::PartitionFace(fx.impl, fx.face, fx.edges, onEdgeLists,
-                                     chords, {0}, newPos, fx.impl.faceNormal_);
+  const overlap_removal::FacePartition part = overlap_removal::PartitionFace(
+      fx.impl, fx.face, fx.edges, fx.he2e, onEdgeLists, chords, {0}, newPos,
+      fx.impl.faceNormal_);
   ASSERT_EQ(part.polygons.size(), 1u);
   EXPECT_EQ(part.zeroLengthChordsSkipped, 1);
   EXPECT_EQ(part.polygons[0].size(), 3u);  // the bare corner cycle
   EXPECT_TRUE(Step10CycleIsSimple(part.polygons[0]));
 
   const overlap_removal::FacePartition clean = overlap_removal::PartitionFace(
-      fx.impl, fx.face, fx.edges, onEdgeLists, {}, {}, {}, fx.impl.faceNormal_);
+      fx.impl, fx.face, fx.edges, fx.he2e, onEdgeLists, {}, {}, {},
+      fx.impl.faceNormal_);
   ASSERT_EQ(clean.polygons.size(), 1u);
   EXPECT_EQ(clean.polygons[0].size(), 3u);
 }
@@ -2202,6 +2205,135 @@ TEST(OverlapRemoval, Step13BookTwinPairingSplitsSharedEdge) {
   }
 }
 
+// ---- Step 6.5 coplanar trace chords (docs/Steps10to13Design.md v6) ----
+
+TEST(OverlapRemoval, Step65PancakeQuadTraceChords) {
+  // Zero-volume pancake: two sheets over the unit quad, triangulated
+  // with DIFFERENT diagonals (top 0-2 at +z winding, bottom 1-3 at
+  // -z), a valid closed manifold. Every cross-sheet pair overlaps;
+  // the only genuine crossing is diag x anti-diag at the quad center.
+  // Expect: ONE new vert at (0.5, 0.5, 0); trace chords spanning
+  // center-to-corner, on cross-sheet pairs only (same-sheet
+  // neighbors ride boundaries and emit nothing); and exactly two
+  // on-edge additions - the center vert at t = 0.5 on BOTH diagonal
+  // edges (the X case: one record per edge, one shared vert id).
+  // Hand-built Impl: the public constructor strips zero-volume
+  // components, but hull-class pancakes live ON a larger connected
+  // surface; the unit test needs only vertPos_ and paired halfedges.
+  Manifold::Impl impl;
+  impl.vertPos_.push_back({0.0, 0.0, 0.0});
+  impl.vertPos_.push_back({1.0, 0.0, 0.0});
+  impl.vertPos_.push_back({1.0, 1.0, 0.0});
+  impl.vertPos_.push_back({0.0, 1.0, 0.0});
+  const int tris[4][3] = {{0, 1, 2}, {0, 2, 3}, {3, 1, 0}, {3, 2, 1}};
+  for (const auto& t : tris) {
+    for (int k = 0; k < 3; ++k) impl.halfedge_.push_back(t[k], -1, -1);
+  }
+  std::map<std::pair<int, int>, int> directedHe;
+  for (int h = 0; h < 12; ++h) {
+    directedHe[{impl.halfedge_.Start(h), impl.halfedge_.End(h)}] = h;
+  }
+  for (const auto& [uv, h] : directedHe) {
+    impl.halfedge_.SetPair(h, directedHe.at({uv.second, uv.first}));
+  }
+  ASSERT_EQ(impl.NumTri(), 4u);
+  const int c00 = 0;
+  const int c10 = 1;
+  const int c11 = 2;
+  const int c01 = 3;
+  const std::vector<overlap_removal::Edge> edges =
+      overlap_removal::EnumerateEdges(impl);
+  const std::vector<int> he2e =
+      overlap_removal::BuildHalfedgeToEdgeIndex(impl, edges);
+  const double eps = std::max(impl.epsilon_, 1e-12);
+  const overlap_removal::TraceChordResult res =
+      overlap_removal::CoplanarTraceChords(impl, edges, he2e, {},
+                                           std::max(impl.tolerance_, eps), eps);
+  const int baseId = static_cast<int>(impl.NumVert());
+  ASSERT_EQ(res.newVertPositions.size(), 1u);
+  const manifold::vec3 x = res.newVertPositions[0];
+  EXPECT_NEAR(x.x, 0.5, 1e-9);
+  EXPECT_NEAR(x.y, 0.5, 1e-9);
+  EXPECT_NEAR(x.z, 0.0, 1e-9);
+  const int center = baseId;
+  // Chords: center-to-corner segments, each from two cross-sheet
+  // pairs; never within one sheet.
+  EXPECT_EQ(res.chords.size(), 8u);
+  std::map<std::pair<int, int>, int> segCount;
+  auto sheetZ = [&](int t) {  // winding sign (faceNormal_ not built)
+    const manifold::vec3 a = impl.vertPos_[impl.halfedge_.Start(3 * t)];
+    const manifold::vec3 b = impl.vertPos_[impl.halfedge_.Start(3 * t + 1)];
+    const manifold::vec3 c = impl.vertPos_[impl.halfedge_.Start(3 * t + 2)];
+    return la::cross(b - a, c - a).z;
+  };
+  for (const overlap_removal::PiercedNewEdge& ch : res.chords) {
+    segCount[{std::min(ch.v0, ch.v1), std::max(ch.v0, ch.v1)}]++;
+    EXPECT_LT(sheetZ(ch.triA) * sheetZ(ch.triB), 0.0)
+        << "chord faces must be cross-sheet";
+  }
+  for (const int corner : {c00, c10, c11, c01}) {
+    const std::pair<int, int> key{std::min(corner, center),
+                                  std::max(corner, center)};
+    EXPECT_EQ(segCount[key], 2) << "corner " << corner;
+  }
+  // On-edge additions: the center vert on both diagonal edges.
+  ASSERT_EQ(res.onEdgeAdditions.size(), 2u);
+  std::set<int> additionEdges;
+  for (const overlap_removal::OnEdgeAddition& a : res.onEdgeAdditions) {
+    EXPECT_EQ(a.vertId, center);
+    EXPECT_NEAR(a.t, 0.5, 1e-9);
+    additionEdges.insert(a.edge);
+  }
+  auto edgeIndexOf = [&](int u, int v) {
+    for (size_t i = 0; i < edges.size(); ++i) {
+      if (edges[i].v0 == std::min(u, v) && edges[i].v1 == std::max(u, v)) {
+        return static_cast<int>(i);
+      }
+    }
+    return -1;
+  };
+  EXPECT_TRUE(additionEdges.count(edgeIndexOf(c00, c11)));
+  EXPECT_TRUE(additionEdges.count(edgeIndexOf(c10, c01)));
+  EXPECT_GT(res.intervalsRejected, 0);
+}
+
+TEST(OverlapRemoval, Step65CoplanarNeighborsEmitNothing) {
+  // A clean cube: every face's two tris are coplanar neighbors whose
+  // clip intervals all ride the shared boundary - no trace chords, no
+  // additions, so clean flat meshes keep the driver's early-exit.
+  Manifold::Impl impl(Manifold::Cube({1, 1, 1}).GetMeshGL64());
+  const std::vector<overlap_removal::Edge> edges =
+      overlap_removal::EnumerateEdges(impl);
+  const std::vector<int> he2e =
+      overlap_removal::BuildHalfedgeToEdgeIndex(impl, edges);
+  const double eps = std::max(impl.epsilon_, 1e-12);
+  const overlap_removal::TraceChordResult res =
+      overlap_removal::CoplanarTraceChords(impl, edges, he2e, {},
+                                           std::max(impl.tolerance_, eps), eps);
+  EXPECT_TRUE(res.chords.empty());
+  EXPECT_TRUE(res.onEdgeAdditions.empty());
+  EXPECT_TRUE(res.newVertPositions.empty());
+}
+
+TEST(OverlapRemoval, Step65AddVertsToOnEdgeLists) {
+  // The trace-chord sibling of PropagateNewVertsToOnEdgeLists:
+  // id-dedup against the existing list, then per-edge t re-sort.
+  std::vector<overlap_removal::EdgeVertList> lists(2);
+  lists[0].verts = {7};
+  lists[0].ts = {0.5};
+  const std::vector<overlap_removal::OnEdgeAddition> additions = {
+      {0, 9, 0.8},
+      {0, 8, 0.2},
+      {0, 7, 0.5},  // 7 duplicates: skipped
+      {1, 9, 0.4}};
+  overlap_removal::AddVertsToOnEdgeLists(additions, lists);
+  ASSERT_EQ(lists[0].verts.size(), 3u);
+  EXPECT_EQ(lists[0].verts, (std::vector<int>{8, 7, 9}));
+  EXPECT_EQ(lists[0].ts, (std::vector<double>{0.2, 0.5, 0.8}));
+  ASSERT_EQ(lists[1].verts.size(), 1u);
+  EXPECT_EQ(lists[1].verts[0], 9);
+}
+
 // White-box interior-pierce count via the internal checker (external
 // linkage in the linked manifold library), used to assert the
 // pierce-monotonicity contract that the public API does not expose.
@@ -2259,12 +2391,7 @@ TEST(Manifold, RemoveSelfIntersectionsHullMaskFixture) {
   const double inVol = result.Volume();
   Manifold cleaned = result.RemoveSelfIntersections();
   EXPECT_EQ(cleaned.Status(), Manifold::Error::NoError);
-  // TRACKING (step-9 rebuild, docs/Step9Design.md): the pre-rebuild
-  // pipeline cleared every pierce here (EXPECT_EQ 0). Steps 9-13 are
-  // being rebuilt; until they land, RemoveSelfIntersections is a no-op
-  // stub and only monotonicity holds. Restore EXPECT_EQ(_, 0) when the
-  // rebuilt pipeline lands.
-  EXPECT_LE(InteriorPierces(cleaned), InteriorPierces(result));
+  EXPECT_EQ(InteriorPierces(cleaned), 0);
   EXPECT_GT(cleaned.Volume(), 0);
   EXPECT_LT(std::abs(cleaned.Volume() - inVol) / inVol, 0.01);
 }
@@ -2343,14 +2470,11 @@ TEST(Manifold, RemoveSelfIntersectionsDeterministic) {
 }
 
 TEST(Manifold, RemoveSelfIntersectionsFarFromOrigin) {
-  // ProbeMeshScale (shared by the per-vert and per-polygon classifiers)
-  // uses Box::Scale, not the bbox diagonal, so the probe stays usable far
-  // from the origin. Run a genuinely self-intersecting input (hull Subtract,
-  // ~31 pierces) translated to 1e4 and require strict reduction: the old
-  // bbox-diagonal form mis-scales the probe ~1150x and falls back unchanged
-  // (leaving all ~31), so a strict drop proves the probe still does real
-  // work. It does not fully clear at 1e4 (some precision is lost vs the ~0 it
-  // reaches at the origin), so this asserts reduction, not zero.
+  // Scale-robustness pin: the same genuinely self-intersecting input
+  // (hull Subtract, ~31 pierces) translated to 1e4 must still see a
+  // strict pierce reduction. At 1e4 the absolute FP grid is ~1e-12,
+  // so the arrangement's plane re-projection cancellation is the
+  // known precision tax - this asserts reduction, not zero.
   Manifold body = Manifold(ReadTestMeshGL64OBJ("hull-body.obj"));
   Manifold mask = Manifold(ReadTestMeshGL64OBJ("hull-mask.obj"));
   Manifold result = (body - mask).Translate({1e4, 1e4, 1e4});
@@ -2358,11 +2482,7 @@ TEST(Manifold, RemoveSelfIntersectionsFarFromOrigin) {
   ASSERT_GT(InteriorPierces(result), 0);
   Manifold cleaned = result.RemoveSelfIntersections();
   EXPECT_EQ(cleaned.Status(), Manifold::Error::NoError);
-  // TRACKING (step-9 rebuild, docs/Step9Design.md): the pre-rebuild
-  // pipeline strictly reduced pierces here (EXPECT_LT). Until the
-  // rebuilt steps 9-13 land, the no-op stub satisfies only
-  // monotonicity. Restore EXPECT_LT when the rebuilt pipeline lands.
-  EXPECT_LE(InteriorPierces(cleaned), InteriorPierces(result));
+  EXPECT_LT(InteriorPierces(cleaned), InteriorPierces(result));
   EXPECT_GT(cleaned.Volume(), 0);
 }
 

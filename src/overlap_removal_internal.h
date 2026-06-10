@@ -284,6 +284,55 @@ std::vector<NewEdgeWithExtras> AddInteriorVertsToNewEdges(
     const std::vector<PiercedNewEdge>& newEdges,
     const std::vector<TriVertList>& onTriLists, double eps);
 
+// ---- Step 6.5: coplanar trace chords (docs/Steps10to13Design.md v6) ----
+
+// In-plane conformance for coplanar overlapping face pairs. Step 1's
+// eps-merge flattens Boolean SoS slivers into zero-volume pancakes -
+// coplanar overlapping faces with opposite orientations - by design:
+// step 12's signed-multiplicity cancellation consumes the
+// coincidences. But transversal step-6 events cannot cut coplanar
+// pairs, so without this pass the sheets' partitions never conform,
+// cancellation cannot fire, and BuildCellComplex hits exact angular
+// ties. For each BVH pair surviving the plane gate (every vert within
+// eps of the LARGER face's plane), both faces' edges are clipped
+// against the other face in ONE shared frame (the lower face id's, so
+// a crossing is computed once and shares its id across both clip
+// directions). An interval qualifies iff it is longer than eps AND
+// its midpoint is interior to the other face by > eps (full-through
+// cuts qualify - their midpoints are interior; boundary-riding
+// intervals from coplanar neighbors never do, so clean flat meshes
+// emit nothing). Crossing endpoints snap to the pair's six corners at
+// tolerance + eps (nearest, ties to smallest - the step-9
+// convention), then dedup new-to-new at eps first-found (the step-7
+// convention); an endpoint farther than eps from either original 3D
+// edge rejects its interval (the near-grazing guard). Each qualifying
+// interval emits a chord lying on BOTH faces; new crossing verts on
+// original mesh edges are returned as explicit on-edge additions
+// (one per edge - an X crossing gets two records with one vert id).
+struct OnEdgeAddition {
+  int edge;  // index into edges[]
+  int vertId;
+  double t;
+};
+struct TraceChordResult {
+  std::vector<PiercedNewEdge> chords;
+  std::vector<vec3> newVertPositions;  // input extended (taken by value)
+  std::vector<OnEdgeAddition> onEdgeAdditions;  // deduped (edge, vertId)
+  int intervalsRejected = 0;  // boundary-riding / grazing / sub-eps
+};
+TraceChordResult CoplanarTraceChords(const Manifold::Impl& impl,
+                                     const std::vector<Edge>& edges,
+                                     const std::vector<int>& edgeOfHalfedge,
+                                     std::vector<vec3> newVertPositions,
+                                     double tolerance, double eps);
+
+// Apply explicit on-edge additions: id-dedup against the existing
+// list, then per-edge re-sort by t. The trace-chord sibling of
+// PropagateNewVertsToOnEdgeLists (whose interface is parallel to
+// etIsects and structurally cannot carry these).
+void AddVertsToOnEdgeLists(const std::vector<OnEdgeAddition>& additions,
+                           std::vector<EdgeVertList>& onEdgeLists);
+
 // ---- Step 9: chord-chord crossings within each triangle ----
 // (docs/Step9Design.md; implemented incrementally.)
 
@@ -384,6 +433,14 @@ Step9Threading ResolveAndThreadClusters(
 
 // ---- Steps 10-11: per-face partition (docs/Steps10to13Design.md) ----
 
+// Halfedge-id -> index into edges[] (both directions of an edge map
+// to the same index; -1 where no canonical edge covers a halfedge).
+// Built ONCE per pipeline run and shared by every PartitionFace call
+// - rebuilding an all-edges lookup inside the per-face partition made
+// it quadratic over the mesh.
+std::vector<int> BuildHalfedgeToEdgeIndex(const Manifold::Impl& impl,
+                                          const std::vector<Edge>& edges);
+
 // Partition one face of the conforming step-9 arrangement into simple
 // sub-polygon cycles (CCW w.r.t. the face normal). The face's three
 // original edges contribute one halfedge per sub-edge (subdivided by
@@ -401,9 +458,15 @@ struct FacePartition {
   std::vector<std::vector<int>> polygons;  // simple cycles of vert ids
   int spursDropped = 0;
   int zeroLengthChordsSkipped = 0;
+  // >= 3-vert cycles with exactly-zero projected area (flattened
+  // spurs: coincident post-merge positions under distinct ids, or an
+  // exactly-collinear out-and-back walk). Dropped - their Newell
+  // normal is undefined downstream.
+  int degenerateCyclesDropped = 0;
 };
 FacePartition PartitionFace(const Manifold::Impl& impl, int face,
                             const std::vector<Edge>& edges,
+                            const std::vector<int>& edgeOfHalfedge,
                             const std::vector<EdgeVertList>& onEdgeLists,
                             const std::vector<NewEdgeWithExtras>& chords,
                             const std::vector<int>& faceChords,

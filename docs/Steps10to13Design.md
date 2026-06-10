@@ -1,4 +1,10 @@
-# Steps 10-13 design v4: partition, merge, global winding, emit
+# Steps 10-13 design v5: partition, merge, global winding, emit
+
+v5 = v4 + the increment-v driver findings: a new COPLANAR CONFORMANCE pass
+(step 6.5) and seed-target hardening - see "v5 delta" at the end. Both came
+out of wiring the full driver: the hull fixture exposed coplanar pancake
+regions that steps 4-12 as sketched cannot cancel, and the far-from-origin
+fixture exhausted the 3-target seed retry on sliver ears.
 
 v4 = v3 + round 3: the closure guard corrected to vertex-arrival (the
 boolean2 production pattern); the ring orbit operator pinned on the POLYGON
@@ -228,7 +234,12 @@ compose at verts (round 2). So the emit assigns topology EXPLICITLY:
   vetoes correct outputs on exactly the heavy-overlap inputs the feature
   targets. Wrong-seed risk is owned by the debug-mode BFS/fan asserts and
   the nested/book fixtures, not a release heuristic.
-  Under MANIFOLD_DEBUG the gate conditions also DEBUG_ASSERT.
+  The gate arms do NOT DEBUG_ASSERT (changed from round 3 at
+  implementation): a gate trip is the expected fallback for adversarial
+  inputs (the dense-sliver class), not an invariant violation - asserting
+  would fire on known-fallback fixtures in every debug run. Internal
+  invariants (BFS disagreement, odd kept fans, unpaired halfedges, ...)
+  keep their DEBUG_ASSERTs.
 - Serial-first; `// TODO: parallelize` markers only.
 
 ## Doc debt at landing
@@ -283,3 +294,194 @@ v.   Driver wiring + emit; restore the two relaxed feature tests (HullMask
 - Scale: FarFromOrigin bar is strict reduction; plane re-projection
   cancellation at 1e4 is the known precision tax.
 - Performance unmeasured; near-linear except the per-component seed cast.
+
+## v5 delta: coplanar conformance (step 6.5) + seed-target hardening
+
+### What the driver run exposed
+
+Wiring the full driver (increment v) and running the hull fixture
+(hull-body Subtract hull-mask, ~31 pierces) surfaced two design gaps.
+Empirical landscape with the gaps waved through: every other feature test
+passes (clean inputs early-exit bit-identical; the ovoid dense-sliver
+fixture falls back cleanly, as documented); the hull fixture and its 1e4
+translation are the only failures, and each isolates one gap.
+
+GAP 1 - coplanar pancakes. Step 1's eps-merge flattens Boolean3's SoS
+sliver wedges into zero-volume pancakes: coplanar overlapping face pairs
+with opposite orientations. That is BY DESIGN - the merge manufactures the
+coincidences step 12's signed-multiplicity cancellation consumes. But the
+sketch's step 6 finds only TRANSVERSAL edge-tri pierces: coplanar pairs
+produce no chords, the two sheets' partitions never conform in-plane,
+step 12's equal-cycle cancellation cannot fire, and BuildCellComplex hits
+EXACT angular ties (bit-identical in-face directions at shared fan edges -
+observed directly on the fixture: a big tri on one sheet against a
+3-sub-tri Steiner triangulation of the same region on the other, sharing
+all four verts, surviving with unbalanced mults). Letting the tie through
+on polygon-id order corrupts the wedge unions: downstream the winding BFS
+disagrees and kept cycles emit non-simple (Triangulate's CCW check
+throws). The tie assert is correct; the arrangement is what is incomplete.
+
+GAP 2 - seed-target slivers. At 1e4 the seed cast exhausted its 3 targets:
+ascending-polygon-id order picked eps-thin slivers whose first-ear
+centroids sit within the graze margin of their own boundaries, so every
+cast aborted. (Distinct from the documented re-projection precision tax;
+this is target SELECTION, not cast math.)
+
+### Step 6.5: coplanar trace chords (v6: post-review revision)
+
+Two adversarial review lanes (geometry; integration/numerics) returned
+NOT CLEAR on the v5 sketch. v6 pins every blocked rule. Review traceback:
+[G1] driver wiring, [G2]/[I-A4] two-frame id divergence, [I-A1] snap-rule
+misattribution, [I-A2] on-edge injection path, [I-B1] early-exit/welding
+semantics + coplanar-neighbor noise, [I-C1] grazing-clip inflation,
+[G4] detect thresholds, [G7] rule-3 endpoint ambiguity, [G9] rim fans.
+
+After step 7 (GenerateChordEdges), BEFORE PropagateNewVertsToOnEdgeLists
+and step 8, run a conformance pass over coplanar overlapping face pairs:
+
+1. **Detect (broad + plane gate).** Fresh BVH over tri boxes (the
+   SortedBVH ritual; serial, once per run); for each candidate pair, the
+   plane gate: ALL SIX verts within eps of the LARGER-AREA face's plane
+   (one-sided against the larger face only - a near-zero-area sliver's
+   own plane is noise [G4]; eps is a length). Near-coplanar-but-tilted
+   pairs fail and keep their transversal step-6 chords - no double
+   handling.
+2. **Single-frame clip [G2, I-A4].** ALL geometry for a pair is computed
+   in ONE frame: the lower-face-id face's FaceBasisFromNormal frame.
+   Clip each of B's 3 edges against A's projected triangle AND each of
+   A's 3 edges against B's projected triangle in that same frame (convex
+   clip: at most one interval per edge). The same geometric crossing is
+   therefore computed exactly once and shared by both clip directions -
+   the two-frame id-divergence failure mode is removed by construction.
+3. **Interval qualification [I-B1, G4].** An interval becomes a trace
+   chord only if (a) its length > eps AND (b) its midpoint lies strictly
+   interior to the OTHER face with in-plane edge-distance margin > eps.
+   (b) rejects boundary-coincident intervals: coplanar NEIGHBORS (any
+   flat region of any mesh - e.g. a cube face's two tris) produce only
+   boundary-riding intervals and emit NOTHING, so clean flat meshes
+   still take the early-exit; equal-size face-glued solids likewise
+   emit nothing and pass through bit-identical. A qualifying interval
+   exists only where one face's boundary genuinely crosses the other's
+   interior - the pancake class.
+   MIDPOINT, not endpoints (re-review round 2 adjudication): a
+   full-through cut - B's edge entering AND exiting A, the generic
+   overlap case - has BOTH endpoints on A's boundary (endpoint margins
+   ~0) yet an interior midpoint, so an endpoint-margin predicate would
+   reject exactly the cuts conformance needs most. Distance-to-boundary
+   is CONCAVE along a segment inside a convex face, so the midpoint
+   margin >= half the deepest penetration: the midpoint rule keeps
+   every cut deeper than 2 * eps and rejects only the FP-degenerate
+   dip band the rule-4 grazing guard already skips.
+4. **Endpoint ids [I-A1, G7].** Pin: interval endpoints that are
+   original verts (a vert of one tri inside or on the other) use their
+   ids directly. A genuine crossing endpoint snaps to the nearest of
+   the pair's six corner verts within tolerance + eps (nearest, ties to
+   smallest id) - this is the STEP-9 resolve-then-allocate convention,
+   chosen deliberately: trace verts feed straight into step-9
+   resolution, so they must obey its radius, NOT step 7's bare-eps
+   first-found (which is the convention only for step-7's own
+   pierce-event dedup). Unsnapped endpoints allocate new verts, then
+   dedup new-to-new across ALL step-6.5 verts at eps, first-found, in
+   deterministic pair order (the step-7 new-to-new convention, named as
+   such). Lift back to 3D in the shared frame; clamp the crossing t and
+   REJECT (skip the interval) any endpoint whose lifted position is
+   farther than eps from either original 3D edge - the near-grazing
+   inflation guard [I-C1]; a skipped degenerate interval costs only
+   conformance we provably cannot compute.
+5. **Trace chords.** Each qualifying interval emits
+   `PiercedNewEdge{v0, v1, A, B}` (it lies on both coplanar faces; the
+   existing chord model applies verbatim). Dedup by sorted endpoint ids
+   within the pair; ACROSS pairs the partition's per-face undirected
+   dedup (rule a) absorbs geometric repeats - there is NO pre-partition
+   global chord dedup [G3].
+6. **Boundary conformance [I-A2, G7].** Only NEW crossing endpoints
+   that lie on an original mesh edge (within eps, by construction of
+   the clip) generate on-edge insertions; original-vert endpoints are
+   already endpoints and are NOT inserted. A crossing landing on edges
+   of BOTH faces (the X case: B's edge crossing A's edge) gets one
+   record PER EDGE - the two clip directions contribute one each, with
+   the same vert id and per-edge t. The pass returns explicit
+   (edgeIdx, vertId, t) additions - t recomputed from 3D positions -
+   and the driver applies them via a NEW sibling helper
+   `AddVertsToOnEdgeLists` (id-dedup + per-edge t re-sort, the same
+   internals as PropagateNewVertsToOnEdgeLists, which structurally
+   cannot carry them: its interface is parallel to etIsects).
+7. **Compose [G1].** The driver appends trace chords to
+   `ChordEdges::newEdges` and the new positions to
+   `ChordEdges::newVertPositions` BEFORE the early-exit, BEFORE
+   GroupChordsByFace, and BEFORE step 8:
+   - EARLY-EXIT moves after this pass: return input iff the COMBINED
+     newEdges is empty (a pancake-only defect has no transversal
+     chords at all).
+   - `chordsByFace` = GroupChordsByFace(COMBINED list) - one grouping
+     feeds step 8 extras, step 9 (trace-vs-regular and trace-vs-trace
+     crossings resolve there [G5]), and the partition. No other
+     consumer changes.
+
+After conformance both sheets partition into IDENTICAL sub-polygon
+geometry over the overlap region (same ids by rules 2+4), step 12
+cancels the doubled area exactly (equal canonical cycles, opposite
+signs), and the angular-tie DEBUG_ASSERT stays - a remaining tie is
+again a real invariant failure.
+
+Semantics pin [I-B1]: a coincident interior wall separating winding
+1|1 (differently-sized solids glued face to face, after conformance)
+DROPS by the step-13 keep rule - the output is the winding-faithful
+welded solid. This is correct #289 behavior, not a regression: the
+input's w > 0 region IS one solid. Equal-size glued faces never reach
+the pipeline (rule 3 emits nothing; early-exit). Documented with a
+fixture.
+
+Rim note [G9]: cancelling a pancake leaves its rim edges with a
+single surviving non-coplanar polygon - the k = 1 open-sheet fan whose
+existing rim rule (unite own front and back) is exactly the ambient
+behavior wanted: the BFS crosses the survivor with its own mult and
+the vanished pancake imposes no constraint.
+
+Absorbed edge classes (unchanged from v5, restated tighter):
+- Boundary-coincident intervals: now REJECTED at rule 3 (not emitted,
+  rather than emitted-and-absorbed).
+- A fully inside B: A's edges qualify (interior midpoints), B's edges
+  do not reach A's interior; B's partition carves the A-shaped hole;
+  cancellation proceeds.
+- 3+ stacked sheets: pairwise traces compose; cross-pair crossings are
+  step-9 chord-chord crossings on the shared face; multiplicities sum
+  per step 12. A trace endpoint allocated near a THIRD sheet's corner
+  (outside its own pair's six-corner snap set) resolves via step 8 ->
+  step 9: the corner is an on-tri vert of the host face, step 8
+  threads it onto the trace chord as an extra, and step-9 resolution
+  snaps the eps-close endpoint to it - this RELIES on the rule-7
+  ordering (step 8 runs over trace chords before step 9).
+- Collinear overlapping edges: intervals ride the boundary - rejected
+  by rule 3; eps-distinct near-collinear duplicates remain the
+  documented doubled-cut limitation.
+
+Cost: detect is one BVH pass + plane gates; clips run only on pairs
+surviving the gate; everything is serial with `// TODO: parallelize`.
+
+### Seed-target hardening (v6)
+
+Replace ascending-polygon-id target order with DESCENDING-AREA order
+(area = |relative-origin Newell| of the canonical cycle, computed in
+deterministic cycle order; ties by ascending polygon id), and raise the
+retry budget from 3 to `kSeedCastMaxTargets = 8` (named constant in the
+.cpp numeric-defaults block [I-D1]). Big polygons have ear centroids far
+from their boundaries, so the first target almost always casts cleanly;
+slivers sort last instead of first. Deterministic given identical input
+order [I-D2]; no cast-math change. All-8-graze still falls back to the
+input (counted) - accepted.
+
+### Increment plan (red-first; v6 reviewed)
+
+v-2a. CoplanarTraceChords unit: overlapping coplanar tri pair (opposite
+      orientation) -> expected trace chords with single-frame shared
+      ids; the contained-vert, shared-edge (emits nothing), coplanar-
+      neighbor (emits nothing), and near-grazing-reject cases.
+v-2b. Driver pancake fixture: Compose(cube, zero-volume pancake whose
+      two sheets triangulate the same quad with DIFFERENT diagonals) ->
+      output is the cube alone (pancake cancels in step 12), 0 pierces.
+      Plus the glued-boxes fixtures: equal faces -> bit-identical
+      early-exit; smaller-on-larger -> welded, volume = sum, 0 pierces.
+v-2c. Seed-target hardening + FarFromOrigin (EXPECT_LT restored).
+v-2d. Hull fixture integration (EXPECT_EQ 0, tie assert restored,
+      TEMP DEBUG instrumentation removed).
