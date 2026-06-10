@@ -1340,6 +1340,135 @@ std::vector<MergedPolygon> MergePolygons(
   return out;
 }
 
+CellComplex BuildCellComplex(const Manifold::Impl& impl,
+                             const std::vector<MergedPolygon>& polygons,
+                             const std::vector<vec3>& newVertPositions) {
+  using la::cross;
+  using la::dot;
+  CellComplex out;
+  const int nP = static_cast<int>(polygons.size());
+  if (nP == 0) return out;
+  const int baseId = static_cast<int>(impl.NumVert());
+  auto posOf = [&](int id) {
+    return GetPos3(id, baseId, impl, newVertPositions);
+  };
+
+  // Newell normal per polygon: the canonical cycle's own orientation -
+  // the frame its multiplicity is signed against (the polygon's FRONT
+  // is the +normal side).
+  std::vector<vec3> normal(nP);
+  for (int p = 0; p < nP; ++p) {
+    const std::vector<int>& c = polygons[p].cycle;
+    vec3 nsum(0.0, 0.0, 0.0);
+    for (size_t i = 0; i < c.size(); ++i) {
+      nsum = nsum + cross(posOf(c[i]), posOf(c[(i + 1) % c.size()]));
+    }
+    const double len2 = dot(nsum, nsum);
+    DEBUG_ASSERT(len2 > 0, logicErr, "BuildCellComplex: degenerate polygon");
+    normal[p] = len2 > 0 ? nsum / std::sqrt(len2) : vec3(0.0, 0.0, 1.0);
+  }
+
+  // Fan entries per undirected arrangement edge. The in-face direction
+  // at a cycle edge a -> b is cross(normal, walkDir): perpendicular to
+  // the edge, pointing into the polygon (exact locally, convex or
+  // not). frontCcw: the front side faces the CCW-adjacent wedge iff
+  // rotating the in-face direction +90 degrees about the edge axis
+  // lands on the +normal side.
+  struct FanEntry {
+    int polygon;
+    vec2 dir2;
+    bool frontCcw;
+  };
+  std::map<std::pair<int, int>, std::vector<FanEntry>> fans;
+  for (int p = 0; p < nP; ++p) {
+    const std::vector<int>& c = polygons[p].cycle;
+    for (size_t i = 0; i < c.size(); ++i) {
+      const int a = c[i];
+      const int b = c[(i + 1) % c.size()];
+      const std::pair<int, int> key{std::min(a, b), std::max(a, b)};
+      const vec3 pa = posOf(key.first);
+      const vec3 pb = posOf(key.second);
+      const vec3 axisRaw = pb - pa;
+      const double axisLen2 = dot(axisRaw, axisRaw);
+      DEBUG_ASSERT(axisLen2 > 0, logicErr,
+                   "BuildCellComplex: zero-length arrangement edge");
+      if (axisLen2 == 0) continue;
+      const vec3 axis = axisRaw / std::sqrt(axisLen2);
+      const vec3 walkRaw = posOf(b) - posOf(a);
+      const vec3 walk = walkRaw / std::sqrt(dot(walkRaw, walkRaw));
+      const vec3 inFace = cross(normal[p], walk);
+      const InPlaneBasis fanBasis = FaceBasisFromNormal(axis);
+      const vec2 dir2(dot(inFace, fanBasis.u), dot(inFace, fanBasis.v));
+      const bool frontCcw = dot(cross(axis, inFace), normal[p]) > 0;
+      fans[key].push_back({p, dir2, frontCcw});
+    }
+  }
+
+  // Radial sort per fan (atan2-free comparator); an exact angular tie
+  // is a step-12 invariant failure - DEBUG_ASSERT, with ascending
+  // polygon id only as release determinism insurance.
+  auto bucketOf = [](const vec2& d) {
+    return (d.y > 0 || (d.y == 0 && d.x > 0)) ? 0 : 1;
+  };
+  for (auto& [key, entries] : fans) {
+    std::sort(entries.begin(), entries.end(),
+              [&](const FanEntry& x, const FanEntry& y) {
+                const int bx = bucketOf(x.dir2);
+                const int by = bucketOf(y.dir2);
+                if (bx != by) return bx < by;
+                const double c = x.dir2.x * y.dir2.y - x.dir2.y * y.dir2.x;
+                if (c != 0) return c > 0;
+                DEBUG_ASSERT(false, logicErr,
+                             "BuildCellComplex: exact angular tie (step-12 "
+                             "invariant failure)");
+                return x.polygon < y.polygon;
+              });
+  }
+
+  // Wedges -> cells: between angularly-consecutive entries lies one
+  // wedge; unite the CCW-facing side of the earlier entry with the
+  // CW-facing side of the later. A k = 1 fan is an open sheet's rim:
+  // its single wedge wraps around and unites the polygon's own front
+  // and back, as the ambient space does.
+  DisjointSets uf(static_cast<uint32_t>(2 * nP));
+  for (const auto& [key, entries] : fans) {
+    const size_t k = entries.size();
+    for (size_t i = 0; i < k; ++i) {
+      const size_t j = (i + 1) % k;
+      const int sideI = entries[i].frontCcw ? 0 : 1;  // faces CCW
+      const int sideJ = entries[j].frontCcw ? 1 : 0;  // faces CW
+      uf.unite(static_cast<uint32_t>(2 * entries[i].polygon + sideI),
+               static_cast<uint32_t>(2 * entries[j].polygon + sideJ));
+    }
+  }
+
+  // Renumber cells by smallest member key; emit fans ordered by edge.
+  out.cellOf.assign(2 * nP, -1);
+  std::map<uint32_t, int> cellIdOf;
+  for (int s = 0; s < 2 * nP; ++s) {
+    const uint32_t r = uf.find(static_cast<uint32_t>(s));
+    auto it = cellIdOf.find(r);
+    if (it == cellIdOf.end()) {
+      it = cellIdOf.insert({r, out.numCells++}).first;
+    }
+    out.cellOf[s] = it->second;
+  }
+  out.fans.reserve(fans.size());
+  for (const auto& [key, entries] : fans) {
+    EdgeFan fan;
+    fan.a = key.first;
+    fan.b = key.second;
+    fan.polygons.reserve(entries.size());
+    fan.frontCcw.reserve(entries.size());
+    for (const FanEntry& e : entries) {
+      fan.polygons.push_back(e.polygon);
+      fan.frontCcw.push_back(e.frontCcw);
+    }
+    out.fans.push_back(std::move(fan));
+  }
+  return out;
+}
+
 void PropagateNewVertsToOnEdgeLists(
     const std::vector<EdgeTriIntersection>& etIsects,
     const std::vector<int>& resolvedIds, const std::vector<Edge>& edges,

@@ -430,6 +430,36 @@ struct MergedPolygon {
 std::vector<MergedPolygon> MergePolygons(
     const std::vector<std::pair<int, std::vector<int>>>& facePolygons);
 
+// ---- Step 13.2-13.3: radial fans + cells (docs/Steps10to13Design.md) ----
+
+// The radial fan of one arrangement edge: incident polygons sorted
+// CCW about the a -> b axis by their in-face direction, with each
+// polygon's facing recorded (frontCcw: the front (+normal) side faces
+// the CCW-adjacent wedge). An exact angular tie is a step-12
+// invariant failure (DEBUG_ASSERT; ascending-polygon-id fallback only
+// as release determinism insurance).
+struct EdgeFan {
+  int a, b;                   // undirected edge verts, a < b
+  std::vector<int> polygons;  // incident polygon indices, radial order
+  std::vector<bool> frontCcw;
+};
+// The volume-cell structure of the merged arrangement: cells are the
+// equivalence classes of polygon SIDES (2 * polygon + side, side 0 =
+// front = +Newell-normal of the canonical cycle) united through the
+// wedges between angularly-consecutive fan entries - the 3D twin
+// structure that makes winding propagation global. Cell ids are
+// renumbered by smallest member key. A polygon's boundary edge with a
+// single incident polygon (an open sheet's rim) unites its own front
+// and back, as the ambient space does.
+struct CellComplex {
+  std::vector<EdgeFan> fans;  // ordered by (a, b)
+  std::vector<int> cellOf;    // [2 * polygon + side] -> cell id
+  int numCells = 0;
+};
+CellComplex BuildCellComplex(const Manifold::Impl& impl,
+                             const std::vector<MergedPolygon>& polygons,
+                             const std::vector<vec3>& newVertPositions);
+
 // Step 10 of the pipeline: propagate etIsect resolved verts onto
 // their piercing edges' on-edge lists, so the polygon walker
 // subdivides those halfedges at the new pierce points. Skips verts

@@ -1925,6 +1925,93 @@ TEST(OverlapRemoval, Step12DeterministicKeyOrder) {
   EXPECT_EQ(outA[0].cycle, (std::vector<int>{1, 2, 3}));
 }
 
+// ---- Step 13.2-13.3 cell-complex tests (docs/Steps10to13Design.md) ----
+// Closed synthetic complexes with all ids in newVertPositions (empty
+// Impl, baseId == 0). Side key: 2 * polygon + side, side 0 = front.
+
+namespace {
+bool Step13SameCell(const overlap_removal::CellComplex& cc, int sideA,
+                    int sideB) {
+  return cc.cellOf[sideA] == cc.cellOf[sideB];
+}
+}  // namespace
+
+TEST(OverlapRemoval, Step13TetraSurfaceHasTwoCells) {
+  // A closed tetra surface (4 outward-wound faces): every edge fan has
+  // k = 2, and the cells are exactly inside and outside - all fronts
+  // (outward) one cell, all backs the other.
+  Manifold::Impl impl;
+  const std::vector<manifold::vec3> pos = {
+      {0.0, 0.0, 0.0}, {1.0, 0.0, 0.0}, {0.0, 1.0, 0.0}, {0.0, 0.0, 1.0}};
+  const std::vector<overlap_removal::MergedPolygon> polys = {
+      {{0, 2, 1}, 1, 0},   // base, outward -z
+      {{0, 1, 3}, 1, 0},   // outward -y
+      {{1, 2, 3}, 1, 0},   // outward +x+y+z
+      {{2, 0, 3}, 1, 0}};  // outward -x
+  const overlap_removal::CellComplex cc =
+      overlap_removal::BuildCellComplex(impl, polys, pos);
+  ASSERT_EQ(cc.cellOf.size(), 8u);
+  EXPECT_EQ(cc.numCells, 2);
+  ASSERT_EQ(cc.fans.size(), 6u);
+  for (const overlap_removal::EdgeFan& fan : cc.fans) {
+    EXPECT_EQ(fan.polygons.size(), 2u);
+  }
+  for (int p = 1; p < 4; ++p) {
+    EXPECT_TRUE(Step13SameCell(cc, 0, 2 * p));      // fronts: outside
+    EXPECT_TRUE(Step13SameCell(cc, 1, 2 * p + 1));  // backs: inside
+  }
+  EXPECT_FALSE(Step13SameCell(cc, 0, 1));
+}
+
+TEST(OverlapRemoval, Step13BipyramidWithInternalFaceHasThreeCells) {
+  // Triangular bipyramid (apexes above and below the shared base
+  // triangle) with the base itself included as an internal polygon
+  // (normal +z, toward the upper solid): three cells - outside,
+  // upper inside, lower inside - and the base edges carry k = 3 fans.
+  Manifold::Impl impl;
+  const std::vector<manifold::vec3> pos = {{0.0, 0.0, 0.0},
+                                           {1.0, 0.0, 0.0},
+                                           {0.0, 1.0, 0.0},
+                                           {0.3, 0.3, 1.0},
+                                           {0.3, 0.3, -1.0}};
+  // A=0 B=1 C=2 U=3 D=4. Outer faces wound outward; base (A,B,C) CCW
+  // from above (front = +z = upper inside).
+  const std::vector<overlap_removal::MergedPolygon> polys = {
+      {{0, 1, 3}, 1, 0},   // 0: ABU upper side
+      {{1, 2, 3}, 1, 0},   // 1: BCU upper side
+      {{2, 0, 3}, 1, 0},   // 2: CAU upper side
+      {{1, 0, 4}, 1, 0},   // 3: BAD lower side
+      {{2, 1, 4}, 1, 0},   // 4: CBD lower side
+      {{0, 2, 4}, 1, 0},   // 5: ACD lower side
+      {{0, 1, 2}, 1, 0}};  // 6: base, front toward U
+  const overlap_removal::CellComplex cc =
+      overlap_removal::BuildCellComplex(impl, polys, pos);
+  ASSERT_EQ(cc.cellOf.size(), 14u);
+  EXPECT_EQ(cc.numCells, 3);
+  // Base edges (A,B), (B,C), (A,C) have three incident polygons.
+  int k3Fans = 0;
+  for (const overlap_removal::EdgeFan& fan : cc.fans) {
+    if (fan.polygons.size() == 3u) ++k3Fans;
+  }
+  EXPECT_EQ(k3Fans, 3);
+  // Outside: all six outer fronts together.
+  for (int p = 1; p < 6; ++p) {
+    EXPECT_TRUE(Step13SameCell(cc, 0, 2 * p)) << "outer front " << p;
+  }
+  // Upper inside: the upper faces' backs + the base's front.
+  EXPECT_TRUE(Step13SameCell(cc, 1, 3));
+  EXPECT_TRUE(Step13SameCell(cc, 1, 5));
+  EXPECT_TRUE(Step13SameCell(cc, 1, 2 * 6));
+  // Lower inside: the lower faces' backs + the base's back.
+  EXPECT_TRUE(Step13SameCell(cc, 7, 9));
+  EXPECT_TRUE(Step13SameCell(cc, 7, 11));
+  EXPECT_TRUE(Step13SameCell(cc, 7, 2 * 6 + 1));
+  // The three cells are distinct.
+  EXPECT_FALSE(Step13SameCell(cc, 0, 1));
+  EXPECT_FALSE(Step13SameCell(cc, 0, 7));
+  EXPECT_FALSE(Step13SameCell(cc, 1, 7));
+}
+
 // White-box interior-pierce count via the internal checker (external
 // linkage in the linked manifold library), used to assert the
 // pierce-monotonicity contract that the public API does not expose.
