@@ -735,12 +735,36 @@ std::vector<OnChordContact> FindOnChordEndpointContacts(
   return out;
 }
 
+namespace {
+// Deterministic orthonormal in-plane basis for a unit face normal - a
+// true isometry, so a kernel's 2D eps equals the pipeline's 3D eps
+// (the axis-drop projection used by the old walker is not an isometry
+// and would contract distances). cross(u, v) == n, so CCW in (u, v)
+// is CCW about the normal. Shared by step 9's projection and the
+// step 10-11 angular ordering.
+struct InPlaneBasis {
+  vec3 u, v;
+};
+InPlaneBasis FaceBasisFromNormal(const vec3& n) {
+  using la::cross;
+  using la::dot;
+  const double ax = std::fabs(n.x);
+  const double ay = std::fabs(n.y);
+  const double az = std::fabs(n.z);
+  const vec3 ref = (ax <= ay && ax <= az) ? vec3(1.0, 0.0, 0.0)
+                   : (ay <= az)           ? vec3(0.0, 1.0, 0.0)
+                                          : vec3(0.0, 0.0, 1.0);
+  vec3 u = cross(n, ref);
+  u = u / std::sqrt(dot(u, u));
+  return {u, cross(n, u)};
+}
+}  // namespace
+
 std::vector<ChordChordCrossing> FindChordChordCrossings(
     const Manifold::Impl& impl, const std::vector<NewEdgeWithExtras>& chords,
     const std::vector<vec3>& newVertPositions,
     const std::vector<std::vector<int>>& chordsByFace,
     VecView<const vec3> faceNormals, double eps) {
-  using la::cross;
   using la::dot;
   std::vector<ChordChordCrossing> out;
   const int baseId = static_cast<int>(impl.NumVert());
@@ -757,19 +781,9 @@ std::vector<ChordChordCrossing> FindChordChordCrossings(
     const double nLen2 = dot(nRaw, nRaw);
     if (nLen2 == 0) continue;
     const vec3 n = nRaw / std::sqrt(nLen2);
-    // Deterministic orthonormal in-plane basis - a true isometry, so
-    // the kernel's 2D eps equals the pipeline's 3D eps (the axis-drop
-    // projection used elsewhere is not an isometry and would contract
-    // distances).
-    const double ax = std::fabs(n.x);
-    const double ay = std::fabs(n.y);
-    const double az = std::fabs(n.z);
-    const vec3 ref = (ax <= ay && ax <= az) ? vec3(1.0, 0.0, 0.0)
-                     : (ay <= az)           ? vec3(0.0, 1.0, 0.0)
-                                            : vec3(0.0, 0.0, 1.0);
-    vec3 u = cross(n, ref);
-    u = u / std::sqrt(dot(u, u));
-    const vec3 v = cross(n, u);
+    const InPlaneBasis basis = FaceBasisFromNormal(n);
+    const vec3 u = basis.u;
+    const vec3 v = basis.v;
     for (size_t i = 0; i < faceChords.size(); ++i) {
       for (size_t j = i + 1; j < faceChords.size(); ++j) {
         const int ci = faceChords[i];
@@ -1080,6 +1094,206 @@ std::vector<ChordCrossing> MergeAndPropagateCrossings(
       }
     }
     out.push_back(std::move(cluster));
+  }
+  return out;
+}
+
+FacePartition PartitionFace(const Manifold::Impl& impl, int face,
+                            const std::vector<Edge>& edges,
+                            const std::vector<EdgeVertList>& onEdgeLists,
+                            const std::vector<NewEdgeWithExtras>& chords,
+                            const std::vector<int>& faceChords,
+                            const std::vector<vec3>& newVertPositions,
+                            VecView<const vec3> faceNormals) {
+  using la::dot;
+  FacePartition out;
+  const int baseId = static_cast<int>(impl.NumVert());
+  DEBUG_ASSERT(face >= 0 && static_cast<size_t>(face) < faceNormals.size(),
+               logicErr, "PartitionFace: face normal missing");
+  if (face < 0 || static_cast<size_t>(face) >= faceNormals.size()) return out;
+  const vec3 nRaw = faceNormals[face];
+  const double nLen2 = dot(nRaw, nRaw);
+  if (nLen2 == 0) return out;
+  const vec3 n = nRaw / std::sqrt(nLen2);
+  const InPlaneBasis basis = FaceBasisFromNormal(n);
+  const vec3 planePt = impl.vertPos_[impl.halfedge_.Start(3 * face)];
+  auto to2d = [&](int id) -> vec2 {
+    const vec3 p = GetPos3(id, baseId, impl, newVertPositions);
+    const vec3 inPlane = p - dot(p - planePt, n) * n;
+    return vec2(dot(inPlane - planePt, basis.u),
+                dot(inPlane - planePt, basis.v));
+  };
+
+  // Directed sub-edges of the face graph. Original edges contribute
+  // one halfedge per sub-edge along the face's CCW winding; chords
+  // contribute BOTH directions, deduped per face by undirected vert
+  // pair (coincident chords otherwise create exact angular ties).
+  struct SubHalfedge {
+    int start, end;
+  };
+  std::vector<SubHalfedge> hes;
+  std::map<std::pair<int, int>, int> edgeIdxOf;
+  for (size_t i = 0; i < edges.size(); ++i) {
+    edgeIdxOf[{edges[i].v0, edges[i].v1}] = static_cast<int>(i);
+  }
+  for (int k = 0; k < 3; ++k) {
+    const Halfedge he = impl.halfedge_.Get(3 * face + k);
+    const int a = he.startVert;
+    const int b = he.endVert;
+    const auto it = edgeIdxOf.find({std::min(a, b), std::max(a, b)});
+    DEBUG_ASSERT(it != edgeIdxOf.end(), logicErr,
+                 "PartitionFace: face edge missing from EnumerateEdges");
+    if (it == edgeIdxOf.end()) continue;
+    const EdgeVertList& evl = onEdgeLists[it->second];
+    std::vector<int> seq;
+    seq.push_back(a);
+    if (a == edges[it->second].v0) {
+      seq.insert(seq.end(), evl.verts.begin(), evl.verts.end());
+    } else {
+      seq.insert(seq.end(), evl.verts.rbegin(), evl.verts.rend());
+    }
+    seq.push_back(b);
+    for (size_t i = 0; i + 1 < seq.size(); ++i) {
+      if (seq[i] == seq[i + 1]) continue;  // snapped duplicates
+      hes.push_back({seq[i], seq[i + 1]});
+    }
+  }
+  std::set<std::pair<int, int>> seenSub;
+  for (const int ci : faceChords) {
+    const NewEdgeWithExtras& nwe = chords[ci];
+    if (nwe.edge.v0 == nwe.edge.v1) {
+      ++out.zeroLengthChordsSkipped;
+      continue;
+    }
+    std::vector<int> seq;
+    seq.push_back(nwe.edge.v0);
+    seq.insert(seq.end(), nwe.extraVerts.begin(), nwe.extraVerts.end());
+    seq.push_back(nwe.edge.v1);
+    for (size_t i = 0; i + 1 < seq.size(); ++i) {
+      const int a = seq[i];
+      const int b = seq[i + 1];
+      if (a == b) continue;
+      if (!seenSub.insert({std::min(a, b), std::max(a, b)}).second) continue;
+      hes.push_back({a, b});
+      hes.push_back({b, a});
+    }
+  }
+  if (hes.empty()) return out;
+
+  // Outgoing lists per vert, ordered CCW about the face normal by the
+  // atan2-free comparator (half-plane bucket + cross sign - the
+  // boolean2 winding_filter pattern; no trig in the decision path).
+  std::map<int, vec2> pos2;
+  auto p2 = [&](int id) -> vec2 {
+    auto it = pos2.find(id);
+    if (it == pos2.end()) it = pos2.insert({id, to2d(id)}).first;
+    return it->second;
+  };
+  auto dirOf = [&](int he) -> vec2 {
+    return p2(hes[he].end) - p2(hes[he].start);
+  };
+  auto bucketOf = [](const vec2& d) {
+    return (d.y > 0 || (d.y == 0 && d.x > 0)) ? 0 : 1;
+  };
+  auto angleStrictLess = [&](const vec2& dA, const vec2& dB) {
+    const int bA = bucketOf(dA);
+    const int bB = bucketOf(dB);
+    if (bA != bB) return bA < bB;
+    return dA.x * dB.y - dA.y * dB.x > 0;
+  };
+  std::map<int, std::vector<int>> outgoing;
+  for (size_t i = 0; i < hes.size(); ++i) {
+    outgoing[hes[i].start].push_back(static_cast<int>(i));
+  }
+  for (auto& [vtx, list] : outgoing) {
+    std::sort(list.begin(), list.end(), [&](int x, int y) {
+      const vec2 dx = dirOf(x);
+      const vec2 dy = dirOf(y);
+      if (angleStrictLess(dx, dy)) return true;
+      if (angleStrictLess(dy, dx)) return false;
+      return x < y;  // deterministic exact-tie fallback
+    });
+  }
+
+  // Successor of h (a -> b): among UNVISITED outgoing halfedges at b,
+  // excluding the immediate reverse (b -> a) UNLESS it is the sole
+  // candidate (the U-turn that traverses dangling-chord spurs), the
+  // entry whose direction is the cyclic predecessor of the reverse
+  // direction in CCW order - the smallest left turn.
+  std::vector<bool> visited(hes.size(), false);
+  auto successor = [&](int h) -> int {
+    const int b = hes[h].end;
+    const auto it = outgoing.find(b);
+    if (it == outgoing.end()) return -1;
+    const vec2 q = p2(hes[h].start) - p2(b);  // reverse direction
+    int reverseHe = -1;
+    int best = -1;      // max angle among directions strictly below q
+    int bestWrap = -1;  // max angle overall (cyclic wrap)
+    for (const int e : it->second) {
+      if (visited[e]) continue;
+      if (hes[e].end == hes[h].start) {
+        reverseHe = e;
+        continue;
+      }
+      const vec2 d = dirOf(e);
+      if (bestWrap < 0 || angleStrictLess(dirOf(bestWrap), d)) bestWrap = e;
+      if (angleStrictLess(d, q) &&
+          (best < 0 || angleStrictLess(dirOf(best), d))) {
+        best = e;
+      }
+    }
+    if (best >= 0) return best;
+    if (bestWrap >= 0) return bestWrap;
+    return reverseHe;  // sole candidate -> U-turn; -1 if none at all
+  };
+
+  // Walk every halfedge once; closure is VERTEX ARRIVAL (destination
+  // equals the walk's start vert - the boolean2 OutEdgesToPolygons
+  // pattern). Then split each closed cycle at repeated vert ids
+  // (PushSimpleLoops pattern); sub-3-vert loops are spurs - dropped
+  // and counted.
+  for (size_t h0 = 0; h0 < hes.size(); ++h0) {
+    if (visited[h0]) continue;
+    const int startV = hes[h0].start;
+    std::vector<int> loop;
+    int cur = static_cast<int>(h0);
+    bool closed = false;
+    const size_t maxSteps = hes.size() + 1;
+    for (size_t step = 0; step < maxSteps && cur >= 0; ++step) {
+      visited[cur] = true;
+      loop.push_back(hes[cur].start);
+      if (hes[cur].end == startV) {
+        closed = true;
+        break;
+      }
+      cur = successor(cur);
+    }
+    DEBUG_ASSERT(closed, logicErr,
+                 "PartitionFace: open walk in a conforming arrangement");
+    if (!closed) continue;
+    for (;;) {
+      bool split = false;
+      for (size_t i = 1; i < loop.size() && !split; ++i) {
+        for (size_t j = 0; j < i; ++j) {
+          if (loop[i] != loop[j]) continue;
+          std::vector<int> sub(loop.begin() + j, loop.begin() + i);
+          if (sub.size() >= 3) {
+            out.polygons.push_back(std::move(sub));
+          } else {
+            ++out.spursDropped;
+          }
+          loop.erase(loop.begin() + j + 1, loop.begin() + i + 1);
+          split = true;
+          break;
+        }
+      }
+      if (!split) break;
+    }
+    if (loop.size() >= 3) {
+      out.polygons.push_back(std::move(loop));
+    } else {
+      ++out.spursDropped;
+    }
   }
   return out;
 }

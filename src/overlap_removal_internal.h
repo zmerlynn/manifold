@@ -382,6 +382,34 @@ Step9Threading ResolveAndThreadClusters(
     const std::vector<ChordCrossing>& clusters,
     const std::vector<OnChordContact>& contacts, double tolerance, double eps);
 
+// ---- Steps 10-11: per-face partition (docs/Steps10to13Design.md) ----
+
+// Partition one face of the conforming step-9 arrangement into simple
+// sub-polygon cycles (CCW w.r.t. the face normal). The face's three
+// original edges contribute one halfedge per sub-edge (subdivided by
+// onEdgeLists); incident chords contribute BOTH directions per
+// sub-edge, deduped per face by undirected vert pair (coincident
+// chords otherwise create exact angular ties). The angle-sorted walk
+// skips the immediate reverse halfedge UNLESS it is the sole candidate
+// (the U-turn that traverses dangling-chord spurs instead of
+// stalling), closes on vertex arrival, and splits each closed cycle at
+// repeated vert ids, dropping sub-3-vert spur loops (counted).
+// Zero-length chords (step-9 snapping can collapse v0 == v1) are
+// skipped at entry (counted). A stall is a DEBUG_ASSERT - with the
+// conforming arrangement the walk is total.
+struct FacePartition {
+  std::vector<std::vector<int>> polygons;  // simple cycles of vert ids
+  int spursDropped = 0;
+  int zeroLengthChordsSkipped = 0;
+};
+FacePartition PartitionFace(const Manifold::Impl& impl, int face,
+                            const std::vector<Edge>& edges,
+                            const std::vector<EdgeVertList>& onEdgeLists,
+                            const std::vector<NewEdgeWithExtras>& chords,
+                            const std::vector<int>& faceChords,
+                            const std::vector<vec3>& newVertPositions,
+                            VecView<const vec3> faceNormals);
+
 // Step 10 of the pipeline: propagate etIsect resolved verts onto
 // their piercing edges' on-edge lists, so the polygon walker
 // subdivides those halfedges at the new pierce points. Skips verts

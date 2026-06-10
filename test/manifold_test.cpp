@@ -1681,6 +1681,185 @@ TEST(OverlapRemoval, Step9EndToEndComposition) {
   EXPECT_TRUE(threaded.chords[2].extraVerts.empty());  // e: id 4 is its own
 }
 
+// ---- Steps 10-11 partition tests (docs/Steps10to13Design.md) ----
+// Fixtures run on a real tetrahedron Impl. Manifold::Impl(MeshGL64)
+// runs SortGeometry, which permutes vert and face ids, so the fixture
+// recovers the z = 0 face A(0,0,0), B(1,0,0), C(0,1,0) and its corner
+// ids FROM POSITIONS. Chords and on-edge verts are synthetic
+// step-9-style literals in that plane; ids 4+ index newVertPositions.
+
+namespace {
+int Step10EdgeIndex(const std::vector<overlap_removal::Edge>& edges, int a,
+                    int b) {
+  const int v0 = std::min(a, b);
+  const int v1 = std::max(a, b);
+  for (size_t i = 0; i < edges.size(); ++i) {
+    if (edges[i].v0 == v0 && edges[i].v1 == v1) return static_cast<int>(i);
+  }
+  return -1;
+}
+bool Step10CycleIsSimple(const std::vector<int>& poly) {
+  std::set<int> s(poly.begin(), poly.end());
+  return s.size() == poly.size();
+}
+struct Step10Fixture {
+  Manifold::Impl impl;
+  std::vector<overlap_removal::Edge> edges;
+  int face = -1;               // the z = 0 face, post-SortGeometry
+  int A = -1, B = -1, C = -1;  // ids of (0,0,0), (1,0,0), (0,1,0)
+};
+Step10Fixture MakeStep10Fixture() {
+  Step10Fixture f;
+  MeshGL64 m;
+  m.numProp = 3;
+  m.vertProperties = {0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
+                      0.0, 1.0, 0.0, 0.0, 0.0, 1.0};
+  m.triVerts = {0, 2, 1, 0, 1, 3, 1, 2, 3, 2, 0, 3};
+  f.impl = Manifold::Impl(m);
+  f.edges = overlap_removal::EnumerateEdges(f.impl);
+  auto idAt = [&](double x, double y, double z) {
+    for (size_t i = 0; i < f.impl.NumVert(); ++i) {
+      const manifold::vec3 d = f.impl.vertPos_[i] - manifold::vec3(x, y, z);
+      if (la::dot(d, d) < 1e-24) return static_cast<int>(i);
+    }
+    return -1;
+  };
+  f.A = idAt(0, 0, 0);
+  f.B = idAt(1, 0, 0);
+  f.C = idAt(0, 1, 0);
+  const std::set<int> want = {f.A, f.B, f.C};
+  for (size_t t = 0; t < f.impl.NumTri(); ++t) {
+    std::set<int> got;
+    for (int k = 0; k < 3; ++k) {
+      got.insert(f.impl.halfedge_.Start(3 * static_cast<int>(t) + k));
+    }
+    if (got == want) {
+      f.face = static_cast<int>(t);
+      break;
+    }
+  }
+  return f;
+}
+// Insert vertId (at position p) into the on-edge list of edge (a, b),
+// keeping the list sorted by t along the edge's v0 -> v1.
+void Step10AddOnEdge(const Step10Fixture& f,
+                     std::vector<overlap_removal::EdgeVertList>& lists, int a,
+                     int b, int vertId, manifold::vec3 p) {
+  const int ei = Step10EdgeIndex(f.edges, a, b);
+  ASSERT_GE(ei, 0);
+  const manifold::vec3 v0 = f.impl.vertPos_[f.edges[ei].v0];
+  const manifold::vec3 v1 = f.impl.vertPos_[f.edges[ei].v1];
+  const double t = la::dot(p - v0, v1 - v0) / la::dot(v1 - v0, v1 - v0);
+  overlap_removal::EdgeVertList& l = lists[ei];
+  size_t pos = 0;
+  while (pos < l.ts.size() && l.ts[pos] < t) ++pos;
+  l.verts.insert(l.verts.begin() + pos, vertId);
+  l.ts.insert(l.ts.begin() + pos, t);
+}
+}  // namespace
+
+TEST(OverlapRemoval, Step10XCrossingPartitionsIntoFour) {
+  // Two chords crossing at id 8 split the z = 0 face into four simple
+  // polygons (three quads around the corners, one triangle in the
+  // middle), every one containing the crossing vert exactly once.
+  const Step10Fixture fx = MakeStep10Fixture();
+  ASSERT_GE(fx.face, 0);
+  std::vector<overlap_removal::EdgeVertList> onEdgeLists(fx.edges.size());
+  // p1 = id 4 (0.5,0,0) and p3 = id 6 (0.25,0,0) on edge (A,B);
+  // p2 = id 5 (0,0.5,0) on (A,C); p4 = id 7 (0.5,0.5,0) on (B,C).
+  Step10AddOnEdge(fx, onEdgeLists, fx.A, fx.B, 4, {0.5, 0.0, 0.0});
+  Step10AddOnEdge(fx, onEdgeLists, fx.A, fx.B, 6, {0.25, 0.0, 0.0});
+  Step10AddOnEdge(fx, onEdgeLists, fx.A, fx.C, 5, {0.0, 0.5, 0.0});
+  Step10AddOnEdge(fx, onEdgeLists, fx.B, fx.C, 7, {0.5, 0.5, 0.0});
+  const std::vector<overlap_removal::NewEdgeWithExtras> chords = {
+      {{4, 5, fx.face, 99}, {8}, {1.0 / 3.0}},    // p1 -> p2 through x
+      {{6, 7, fx.face, 101}, {8}, {1.0 / 3.0}}};  // p3 -> p4 through x
+  const std::vector<manifold::vec3> newPos = {{0.5, 0.0, 0.0},
+                                              {0.0, 0.5, 0.0},
+                                              {0.25, 0.0, 0.0},
+                                              {0.5, 0.5, 0.0},
+                                              {1.0 / 3.0, 1.0 / 6.0, 0.0}};
+  const overlap_removal::FacePartition part = overlap_removal::PartitionFace(
+      fx.impl, fx.face, fx.edges, onEdgeLists, chords, {0, 1}, newPos,
+      fx.impl.faceNormal_);
+  ASSERT_EQ(part.polygons.size(), 4u);
+  EXPECT_EQ(part.spursDropped, 0);
+  std::multiset<size_t> sizes;
+  for (const std::vector<int>& poly : part.polygons) {
+    EXPECT_TRUE(Step10CycleIsSimple(poly));
+    EXPECT_EQ(std::count(poly.begin(), poly.end(), 8), 1);
+    sizes.insert(poly.size());
+  }
+  EXPECT_EQ(sizes, (std::multiset<size_t>{3, 4, 4, 4}));
+}
+
+TEST(OverlapRemoval, Step10DanglingChordSpurDropped) {
+  // A chord from the boundary to an interior dead end (its sibling
+  // pair was dropped upstream): the walk U-turns at the dead end, the
+  // spur splits out as a sub-3-vert loop and is dropped, and the one
+  // remaining polygon is simple and excludes the interior vert.
+  const Step10Fixture fx = MakeStep10Fixture();
+  ASSERT_GE(fx.face, 0);
+  std::vector<overlap_removal::EdgeVertList> onEdgeLists(fx.edges.size());
+  Step10AddOnEdge(fx, onEdgeLists, fx.A, fx.B, 4, {0.5, 0.0, 0.0});
+  const std::vector<overlap_removal::NewEdgeWithExtras> chords = {
+      {{4, 5, fx.face, 99}, {}, {}}};  // p1 -> interior d, dangling
+  const std::vector<manifold::vec3> newPos = {{0.5, 0.0, 0.0}, {0.3, 0.3, 0.0}};
+  const overlap_removal::FacePartition part =
+      overlap_removal::PartitionFace(fx.impl, fx.face, fx.edges, onEdgeLists,
+                                     chords, {0}, newPos, fx.impl.faceNormal_);
+  ASSERT_EQ(part.polygons.size(), 1u);
+  EXPECT_GE(part.spursDropped, 1);
+  EXPECT_TRUE(Step10CycleIsSimple(part.polygons[0]));
+  EXPECT_EQ(std::count(part.polygons[0].begin(), part.polygons[0].end(), 5), 0);
+  EXPECT_EQ(part.polygons[0].size(), 4u);  // corners + the on-edge vert
+}
+
+TEST(OverlapRemoval, Step10CoincidentChordsDedup) {
+  // Two chords spanning the same vert pair (the collinear-overlap
+  // class) dedup to one cut: the partition equals the single-chord
+  // result - two simple polygons.
+  const Step10Fixture fx = MakeStep10Fixture();
+  ASSERT_GE(fx.face, 0);
+  std::vector<overlap_removal::EdgeVertList> onEdgeLists(fx.edges.size());
+  Step10AddOnEdge(fx, onEdgeLists, fx.A, fx.B, 4, {0.5, 0.0, 0.0});
+  Step10AddOnEdge(fx, onEdgeLists, fx.A, fx.C, 5, {0.0, 0.5, 0.0});
+  const std::vector<overlap_removal::NewEdgeWithExtras> chords = {
+      {{4, 5, fx.face, 99}, {}, {}}, {{4, 5, fx.face, 101}, {}, {}}};
+  const std::vector<manifold::vec3> newPos = {{0.5, 0.0, 0.0}, {0.0, 0.5, 0.0}};
+  const overlap_removal::FacePartition part = overlap_removal::PartitionFace(
+      fx.impl, fx.face, fx.edges, onEdgeLists, chords, {0, 1}, newPos,
+      fx.impl.faceNormal_);
+  ASSERT_EQ(part.polygons.size(), 2u);
+  for (const std::vector<int>& poly : part.polygons) {
+    EXPECT_TRUE(Step10CycleIsSimple(poly));
+  }
+}
+
+TEST(OverlapRemoval, Step10ZeroLengthChordSkippedAndCleanFace) {
+  // A zero-length chord (step-9 snapping collapsed it) is skipped and
+  // counted; with no effective cuts the face partitions into its own
+  // boundary cycle. Also pins the chord-free clean-face path.
+  const Step10Fixture fx = MakeStep10Fixture();
+  ASSERT_GE(fx.face, 0);
+  const std::vector<overlap_removal::EdgeVertList> onEdgeLists(fx.edges.size());
+  const std::vector<overlap_removal::NewEdgeWithExtras> chords = {
+      {{4, 4, fx.face, 99}, {}, {}}};
+  const std::vector<manifold::vec3> newPos = {{0.5, 0.0, 0.0}};
+  const overlap_removal::FacePartition part =
+      overlap_removal::PartitionFace(fx.impl, fx.face, fx.edges, onEdgeLists,
+                                     chords, {0}, newPos, fx.impl.faceNormal_);
+  ASSERT_EQ(part.polygons.size(), 1u);
+  EXPECT_EQ(part.zeroLengthChordsSkipped, 1);
+  EXPECT_EQ(part.polygons[0].size(), 3u);  // the bare corner cycle
+  EXPECT_TRUE(Step10CycleIsSimple(part.polygons[0]));
+
+  const overlap_removal::FacePartition clean = overlap_removal::PartitionFace(
+      fx.impl, fx.face, fx.edges, onEdgeLists, {}, {}, {}, fx.impl.faceNormal_);
+  ASSERT_EQ(clean.polygons.size(), 1u);
+  EXPECT_EQ(clean.polygons[0].size(), 3u);
+}
+
 // White-box interior-pierce count via the internal checker (external
 // linkage in the linked manifold library), used to assert the
 // pierce-monotonicity contract that the public API does not expose.
