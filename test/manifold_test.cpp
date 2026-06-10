@@ -1931,6 +1931,66 @@ TEST(OverlapRemoval, Step10BoundaryRidingChordsSkipped) {
   }
 }
 
+TEST(OverlapRemoval, Step10WalkFrameIgnoresStoredNormal) {
+  // The walk frame derives from the halfedge WINDING, not the stored
+  // faceNormal_ (folded-sheet faces arrive with the two disagreeing -
+  // SortGeometry can deliver either). Inverting the stored normal must
+  // not change the partition.
+  Step10Fixture fx = MakeStep10Fixture();
+  ASSERT_GE(fx.face, 0);
+  fx.impl.faceNormal_[fx.face] = -fx.impl.faceNormal_[fx.face];
+  std::vector<overlap_removal::EdgeVertList> onEdgeLists(fx.edges.size());
+  Step10AddOnEdge(fx, onEdgeLists, fx.A, fx.B, 4, {0.5, 0.0, 0.0});
+  Step10AddOnEdge(fx, onEdgeLists, fx.A, fx.C, 5, {0.0, 0.5, 0.0});
+  const std::vector<overlap_removal::NewEdgeWithExtras> chords = {
+      {{4, 5, fx.face, 99}, {}, {}}};
+  const std::vector<manifold::vec3> newPos = {{0.5, 0.0, 0.0}, {0.0, 0.5, 0.0}};
+  const overlap_removal::FacePartition part = overlap_removal::PartitionFace(
+      fx.impl, fx.face, fx.edges, fx.he2e, onEdgeLists, chords, {0}, newPos);
+  ASSERT_EQ(part.polygons.size(), 2u);
+  std::multiset<size_t> sizes;
+  for (const std::vector<int>& poly : part.polygons) {
+    EXPECT_TRUE(Step10CycleIsSimple(poly));
+    sizes.insert(poly.size());
+  }
+  EXPECT_EQ(sizes, (std::multiset<size_t>{3, 4}));
+}
+
+TEST(OverlapRemoval, Step10BoundaryRiderResultIsChordOrderInvariant) {
+  // The rider configuration again, with the chord list presented in
+  // all rotations: the partition must not depend on chord order (the
+  // hes-order sensitivity the rider skip was built to remove).
+  Step10Fixture fx = MakeStep10Fixture();
+  ASSERT_GE(fx.face, 0);
+  std::vector<overlap_removal::EdgeVertList> onEdgeLists(fx.edges.size());
+  Step10AddOnEdge(fx, onEdgeLists, fx.A, fx.B, 4, {0.5, 0.0, 0.0});
+  const std::vector<overlap_removal::NewEdgeWithExtras> base = {
+      {{std::min(fx.A, 4), std::max(fx.A, 4), fx.face, 99}, {}, {}},
+      {{std::min(4, fx.C), std::max(4, fx.C), fx.face, 99}, {}, {}},
+      {{std::min(4, fx.B), std::max(4, fx.B), fx.face, 99}, {}, {}}};
+  const std::vector<manifold::vec3> newPos = {{0.5, 0.0, 0.0}};
+  std::vector<std::vector<std::vector<int>>> results;
+  for (int rot = 0; rot < 3; ++rot) {
+    std::vector<overlap_removal::NewEdgeWithExtras> chords;
+    for (int k = 0; k < 3; ++k) chords.push_back(base[(k + rot) % 3]);
+    const overlap_removal::FacePartition part =
+        overlap_removal::PartitionFace(fx.impl, fx.face, fx.edges, fx.he2e,
+                                       onEdgeLists, chords, {0, 1, 2}, newPos);
+    std::vector<std::vector<int>> canon;
+    for (const std::vector<int>& poly : part.polygons) {
+      // Canonical rotation: smallest id first (orientation preserved).
+      const auto mn = std::min_element(poly.begin(), poly.end());
+      std::vector<int> c(mn, poly.end());
+      c.insert(c.end(), poly.begin(), mn);
+      canon.push_back(std::move(c));
+    }
+    std::sort(canon.begin(), canon.end());
+    results.push_back(std::move(canon));
+  }
+  EXPECT_EQ(results[0], results[1]);
+  EXPECT_EQ(results[0], results[2]);
+}
+
 TEST(OverlapRemoval, Step10ZeroLengthChordSkippedAndCleanFace) {
   // A zero-length chord (step-9 snapping collapsed it) is skipped and
   // counted; with no effective cuts the face partitions into its own
@@ -2325,6 +2385,105 @@ TEST(OverlapRemoval, Step13BookTwinPairingSplitsSharedEdge) {
   }
 }
 
+TEST(OverlapRemoval, Step13OddKeptFanFailsEmitTopology) {
+  // Three kept pages sharing one edge: inside-wedge twin pairing
+  // cannot release the shared edge with an odd page count, and the
+  // emit must fail CLOSED rather than emit an unpaired halfedge - in
+  // release as ok = false, in MANIFOLD_DEBUG as the corresponding
+  // assert (the driver catches it and falls back either way).
+  Manifold::Impl impl;
+  const std::vector<manifold::vec3> pos = {{0.0, 0.0, 0.0},
+                                           {0.0, 0.0, 1.0},
+                                           {1.0, 0.0, 0.5},
+                                           {-0.5, 0.5, 0.5},
+                                           {-0.5, -0.5, 0.5}};
+  const std::vector<overlap_removal::MergedPolygon> polys = {
+      {{0, 1, 2}, 1, 0}, {{0, 1, 3}, 1, 1}, {{0, 1, 4}, 1, 2}};
+  const overlap_removal::CellComplex cc =
+      overlap_removal::BuildCellComplex(impl, polys, pos);
+  overlap_removal::CellWinding cw;
+  cw.ok = true;
+  cw.seedCasts = 0;
+  cw.winding.assign(cc.numCells, 1);  // every wedge "inside"
+  cw.keep.assign(3, true);
+  cw.flip.assign(3, false);
+  bool failedClosed = false;
+  try {
+    const overlap_removal::EmitTopology et =
+        overlap_removal::BuildEmitTopology(polys, cc, cw);
+    failedClosed = !et.ok;
+  } catch (const std::exception& e) {
+    failedClosed = true;
+    EXPECT_NE(std::string(e.what()).find("odd kept count"), std::string::npos)
+        << e.what();
+  }
+  EXPECT_TRUE(failedClosed);
+}
+
+TEST(OverlapRemoval, Step13ConcaveSeedTargetUsesRealTriangulationEar) {
+  // Seed targets for > 3-vert cycles come from the largest ear of a
+  // REAL triangulation: a concave L-prism's hex faces (the largest
+  // polygons, so they are tried first) have their vert-centroid
+  // EXACTLY on the reflex corner - a guaranteed graze for a centroid
+  // regression (and fan ears from the first vert can land outside a
+  // concavity in general). The real-ear target is interior: one cast,
+  // every face kept at winding 0|1.
+  Manifold::Impl impl;
+  std::vector<manifold::vec3> pos;
+  const double xy[6][2] = {{0, 0}, {2, 0}, {2, 1}, {1, 1}, {1, 2}, {0, 2}};
+  for (const auto& p : xy) pos.push_back({p[0], p[1], 0.0});  // 0-5 bottom
+  for (const auto& p : xy) pos.push_back({p[0], p[1], 0.2});  // 6-11 top
+  std::vector<overlap_removal::MergedPolygon> polys;
+  polys.push_back({{0, 5, 4, 3, 2, 1}, 1, 0});    // bottom, outward -z
+  polys.push_back({{6, 7, 8, 9, 10, 11}, 1, 1});  // top, outward +z
+  for (int i = 0; i < 6; ++i) {                   // sides, outward
+    const int j = (i + 1) % 6;
+    polys.push_back({{i, j, 6 + j, 6 + i}, 1, 2 + i});
+  }
+  const overlap_removal::CellComplex cc =
+      overlap_removal::BuildCellComplex(impl, polys, pos);
+  ASSERT_EQ(cc.numCells, 2);
+  const overlap_removal::CellWinding cw =
+      overlap_removal::ClassifyCells(impl, polys, pos, cc);
+  ASSERT_TRUE(cw.ok);
+  EXPECT_EQ(cw.seedCasts, 1);  // the first (largest) target cast cleanly
+  for (size_t p = 0; p < polys.size(); ++p) {
+    EXPECT_TRUE(cw.keep[p]) << "polygon " << p;
+    const int wF = cw.winding[cc.cellOf[2 * p]];
+    const int wB = cw.winding[cc.cellOf[2 * p + 1]];
+    EXPECT_EQ(std::min(wF, wB), 0) << "polygon " << p;
+    EXPECT_EQ(std::max(wF, wB), 1) << "polygon " << p;
+  }
+}
+
+TEST(OverlapRemoval, Step13SeedCastExhaustionFailsClosed) {
+  // Every seed target grazes (an oversized epsilon hint makes each
+  // arrival read as tangential): the cast budget caps at
+  // kSeedCastMaxTargets and classification fails CLOSED - in release
+  // as ok = false with seedCasts == 8, in MANIFOLD_DEBUG as the
+  // exhaustion assert (the driver catches it and falls back).
+  Manifold::Impl impl;
+  std::vector<manifold::vec3> pos;
+  std::vector<overlap_removal::MergedPolygon> polys;
+  AppendCubePolys(0.0, 1.0, pos, polys);  // 12 tris > the 8-cast budget
+  const overlap_removal::CellComplex cc =
+      overlap_removal::BuildCellComplex(impl, polys, pos);
+  ASSERT_EQ(cc.numCells, 2);
+  bool failedClosed = false;
+  try {
+    const overlap_removal::CellWinding cw =
+        overlap_removal::ClassifyCells(impl, polys, pos, cc, /*epsHint=*/1e6);
+    failedClosed = !cw.ok;
+    EXPECT_EQ(cw.seedCasts, 8);  // the kSeedCastMaxTargets cap
+  } catch (const std::exception& e) {
+    failedClosed = true;
+    EXPECT_NE(std::string(e.what()).find("seed cast retries exhausted"),
+              std::string::npos)
+        << e.what();
+  }
+  EXPECT_TRUE(failedClosed);
+}
+
 TEST(OverlapRemoval, Step95UnifyArrangementVerts) {
   // Twins from two allocation paths 5 * eps apart, plus a new vert
   // 3 * eps from an original corner: one sweep at the nearby-crossing
@@ -2681,42 +2840,53 @@ int InteriorPierces(const Manifold& m) {
   return overlap_removal::CheckSelfIntersection(m, 1e-12).interiorPierces;
 }
 
+// Bit-identical passthrough: the early-exit (empty chord list) and
+// every fallback arm return the input Manifold exactly - field-level
+// MeshGL64 equality, not just volume/count agreement (review finding:
+// loose bounds let a remesh or tolerance change slip through).
+void ExpectMeshGL64Identical(const Manifold& got, const Manifold& want) {
+  const MeshGL64 g = got.GetMeshGL64();
+  const MeshGL64 w = want.GetMeshGL64();
+  EXPECT_EQ(g.numProp, w.numProp);
+  EXPECT_EQ(g.NumVert(), w.NumVert());
+  EXPECT_EQ(g.NumTri(), w.NumTri());
+  EXPECT_EQ(g.vertProperties, w.vertProperties);
+  EXPECT_EQ(g.triVerts, w.triVerts);
+  EXPECT_EQ(g.tolerance, w.tolerance);
+}
+
 TEST(Manifold, RemoveSelfIntersectionsApi) {
-  // API smoke: a clean cube has no self-intersections; output should
-  // be a valid manifold equivalent to input (volume preserved).
+  // API smoke: a clean cube has no self-intersections; output is the
+  // input bit-identically (the empty-chord early-exit).
   Manifold cube = Manifold::Cube({1, 1, 1});
   Manifold cleaned = cube.RemoveSelfIntersections();
   EXPECT_EQ(cleaned.Status(), Manifold::Error::NoError);
-  EXPECT_NEAR(cube.Volume(), cleaned.Volume(), 1e-9);
+  ExpectMeshGL64Identical(cleaned, cube);
 }
 
 TEST(Manifold, RemoveSelfIntersectionsCleanInputUnchanged) {
-  // A mesh with no self-intersections should pass through with
-  // matching volume.
+  // A mesh with no self-intersections passes through bit-identically.
   Manifold sphere = Manifold::Sphere(1.0, 32);
   Manifold cleaned = sphere.RemoveSelfIntersections();
   EXPECT_EQ(cleaned.Status(), Manifold::Error::NoError);
-  EXPECT_NEAR(sphere.Volume(), cleaned.Volume(), sphere.Volume() * 1e-3);
+  ExpectMeshGL64Identical(cleaned, sphere);
 }
 
 TEST(Manifold, RemoveSelfIntersectionsBooleanResult) {
-  // The common case: a clean Boolean output round-trips unchanged. Two
-  // interpenetrating cubes via Add produce a manifold with no pierces, so
-  // the cleaned result must also have none and preserve volume. (HullMask
-  // and SelfIntersect below cover the actually-piercing paths.)
+  // The common case: a clean Boolean output round-trips bit-
+  // identically (no pierce events, no coplanar trace chords - the
+  // empty-chord early-exit). (HullMask and SelfIntersect below cover
+  // the actually-piercing paths.)
   Manifold a = Manifold::Cube({2, 2, 2}, true);
   Manifold b = Manifold::Cube({2, 2, 2}, true)
                    .Translate({1, 0.5, 0.3})
                    .Rotate(15, 30, 7);
   Manifold result = a + b;
   EXPECT_EQ(result.Status(), Manifold::Error::NoError);
+  ASSERT_EQ(InteriorPierces(result), 0);  // premise: clean input
   Manifold cleaned = result.RemoveSelfIntersections();
   EXPECT_EQ(cleaned.Status(), Manifold::Error::NoError);
-  EXPECT_EQ(InteriorPierces(cleaned),
-            InteriorPierces(result));  // clean -> clean
-  EXPECT_GT(cleaned.Volume(), 0);
-  EXPECT_LT(std::abs(cleaned.Volume() - result.Volume()) / result.Volume(),
-            0.5);  // < 50% drift
+  ExpectMeshGL64Identical(cleaned, result);
 }
 
 TEST(Manifold, RemoveSelfIntersectionsHullMaskFixture) {
@@ -2741,13 +2911,7 @@ TEST(Manifold, RemoveSelfIntersectionsHullMaskFixture) {
   Manifold cleaned = result.RemoveSelfIntersections();
   EXPECT_EQ(cleaned.Status(), Manifold::Error::NoError);
   // Fail-closed fallback: bit-identical input passthrough.
-  const MeshGL64 inM = result.GetMeshGL64();
-  const MeshGL64 outM = cleaned.GetMeshGL64();
-  EXPECT_EQ(outM.NumVert(), inM.NumVert());
-  EXPECT_EQ(outM.NumTri(), inM.NumTri());
-  EXPECT_EQ(outM.vertProperties, inM.vertProperties);
-  EXPECT_EQ(outM.triVerts, inM.triVerts);
-  EXPECT_EQ(outM.tolerance, inM.tolerance);
+  ExpectMeshGL64Identical(cleaned, result);
   EXPECT_EQ(InteriorPierces(cleaned), InteriorPierces(result));
 }
 
@@ -2822,7 +2986,7 @@ TEST(Manifold, RemoveSelfIntersectionsGluedBoxes) {
   EXPECT_EQ(cleanedEq.Status(), Manifold::Error::NoError);
   EXPECT_EQ(InteriorPierces(cleanedEq), 0);
   EXPECT_NEAR(cleanedEq.Volume(), 2.0, 1e-9);
-  EXPECT_EQ(cleanedEq.NumTri(), glued.NumTri());  // early-exit, unchanged
+  ExpectMeshGL64Identical(cleanedEq, glued);  // early-exit, bit-identical
   // (b) A smaller box glued onto a larger face: the coincident
   //     interior wall region separates winding 1|1 and DROPS - the
   //     output is the winding-faithful welded solid (one component).
@@ -2849,8 +3013,11 @@ TEST(Manifold, RemoveSelfIntersectionsEmptyInput) {
 }
 
 TEST(Manifold, RemoveSelfIntersectionsIdempotent) {
-  // A genuinely-piercing input is reduced on the first pass, and a second
-  // pass is a fixed point (same triangulation + volume).
+  // Repeated passes never regress. At origin scale the hull fixture
+  // takes the folded-shell fallback, so pass 2 of an identical input
+  // must be the identical fallback (fixed point, bit-identical). On
+  // the success path (the same fixture at 1e4) a second pass must
+  // hold the monotonicity contract: no new pierces, valid status.
   Manifold body = Manifold(ReadTestMeshGL64OBJ("hull-body.obj"));
   Manifold mask = Manifold(ReadTestMeshGL64OBJ("hull-mask.obj"));
   Manifold input = body - mask;
@@ -2860,8 +3027,16 @@ TEST(Manifold, RemoveSelfIntersectionsIdempotent) {
   EXPECT_LE(InteriorPierces(once), InteriorPierces(input));
   Manifold twice = once.RemoveSelfIntersections();
   EXPECT_EQ(twice.Status(), Manifold::Error::NoError);
-  EXPECT_EQ(twice.NumTri(), once.NumTri());
-  EXPECT_NEAR(once.Volume(), twice.Volume(), once.Volume() * 1e-6);
+  ExpectMeshGL64Identical(twice, once);
+
+  Manifold far = input.Translate({1e4, 1e4, 1e4});
+  Manifold farOnce = far.RemoveSelfIntersections();
+  ASSERT_EQ(farOnce.Status(), Manifold::Error::NoError);
+  ASSERT_LT(InteriorPierces(farOnce), InteriorPierces(far));  // success path
+  Manifold farTwice = farOnce.RemoveSelfIntersections();
+  EXPECT_EQ(farTwice.Status(), Manifold::Error::NoError);
+  EXPECT_LE(InteriorPierces(farTwice), InteriorPierces(farOnce));
+  EXPECT_GT(farTwice.Volume(), 0);
 }
 
 TEST(Manifold, RemoveSelfIntersectionsDeterministic) {
@@ -2898,6 +3073,12 @@ TEST(Manifold, RemoveSelfIntersectionsFarFromOrigin) {
   EXPECT_EQ(cleaned.Status(), Manifold::Error::NoError);
   EXPECT_LT(InteriorPierces(cleaned), InteriorPierces(result));
   EXPECT_GT(cleaned.Volume(), 0);
+  // All three disjoint hulls survive (the fold class resolves here:
+  // the larger scale-derived eps absorbs the degenerate clusters) and
+  // the volume holds to 0.1% - the success-path complement of the
+  // origin-scale folded-shell fallback.
+  EXPECT_EQ(cleaned.Decompose().size(), 3u);
+  EXPECT_NEAR(cleaned.Volume(), result.Volume(), result.Volume() * 1e-3);
 }
 
 TEST(Manifold, MeshID) {
