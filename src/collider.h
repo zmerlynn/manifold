@@ -284,6 +284,8 @@ class Collider {
 
   Box GetBoundingBox() const {
     if (nodeBBox_.empty()) return Box();
+    // A single-leaf tree has no internal nodes; the leaf is the root.
+    if (internalChildren_.empty()) return nodeBBox_[0];
     return nodeBBox_[collider_internal::Internal2Node(0)];
   }
 
@@ -294,6 +296,8 @@ class Collider {
     // copy in leaf node Boxes
     auto leaves = StridedRange(nodeBBox_.begin(), nodeBBox_.end(), 2);
     copy(leafBB.cbegin(), leafBB.cend(), leaves.begin());
+    // a single-leaf tree has no internal Boxes to build
+    if (NumInternal() == 0) return;
     // create global counters
     Vec<int> counter(NumInternal(), 0);
     // kernel over leaves to save internal Boxes
@@ -317,7 +321,28 @@ class Collider {
                   ExecutionContext::Impl* ctx = nullptr) const {
     ZoneScoped;
     using collider_internal::FindCollision;
-    if (internalChildren_.empty()) return;
+    if (nodeBBox_.empty()) return;
+    if (internalChildren_.empty()) {
+      // Single-leaf tree: there is no root internal node to start the
+      // radix traversal from, so test each query against the lone leaf
+      // directly, mirroring FindCollision's leaf arm.
+      const Box leafBox = nodeBBox_[0];
+      auto oneLeaf = [&f, &recorder, leafBox](const int queryIdx) {
+        auto query = f(queryIdx);
+        // early exit for empty boxes
+        if constexpr (std::is_same_v<std::remove_cv_t<decltype(query)>, Box>) {
+          if (query.min.x == std::numeric_limits<double>::infinity()) return;
+        }
+        if (!leafBox.DoesOverlap(query)) return;
+        if (!selfCollision || queryIdx != 0)
+          recorder.record(queryIdx, 0, recorder.local());
+      };
+      for_each_n(parallel
+                     ? autoPolicy(n, collider_internal::kSequentialThreshold)
+                     : ExecutionPolicy::Seq,
+                 countAt(0), n, ctx, oneLeaf);
+      return;
+    }
     for_each_n(parallel ? autoPolicy(n, collider_internal::kSequentialThreshold)
                         : ExecutionPolicy::Seq,
                countAt(0), n, ctx,
@@ -370,8 +395,10 @@ class Collider {
   Vec<std::pair<int, int>> internalChildren_;
 
   size_t NumInternal() const { return internalChildren_.size(); };
+  // Derived from nodeBBox_ (2 * leaves - 1 nodes), not internalChildren_:
+  // a single-leaf tree has zero internal nodes but one leaf.
   size_t NumLeaves() const {
-    return internalChildren_.empty() ? 0 : (NumInternal() + 1);
+    return nodeBBox_.empty() ? 0 : (nodeBBox_.size() + 1) / 2;
   };
 };
 

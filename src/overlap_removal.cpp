@@ -235,22 +235,11 @@ struct SortedBVH {
   std::vector<size_t> leaf2Orig;  // [sorted leaf idx] -> input idx
 
   // Sequential broad phase: recorder.record(queryIdx, leafIdx) for
-  // each query box overlapping a leaf box. Collider cannot represent
-  // a 1-leaf tree (no internal nodes: traversal silently returns no
-  // collisions, and the UpdateBoxes assertion fires only under
-  // MANIFOLD_DEBUG), so the single-leaf case - reachable e.g. when a
-  // pipeline run allocates exactly one new vert - is brute-forced
-  // with the same DoesOverlap test the tree uses. Callers must route
-  // queries through this, not collider.Collisions.
+  // each query box overlapping a leaf box. Sequential deliberately:
+  // every consumer feeds order-sensitive downstream stages, so the
+  // deterministic visit order is part of the contract.
   template <typename Recorder, typename F>
   void Collisions(Recorder& recorder, F queryBox, int nQueries) const {
-    if (boxes.size() == 1) {
-      auto& local = recorder.local();
-      for (int q = 0; q < nQueries; ++q) {
-        if (queryBox(q).DoesOverlap(boxes[0])) recorder.record(q, 0, local);
-      }
-      return;
-    }
     collider.Collisions<false>(recorder, queryBox, nQueries,
                                /*parallel=*/false);
   }
@@ -292,15 +281,9 @@ SortedBVH BuildSortedBVH(VecView<const Box> leafBoxes) {
     out.boxes[i] = leafBoxes[out.leaf2Orig[i]];
     out.morton[i] = rawMorton[out.leaf2Orig[i]];
   }
-  // Collider cannot represent a single leaf (no internal nodes;
-  // its traversal would silently return no collisions, and the
-  // UpdateBoxes assertion fires only under MANIFOLD_DEBUG); leave it
-  // empty and let SortedBVH::Collisions brute-force that case.
-  if (n > 1) {
-    out.collider =
-        Collider(VecView<const Box>(out.boxes.data(), out.boxes.size()),
-                 VecView<const uint32_t>(out.morton.data(), out.morton.size()));
-  }
+  out.collider =
+      Collider(VecView<const Box>(out.boxes.data(), out.boxes.size()),
+               VecView<const uint32_t>(out.morton.data(), out.morton.size()));
   return out;
 }
 

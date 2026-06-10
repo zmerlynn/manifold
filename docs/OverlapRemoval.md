@@ -556,7 +556,9 @@ Repeated whole-branch dual-track review passes (Claude + Codex lanes:
 correctness, numerical robustness, tests/docs/API, style and refactoring)
 after consolidation produced the remaining hardening: the conditioned-radius
 carry through step 9, source-gated trace dedup, nearest-original
-unification, the measured-displacement tolerance claim, the single-leaf BVH
-guard, the snapped-endpoint on-edge propagation, the position-fixed-point
+unification, the measured-displacement tolerance claim, single-leaf trees
+fixed in `Collider` itself (first shipped as a wrapper-side guard; the
+architecture pass promoted it to the host class so every consumer shares
+one BVH), the snapped-endpoint on-edge propagation, the position-fixed-point
 merge convergence, and - found while chasing the hull fixture's volume red -
 the folded-shell volume gate above.
