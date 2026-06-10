@@ -1860,6 +1860,71 @@ TEST(OverlapRemoval, Step10ZeroLengthChordSkippedAndCleanFace) {
   EXPECT_EQ(clean.polygons[0].size(), 3u);
 }
 
+// ---- Step 12 canonical merge tests (docs/Steps10to13Design.md) ----
+
+TEST(OverlapRemoval, Step12RotationsMergeAndSum) {
+  // The same cycle in two rotations (coplanar same-orientation
+  // duplicates from two faces) merges to one entry with summed
+  // multiplicity; the face of the FIRST contributor wins.
+  const std::vector<std::pair<int, std::vector<int>>> in = {{7, {2, 3, 1}},
+                                                            {9, {1, 2, 3}}};
+  const std::vector<overlap_removal::MergedPolygon> out =
+      overlap_removal::MergePolygons(in);
+  ASSERT_EQ(out.size(), 1u);
+  EXPECT_EQ(out[0].cycle, (std::vector<int>{1, 2, 3}));
+  EXPECT_EQ(out[0].mult, 2);
+  EXPECT_EQ(out[0].face, 7);
+}
+
+TEST(OverlapRemoval, Step12OppositePairCancels) {
+  // A cycle and its reversal (a doubled surface's two faces) sum to
+  // zero and drop.
+  const std::vector<std::pair<int, std::vector<int>>> in = {{7, {1, 2, 3, 4}},
+                                                            {9, {4, 3, 2, 1}}};
+  EXPECT_TRUE(overlap_removal::MergePolygons(in).empty());
+}
+
+TEST(OverlapRemoval, Step12SignRuleReversedCycle) {
+  // A cycle whose canonical form is a rotation of its REVERSAL enters
+  // with multiplicity -1, stored under the canonical (reversed)
+  // rotation.
+  const std::vector<std::pair<int, std::vector<int>>> in = {{7, {3, 2, 1}}};
+  const std::vector<overlap_removal::MergedPolygon> out =
+      overlap_removal::MergePolygons(in);
+  ASSERT_EQ(out.size(), 1u);
+  EXPECT_EQ(out[0].cycle, (std::vector<int>{1, 2, 3}));
+  EXPECT_EQ(out[0].mult, -1);
+}
+
+TEST(OverlapRemoval, Step12DistinctSameVertSetStaySeparate) {
+  // Two cycles over the same vert set but different cyclic order are
+  // DIFFERENT polygons and must not merge (the reason step 12 keys on
+  // the cycle, not Emmett's vert set).
+  const std::vector<std::pair<int, std::vector<int>>> in = {{7, {1, 2, 3, 4}},
+                                                            {9, {1, 3, 2, 4}}};
+  const std::vector<overlap_removal::MergedPolygon> out =
+      overlap_removal::MergePolygons(in);
+  ASSERT_EQ(out.size(), 2u);
+  EXPECT_NE(out[0].cycle, out[1].cycle);
+}
+
+TEST(OverlapRemoval, Step12DeterministicKeyOrder) {
+  // Output ordered by canonical key regardless of input order.
+  const std::vector<std::pair<int, std::vector<int>>> a = {{7, {5, 6, 7}},
+                                                           {9, {1, 2, 3}}};
+  const std::vector<std::pair<int, std::vector<int>>> b = {{9, {1, 2, 3}},
+                                                           {7, {5, 6, 7}}};
+  const std::vector<overlap_removal::MergedPolygon> outA =
+      overlap_removal::MergePolygons(a);
+  const std::vector<overlap_removal::MergedPolygon> outB =
+      overlap_removal::MergePolygons(b);
+  ASSERT_EQ(outA.size(), 2u);
+  ASSERT_EQ(outB.size(), 2u);
+  EXPECT_EQ(outA[0].cycle, outB[0].cycle);
+  EXPECT_EQ(outA[1].cycle, outB[1].cycle);
+  EXPECT_EQ(outA[0].cycle, (std::vector<int>{1, 2, 3}));
+}
+
 // White-box interior-pierce count via the internal checker (external
 // linkage in the linked manifold library), used to assert the
 // pierce-monotonicity contract that the public API does not expose.

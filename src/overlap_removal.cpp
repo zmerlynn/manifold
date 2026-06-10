@@ -1298,6 +1298,48 @@ FacePartition PartitionFace(const Manifold::Impl& impl, int face,
   return out;
 }
 
+std::vector<MergedPolygon> MergePolygons(
+    const std::vector<std::pair<int, std::vector<int>>>& facePolygons) {
+  // Canonical form: the lexicographically-smallest rotation. O(n^2)
+  // per cycle - sub-polygon cycles are small.
+  auto minRotation = [](const std::vector<int>& c) {
+    const size_t n = c.size();
+    std::vector<int> best;
+    std::vector<int> rot(n);
+    for (size_t s = 0; s < n; ++s) {
+      for (size_t i = 0; i < n; ++i) rot[i] = c[(s + i) % n];
+      if (best.empty() || rot < best) best = rot;
+    }
+    return best;
+  };
+  struct Entry {
+    int mult = 0;
+    int face = -1;
+  };
+  std::map<std::vector<int>, Entry> merged;
+  for (const auto& [face, cycle] : facePolygons) {
+    if (cycle.size() < 3) continue;  // defensive; the partition emits >= 3
+    const std::vector<int> fwd = minRotation(cycle);
+    const std::vector<int> rev(cycle.rbegin(), cycle.rend());
+    const std::vector<int> bwd = minRotation(rev);
+    // A simple cycle with distinct verts is never rotation-equivalent
+    // to its own reversal, so fwd != bwd and the sign is well-defined:
+    // +1 when the canonical form comes from the cycle as walked, -1
+    // from the reversal.
+    const bool forward = fwd < bwd;
+    Entry& e = merged[forward ? fwd : bwd];
+    if (e.face < 0) e.face = face;
+    e.mult += forward ? 1 : -1;
+  }
+  std::vector<MergedPolygon> out;
+  out.reserve(merged.size());
+  for (const auto& [key, e] : merged) {
+    if (e.mult == 0) continue;  // coincident opposite-facing pair cancels
+    out.push_back({key, e.mult, e.face});
+  }
+  return out;
+}
+
 void PropagateNewVertsToOnEdgeLists(
     const std::vector<EdgeTriIntersection>& etIsects,
     const std::vector<int>& resolvedIds, const std::vector<Edge>& edges,

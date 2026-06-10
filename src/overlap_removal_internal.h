@@ -410,6 +410,26 @@ FacePartition PartitionFace(const Manifold::Impl& impl, int face,
                             const std::vector<vec3>& newVertPositions,
                             VecView<const vec3> faceNormals);
 
+// ---- Step 12: canonical polygon merge (docs/Steps10to13Design.md) ----
+
+// Merge equivalent sub-polygons with signed multiplicity. The
+// canonical key of a cycle is the lexicographically-smallest rotation
+// among all rotations of the cycle AND of its reversal; the sign is
+// +1 when the canonical form is a rotation of the cycle as walked
+// (CCW w.r.t. its face normal), -1 when it is a rotation of the
+// reversal. A simple cycle with distinct verts is never
+// rotation-equivalent to its own reversal, so the sign is always
+// well-defined. Entries summing to zero drop (coincident
+// opposite-facing surfaces cancel). `face` is the first contributor's
+// (the plane/normal source); output is ordered by canonical key.
+struct MergedPolygon {
+  std::vector<int> cycle;  // the canonical rotation
+  int mult;
+  int face;
+};
+std::vector<MergedPolygon> MergePolygons(
+    const std::vector<std::pair<int, std::vector<int>>>& facePolygons);
+
 // Step 10 of the pipeline: propagate etIsect resolved verts onto
 // their piercing edges' on-edge lists, so the polygon walker
 // subdivides those halfedges at the new pierce points. Skips verts
