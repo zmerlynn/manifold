@@ -275,10 +275,11 @@ std::vector<NewEdgeWithExtras> AddInteriorVertsToNewEdges(
 // min(this crossing's conditioned radius, the entry's recorded
 // radius), eps-floored; an endpoint farther than eps from either
 // original 3D edge rejects its interval (the near-grazing guard).
-// Each qualifying
-// interval emits a chord lying on BOTH faces; new crossing verts on
-// original mesh edges are returned as explicit on-edge additions
-// (one per edge - an X crossing gets two records with one vert id).
+// Each qualifying interval emits a chord lying on BOTH faces;
+// interior crossing endpoints - allocated AND snapped - return as
+// explicit (edge, vert, t) on-edge additions for every claimed edge
+// whose endpoint they are not (an X crossing gets two records with
+// one vert id).
 struct OnEdgeAddition {
   int edge;  // index into edges[]
   int vertId;
@@ -562,8 +563,10 @@ CellComplex BuildCellComplex(const Manifold::Impl& impl,
 // Winding classification of the cell complex. Per connected component
 // of the cell graph (cells joined where a polygon separates them), a
 // segment cast from outside the arrangement's bbox to an interior
-// point of one of the component's polygons (the centroid of its first
-// ear) seeds the arrival-side cell with the true ambient winding:
+// point of one of the component's polygons - targets in DESCENDING
+// area (ties ascending id); triangles use their centroid, longer
+// cycles the largest ear of a REAL triangulation - seeds the
+// arrival-side cell with the true ambient winding:
 // signed crossings are counted against ALL other polygons, including
 // other components' - which is why an extreme-vertex seed is wrong
 // for nested components. BFS then propagates windings through the
@@ -628,9 +631,9 @@ EmitTopology BuildEmitTopology(const std::vector<MergedPolygon>& polygons,
                                const CellComplex& cells,
                                const CellWinding& winding);
 
-// Step 10 of the pipeline: propagate etIsect resolved verts onto
-// their piercing edges' on-edge lists, so the partition
-// subdivides those halfedges at the new pierce points. t is
+// Post-step-7 on-edge propagation (before step 8 and the partition):
+// etIsect resolved verts onto their piercing edges' on-edge lists, so
+// the partition subdivides those halfedges at the pierce points. t is
 // recomputed from the RESOLVED vert's position (a snapped event's
 // raw parameter can order against the geometry). Skips verts that
 // are already edge endpoints or already in the list.

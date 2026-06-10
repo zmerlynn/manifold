@@ -306,7 +306,6 @@ MergeVertsResult MergeVertsEps(const Manifold& in, double eps, int maxIter) {
     SortedBVH bvh =
         BuildSortedBVH(VecView<const Box>(boxes.data(), boxes.size()));
     DisjointSets uf(static_cast<uint32_t>(n));
-    int unions = 0;
     const double eps2 = eps * eps;
     auto checkPair = [&](size_t qi, size_t li) {
       if (qi >= li) return;
@@ -315,10 +314,7 @@ MergeVertsResult MergeVertsEps(const Manifold& in, double eps, int maxIter) {
       const vec3 d = verts[va] - verts[vb];
       const double d2 = la::dot(d, d);
       if (d2 > eps2) return;
-      uint32_t before = uf.find(static_cast<uint32_t>(va));
       uf.unite(static_cast<uint32_t>(va), static_cast<uint32_t>(vb));
-      uint32_t after = uf.find(static_cast<uint32_t>(va));
-      if (before != after) ++unions;
     };
     auto recorder = MakeSimpleRecorder(checkPair);
     auto qf = [&](int i) { return bvh.boxes[i]; };
@@ -342,7 +338,13 @@ MergeVertsResult MergeVertsEps(const Manifold& in, double eps, int maxIter) {
         moved = true;
       }
     }
-    if (unions == 0 && !moved) {
+    // Convergence = a fixed point of POSITIONS: nothing moved this
+    // pass, so this pass's component labels are final. A union count
+    // is the wrong test - an already-merged coincident cluster
+    // re-unites in every pass's fresh union-find, and whether that
+    // reads as a "new" union depends on the union-find's internal
+    // attachment order (termination-pass finding).
+    if (!moved) {
       converged = true;
       break;
     }
@@ -421,7 +423,7 @@ std::vector<EdgeVertList> BuildOnEdgeVertLists(const Manifold::Impl& impl,
   std::vector<EdgeVertList> out(nE);
   if (nE == 0 || nV == 0) return out;
 
-  // vert->neighbor adjacency for the thin-tri-apex skip in
+  // vert->neighbor adjacency for the thin-tri-apex skip below:
   // GenerateChordEdges.
   std::vector<std::set<int>> adj(nV);
   for (size_t i = 0; i < impl.halfedge_.size(); ++i) {
@@ -765,9 +767,6 @@ vec3 GetPos3(int id, int baseId, const Manifold::Impl& impl,
   const int j = id - baseId;
   DEBUG_ASSERT(j >= 0 && j < static_cast<int>(newVertPositions.size()),
                logicErr, "GetPos3: chord vert id beyond newVertPositions");
-  if (j < 0 || j >= static_cast<int>(newVertPositions.size())) {
-    return vec3(0.0, 0.0, 0.0);
-  }
   return newVertPositions[j];
 }
 
@@ -1021,7 +1020,6 @@ TraceChordResult CoplanarTraceChords(const Manifold::Impl& impl,
         int ids[2];
         int clipK[2] = {k0, k1};
         vec3 pos3[2] = {P0, P1};
-        bool isNew[2] = {false, false};
         bool grazeReject = false;
         for (int e = 0; e < 2 && !grazeReject; ++e) {
           const double t = e == 0 ? t0 : t1;
@@ -1106,7 +1104,6 @@ TraceChordResult CoplanarTraceChords(const Manifold::Impl& impl,
             out.newVertPositions.push_back(x3);
             out.newVertSnapR.push_back(condOnly);
           }
-          isNew[e] = true;
         }
         if (grazeReject) {
           ++out.intervalsRejected;
@@ -1116,28 +1113,41 @@ TraceChordResult CoplanarTraceChords(const Manifold::Impl& impl,
           ++out.intervalsRejected;
           continue;
         }
-        const std::pair<int, int> key{std::min(ids[0], ids[1]),
-                                      std::max(ids[0], ids[1])};
-        if (!pairChords.insert(key).second) continue;  // both directions
-        PiercedNewEdge chord;
-        chord.v0 = key.first;
-        chord.v1 = key.second;
-        chord.triA = fa;
-        chord.triB = fb;
-        out.chords.push_back(chord);
-        // On-edge additions: a NEW crossing vert lies on the src
-        // edge, and - when a tri edge clipped it - on the dst face's
-        // edge too (the X case: one record per edge, one vert id).
+        // On-edge additions: an interior crossing endpoint lies on the
+        // src edge, and - when a tri edge clipped it - on the dst
+        // face's edge too (the X case: one record per edge, one vert
+        // id). Emitted for SNAPPED endpoints as well as allocated ones
+        // (termination-pass finding: a corner-snapped crossing still
+        // subdivides the edges it crossed, or the claiming faces'
+        // partitions never see the cut) - unless the resolved id IS
+        // that edge's endpoint, where no subdivision is needed. The
+        // resolved POSITION is used for t: a snap moves the point, and
+        // a projection landing outside (0, 1) means the snap target
+        // sits past the edge's end - the endpoint case again. Emitted
+        // BEFORE the both-directions chord dedup below: each direction
+        // claims a DIFFERENT src edge, and a snapped endpoint's only
+        // subdividing record can come from the second direction
+        // (additionSeen dedups per (edge, id)).
         for (int e = 0; e < 2; ++e) {
-          if (!isNew[e]) continue;
+          if (ids[e] == triVert(srcFace, k) ||
+              ids[e] == triVert(srcFace, (k + 1) % 3)) {
+            continue;  // t == 0/1 endpoints resolve to the edge's verts
+          }
+          const vec3 resolvedPos = ids[e] < baseId
+                                       ? impl.vertPos_[ids[e]]
+                                       : out.newVertPositions[ids[e] - baseId];
           auto addOn = [&](int face, int kk, const vec3& s0, const vec3& s1) {
             if (kk < 0) return;
             const int edgeIdx = halfedge2Edge[3 * face + kk];
             if (edgeIdx < 0) return;
-            if (!additionSeen.insert({edgeIdx, ids[e]}).second) return;
+            if (ids[e] == edges[edgeIdx].v0 || ids[e] == edges[edgeIdx].v1) {
+              return;
+            }
             const vec3 d = s1 - s0;
             const double len2 = dot(d, d);
-            const double tt = len2 > 0 ? dot(pos3[e] - s0, d) / len2 : 0.0;
+            const double tt = len2 > 0 ? dot(resolvedPos - s0, d) / len2 : 0.0;
+            if (tt <= 0.0 || tt >= 1.0) return;
+            if (!additionSeen.insert({edgeIdx, ids[e]}).second) return;
             // t along the canonical edge direction (v0 -> v1).
             const double tEdge =
                 edges[edgeIdx].v0 == impl.halfedge_.Start(3 * face + kk)
@@ -1148,6 +1158,15 @@ TraceChordResult CoplanarTraceChords(const Manifold::Impl& impl,
           addOn(srcFace, k, srcV[k], srcV[(k + 1) % 3]);
           addOn(dstFace, clipK[e], dstV[clipK[e]], dstV[(clipK[e] + 1) % 3]);
         }
+        const std::pair<int, int> key{std::min(ids[0], ids[1]),
+                                      std::max(ids[0], ids[1])};
+        if (!pairChords.insert(key).second) continue;  // both directions
+        PiercedNewEdge chord;
+        chord.v0 = key.first;
+        chord.v1 = key.second;
+        chord.triA = fa;
+        chord.triB = fb;
+        out.chords.push_back(chord);
       }
     };
     traceDirection(fb, bv, b2, fa, av, a2, orientA);
@@ -2284,8 +2303,8 @@ CellWinding ClassifyCells(const Manifold::Impl& impl,
 
   // Per connected component of the cell graph: seed one cell by a
   // segment cast, then propagate by BFS. Components are discovered in
-  // ascending cell order and targets tried in ascending polygon
-  // order - deterministic.
+  // ascending cell order; targets are tried in DESCENDING area, ties
+  // ascending polygon id - deterministic.
   std::vector<int> compOf(cells.numCells, -1);
   std::vector<bool> seen(cells.numCells, false);
   int numComps = 0;
@@ -2673,9 +2692,9 @@ void PropagateNewVertsToOnEdgeLists(
     touched.push_back(x.edgeIdx);
   }
   // BuildOnEdgeVertLists left each list sorted by t, but the appends above
-  // are unordered. Step 11 (BuildPerTriHalfedgeGraphs) consumes verts in
-  // stored order to build consecutive sub-edges assuming monotone t, so
-  // re-sort each touched list by t (carrying verts along).
+  // are unordered. PartitionFace consumes verts in stored order to
+  // build consecutive sub-edges assuming monotone t, so re-sort each
+  // touched list by t (carrying verts along).
   std::sort(touched.begin(), touched.end());
   touched.erase(std::unique(touched.begin(), touched.end()), touched.end());
   for (int e : touched) {
@@ -2720,6 +2739,11 @@ SelfIntersectionResult CheckSelfIntersection(const Manifold& m, double relTol) {
   r.trianglesTotal = static_cast<int>(nTri);
   if (nTri < 2) return r;
 
+  auto vp = [&](int idx) {
+    return vec3(mesh.vertProperties[mesh.numProp * idx + 0],
+                mesh.vertProperties[mesh.numProp * idx + 1],
+                mesh.vertProperties[mesh.numProp * idx + 2]);
+  };
   std::vector<Box> triBoxes(nTri);
   std::vector<std::array<int, 3>> triIdx(nTri);
   for (size_t t = 0; t < nTri; ++t) {
@@ -2727,11 +2751,6 @@ SelfIntersectionResult CheckSelfIntersection(const Manifold& m, double relTol) {
     const int i1 = mesh.triVerts[3 * t + 1];
     const int i2 = mesh.triVerts[3 * t + 2];
     triIdx[t] = {i0, i1, i2};
-    auto vp = [&](int idx) {
-      return vec3(mesh.vertProperties[mesh.numProp * idx + 0],
-                  mesh.vertProperties[mesh.numProp * idx + 1],
-                  mesh.vertProperties[mesh.numProp * idx + 2]);
-    };
     Box b(vp(i0), vp(i1));
     b.Union(vp(i2));
     triBoxes[t] = b;
@@ -2739,12 +2758,6 @@ SelfIntersectionResult CheckSelfIntersection(const Manifold& m, double relTol) {
 
   SortedBVH bvh =
       BuildSortedBVH(VecView<const Box>(triBoxes.data(), triBoxes.size()));
-
-  auto vp = [&](int idx) {
-    return vec3(mesh.vertProperties[mesh.numProp * idx + 0],
-                mesh.vertProperties[mesh.numProp * idx + 1],
-                mesh.vertProperties[mesh.numProp * idx + 2]);
-  };
 
   auto checkPair = [&](size_t qi, size_t li) {
     if (qi >= li) return;

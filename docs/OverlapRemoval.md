@@ -479,6 +479,13 @@ numbers go stale instantly; the suite is the source of truth.)
 7. Output tolerance widens to cover the pipeline's applied movements (the
    10-eps floor plus the measured merge/unification displacements); see the
    eps contract's OUTPUT tolerance bullet for the exact formula.
+8. **Fold-gate residual**: two opposite-orientation folded shells that share
+   a REAL undirected edge (same two snapped vert ids, without the coincident
+   opposite polygons step 12 would cancel) are edge-connected into one
+   component and can net their signed volumes under the threshold. Requires
+   eps-coincident input edge geometry between oppositely wound shells that
+   BOTH fold into one cell - adversarial-construction territory, documented
+   rather than guarded.
 
 ## Relationship to #289 and design history
 
@@ -488,32 +495,32 @@ step 13; the in-plane crossing kernel is boolean2's `IntersectSegments`
 (production since #1722/#1751); the angular ordering, the canonical merge,
 and the winding filter are the boolean2 patterns lifted to 3D.
 
-The design went through staged adversarial review: step 9 over five rounds
-(architecture; kernel contract; the split-identity resolve-then-allocate
-rule; t-recompute ordering; two post-implementation code bugs fixed
-red-first). Steps 10-13 over three rounds (the trim pre-pass replaced by the
+The design went through staged adversarial review, multiple rounds per
+stage: step 9 (architecture; kernel contract; the split-identity
+resolve-then-allocate rule; t-recompute ordering; post-implementation code
+bugs fixed red-first). Steps 10-13 (the trim pre-pass replaced by the
 U-turn + split-at-repeated-vert production pattern; per-(edge,pair) vert
 duplication replaced by twin assignment + ring extraction; the volume
-tripwire dropped with worked math). Step 6.5 over three rounds (driver
-wiring, two-frame id divergence, snap-rule attribution, early-exit and
-welding semantics, grazing inflation; a round-2 max-endpoint-margin
-counterproposal was declined on the concavity argument - it would reject
-full-through cuts). A whole-branch post-implementation review found six more
-findings (stale ts after remap; the cast counting membrane crossings; the
-cross-pair conditioned gap; the retry cap; release-mode classification
-failure; an inverted sign statement in this doc's ancestor), all fixed, the
-HIGHs red-first. An eps-propagation audit then plumbed the driver's eps into
-the cast and made the output tolerance claim honest.
+tripwire dropped with worked math). Step 6.5 (driver wiring, two-frame id
+divergence, snap-rule attribution, early-exit and welding semantics, grazing
+inflation; a max-endpoint-margin counterproposal was declined on the
+concavity argument - it would reject full-through cuts). A whole-branch
+post-implementation review found further fixes (stale ts after remap; the
+cast counting membrane crossings; the cross-pair conditioned gap; the retry
+cap; release-mode classification failure; an inverted sign statement in this
+doc's ancestor), the worst red-first. An eps-propagation audit then plumbed
+the driver's eps into the cast and made the output tolerance claim honest.
 
-The empirical record behind the residue analysis (every snap-radius
-experiment and its pierce count) is in the git history of
+The empirical record behind the residue analysis (the snap-radius
+experiments and their outcomes) is in the git history of
 `docs/Steps10to13Design.md` - a working doc deleted when its content was
 consolidated here; the history remains reachable at the deleting commit.
 
-A whole-branch review round after consolidation (Claude + Codex dual-track,
-8 lanes: correctness, numerical robustness, tests/docs/API, style and
-refactoring) produced one more round of fixes: the conditioned-radius carry
-through step 9, source-gated trace dedup, nearest-original unification, the
-measured-displacement tolerance claim, the single-leaf BVH guard, and -
-found while chasing the hull fixture's volume red - the folded-shell volume
-gate above.
+Repeated whole-branch dual-track review passes (Claude + Codex lanes:
+correctness, numerical robustness, tests/docs/API, style and refactoring)
+after consolidation produced the remaining hardening: the conditioned-radius
+carry through step 9, source-gated trace dedup, nearest-original
+unification, the measured-displacement tolerance claim, the single-leaf BVH
+guard, the snapped-endpoint on-edge propagation, the position-fixed-point
+merge convergence, and - found while chasing the hull fixture's volume red -
+the folded-shell volume gate above.

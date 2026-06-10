@@ -2728,6 +2728,41 @@ TEST(OverlapRemoval, Step13FoldedOppositeShellsDoNotCancel) {
   }
 }
 
+TEST(OverlapRemoval, Step13FoldedMembranePassesBentOpenFoldTrips) {
+  // The gate's other two documented arms, directly. (a) A FLAT folded
+  // membrane (coplanar open sheet) encloses no volume about its own
+  // centroid and must PASS - tripping it would veto the legitimate
+  // membrane drops the keep rule performs. (b) A macro-BENT open fold
+  // has centroid-anchored cone volume O(area x bend depth) and must
+  // TRIP - an open fold of real extent is arrangement damage, and
+  // falling back is the safe side.
+  const double eps = 1e-9;
+  {  // (a) flat quad sheet, two coplanar triangles, folded
+    Manifold::Impl impl;
+    const std::vector<manifold::vec3> pos = {
+        {0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}};
+    const std::vector<overlap_removal::MergedPolygon> polys = {
+        {{0, 1, 2}, 1, 0}, {{0, 2, 3}, 1, 1}};
+    overlap_removal::CellComplex cells;
+    cells.numCells = 1;
+    cells.polySide2Cell.assign(2 * polys.size(), 0);
+    EXPECT_FALSE(overlap_removal::FoldedCellsEncloseVolume(impl, polys, pos,
+                                                           cells, eps));
+  }
+  {  // (b) the same sheet folded 90 degrees along the diagonal
+    Manifold::Impl impl;
+    const std::vector<manifold::vec3> pos = {
+        {0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 1}};  // bent flap
+    const std::vector<overlap_removal::MergedPolygon> polys = {
+        {{0, 1, 2}, 1, 0}, {{0, 2, 3}, 1, 1}};
+    overlap_removal::CellComplex cells;
+    cells.numCells = 1;
+    cells.polySide2Cell.assign(2 * polys.size(), 0);
+    EXPECT_TRUE(overlap_removal::FoldedCellsEncloseVolume(impl, polys, pos,
+                                                          cells, eps));
+  }
+}
+
 TEST(OverlapRemoval, Step1MergeReportsMaxMove) {
   // The step-1 merge's applied displacement feeds the driver's output
   // tolerance claim. One eps-pair (verts 0 and 3, 2^-11 apart so the
@@ -2742,6 +2777,32 @@ TEST(OverlapRemoval, Step1MergeReportsMaxMove) {
   ASSERT_EQ(tet.Status(), Manifold::Error::NoError);
   const overlap_removal::MergeVertsResult r =
       overlap_removal::MergeVertsEps(tet, 1e-3);
+  EXPECT_EQ(r.mergedCount, 1);
+  EXPECT_NEAR(r.maxMove, h / 2, 1e-15);
+}
+
+TEST(OverlapRemoval, Step1MergeConvergesWhenHigherIdSortsFirst) {
+  // Termination-pass finding: convergence used a per-pass union COUNT.
+  // A coincident (already-merged) cluster re-unites in every pass's
+  // fresh union-find, and DisjointSets attaches the LARGER id under
+  // the smaller - so whenever the cluster's higher-id vert
+  // Morton-sorts FIRST, find(va) changed every pass, the count never
+  // hit zero, and an assert-enabled build threw the iteration-cap
+  // tripwire on a perfectly ordinary merge. Convergence is now a
+  // position fixed point. This fixture puts the HIGHER id (3) at the
+  // bbox-min corner so it sorts first: under the old rule it never
+  // converged.
+  const double h = 0.00048828125;  // 2^-11, below eps = 1e-3
+  MeshGL64 m;
+  m.numProp = 3;
+  // vert 3 at the origin (Morton-first), vert 0 at (0,0,h); verts 1,2
+  // swapped vs the canonical tetra so orientation stays positive.
+  m.vertProperties = {0, 0, h, 0, 1, 0, 1, 0, 0, 0, 0, 0};
+  m.triVerts = {0, 2, 1, 0, 1, 3, 1, 2, 3, 2, 0, 3};
+  Manifold tet((MeshGL64(m)));
+  ASSERT_EQ(tet.Status(), Manifold::Error::NoError);
+  const overlap_removal::MergeVertsResult r =
+      overlap_removal::MergeVertsEps(tet, 1e-3);  // must not throw
   EXPECT_EQ(r.mergedCount, 1);
   EXPECT_NEAR(r.maxMove, h / 2, 1e-15);
 }
@@ -2762,6 +2823,38 @@ Manifold::Impl MakeTwoTriImpl(const manifold::vec3 t1[3],
     for (int k = 0; k < 3; ++k) impl.halfedge_.push_back(t[k], -1, -1);
   }
   return impl;
+}
+
+TEST(OverlapRemoval, Step6SnapBandIsBareEps) {
+  // The eps contract's event-identity arm: a pierce event snaps to an
+  // existing vert only within BARE eps (the step-1 old-old scale) -
+  // NOT the tolerance + eps allocation radius. An event 2 eps from a
+  // corner must allocate (snapTo == -1); half an eps away must snap.
+  // (Events in the (eps, 10 eps] band are unified by step 9.5; a
+  // tolerance-scale radius here would drag pierce events onto far
+  // verts and deform the arrangement.)
+  const double eps = 1e-3;
+  auto pierceAt = [&](double x0, double y0) {
+    const manifold::vec3 t1[3] = {{0, 0, 0}, {1, 0, 0}, {0, 1, 0}};
+    const manifold::vec3 t2[3] = {{x0, y0, -1}, {x0, y0, 1}, {5, 5, 5}};
+    Manifold::Impl impl = MakeTwoTriImpl(t1, t2);
+    const std::vector<overlap_removal::Edge> edges =
+        overlap_removal::EnumerateEdges(impl);
+    const std::vector<overlap_removal::EdgeVertList> onEdgeLists(edges.size());
+    const std::vector<overlap_removal::TriVertList> onTriLists(impl.NumTri());
+    const std::vector<overlap_removal::EdgeTriIntersection> events =
+        overlap_removal::FindEdgeTriIntersections(impl, edges, onEdgeLists,
+                                                  onTriLists, eps);
+    for (const overlap_removal::EdgeTriIntersection& x : events) {
+      if (x.triIdx == 0) return x.snapTo;  // the pierce into T1
+    }
+    return -2;  // no event found
+  };
+  const double inv = 1.0 / std::sqrt(2.0);
+  // 2 eps from corner (0,0,0): outside the band - allocate.
+  EXPECT_EQ(pierceAt(2.0 * eps * inv, 2.0 * eps * inv), -1);
+  // 0.5 eps from the corner: inside - snap to vert id 0.
+  EXPECT_EQ(pierceAt(0.5 * eps * inv, 0.5 * eps * inv), 0);
 }
 
 TEST(OverlapRemoval, Step65PlaneGatePairWithinEpsOffsetIsFound) {
@@ -2818,6 +2911,64 @@ TEST(OverlapRemoval, Step65FullThroughCutQualifies) {
     }
   }
   EXPECT_TRUE(found) << "full-through chord (0,1)-(3,1) missing";
+}
+
+TEST(OverlapRemoval, Step65SnappedEndpointStillSubdividesSourceEdge) {
+  // Termination-pass finding: on-edge additions were emitted only for
+  // ALLOCATED crossing endpoints. A crossing on a source edge that
+  // SNAPS to a corner of the OTHER face (within the tolerance + eps /
+  // conditioned corner radius, but farther than eps from the edge -
+  // so step 4 never listed it) must still subdivide that source edge
+  // at the snapped id, or the partition of the source face never sees
+  // the cut and the sheets do not conform. T2's apex (1, 0.03) sits
+  // near the interior of T1's bottom edge; the near crossing
+  // (~x = 0.9985) snaps to the apex with tolerance 0.05, the far
+  // crossing (~x = 1.059) allocates.
+  const double eps = 1e-6;
+  const double tolerance = 0.05;
+  const manifold::vec3 t1[3] = {{0, 0, 0}, {4, 0, 0}, {0, 4, 0}};
+  const manifold::vec3 t2[3] = {
+      {1, 0.03, 0}, {5, -2, 0}, {0.9, -2, 0}};  // opposite winding
+  Manifold::Impl impl = MakeTwoTriImpl(t1, t2);
+  const int apexId = 3;  // t2[0]
+  const std::vector<overlap_removal::Edge> edges =
+      overlap_removal::EnumerateEdges(impl);
+  const std::vector<int> he2e =
+      overlap_removal::BuildHalfedgeToEdgeIndex(impl, edges);
+  const overlap_removal::TraceChordResult res =
+      overlap_removal::CoplanarTraceChords(impl, edges, he2e, {}, tolerance,
+                                           eps);
+  // Premise: a chord with the apex as one endpoint exists.
+  bool chordUsesApex = false;
+  for (const overlap_removal::PiercedNewEdge& ch : res.chords) {
+    if (ch.v0 == apexId || ch.v1 == apexId) chordUsesApex = true;
+  }
+  ASSERT_TRUE(chordUsesApex) << "premise: near crossing snapped to the apex";
+  // The bug: no on-edge addition threading the apex onto T1's bottom
+  // edge (verts 0 and 1).
+  int bottomEdge = -1;
+  for (size_t e = 0; e < edges.size(); ++e) {
+    if (edges[e].v0 == 0 && edges[e].v1 == 1) bottomEdge = static_cast<int>(e);
+  }
+  ASSERT_GE(bottomEdge, 0);
+  bool apexOnBottomEdge = false;
+  for (const overlap_removal::OnEdgeAddition& a : res.onEdgeAdditions) {
+    if (a.edge == bottomEdge && a.vertId == apexId) {
+      apexOnBottomEdge = true;
+      EXPECT_NEAR(a.t, 0.9985 / 4.0, 0.01);
+    }
+  }
+  EXPECT_TRUE(apexOnBottomEdge)
+      << "snapped endpoint not threaded onto its source edge";
+  // Conditioned-radius production (the eps contract's trace arm):
+  // newVertSnapR is parallel to the pool, eps-floored, and the
+  // allocated far crossing records its eps / sin(angle) conditioning
+  // (the T2 edge meets T1's bottom edge at sin ~ 0.45 -> ~2.2 eps).
+  ASSERT_EQ(res.newVertSnapR.size(), res.newVertPositions.size());
+  for (const double r : res.newVertSnapR) EXPECT_GE(r, eps);
+  ASSERT_GE(res.newVertPositions.size(), 1u);
+  EXPECT_GT(res.newVertSnapR[0], 2.0 * eps);
+  EXPECT_LT(res.newVertSnapR[0], 2.5 * eps);
 }
 
 TEST(OverlapRemoval, Step65PancakeQuadTraceChords) {
@@ -2978,6 +3129,22 @@ void ExpectMeshGL64Identical(const Manifold& got, const Manifold& want) {
   EXPECT_EQ(g.halfedgeTangent, w.halfedgeTangent);
 }
 
+// Determinism of a fresh REBUILD: geometric output equality. Identity
+// metadata (runOriginalID and friends) is construction-unique by
+// design (see Manifold.MeshID), so the full-field helper above only
+// applies to passthrough/fallback, where the SAME object comes back.
+void ExpectMeshGL64GeometryIdentical(const Manifold& got,
+                                     const Manifold& want) {
+  const MeshGL64 g = got.GetMeshGL64();
+  const MeshGL64 w = want.GetMeshGL64();
+  EXPECT_EQ(g.numProp, w.numProp);
+  EXPECT_EQ(g.vertProperties, w.vertProperties);
+  EXPECT_EQ(g.triVerts, w.triVerts);
+  EXPECT_EQ(g.tolerance, w.tolerance);
+  EXPECT_EQ(g.mergeFromVert, w.mergeFromVert);
+  EXPECT_EQ(g.mergeToVert, w.mergeToVert);
+}
+
 TEST(Manifold, RemoveSelfIntersectionsApi) {
   // API smoke: a clean cube has no self-intersections; output is the
   // input bit-identically (the empty-chord early-exit).
@@ -3039,10 +3206,11 @@ TEST(Manifold, RemoveSelfIntersectionsHullMaskFixture) {
 }
 
 TEST(Manifold, RemoveSelfIntersectionsSelfIntersectFixture) {
-  // self_intersect: Add of two interpenetrating ovoids (661 interior
-  // pierces). This is the dense-sliver fallback class - the pipeline
-  // cannot cleanly reduce it, so it falls back to the input unchanged,
-  // which still satisfies pierce-monotonicity (output <= input).
+  // self_intersect: Add of two interpenetrating ovoids, dense interior
+  // pierces. This is the dense-sliver fallback class - the pipeline
+  // cannot cleanly reduce it, so it must fall back to the input
+  // BIT-IDENTICALLY (the fail-closed contract; a partial rebuild
+  // slipping out with merely-monotonic pierces would break it).
   //
   // test_main.cpp sets ManifoldParams().processOverlaps = false for
   // stricter validation; that enables a CCW-check assertion in Boolean3's
@@ -3060,12 +3228,10 @@ TEST(Manifold, RemoveSelfIntersectionsSelfIntersectFixture) {
   Manifold result = a + b;
   EXPECT_EQ(result.Status(), Manifold::Error::NoError);
   ASSERT_GT(InteriorPierces(result), 0);  // premise: input genuinely pierces
-  const double inVol = result.Volume();
   Manifold cleaned = result.RemoveSelfIntersections();
   EXPECT_EQ(cleaned.Status(), Manifold::Error::NoError);
-  EXPECT_LE(InteriorPierces(cleaned), InteriorPierces(result));
-  EXPECT_GT(cleaned.Volume(), 0);
-  EXPECT_LT(std::abs(cleaned.Volume() - inVol) / inVol, 0.05);
+  ExpectMeshGL64Identical(cleaned, result);
+  EXPECT_EQ(InteriorPierces(cleaned), InteriorPierces(result));
 }
 
 // Appends an axis-aligned box [lo, hi] as 8 fresh verts + 12 tris to
@@ -3174,23 +3340,17 @@ TEST(Manifold, RemoveSelfIntersectionsDeterministic) {
   ASSERT_GT(InteriorPierces(result), 0);  // premise: pipeline does real work
   Manifold first = result.RemoveSelfIntersections();
   ASSERT_EQ(first.Status(), Manifold::Error::NoError);
-  const MeshGL64 firstMesh = first.GetMeshGL64();
   for (int i = 0; i < 4; ++i) {
     Manifold again = result.RemoveSelfIntersections();
-    const MeshGL64 againMesh = again.GetMeshGL64();
-    EXPECT_EQ(againMesh.triVerts, firstMesh.triVerts);
-    EXPECT_EQ(againMesh.vertProperties, firstMesh.vertProperties);
+    ExpectMeshGL64Identical(again, first);
   }
   Manifold far = result.Translate({1e4, 1e4, 1e4});
   Manifold farFirst = far.RemoveSelfIntersections();
   ASSERT_EQ(farFirst.Status(), Manifold::Error::NoError);
   ASSERT_LT(InteriorPierces(farFirst), InteriorPierces(far));  // success path
-  const MeshGL64 farFirstMesh = farFirst.GetMeshGL64();
   for (int i = 0; i < 2; ++i) {
     Manifold again = far.RemoveSelfIntersections();
-    const MeshGL64 againMesh = again.GetMeshGL64();
-    EXPECT_EQ(againMesh.triVerts, farFirstMesh.triVerts);
-    EXPECT_EQ(againMesh.vertProperties, farFirstMesh.vertProperties);
+    ExpectMeshGL64GeometryIdentical(again, farFirst);
   }
 }
 
@@ -3215,6 +3375,11 @@ TEST(Manifold, RemoveSelfIntersectionsFarFromOrigin) {
   // origin-scale folded-shell fallback.
   EXPECT_EQ(cleaned.Decompose().size(), 3u);
   EXPECT_NEAR(cleaned.Volume(), result.Volume(), result.Volume() * 1e-3);
+  // The documented output-tolerance floor: a successful rebuild's
+  // tolerance covers at least the 10 x working-eps merge radius (the
+  // measured-displacement terms can only widen it further).
+  EXPECT_GE(cleaned.GetMeshGL64().tolerance,
+            10.0 * overlap_removal::InferEps(result));
   // The documented positions-only rebuild contract: a successful
   // rebuild drops non-position properties to numProp == 3.
   Manifold propped = result.SetProperties(
