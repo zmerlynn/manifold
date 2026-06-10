@@ -339,7 +339,7 @@ vec3 GetPos3(int id, int baseId, const Manifold::Impl& impl,
 // filtering "small" pierces; it prevents zero-by-zero in the t
 // computation.
 double SegmentPiercesTriInterior(vec3 a, vec3 b, vec3 v0, vec3 v1, vec3 v2,
-                                 double relTol = 1e-12) {
+                                 double relTol = kPipelineRelTol) {
   using la::cross;
   using la::dot;
   const vec3 e1 = v1 - v0;
@@ -367,6 +367,249 @@ double SegmentPiercesTriInterior(vec3 a, vec3 b, vec3 v0, vec3 v1, vec3 v2,
   return std::min(std::fabs(dA), std::fabs(dB)) / nMag;
 }
 
+// Pipeline body - file-local so the public RunOverlapRemoval below
+// stays a thin fail-closed wrapper (every stage it composes is
+// declared in overlap_removal_internal.h, so the definition can
+// live here ahead of the stage implementations).
+Manifold RunOverlapRemovalImpl(const Manifold& input, double eps) {
+  using la::cross;
+  using la::dot;
+  if (input.IsEmpty()) return input;
+  if (eps <= 0) eps = InferEps(input);
+  // The input's pierce count, computed once for the gate's
+  // monotonicity arm.
+  const int inputPierces = CheckSelfIntersection(input).interiorPierces;
+
+  // Step 1: merge verts within eps.
+  const MergeVertsResult merged = MergeVertsEps(input, eps);
+  const Manifold& work = merged.manifold;
+  if (work.IsEmpty() || work.Status() != Manifold::Error::NoError) {
+    return input;
+  }
+  // Impl via the public GetMeshGL64 round-trip, for halfedge /
+  // face-normal access.
+  const Manifold::Impl impl = Manifold::Impl(work.GetMeshGL64());
+  const double tolerance = std::max(impl.tolerance_, eps);
+  const int baseId = static_cast<int>(impl.NumVert());
+  const int numTri = static_cast<int>(impl.NumTri());
+
+  // Steps 2, 4-5 (no step 3 - see EnumerateEdges' note): canonical
+  // edges, on-edge vert lists, on-tri vert lists.
+  const std::vector<Edge> edges = EnumerateEdges(impl);
+  std::vector<EdgeVertList> onEdgeLists =
+      BuildOnEdgeVertLists(impl, edges, eps);
+  const std::vector<TriVertList> onTriLists = BuildOnTriVertLists(impl, eps);
+
+  // Step 6: edge-pierces-tri events.
+  const std::vector<EdgeTriIntersection> etIsects =
+      FindEdgeTriIntersections(impl, edges, onEdgeLists, onTriLists, eps);
+
+  // Step 7: chords per tri-tri pair.
+  ChordEdges chordEdges = GenerateChordEdges(impl, edges, etIsects, eps);
+
+  // Step 6.5: coplanar trace chords - in-plane conformance for the
+  // eps-merge-flattened pancake class. Appended to the chord list
+  // BEFORE the early-exit, the per-face grouping, and step 8, so the
+  // whole arrangement machinery consumes them unchanged.
+  const std::vector<int> halfedge2Edge = BuildHalfedgeToEdgeIndex(impl, edges);
+  TraceChordResult trace = CoplanarTraceChords(
+      impl, edges, halfedge2Edge, std::move(chordEdges.newVertPositions),
+      tolerance, eps);
+  chordEdges.newVertPositions = std::move(trace.newVertPositions);
+  chordEdges.newEdges.insert(chordEdges.newEdges.end(), trace.chords.begin(),
+                             trace.chords.end());
+
+  // EARLY-EXIT when the COMBINED chord list is empty: covers the
+  // clean-input case (bit-identical return), the all-pairs-dropped
+  // case, and pancake-free coplanar contact.
+  if (chordEdges.newEdges.empty()) return input;
+
+  // Boundary conformance for the trace crossings, then pierce verts
+  // onto their piercing edges' on-edge lists, so the partition
+  // subdivides those halfedges at the new verts.
+  AddVertsToOnEdgeLists(trace.onEdgeAdditions, onEdgeLists);
+  PropagateNewVertsToOnEdgeLists(impl, chordEdges.newVertPositions, etIsects,
+                                 chordEdges.etIsect2Vert, edges, onEdgeLists);
+
+  // Step 8: on-tri verts onto chord interiors.
+  std::vector<NewEdgeWithExtras> chords = AddInteriorVertsToNewEdges(
+      impl, chordEdges.newVertPositions, chordEdges.newEdges, onTriLists, eps);
+
+  // Step 9: chord-chord crossings within each face - contacts,
+  // pairwise crossings, nearby-crossing merge + propagation,
+  // resolve-then-allocate threading.
+  const std::vector<std::vector<int>> face2Chords =
+      GroupChordsByFace(chordEdges.newEdges, numTri);
+  const std::vector<OnChordContact> contacts = FindOnChordEndpointContacts(
+      impl, chords, chordEdges.newVertPositions, face2Chords, tolerance, eps);
+  const std::vector<ChordChordCrossing> rawCrossings =
+      FindChordChordCrossings(impl, chords, chordEdges.newVertPositions,
+                              face2Chords, impl.faceNormal_, eps);
+  const std::vector<ChordCrossing> clusters = MergeAndPropagateCrossings(
+      impl, chords, chordEdges.newVertPositions, rawCrossings, face2Chords,
+      impl.faceNormal_, tolerance, eps);
+  Step9Threading threaded = ResolveAndThreadClusters(
+      impl, std::move(chords), std::move(chordEdges.newVertPositions),
+      std::move(trace.newVertSnapR), clusters, contacts, tolerance, eps);
+
+  // Step 9.5: unify new verts across allocation paths (the same
+  // geometric point computed through two frames lands up to ~10 * eps
+  // apart; unpaired twin sub-edges would read as open rims and
+  // collapse the cell complex). The conditioned radii now cover the
+  // step-9 allocations too (threaded, not just the trace pass's).
+  const UnifyResult unified =
+      UnifyArrangementVerts(impl, threaded.newVertPositions, edges, onEdgeLists,
+                            threaded.chords, eps, threaded.newVertSnapR);
+
+  // Steps 10-11: partition every face (chordless faces still pick up
+  // on-edge subdivision, so the arrangement conforms across shared
+  // edges).
+  std::vector<std::pair<int, std::vector<int>>> facePolygons;
+  for (int f = 0; f < numTri; ++f) {
+    FacePartition part = PartitionFace(
+        impl, f, edges, halfedge2Edge, onEdgeLists, threaded.chords,
+        face2Chords[f], threaded.newVertPositions);
+    for (std::vector<int>& cyc : part.polygons) {
+      facePolygons.push_back({f, std::move(cyc)});
+    }
+  }
+
+  // Step 12: canonical merge with signed multiplicity.
+  const std::vector<MergedPolygon> polys = MergePolygons(facePolygons);
+  if (polys.empty()) return input;
+
+  // Step 13: cells, winding, keep, emit topology. Classification or
+  // topology failures (seed retries exhausted, unpaired halfedges,
+  // ...) fall back to the input.
+  const CellComplex cellCx =
+      BuildCellComplex(impl, polys, threaded.newVertPositions);
+  const CellWinding winding =
+      ClassifyCells(impl, polys, threaded.newVertPositions, cellCx, eps);
+  if (!winding.ok) return input;
+  // GATE (fail closed): a folded cell that encloses real volume means
+  // a tangent-degenerate contact folded a closed shell's two sides
+  // into one cell (its polygons all read front == back and the keep
+  // rule drops them) - emitting would silently delete that shell.
+  // Membranes legitimately fold flat and pass the area-relative
+  // threshold; see FoldedCellsEncloseVolume.
+  if (FoldedCellsEncloseVolume(impl, polys, threaded.newVertPositions, cellCx,
+                               eps)) {
+    return input;
+  }
+  const EmitTopology topo = BuildEmitTopology(polys, cellCx, winding);
+  if (!topo.ok || topo.keptPolygons.empty()) return input;
+
+  // Emit: one output vert per ring; triangulate each kept cycle in
+  // its outward frame (Triangulate's CCW triangles project back
+  // winding-consistent because the basis is right-handed).
+  std::vector<vec3> ringPos(topo.ring2Vert.size());
+  for (size_t r = 0; r < topo.ring2Vert.size(); ++r) {
+    ringPos[r] =
+        GetPos3(topo.ring2Vert[r], baseId, impl, threaded.newVertPositions);
+  }
+  std::vector<ivec3> outTris;
+  for (const std::vector<int>& cyc : topo.outCycles) {
+    if (cyc.size() == 3) {
+      outTris.push_back(ivec3(cyc[0], cyc[1], cyc[2]));
+      continue;
+    }
+    // Relative-origin Newell sum - see BuildCellComplex.
+    const vec3 cycOrigin = ringPos[cyc[0]];
+    vec3 nsum(0.0, 0.0, 0.0);
+    for (size_t i = 0; i < cyc.size(); ++i) {
+      nsum = nsum + cross(ringPos[cyc[i]] - cycOrigin,
+                          ringPos[cyc[(i + 1) % cyc.size()]] - cycOrigin);
+    }
+    const double len2 = dot(nsum, nsum);
+    DEBUG_ASSERT(len2 > 0, logicErr,
+                 "RunOverlapRemoval: degenerate kept cycle");
+    if (len2 <= 0) return input;
+    const InPlaneBasis basis = FaceBasisFromNormal(nsum / std::sqrt(len2));
+    SimplePolygon poly2;
+    poly2.reserve(cyc.size());
+    const vec3 origin = ringPos[cyc[0]];
+    for (const int r : cyc) {
+      const vec3 d = ringPos[r] - origin;
+      poly2.push_back(vec2(dot(d, basis.u), dot(d, basis.v)));
+    }
+    // Triangulate with epsilon-doubling retries: a kept cycle can
+    // carry micro-tails of original verts clustered above the step-1
+    // merge radius but below triangulable resolution (their ring ids
+    // are topologically pinned, so the cycle cannot be simplified).
+    // Widening epsilon moves the tail into the triangulator's own
+    // degenerate class; the resulting zero-area tris collapse at
+    // Manifold construction. Release builds return the same
+    // triangulation without the debug CCW check, so behavior matches.
+    std::vector<ivec3> tris;
+    // Start from the pipeline eps, not just the mesh epsilon: kept
+    // cycles carry pipeline-scale jitter (10 * eps merges), so seeding
+    // the retry ladder below it just burns doubling attempts.
+    double triEps = std::max({impl.tolerance_, impl.epsilon_, eps});
+    // The retry ladder exists for MANIFOLD_DEBUG, where Triangulate's
+    // CCW check can throw on micro-tail cycles; widening epsilon moves
+    // the tail into the triangulator's own degenerate class. Capped at
+    // 64x: far beyond that the check passes CW triangles spanning REAL
+    // geometry, and the gate cannot be relied on to catch a mix.
+    // Release Triangulate does not throw (it returns the same
+    // triangulation unchecked), so behavior matches.
+#ifdef MANIFOLD_DEBUG
+    bool triangulated = false;
+    for (int attempt = 0; attempt < 7 && !triangulated; ++attempt) {
+      try {
+        tris = Triangulate({poly2}, triEps, true);
+        triangulated = true;
+      } catch (...) {
+        triEps *= 2.0;
+      }
+    }
+    if (!triangulated) return input;  // give the gate its fallback
+#else
+    tris = Triangulate({poly2}, triEps, true);
+#endif
+    for (const ivec3& t : tris) {
+      outTris.push_back(ivec3(cyc[t[0]], cyc[t[1]], cyc[t[2]]));
+    }
+  }
+
+  // Output mesh: positions only (numProp = 3) - non-position
+  // properties are not preserved (documented). The tolerance claim
+  // propagates the pipeline's MEASURED applied movements: the 10 * eps
+  // floor covers the nearby-crossing merge radius (step-9 crossing
+  // merges, step-9.5 new-new unification), and the measured step-1
+  // cluster and step-9.5 remap displacements widen it when a chain or
+  // a conditioned snap moved a vert further. Ill-conditioned shallow-
+  // incidence corners can carry residual error beyond this, up to the
+  // conditioned band (eps / sin(incidence), capped at kCondSnapCapEps
+  // * eps) - a documented limitation, not part of the tolerance claim.
+  MeshGL64 outMesh;
+  outMesh.numProp = 3;
+  outMesh.tolerance =
+      std::max({tolerance, 10.0 * eps, merged.maxMove, unified.maxMove});
+  outMesh.vertProperties.reserve(ringPos.size() * 3);
+  for (const vec3& p : ringPos) {
+    outMesh.vertProperties.push_back(p.x);
+    outMesh.vertProperties.push_back(p.y);
+    outMesh.vertProperties.push_back(p.z);
+  }
+  outMesh.triVerts.reserve(outTris.size() * 3);
+  for (const ivec3& t : outTris) {
+    outMesh.triVerts.push_back(static_cast<uint64_t>(t[0]));
+    outMesh.triVerts.push_back(static_cast<uint64_t>(t[1]));
+    outMesh.triVerts.push_back(static_cast<uint64_t>(t[2]));
+  }
+  Manifold out(outMesh);
+
+  // GATE (thin, final): construction status, positive volume for a
+  // non-empty input (NaN fails the comparison too), and pierce-
+  // monotonicity. No volume-ratio tripwire: the input volume is the
+  // winding-WEIGHTED integral, so heavy overlap legitimately shrinks
+  // the measured volume (a full overlap reads 1/3). Gate failures
+  // are an expected fallback for adversarial inputs, not asserts.
+  if (out.Status() != Manifold::Error::NoError) return input;
+  if (!(out.Volume() > 0)) return input;
+  if (CheckSelfIntersection(out).interiorPierces > inputPierces) return input;
+  return out;
+}
 }  // namespace
 
 double InferEps(const Manifold& m) {
@@ -425,7 +668,7 @@ MergeVertsResult MergeVertsEps(const Manifold& in, double eps, int maxIter) {
     // n equal doubles and dividing is not bit-idempotent at large n
     // (iterated-addition rounding), and a drifting "centroid" of an
     // already-collapsed cluster could oscillate to the iteration cap
-    // (termination-pass finding). With this skip, every cluster is
+    // With this skip, every cluster is
     // bit-identical one pass after it last grows, so convergence is
     // structural.
     int nComp = uf.connectedComponents(componentLabel);
@@ -461,7 +704,7 @@ MergeVertsResult MergeVertsEps(const Manifold& in, double eps, int maxIter) {
     // is the wrong test - an already-merged coincident cluster
     // re-unites in every pass's fresh union-find, and whether that
     // reads as a "new" union depends on the union-find's internal
-    // attachment order (termination-pass finding).
+    // attachment order.
     if (!moved) {
       converged = true;
       break;
@@ -1225,7 +1468,7 @@ TraceChordResult CoplanarTraceChords(const Manifold::Impl& impl,
         // src edge, and - when a tri edge clipped it - on the dst
         // face's edge too (the X case: one record per edge, one vert
         // id). Emitted for SNAPPED endpoints as well as allocated ones
-        // (termination-pass finding: a corner-snapped crossing still
+        // (a corner-snapped crossing still
         // subdivides the edges it crossed, or the claiming faces'
         // partitions never see the cut) - unless the resolved id IS
         // that edge's endpoint, where no subdivision is needed. The
@@ -1440,7 +1683,7 @@ UnifyResult UnifyArrangementVerts(const Manifold::Impl& impl,
 
   // Remap consumers. Chord endpoints first; extras then dedup by id
   // and drop ids that became an endpoint. Ts are RECOMPUTED from the
-  // remapped positions and re-sorted (review finding: a remap moves
+  // remapped positions and re-sorted (a remap moves
   // the consumed position by up to the merge radius, and a stale t
   // order would make the partition build a crossed sub-edge
   // sequence).
@@ -2480,15 +2723,21 @@ CellWinding ClassifyCells(const Manifold::Impl& impl,
           poly2.push_back(vec2(dot(d, basis.u), dot(d, basis.v)));
         }
         std::vector<ivec3> tris;
+        // eps is the effective classifier epsilon (>= impl.epsilon_ and
+        // the pipeline epsHint): cycles here carry pipeline-eps-scale
+        // jitter, so triangulating at the raw mesh epsilon could fail
+        // on cycles the pipeline considers clean. A MANIFOLD_DEBUG
+        // throw on a near-line sliver skips to the next target;
+        // release Triangulate does not throw.
+#ifdef MANIFOLD_DEBUG
         try {
-          // eps is the effective classifier epsilon (>= impl.epsilon_ and
-          // the pipeline epsHint): cycles here carry pipeline-eps-scale
-          // jitter, so triangulating at the raw mesh epsilon could throw
-          // on cycles the pipeline considers clean.
           tris = Triangulate({poly2}, std::max(impl.tolerance_, eps), true);
         } catch (...) {
           continue;
         }
+#else
+        tris = Triangulate({poly2}, std::max(impl.tolerance_, eps), true);
+#endif
         if (tris.empty()) continue;
         double bestA = -1.0;
         ivec3 best = tris[0];
@@ -2519,8 +2768,7 @@ CellWinding ClassifyCells(const Manifold::Impl& impl,
         if (p == q) continue;
         // An open sheet (front == back cell) separates nothing and is
         // excluded from the BFS - the cast must skip it too, or the
-        // seeded winding disagrees with what propagates from it
-        // (review finding).
+        // seeded winding disagrees with what propagates from it.
         if (cells.polySide2Cell[2 * p] == cells.polySide2Cell[2 * p + 1])
           continue;
         // SIGNED sum over the fan ears: where a concavity makes fan
@@ -2559,7 +2807,7 @@ CellWinding ClassifyCells(const Manifold::Impl& impl,
             // A disagreement means the arrangement is not the closed
             // surface the propagation assumes - fail the
             // classification in release too, so the driver falls
-            // back (review finding; matches BuildEmitTopology).
+            // back (matches BuildEmitTopology).
             DEBUG_ASSERT(false, logicErr,
                          "ClassifyCells: winding propagation disagreement");
             out.ok = false;
@@ -2978,254 +3226,23 @@ bool FoldedCellsEncloseVolume(const Manifold::Impl& impl,
   return false;
 }
 
-namespace {
-Manifold RunOverlapRemovalImpl(const Manifold& input, double eps) {
-  using la::cross;
-  using la::dot;
-  if (input.IsEmpty()) return input;
-  if (eps <= 0) eps = InferEps(input);
-  // The input's pierce count, computed once for the gate's
-  // monotonicity arm.
-  const int inputPierces = CheckSelfIntersection(input).interiorPierces;
-
-  // Step 1: merge verts within eps.
-  const MergeVertsResult merged = MergeVertsEps(input, eps);
-  const Manifold& work = merged.manifold;
-  if (work.IsEmpty() || work.Status() != Manifold::Error::NoError) {
-    return input;
-  }
-  // Impl via the public GetMeshGL64 round-trip, for halfedge /
-  // face-normal access.
-  const Manifold::Impl impl = Manifold::Impl(work.GetMeshGL64());
-  const double tolerance = std::max(impl.tolerance_, eps);
-  const int baseId = static_cast<int>(impl.NumVert());
-  const int numTri = static_cast<int>(impl.NumTri());
-
-  // Steps 2-5: canonical edges, on-edge vert lists, on-tri vert lists.
-  const std::vector<Edge> edges = EnumerateEdges(impl);
-  std::vector<EdgeVertList> onEdgeLists =
-      BuildOnEdgeVertLists(impl, edges, eps);
-  const std::vector<TriVertList> onTriLists = BuildOnTriVertLists(impl, eps);
-
-  // Step 6: edge-pierces-tri events.
-  const std::vector<EdgeTriIntersection> etIsects =
-      FindEdgeTriIntersections(impl, edges, onEdgeLists, onTriLists, eps);
-
-  // Step 7: chords per tri-tri pair.
-  ChordEdges chordEdges = GenerateChordEdges(impl, edges, etIsects, eps);
-
-  // Step 6.5: coplanar trace chords - in-plane conformance for the
-  // eps-merge-flattened pancake class. Appended to the chord list
-  // BEFORE the early-exit, the per-face grouping, and step 8, so the
-  // whole arrangement machinery consumes them unchanged.
-  const std::vector<int> halfedge2Edge = BuildHalfedgeToEdgeIndex(impl, edges);
-  TraceChordResult trace = CoplanarTraceChords(
-      impl, edges, halfedge2Edge, std::move(chordEdges.newVertPositions),
-      tolerance, eps);
-  chordEdges.newVertPositions = std::move(trace.newVertPositions);
-  chordEdges.newEdges.insert(chordEdges.newEdges.end(), trace.chords.begin(),
-                             trace.chords.end());
-
-  // EARLY-EXIT when the COMBINED chord list is empty: covers the
-  // clean-input case (bit-identical return), the all-pairs-dropped
-  // case, and pancake-free coplanar contact.
-  if (chordEdges.newEdges.empty()) return input;
-
-  // Boundary conformance for the trace crossings, then pierce verts
-  // onto their piercing edges' on-edge lists, so the partition
-  // subdivides those halfedges at the new verts.
-  AddVertsToOnEdgeLists(trace.onEdgeAdditions, onEdgeLists);
-  PropagateNewVertsToOnEdgeLists(impl, chordEdges.newVertPositions, etIsects,
-                                 chordEdges.etIsect2Vert, edges, onEdgeLists);
-
-  // Step 8: on-tri verts onto chord interiors.
-  std::vector<NewEdgeWithExtras> chords = AddInteriorVertsToNewEdges(
-      impl, chordEdges.newVertPositions, chordEdges.newEdges, onTriLists, eps);
-
-  // Step 9: chord-chord crossings within each face - contacts,
-  // pairwise crossings, nearby-crossing merge + propagation,
-  // resolve-then-allocate threading.
-  const std::vector<std::vector<int>> face2Chords =
-      GroupChordsByFace(chordEdges.newEdges, numTri);
-  const std::vector<OnChordContact> contacts = FindOnChordEndpointContacts(
-      impl, chords, chordEdges.newVertPositions, face2Chords, tolerance, eps);
-  const std::vector<ChordChordCrossing> rawCrossings =
-      FindChordChordCrossings(impl, chords, chordEdges.newVertPositions,
-                              face2Chords, impl.faceNormal_, eps);
-  const std::vector<ChordCrossing> clusters = MergeAndPropagateCrossings(
-      impl, chords, chordEdges.newVertPositions, rawCrossings, face2Chords,
-      impl.faceNormal_, tolerance, eps);
-  Step9Threading threaded = ResolveAndThreadClusters(
-      impl, std::move(chords), std::move(chordEdges.newVertPositions),
-      std::move(trace.newVertSnapR), clusters, contacts, tolerance, eps);
-
-  // Step 9.5: unify new verts across allocation paths (the same
-  // geometric point computed through two frames lands up to ~10 * eps
-  // apart; unpaired twin sub-edges would read as open rims and
-  // collapse the cell complex). The conditioned radii now cover the
-  // step-9 allocations too (threaded, not just the trace pass's).
-  const UnifyResult unified =
-      UnifyArrangementVerts(impl, threaded.newVertPositions, edges, onEdgeLists,
-                            threaded.chords, eps, threaded.newVertSnapR);
-
-  // Steps 10-11: partition every face (chordless faces still pick up
-  // on-edge subdivision, so the arrangement conforms across shared
-  // edges).
-  std::vector<std::pair<int, std::vector<int>>> facePolygons;
-  for (int f = 0; f < numTri; ++f) {
-    FacePartition part = PartitionFace(
-        impl, f, edges, halfedge2Edge, onEdgeLists, threaded.chords,
-        face2Chords[f], threaded.newVertPositions);
-    for (std::vector<int>& cyc : part.polygons) {
-      facePolygons.push_back({f, std::move(cyc)});
-    }
-  }
-
-  // Step 12: canonical merge with signed multiplicity.
-  const std::vector<MergedPolygon> polys = MergePolygons(facePolygons);
-  if (polys.empty()) return input;
-
-  // Step 13: cells, winding, keep, emit topology. Classification or
-  // topology failures (seed retries exhausted, unpaired halfedges,
-  // ...) fall back to the input.
-  const CellComplex cellCx =
-      BuildCellComplex(impl, polys, threaded.newVertPositions);
-  const CellWinding winding =
-      ClassifyCells(impl, polys, threaded.newVertPositions, cellCx, eps);
-  if (!winding.ok) return input;
-  // GATE (fail closed): a folded cell that encloses real volume means
-  // a tangent-degenerate contact folded a closed shell's two sides
-  // into one cell (its polygons all read front == back and the keep
-  // rule drops them) - emitting would silently delete that shell.
-  // Membranes legitimately fold flat and pass the area-relative
-  // threshold; see FoldedCellsEncloseVolume.
-  if (FoldedCellsEncloseVolume(impl, polys, threaded.newVertPositions, cellCx,
-                               eps)) {
-    return input;
-  }
-  const EmitTopology topo = BuildEmitTopology(polys, cellCx, winding);
-  if (!topo.ok || topo.keptPolygons.empty()) return input;
-
-  // Emit: one output vert per ring; triangulate each kept cycle in
-  // its outward frame (Triangulate's CCW triangles project back
-  // winding-consistent because the basis is right-handed).
-  std::vector<vec3> ringPos(topo.ring2Vert.size());
-  for (size_t r = 0; r < topo.ring2Vert.size(); ++r) {
-    ringPos[r] =
-        GetPos3(topo.ring2Vert[r], baseId, impl, threaded.newVertPositions);
-  }
-  std::vector<ivec3> outTris;
-  for (const std::vector<int>& cyc : topo.outCycles) {
-    if (cyc.size() == 3) {
-      outTris.push_back(ivec3(cyc[0], cyc[1], cyc[2]));
-      continue;
-    }
-    // Relative-origin Newell sum - see BuildCellComplex.
-    const vec3 cycOrigin = ringPos[cyc[0]];
-    vec3 nsum(0.0, 0.0, 0.0);
-    for (size_t i = 0; i < cyc.size(); ++i) {
-      nsum = nsum + cross(ringPos[cyc[i]] - cycOrigin,
-                          ringPos[cyc[(i + 1) % cyc.size()]] - cycOrigin);
-    }
-    const double len2 = dot(nsum, nsum);
-    DEBUG_ASSERT(len2 > 0, logicErr,
-                 "RunOverlapRemoval: degenerate kept cycle");
-    if (len2 <= 0) return input;
-    const InPlaneBasis basis = FaceBasisFromNormal(nsum / std::sqrt(len2));
-    SimplePolygon poly2;
-    poly2.reserve(cyc.size());
-    const vec3 origin = ringPos[cyc[0]];
-    for (const int r : cyc) {
-      const vec3 d = ringPos[r] - origin;
-      poly2.push_back(vec2(dot(d, basis.u), dot(d, basis.v)));
-    }
-    // Triangulate with epsilon-doubling retries: a kept cycle can
-    // carry micro-tails of original verts clustered above the step-1
-    // merge radius but below triangulable resolution (their ring ids
-    // are topologically pinned, so the cycle cannot be simplified).
-    // Widening epsilon moves the tail into the triangulator's own
-    // degenerate class; the resulting zero-area tris collapse at
-    // Manifold construction. Release builds return the same
-    // triangulation without the debug CCW check, so behavior matches.
-    std::vector<ivec3> tris;
-    // Start from the pipeline eps, not just the mesh epsilon: kept
-    // cycles carry pipeline-scale jitter (10 * eps merges), so seeding
-    // the retry ladder below it just burns doubling attempts.
-    double triEps = std::max({impl.tolerance_, impl.epsilon_, eps});
-    bool triangulated = false;
-    // Cap at 64x (review finding): far beyond that the CCW check
-    // passes CW triangles spanning REAL geometry, not just
-    // micro-tails, and the gate cannot be relied on to catch a mix.
-    for (int attempt = 0; attempt < 7 && !triangulated; ++attempt) {
-      try {
-        tris = Triangulate({poly2}, triEps, true);
-        triangulated = true;
-      } catch (...) {
-        triEps *= 2.0;
-      }
-    }
-    if (!triangulated) return input;  // give the gate its fallback
-    for (const ivec3& t : tris) {
-      outTris.push_back(ivec3(cyc[t[0]], cyc[t[1]], cyc[t[2]]));
-    }
-  }
-
-  // Output mesh: positions only (numProp = 3) - non-position
-  // properties are not preserved (documented). The tolerance claim
-  // propagates the pipeline's MEASURED applied movements: the 10 * eps
-  // floor covers the nearby-crossing merge radius (step-9 crossing
-  // merges, step-9.5 new-new unification), and the measured step-1
-  // cluster and step-9.5 remap displacements widen it when a chain or
-  // a conditioned snap moved a vert further. Ill-conditioned shallow-
-  // incidence corners can carry residual error beyond this, up to the
-  // conditioned band (eps / sin(incidence), capped at kCondSnapCapEps
-  // * eps) - a documented limitation, not part of the tolerance claim.
-  MeshGL64 outMesh;
-  outMesh.numProp = 3;
-  outMesh.tolerance =
-      std::max({tolerance, 10.0 * eps, merged.maxMove, unified.maxMove});
-  outMesh.vertProperties.reserve(ringPos.size() * 3);
-  for (const vec3& p : ringPos) {
-    outMesh.vertProperties.push_back(p.x);
-    outMesh.vertProperties.push_back(p.y);
-    outMesh.vertProperties.push_back(p.z);
-  }
-  outMesh.triVerts.reserve(outTris.size() * 3);
-  for (const ivec3& t : outTris) {
-    outMesh.triVerts.push_back(static_cast<uint64_t>(t[0]));
-    outMesh.triVerts.push_back(static_cast<uint64_t>(t[1]));
-    outMesh.triVerts.push_back(static_cast<uint64_t>(t[2]));
-  }
-  Manifold out(outMesh);
-
-  // GATE (thin, final): construction status, positive volume for a
-  // non-empty input (NaN fails the comparison too), and pierce-
-  // monotonicity. No volume-ratio tripwire: the input volume is the
-  // winding-WEIGHTED integral, so heavy overlap legitimately shrinks
-  // the measured volume (a full overlap reads 1/3). Gate failures
-  // are an expected fallback for adversarial inputs, not asserts.
-  if (out.Status() != Manifold::Error::NoError) return input;
-  if (!(out.Volume() > 0)) return input;
-  if (CheckSelfIntersection(out).interiorPierces > inputPierces) return input;
-  return out;
-}
-}  // namespace
-
 Manifold RunOverlapRemoval(const Manifold& input, double eps) {
-  // Outer try/catch: if any internal stage throws (= a MANIFOLD_DEBUG
-  // assertion in Triangulate, the Manifold(out) constructor, or
-  // std::bad_alloc), return the input unchanged. The input is already a
-  // valid manifold with no more self-intersections than itself, so this
-  // preserves pierce-monotonicity without running any further allocating
-  // or possibly-throwing work (MergeVertsEps both asserts and can produce
-  // a non-manifold result, so it must not run on the failure path).
-  // RunOverlapRemovalImpl is the pipeline body, separated so this entry
-  // point stays a thin fail-closed wrapper.
+  // Exceptions exist only in MANIFOLD_DEBUG builds (optional_assert.h
+  // defines the error types there; release manifold is exception-free
+  // and errors are status enums). Under MANIFOLD_DEBUG, a throwing
+  // assertion anywhere in the pipeline - including inside manifold's
+  // own Triangulate checks - falls back to the input, preserving
+  // pierce-monotonicity; the guard pattern matches polygon.cpp's
+  // TriangulateIdxHalfedges.
+#ifdef MANIFOLD_DEBUG
   try {
     return RunOverlapRemovalImpl(input, eps);
   } catch (...) {
     return input;
   }
+#else
+  return RunOverlapRemovalImpl(input, eps);
+#endif
 }
 
 }  // namespace overlap_removal

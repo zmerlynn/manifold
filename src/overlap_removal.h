@@ -19,10 +19,10 @@
 // include/manifold/manifold.h, implemented in src/manifold.cpp via
 // RunOverlapRemoval below).
 //
-// Internal types + helpers - the per-stage data structures and the
-// BVH query helpers - live in src/overlap_removal_internal.h. That
-// header is for overlap_removal.cpp's own use and is not part of any
-// installed public API.
+// Internal types + the per-stage function seams live in
+// src/overlap_removal_internal.h - a test-only header, not part of
+// any installed public API; file-local kernels stay in
+// overlap_removal.cpp's anonymous namespace.
 
 #include "manifold/manifold.h"  // for Manifold
 
@@ -39,7 +39,9 @@ namespace overlap_removal {
 //
 // `eps` is optional: defaults to AlphaBudgetEpsilon(input.bbox_scale)
 // when 0 (= the production pipeline's choice). Callers that already
-// know their tolerance can pass it explicitly.
+// know their WORKING EPSILON can pass it explicitly (this is the
+// pipeline's computational scale, not the mesh tolerance - see the
+// eps contract in docs/OverlapRemoval.md).
 Manifold RunOverlapRemoval(const Manifold& input, double eps = 0.0);
 
 }  // namespace overlap_removal

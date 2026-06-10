@@ -22,7 +22,6 @@
 #include <utility>  // for std::pair
 #include <vector>
 
-#include "collider.h"           // for Collider, Box
 #include "manifold/common.h"    // vec3 alias
 #include "manifold/manifold.h"  // for Manifold
 
@@ -80,7 +79,7 @@ struct EdgeTriIntersection {
   int snapTo;     // -1 = new vert, >=0 = snap to existing vert
 };
 
-// A "chord" edge between two intersecting triangles. Step 7 phase 2
+// A "chord" edge between two intersecting triangles. Step 7
 // (GenerateChordEdges) generates one PiercedNewEdge per tri-tri
 // pair that has exactly 2 distinct endpoints from EdgeTriIntersection
 // events. The chord lies on both triA and triB and splits each into
@@ -147,7 +146,9 @@ struct MergeVertsResult {
 MergeVertsResult MergeVertsEps(const Manifold& in, double eps,
                                int maxIter = kMergeVertsMaxIter);
 
-// Step 2 of the pipeline: enumerate canonical edges of a Manifold's
+// Step 2 of the pipeline (the sketch's step 3 is subsumed by the
+// canonical-edge representation; numbering follows the sketch):
+// enumerate canonical edges of a Manifold's
 // Impl. Each undirected edge is represented once, with the canonical
 // "forward" halfedge (= the one whose startVert < endVert) and its
 // pair (-1 only on non-manifold edges). Order is deterministic.
@@ -185,7 +186,7 @@ std::vector<EdgeTriIntersection> FindEdgeTriIntersections(
     const std::vector<EdgeVertList>& onEdgeLists,
     const std::vector<TriVertList>& onTriLists, double eps);
 
-// Step 7 phase 2 of the pipeline: resolve etIsect events to vert
+// Step 7 of the pipeline: resolve etIsect events to vert
 // ids (snapping or allocating fresh), group by tri-tri pair, and
 // emit chord edges. Pairs with:
 //   - 2 endpoints -> new chord edge between the two pierce points.
@@ -248,7 +249,7 @@ struct TraceChordResult {
   // radius (eps for pre-existing pool entries; the capped
   // eps / sin(angle) of the crossing for step-6.5 allocations,
   // widened when a dedup hit claims more). Step 9.5 uses it for the
-  // new-onto-original snap, closing the review-found gap where one
+  // new-onto-original snap, closing the gap where one
   // pair corner-snaps an ill-conditioned crossing while the partner
   // pair allocates - leaving twins (10 eps, condR] apart.
   std::vector<double> newVertSnapR;
@@ -405,7 +406,7 @@ Step9Threading ResolveAndThreadClusters(
 // TraceChordResult::newVertSnapR) widens the new-onto-original snap
 // for verts whose allocation was ill-conditioned. Deliberately NO
 // default argument: the driver must pass the threaded radii, and a
-// default would let that handoff sever silently (review finding) -
+// default would let that handoff sever silently -
 // callers with no radii pass {} explicitly.
 struct UnifyResult {
   int changed = 0;
@@ -621,7 +622,8 @@ struct SelfIntersectionResult {
 };
 
 SelfIntersectionResult CheckSelfIntersection(const Manifold& m,
-                                             double relTol = 1e-12);
+                                             double relTol = 1e-12 /* =
+                                                 kPipelineRelTol */);
 
 // Final-gate helper (pre-emit): true if any EDGE-CONNECTED component
 // of folded polygons (front cell == back cell, grouped by fold cell +

@@ -2791,6 +2791,26 @@ TEST(OverlapRemoval, Step13FoldedOppositeShellsDoNotCancel) {
   }
 }
 
+TEST(OverlapRemoval, Step1MergeLargeClusterConverges) {
+  // A whole high-resolution sphere inside one eps-cluster at a large
+  // coordinate: thousands of members collapse to one centroid. Sums
+  // of many near-equal doubles are not bit-idempotent, so without the
+  // collapsed-cluster skip the recomputed centroid can keep drifting
+  // an ULP per pass toward the iteration cap (drift length depends on
+  // the exact (count, value) pair, so this pins the CLASS - large
+  // cluster, high coordinate - rather than one drift trace; the
+  // structural guarantee is the skip itself).
+  Manifold ball =
+      Manifold::Sphere(1e-9, 64).Translate({774996.8, 774996.8, 774996.8});
+  ASSERT_EQ(ball.Status(), Manifold::Error::NoError);
+  const size_t n = ball.GetMeshGL64().NumVert();
+  ASSERT_GT(n, 1000u);
+  const overlap_removal::MergeVertsResult r =
+      overlap_removal::MergeVertsEps(ball, 1e-3);  // must not throw
+  EXPECT_EQ(r.mergedCount, static_cast<int>(n) - 1);
+  EXPECT_LT(r.maxMove, 1e-6);  // members moved at most ~the sphere size
+}
+
 TEST(OverlapRemoval, Step13FoldedMembranePassesBentOpenFoldTrips) {
   // The gate's other two documented arms, directly. (a) A FLAT folded
   // membrane (coplanar open sheet) encloses no volume about its own
@@ -2886,6 +2906,48 @@ Manifold::Impl MakeTwoTriImpl(const manifold::vec3 t1[3],
     for (int k = 0; k < 3; ++k) impl.halfedge_.push_back(t[k], -1, -1);
   }
   return impl;
+}
+
+TEST(OverlapRemoval, Step65SourceGatedDedupKeepsDistinctPoolVert) {
+  // The source-gated trace dedup, pinned: an ill-conditioned crossing
+  // (condR ~ 50 eps from a near-parallel pair) must NOT absorb a
+  // pre-existing well-conditioned pool vert in the (eps, condR] band -
+  // the pool entry's recorded radius (eps) gates the match to
+  // min(condR, eps). A regression to a bare condR radius would weld
+  // them. T2's long edge runs nearly parallel to T1's bottom edge
+  // (sin ~ 0.02), crossing it at ~(1.04, 0); the preseeded pool vert
+  // sits 2e-5 away (20 eps).
+  const double eps = 1e-6;
+  const double tolerance = eps;
+  const manifold::vec3 t1[3] = {{0, 0, 0}, {4, 0, 0}, {0, 4, 0}};
+  const manifold::vec3 t2[3] = {{1, 0.0008, 0}, {5, -0.0792, 0}, {0.9, -2, 0}};
+  Manifold::Impl impl = MakeTwoTriImpl(t1, t2);
+  const int baseId = static_cast<int>(impl.NumVert());  // 6: preseed id
+  const std::vector<overlap_removal::Edge> edges =
+      overlap_removal::EnumerateEdges(impl);
+  const std::vector<int> he2e =
+      overlap_removal::BuildHalfedgeToEdgeIndex(impl, edges);
+  const overlap_removal::TraceChordResult res =
+      overlap_removal::CoplanarTraceChords(
+          impl, edges, he2e, {{1.04 + 2e-5, 0.0, 0.0}}, tolerance, eps);
+  // The pool keeps the preseed plus TWO fresh crossings (near ~1.0 and
+  // far ~1.04) - the far crossing allocates instead of welding.
+  ASSERT_EQ(res.newVertPositions.size(), 3u);
+  for (const overlap_removal::PiercedNewEdge& ch : res.chords) {
+    EXPECT_NE(ch.v0, baseId) << "chord welded to the preseeded pool vert";
+    EXPECT_NE(ch.v1, baseId) << "chord welded to the preseeded pool vert";
+  }
+  // The far crossing's conditioned radius rode along (~eps / 0.02).
+  int farIdx = -1;
+  for (size_t j = 0; j < res.newVertPositions.size(); ++j) {
+    if (std::abs(res.newVertPositions[j].x - 1.04) < 1e-3 &&
+        j > 0) {  // skip the preseed itself
+      farIdx = static_cast<int>(j);
+    }
+  }
+  ASSERT_GE(farIdx, 1);
+  EXPECT_GT(res.newVertSnapR[farIdx], 4e-5);
+  EXPECT_LT(res.newVertSnapR[farIdx], 6e-5);
 }
 
 TEST(OverlapRemoval, Step6SnapBandIsBareEps) {

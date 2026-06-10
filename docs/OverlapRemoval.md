@@ -41,11 +41,15 @@ assumptions hold in doubles, and add no new algorithmic ideas.
 | gate | driver | folded-shell volume (pre-emit) + status / volume / pierce-monotonicity, else return input |
 
 The driver (`RunOverlapRemovalImpl`) composes these serially (per-face
-parallelization is an open follow-up; nothing is parallel yet) inside a
-try/catch that returns the input on any internal throw. EARLY-EXIT: if the
-combined chord list (transversal + trace) is empty, the input is returned
-bit-identical - this covers clean inputs, the all-pairs-dropped case, and
-pancake-free coplanar contact.
+parallelization is an open follow-up; nothing is parallel yet). Exceptions
+exist only in MANIFOLD_DEBUG builds (optional_assert.h defines the error
+types there; release manifold is exception-free and all RSI failure arms
+are status-based) - under MANIFOLD_DEBUG the entry point wraps the body in
+try/catch so a throwing assertion anywhere falls back to the input, the
+polygon.cpp guard pattern. EARLY-EXIT: if the combined chord list
+(transversal + trace) is empty, the input is returned bit-identical - this
+covers clean inputs, the all-pairs-dropped case, and pancake-free coplanar
+contact.
 
 ## House terminology and style (from the boolean2 review logs)
 
@@ -136,8 +140,10 @@ cutting the sketch implicitly assumes:
    equal-size face-glued solids pass through bit-identical.
 4. **Endpoint ids.** t = 0/1 endpoints use the source edge's vert id.
    Crossing endpoints snap to the nearest of the pair's six corners within
-   the CONDITIONED radius (max(tolerance + eps, eps/sin(angle)) capped -
-   nearest, ties to smallest id, the step-9 convention), else allocate,
+   max(tolerance + eps, the CAPPED conditioned radius eps/sin(angle)) -
+   the cap applies to the conditioned term only, so an inflated mesh
+   tolerance still widens the base - nearest, ties to smallest id (the
+   step-9 convention); else allocate,
    deduping new-to-new over the whole pool at the SOURCE-GATED radius
    min(this crossing's conditioned radius, the pool entry's recorded radius),
    eps-floored - an ill-conditioned crossing must not claim an unrelated
@@ -225,7 +231,7 @@ Steps 6.5, 7, and 9 each dedup their own allocations, but the same geometric
 point computed through two different frames lands up to ~10 * eps apart, and
 a pair of such twins subdivides a shared sub-edge inconsistently across faces.
 The unpaired sub-edges then read as open rims, whose ambient unification
-collapses the cell complex (observed: a handful of rims merged nearly every
+collapses the cell complex (observed: rim folds merged nearly every
 cell). One union-find sweep (`UnifyArrangementVerts`):
 
 - new-new pairs unite within 10 * eps (the merge-radius philosophy);
@@ -432,7 +438,8 @@ numbers go stale instantly; the suite is the source of truth.)
   and Boolean-result passthrough (bit-identical); the hull fixture (the
   trimaran fold class - pins the folded-shell gate's bit-identical
   fallback, see Known limitations); the ovoid dense-sliver fixture (falls
-  back via the BFS-disagreement guard, bit-identically); empty input;
+  back bit-identically - the outcome is pinned, not which internal
+  guard fires); empty input;
   idempotence
   (fallback fixed point + success-path monotonicity); determinism;
   far-from-origin (the same trimaran at scale: strict pierce reduction, all
@@ -455,7 +462,7 @@ numbers go stale instantly; the suite is the source of truth.)
    neighbors did not move with them. The class has two observed severities on
    the hull fixture (multiple disjoint hulls grazed by one mask):
    - **Micro-facet pierce residue**: input pierces run thousands of eps
-     deep; a successful rebuild leaves a few residual pierces tens of eps
+     deep; a successful rebuild leaves residual pierces tens of eps
      deep - above the 10x-eps output tolerance, inside the conditioned band
      of that corner.
    - **Folded shells**: the grazing contacts on the outrigger hulls leave
