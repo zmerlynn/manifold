@@ -439,8 +439,19 @@ behavior wanted: the BFS crosses the survivor with its own mult and
 the vanished pancake imposes no constraint.
 
 Absorbed edge classes (unchanged from v5, restated tighter):
-- Boundary-coincident intervals: now REJECTED at rule 3 (not emitted,
-  rather than emitted-and-absorbed).
+- Boundary-coincident intervals (riding the DST face's boundary): now
+  REJECTED at rule 3 (not emitted, rather than emitted-and-absorbed).
+- HOST-side riding (implementation finding): every emitted trace
+  chord rides its SOURCE edge by construction, and when that source
+  edge is the host face's own (subdivided) boundary, the chord would
+  double a directed edge there - and the walk's exact-tie handling of
+  doubles proved hes-ORDER-SENSITIVE on the hull fixture (the same
+  rider/interior pattern partitioned correctly in one chord order and
+  emitted an uncut quad in another). The partition now dedups chord
+  sub-edges against the face's own boundary sub-edges (skipped,
+  counted as boundaryRidingSubEdgesSkipped): riders contribute
+  nothing on their host and their real work - cutting the partner -
+  is untouched.
 - A fully inside B: A's edges qualify (interior midpoints), B's edges
   do not reach A's interior; B's partition carves the A-shaped hole;
   cancellation proceeds.
@@ -470,6 +481,39 @@ from their boundaries, so the first target almost always casts cleanly;
 slivers sort last instead of first. Deterministic given identical input
 order [I-D2]; no cast-math change. All-8-graze still falls back to the
 input (counted) - accepted.
+
+### Endgame: the conditioned-twin residue (implementation findings)
+
+Driving the hull fixture from 31 pierces toward 0 surfaced one class no
+radius policy closes. A shallow-incidence edge piercing TWO
+eps-separated coplanar sheets produces twin step-7 events that are
+geometrically REAL distinct points ~eps / sin(incidence) apart along
+the edge (observed: 44 eps), beside an original corner. The exact
+arrangement has a micro-triangle facet there; per-face FP partitions
+cannot produce it consistently, leaving 3 unpaired rim sub-edges (a
+micro-triangle of k = 1 fans) and 3 residual eps-overlap pierces.
+
+Experiments, all measured on the hull fixture:
+- step 9.5 sweep at 10 eps only: rims 21 -> 3, pierces 31 -> 3. The
+  STABLE operating point.
+- anchored original-vert snap at 16 eps: an exact angular tie
+  (half-collapsed coincidence); at 128 eps: rims 0 but pierces 7.
+- step-7 conditioned snap, isotropic ball: pierces 9; anisotropic
+  capsule (eps transverse, conditioned along the edge): rims 0,
+  pierces 7.
+The pattern is one-way: any snap beyond ~10 eps trades twin-rim holes
+for eps-overlap pierces, because moving a pierce vert tens of eps
+deforms kept geometry that its neighbors did not move with. The twins
+are not numerical duplicates to unify; they are the boundary of a
+micro-facet the partition fails to manufacture.
+
+Closing the class soundly needs one of: exact/extended-precision
+predicates for the micro-facet's local ordering (research-grade, the
+same family Emmett deferred), or a deliberate decision that the
+EXPECT_EQ(0) hull bar becomes EXPECT_LE(small documented residual) for
+the faithful pipeline (the old pipeline's 0 came from the demolished
+mesh-surgery scaffold). That is the user's call, queued with the
+post-implementation adversarial review.
 
 ### Increment plan (red-first; v6 reviewed)
 

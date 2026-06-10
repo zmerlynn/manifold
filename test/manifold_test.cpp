@@ -1782,8 +1782,7 @@ TEST(OverlapRemoval, Step10XCrossingPartitionsIntoFour) {
                                               {0.5, 0.5, 0.0},
                                               {1.0 / 3.0, 1.0 / 6.0, 0.0}};
   const overlap_removal::FacePartition part = overlap_removal::PartitionFace(
-      fx.impl, fx.face, fx.edges, fx.he2e, onEdgeLists, chords, {0, 1}, newPos,
-      fx.impl.faceNormal_);
+      fx.impl, fx.face, fx.edges, fx.he2e, onEdgeLists, chords, {0, 1}, newPos);
   ASSERT_EQ(part.polygons.size(), 4u);
   EXPECT_EQ(part.spursDropped, 0);
   std::multiset<size_t> sizes;
@@ -1808,8 +1807,7 @@ TEST(OverlapRemoval, Step10DanglingChordSpurDropped) {
       {{4, 5, fx.face, 99}, {}, {}}};  // p1 -> interior d, dangling
   const std::vector<manifold::vec3> newPos = {{0.5, 0.0, 0.0}, {0.3, 0.3, 0.0}};
   const overlap_removal::FacePartition part = overlap_removal::PartitionFace(
-      fx.impl, fx.face, fx.edges, fx.he2e, onEdgeLists, chords, {0}, newPos,
-      fx.impl.faceNormal_);
+      fx.impl, fx.face, fx.edges, fx.he2e, onEdgeLists, chords, {0}, newPos);
   ASSERT_EQ(part.polygons.size(), 1u);
   EXPECT_GE(part.spursDropped, 1);
   EXPECT_TRUE(Step10CycleIsSimple(part.polygons[0]));
@@ -1830,11 +1828,40 @@ TEST(OverlapRemoval, Step10CoincidentChordsDedup) {
       {{4, 5, fx.face, 99}, {}, {}}, {{4, 5, fx.face, 101}, {}, {}}};
   const std::vector<manifold::vec3> newPos = {{0.5, 0.0, 0.0}, {0.0, 0.5, 0.0}};
   const overlap_removal::FacePartition part = overlap_removal::PartitionFace(
-      fx.impl, fx.face, fx.edges, fx.he2e, onEdgeLists, chords, {0, 1}, newPos,
-      fx.impl.faceNormal_);
+      fx.impl, fx.face, fx.edges, fx.he2e, onEdgeLists, chords, {0, 1}, newPos);
   ASSERT_EQ(part.polygons.size(), 2u);
   for (const std::vector<int>& poly : part.polygons) {
     EXPECT_TRUE(Step10CycleIsSimple(poly));
+  }
+}
+
+TEST(OverlapRemoval, Step10BoundaryRidingChordsSkipped) {
+  // The hull pancake's host-side configuration: the face's boundary
+  // edge (A,B) is subdivided at vert 4, and three chords arrive as
+  // [rider {A,4}, interior {4,C}, rider {4,B}] - the order that made
+  // the doubled-directed-edge walk emit an uncut quad. Riders
+  // coincide with boundary sub-edges and are skipped (counted); the
+  // interior chord cuts the face into exactly two triangles
+  // regardless of chord order.
+  const Step10Fixture fx = MakeStep10Fixture();
+  ASSERT_GE(fx.face, 0);
+  std::vector<overlap_removal::EdgeVertList> onEdgeLists(fx.edges.size());
+  Step10AddOnEdge(fx, onEdgeLists, fx.A, fx.B, 4, {0.5, 0.0, 0.0});
+  const std::vector<overlap_removal::NewEdgeWithExtras> chords = {
+      {{std::min(fx.A, 4), std::max(fx.A, 4), fx.face, 99}, {}, {}},
+      {{std::min(4, fx.C), std::max(4, fx.C), fx.face, 99}, {}, {}},
+      {{std::min(4, fx.B), std::max(4, fx.B), fx.face, 99}, {}, {}}};
+  const std::vector<manifold::vec3> newPos = {{0.5, 0.0, 0.0}};
+  const overlap_removal::FacePartition part =
+      overlap_removal::PartitionFace(fx.impl, fx.face, fx.edges, fx.he2e,
+                                     onEdgeLists, chords, {0, 1, 2}, newPos);
+  EXPECT_EQ(part.boundaryRidingSubEdgesSkipped, 2);
+  ASSERT_EQ(part.polygons.size(), 2u);
+  for (const std::vector<int>& poly : part.polygons) {
+    EXPECT_EQ(poly.size(), 3u);
+    EXPECT_TRUE(Step10CycleIsSimple(poly));
+    EXPECT_EQ(std::count(poly.begin(), poly.end(), 4), 1) << "pierce vert";
+    EXPECT_EQ(std::count(poly.begin(), poly.end(), fx.C), 1) << "apex";
   }
 }
 
@@ -1849,16 +1876,14 @@ TEST(OverlapRemoval, Step10ZeroLengthChordSkippedAndCleanFace) {
       {{4, 4, fx.face, 99}, {}, {}}};
   const std::vector<manifold::vec3> newPos = {{0.5, 0.0, 0.0}};
   const overlap_removal::FacePartition part = overlap_removal::PartitionFace(
-      fx.impl, fx.face, fx.edges, fx.he2e, onEdgeLists, chords, {0}, newPos,
-      fx.impl.faceNormal_);
+      fx.impl, fx.face, fx.edges, fx.he2e, onEdgeLists, chords, {0}, newPos);
   ASSERT_EQ(part.polygons.size(), 1u);
   EXPECT_EQ(part.zeroLengthChordsSkipped, 1);
   EXPECT_EQ(part.polygons[0].size(), 3u);  // the bare corner cycle
   EXPECT_TRUE(Step10CycleIsSimple(part.polygons[0]));
 
   const overlap_removal::FacePartition clean = overlap_removal::PartitionFace(
-      fx.impl, fx.face, fx.edges, fx.he2e, onEdgeLists, {}, {}, {},
-      fx.impl.faceNormal_);
+      fx.impl, fx.face, fx.edges, fx.he2e, onEdgeLists, {}, {}, {});
   ASSERT_EQ(clean.polygons.size(), 1u);
   EXPECT_EQ(clean.polygons[0].size(), 3u);
 }
@@ -2205,6 +2230,39 @@ TEST(OverlapRemoval, Step13BookTwinPairingSplitsSharedEdge) {
   }
 }
 
+TEST(OverlapRemoval, Step95UnifyArrangementVerts) {
+  // Twins from two allocation paths 5 * eps apart, plus a new vert
+  // 3 * eps from an original corner: one sweep at the nearby-crossing
+  // radius (10 * eps) unifies both - smallest id wins, originals
+  // before new - and remaps chords (endpoint + extras with id-dedup)
+  // and on-edge lists (endpoint entries dropped).
+  const Step10Fixture fx = MakeStep10Fixture();
+  const double eps = 1e-6;
+  // baseId = 4 verts: ids 4, 5, 6.
+  const std::vector<manifold::vec3> newPos = {
+      {0.5, 0.25, 0.0},         // 4
+      {0.5 + 5e-6, 0.25, 0.0},  // 5: within 10 eps of 4 -> rep 4
+      {3e-6, 0.0, 0.0}};        // 6: within 10 eps of corner A -> A
+  std::vector<overlap_removal::EdgeVertList> onEdgeLists(fx.edges.size());
+  const int eAB = Step10EdgeIndex(fx.edges, fx.A, fx.B);
+  ASSERT_GE(eAB, 0);
+  onEdgeLists[eAB].verts = {6, 5};
+  onEdgeLists[eAB].ts = {0.1, 0.5};
+  std::vector<overlap_removal::NewEdgeWithExtras> chords = {
+      {{std::min(5, fx.C), std::max(5, fx.C), fx.face, 99}, {4}, {0.4}}};
+  const int changed = overlap_removal::UnifyArrangementVerts(
+      fx.impl, newPos, fx.edges, onEdgeLists, chords, eps);
+  EXPECT_EQ(changed, 2);  // 5 -> 4 and 6 -> A
+  EXPECT_EQ(std::min(chords[0].edge.v0, chords[0].edge.v1), fx.C);
+  EXPECT_EQ(std::max(chords[0].edge.v0, chords[0].edge.v1), 4);
+  // The extra that became an endpoint id is dropped.
+  EXPECT_TRUE(chords[0].extraVerts.empty());
+  // On-edge list: 6 remapped to corner A (an endpoint: dropped);
+  // 5 remapped to 4 (kept).
+  ASSERT_EQ(onEdgeLists[eAB].verts.size(), 1u);
+  EXPECT_EQ(onEdgeLists[eAB].verts[0], 4);
+}
+
 // ---- Step 6.5 coplanar trace chords (docs/Steps10to13Design.md v6) ----
 
 TEST(OverlapRemoval, Step65PancakeQuadTraceChords) {
@@ -2424,6 +2482,65 @@ TEST(Manifold, RemoveSelfIntersectionsSelfIntersectFixture) {
   EXPECT_LE(InteriorPierces(cleaned), InteriorPierces(result));
   EXPECT_GT(cleaned.Volume(), 0);
   EXPECT_LT(std::abs(cleaned.Volume() - inVol) / inVol, 0.05);
+}
+
+// Appends an axis-aligned box [lo, hi] as 8 fresh verts + 12 tris to
+// a raw MeshGL64 - a pure concatenation. (Manifold::Compose runs a
+// real boolean union here and would resolve touching faces before
+// RemoveSelfIntersections ever sees them; the constructor likewise
+// strips standalone zero-volume components, which is why the pancake
+// class has no standalone driver fixture - the hull fixture covers it
+// end to end.)
+void AppendBoxToMesh(MeshGL64& m, const vec3& lo, const vec3& hi) {
+  const uint64_t b = m.NumVert();
+  for (int i = 0; i < 8; ++i) {
+    m.vertProperties.push_back((i & 1) ? hi.x : lo.x);
+    m.vertProperties.push_back((i & 2) ? hi.y : lo.y);
+    m.vertProperties.push_back((i & 4) ? hi.z : lo.z);
+  }
+  const uint64_t tris[12][3] = {{0, 2, 3}, {0, 3, 1}, {4, 5, 7}, {4, 7, 6},
+                                {0, 1, 5}, {0, 5, 4}, {2, 7, 3}, {2, 6, 7},
+                                {0, 4, 6}, {0, 6, 2}, {1, 7, 5}, {1, 3, 7}};
+  for (const auto& t : tris) {
+    m.triVerts.push_back(b + t[0]);
+    m.triVerts.push_back(b + t[1]);
+    m.triVerts.push_back(b + t[2]);
+  }
+}
+
+TEST(Manifold, RemoveSelfIntersectionsGluedBoxes) {
+  // Two boxes glued face to face, built by raw mesh concatenation.
+  // (a) Equal faces: step 1's eps-merge unifies the duplicated corner
+  //     verts, the touching faces become exactly-equal opposite
+  //     cycles, but every clip interval rides the boundary - no
+  //     chords at all, and the early-exit returns the input
+  //     unchanged.
+  MeshGL64 mEq;
+  mEq.numProp = 3;
+  AppendBoxToMesh(mEq, {0, 0, 0}, {1, 1, 1});
+  AppendBoxToMesh(mEq, {1, 0, 0}, {2, 1, 1});
+  Manifold glued(mEq);
+  ASSERT_EQ(glued.Status(), Manifold::Error::NoError);
+  Manifold cleanedEq = glued.RemoveSelfIntersections();
+  EXPECT_EQ(cleanedEq.Status(), Manifold::Error::NoError);
+  EXPECT_EQ(InteriorPierces(cleanedEq), 0);
+  EXPECT_NEAR(cleanedEq.Volume(), 2.0, 1e-9);
+  EXPECT_EQ(cleanedEq.NumTri(), glued.NumTri());  // early-exit, unchanged
+  // (b) A smaller box glued onto a larger face: the coincident
+  //     interior wall region separates winding 1|1 and DROPS - the
+  //     output is the winding-faithful welded solid (one component).
+  MeshGL64 mMix;
+  mMix.numProp = 3;
+  AppendBoxToMesh(mMix, {0, 0, 0}, {1, 1, 1});
+  AppendBoxToMesh(mMix, {1.0, 0.25, 0.25}, {1.5, 0.75, 0.75});
+  Manifold mixed(mMix);
+  ASSERT_EQ(mixed.Status(), Manifold::Error::NoError);
+  ASSERT_EQ(mixed.Decompose().size(), 2u);  // premise: two components in
+  Manifold cleanedMix = mixed.RemoveSelfIntersections();
+  EXPECT_EQ(cleanedMix.Status(), Manifold::Error::NoError);
+  EXPECT_EQ(InteriorPierces(cleanedMix), 0);
+  EXPECT_NEAR(cleanedMix.Volume(), 1.125, 1e-9);
+  EXPECT_EQ(cleanedMix.Decompose().size(), 1u);  // welded
 }
 
 TEST(Manifold, RemoveSelfIntersectionsEmptyInput) {

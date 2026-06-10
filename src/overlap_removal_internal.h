@@ -431,6 +431,29 @@ Step9Threading ResolveAndThreadClusters(
     const std::vector<ChordCrossing>& clusters,
     const std::vector<OnChordContact>& contacts, double tolerance, double eps);
 
+// ---- Step 9.5: arrangement-wide new-vert unification ----
+
+// Backstop dedup ACROSS allocation paths. Steps 6.5, 7, and 9 each
+// dedup their own allocations, but the same geometric point computed
+// through two different in-plane frames lands up to ~10 * eps apart
+// (the crossing's lever arm on long near-parallel edges), and a pair
+// of such twins subdivides a shared sub-edge inconsistently across
+// faces - the unpaired sub-edges then read as open rims, whose
+// ambient unification collapses the cell complex (observed: 21 rims
+// merged 14k polygons' cells into 3). One union-find sweep at the
+// nearby-crossing merge radius (10 * eps - the design's existing
+// "same point computed twice" constant) unites new-new pairs and
+// snaps new verts onto originals within the same radius (smallest id
+// wins, originals before new). Consumers are remapped in place:
+// chord endpoints, chord extras (id-dedup, endpoint drops), and
+// on-edge lists (id-dedup, endpoint drops, t re-sort). Returns the
+// number of ids remapped.
+int UnifyArrangementVerts(const Manifold::Impl& impl,
+                          const std::vector<vec3>& newVertPositions,
+                          const std::vector<Edge>& edges,
+                          std::vector<EdgeVertList>& onEdgeLists,
+                          std::vector<NewEdgeWithExtras>& chords, double eps);
+
 // ---- Steps 10-11: per-face partition (docs/Steps10to13Design.md) ----
 
 // Halfedge-id -> index into edges[] (both directions of an edge map
@@ -463,15 +486,23 @@ struct FacePartition {
   // exactly-collinear out-and-back walk). Dropped - their Newell
   // normal is undefined downstream.
   int degenerateCyclesDropped = 0;
+  // Chord sub-edges coinciding with the face's own (subdivided)
+  // boundary - step 6.5 trace chords riding their host's boundary
+  // while cutting the partner face. Skipped: doubling a directed
+  // edge makes the walk's exact-tie handling order-sensitive.
+  int boundaryRidingSubEdgesSkipped = 0;
 };
+// The walk frame derives from the face's OWN halfedge winding (NOT
+// the stored faceNormal_, which can oppose the winding on folded
+// self-intersecting sheets - that mirror turns the face-on-left walk
+// into a boundary-hugging walk).
 FacePartition PartitionFace(const Manifold::Impl& impl, int face,
                             const std::vector<Edge>& edges,
                             const std::vector<int>& edgeOfHalfedge,
                             const std::vector<EdgeVertList>& onEdgeLists,
                             const std::vector<NewEdgeWithExtras>& chords,
                             const std::vector<int>& faceChords,
-                            const std::vector<vec3>& newVertPositions,
-                            VecView<const vec3> faceNormals);
+                            const std::vector<vec3>& newVertPositions);
 
 // ---- Step 12: canonical polygon merge (docs/Steps10to13Design.md) ----
 

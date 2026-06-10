@@ -100,7 +100,19 @@ constexpr int kEarClipGuard = 4096;
 //   component ratios - so casts into typical axis-aligned inputs
 //   avoid edge/vert grazes on the first try. Unit to ~4 digits;
 //   only its genericity and ~1 magnitude matter.
+// kSeedCastMaxTargets: seed-cast target retries per cell-graph
+//   component. Targets are tried in descending-area order, so the
+//   budget only matters when the biggest polygons all graze - 8 is
+//   generous headroom over the observed 1-2.
+// kCondSnapCapEps: cap, in eps units, on the condition-aware
+//   corner-snap radius for trace-chord crossings (step 6.5). A
+//   crossing's position error scales as eps / sin(angle) between the
+//   two edge lines; near-parallel boundaries at a near-triple-point
+//   corner were observed to need ~80 eps. 128 covers that with
+//   headroom while keeping the snap local.
 const vec3 kSeedCastDir(0.278773, 0.581753, 0.764101);
+constexpr int kSeedCastMaxTargets = 8;
+constexpr double kCondSnapCapEps = 128.0;
 
 // Deterministic orthonormal in-plane basis for a unit face normal - a
 // true isometry, so a kernel's 2D eps equals the pipeline's 3D eps
@@ -524,11 +536,23 @@ std::vector<EdgeTriIntersection> FindEdgeTriIntersections(
         bw <= kBarycentricFloor)
       return;
 
+    // Snap to the NEAREST existing vert within eps (ties to smallest
+    // id - order-independent, unlike first-found). Wider conditioned
+    // radii were tried for the shallow-incidence twin-event class and
+    // rejected: a pierce through eps-separated stacked sheets puts
+    // its twin events tens of eps apart, but those are geometrically
+    // REAL distinct points - snapping across that span deforms the
+    // arrangement and trades the twin rims for eps-overlap pierces
+    // (31 -> 7/9 instead of -> 3 on the hull fixture).
     int snapTo = -1;
+    double snapBest = eps2;
     auto trySnap = [&](int v) {
-      if (snapTo >= 0) return;
       const vec3 dd = pos - impl.vertPos_[v];
-      if (dot(dd, dd) <= eps2) snapTo = v;
+      const double d2 = dot(dd, dd);
+      if (d2 < snapBest || (d2 == snapBest && snapTo >= 0 && v < snapTo)) {
+        snapBest = d2;
+        snapTo = v;
+      }
     };
     trySnap(edge.v0);
     trySnap(edge.v1);
@@ -924,8 +948,29 @@ TraceChordResult CoplanarTraceChords(const Manifold::Impl& impl,
             grazeReject = true;
             break;
           }
+          // Condition-aware corner snap: the crossing's position
+          // error scales as eps / sin(angle) of the two edge lines
+          // (the lever arm of near-parallel boundaries at a near-
+          // triple-point corner), so the snap radius widens with the
+          // conditioning, capped at kCondSnapCapEps * eps. Well-
+          // conditioned crossings keep the step-9 radius.
+          double condR = tolerance + eps;
+          if (clipK[e] >= 0) {
+            const vec2 d1(q.x - p.x, q.y - p.y);
+            const vec2 d2(dst2[(clipK[e] + 1) % 3].x - dst2[clipK[e]].x,
+                          dst2[(clipK[e] + 1) % 3].y - dst2[clipK[e]].y);
+            const double l1 = std::sqrt(d1.x * d1.x + d1.y * d1.y);
+            const double l2 = std::sqrt(d2.x * d2.x + d2.y * d2.y);
+            const double crossAbs = std::fabs(d1.x * d2.y - d1.y * d2.x);
+            if (l1 > 0 && l2 > 0 && crossAbs > 0) {
+              condR = std::max(condR, std::min(eps * l1 * l2 / crossAbs,
+                                               kCondSnapCapEps * eps));
+            } else {
+              condR = std::max(condR, kCondSnapCapEps * eps);
+            }
+          }
           int best = -1;
-          double bestD = tolerance + eps;
+          double bestD = condR;
           for (int c = 0; c < 6; ++c) {
             const int vid = c < 3 ? triVert(fa, c) : triVert(fb, c - 3);
             const vec3 dv = (c < 3 ? av[c] : bv[c - 3]) - x3;
@@ -939,10 +984,15 @@ TraceChordResult CoplanarTraceChords(const Manifold::Impl& impl,
             ids[e] = best;
             continue;
           }
+          // New-to-new dedup at the CONDITIONED radius: the same
+          // geometric crossing computed through two pairs' frames
+          // diverges by the same eps / sin(angle) lever arm, so twins
+          // of an ill-conditioned crossing land well beyond eps.
           int found = -1;
+          const double dedupR = std::max(eps, condR);
           for (size_t j = 0; j < out.newVertPositions.size(); ++j) {
             const vec3 dv = out.newVertPositions[j] - x3;
-            if (std::sqrt(dot(dv, dv)) <= eps) {
+            if (std::sqrt(dot(dv, dv)) <= dedupR) {
               found = baseId + static_cast<int>(j);
               break;
             }
@@ -1038,6 +1088,136 @@ void AddVertsToOnEdgeLists(const std::vector<OnEdgeAddition>& additions,
     list.verts = std::move(sortedV);
     list.ts = std::move(sortedT);
   }
+}
+
+int UnifyArrangementVerts(const Manifold::Impl& impl,
+                          const std::vector<vec3>& newVertPositions,
+                          const std::vector<Edge>& edges,
+                          std::vector<EdgeVertList>& onEdgeLists,
+                          std::vector<NewEdgeWithExtras>& chords, double eps) {
+  using la::dot;
+  const int baseId = static_cast<int>(impl.NumVert());
+  const int nNew = static_cast<int>(newVertPositions.size());
+  if (nNew == 0) return 0;
+  // One radius for both passes: the nearby-crossing merge radius
+  // (10 * eps), uniting new-new pairs (frame-to-frame spread of one
+  // computed point) and snapping new verts onto nearby originals.
+  // Ill-conditioned event twins beyond this radius are unified at
+  // their SOURCE with the per-event conditioned snap radius (steps
+  // 6.5 and 7), not by widening this sweep - blanket radii either
+  // left rims (10 eps) or rounded real geometry into corners and
+  // re-pierced (128 eps).
+  const double radius = 10.0 * eps;
+  const double radius2 = radius * radius;
+  const double snapR = radius;
+  const double snapR2 = snapR * snapR;
+
+  // Broad phase over the new verts; new-new self-collisions unite,
+  // and each ORIGINAL vert within the snap radius becomes a snap
+  // candidate for the new clusters (smallest original id wins).
+  std::vector<Box> newBoxes(nNew);
+  const double half = 0.5 * snapR;
+  for (int i = 0; i < nNew; ++i) {
+    const vec3& p = newVertPositions[i];
+    newBoxes[i] = Box(vec3(p.x - half, p.y - half, p.z - half),
+                      vec3(p.x + half, p.y + half, p.z + half));
+  }
+  SortedBVH bvh =
+      BuildSortedBVH(VecView<const Box>(newBoxes.data(), newBoxes.size()));
+  DisjointSets uf(static_cast<uint32_t>(nNew));
+  auto unitePair = [&](size_t qi, size_t li) {
+    if (qi >= li) return;
+    const int a = static_cast<int>(bvh.perm[qi]);
+    const int b = static_cast<int>(bvh.perm[li]);
+    const vec3 d = newVertPositions[a] - newVertPositions[b];
+    if (dot(d, d) <= radius2) {
+      uf.unite(static_cast<uint32_t>(a), static_cast<uint32_t>(b));
+    }
+  };
+  auto recorder = MakeSimpleRecorder(unitePair);
+  auto qf = [&](int i) { return bvh.boxes[i]; };
+  bvh.collider.Collisions<false>(recorder, qf, nNew, /*parallel=*/false);
+
+  std::vector<int> snapTo(nNew, -1);  // [new idx] -> original id
+  {
+    std::vector<Box> origBoxes(baseId);  // empty boxes overlap nothing
+    for (int v = 0; v < baseId; ++v) {
+      const vec3& p = impl.vertPos_[v];
+      if (!std::isfinite(p.x)) continue;  // unreferenced post-merge slots
+      origBoxes[v] = Box(vec3(p.x - half, p.y - half, p.z - half),
+                         vec3(p.x + half, p.y + half, p.z + half));
+    }
+    auto hit = [&](size_t qi, size_t li) {
+      const int v = static_cast<int>(qi);
+      const int j = static_cast<int>(bvh.perm[li]);
+      const vec3 d = newVertPositions[j] - impl.vertPos_[v];
+      if (dot(d, d) > snapR2) return;
+      if (snapTo[j] < 0 || v < snapTo[j]) snapTo[j] = v;
+    };
+    auto rec = MakeSimpleRecorder(hit);
+    auto qfOrig = [&](int i) { return origBoxes[i]; };
+    bvh.collider.Collisions<false>(rec, qfOrig, baseId, /*parallel=*/false);
+  }
+
+  // Cluster reps: the smallest snap-original anywhere in the cluster,
+  // else baseId + the smallest member index.
+  std::vector<int> repOriginal(nNew, -1);
+  std::vector<int> repMember(nNew, -1);
+  for (int i = 0; i < nNew; ++i) {
+    const int r = static_cast<int>(uf.find(static_cast<uint32_t>(i)));
+    if (repMember[r] < 0 || i < repMember[r]) repMember[r] = i;
+    if (snapTo[i] >= 0 && (repOriginal[r] < 0 || snapTo[i] < repOriginal[r])) {
+      repOriginal[r] = snapTo[i];
+    }
+  }
+  std::vector<int> remap(baseId + nNew);
+  std::iota(remap.begin(), remap.end(), 0);
+  int changed = 0;
+  for (int i = 0; i < nNew; ++i) {
+    const int r = static_cast<int>(uf.find(static_cast<uint32_t>(i)));
+    const int rep =
+        repOriginal[r] >= 0 ? repOriginal[r] : baseId + repMember[r];
+    if (rep != baseId + i) ++changed;
+    remap[baseId + i] = rep;
+  }
+  if (changed == 0) return 0;
+
+  // Remap consumers. Chord endpoints first; extras then dedup by id
+  // (keeping the first, lowest-t occurrence) and drop ids that became
+  // an endpoint.
+  for (NewEdgeWithExtras& nwe : chords) {
+    nwe.edge.v0 = remap[nwe.edge.v0];
+    nwe.edge.v1 = remap[nwe.edge.v1];
+    std::vector<int> vs;
+    std::vector<double> ts;
+    std::set<int> seen;
+    for (size_t i = 0; i < nwe.extraVerts.size(); ++i) {
+      const int v = remap[nwe.extraVerts[i]];
+      if (v == nwe.edge.v0 || v == nwe.edge.v1) continue;
+      if (!seen.insert(v).second) continue;
+      vs.push_back(v);
+      ts.push_back(nwe.extraTs[i]);
+    }
+    nwe.extraVerts = std::move(vs);
+    nwe.extraTs = std::move(ts);
+  }
+  for (size_t e = 0; e < onEdgeLists.size(); ++e) {
+    EdgeVertList& list = onEdgeLists[e];
+    if (list.verts.empty()) continue;
+    std::vector<int> vs;
+    std::vector<double> ts;
+    std::set<int> seen;
+    for (size_t i = 0; i < list.verts.size(); ++i) {
+      const int v = remap[list.verts[i]];
+      if (v == edges[e].v0 || v == edges[e].v1) continue;
+      if (!seen.insert(v).second) continue;
+      vs.push_back(v);
+      ts.push_back(list.ts[i]);
+    }
+    list.verts = std::move(vs);
+    list.ts = std::move(ts);
+  }
+  return changed;
 }
 
 std::vector<OnChordContact> FindOnChordEndpointContacts(
@@ -1453,15 +1633,25 @@ FacePartition PartitionFace(const Manifold::Impl& impl, int face,
                             const std::vector<EdgeVertList>& onEdgeLists,
                             const std::vector<NewEdgeWithExtras>& chords,
                             const std::vector<int>& faceChords,
-                            const std::vector<vec3>& newVertPositions,
-                            VecView<const vec3> faceNormals) {
+                            const std::vector<vec3>& newVertPositions) {
+  using la::cross;
   using la::dot;
   FacePartition out;
   const int baseId = static_cast<int>(impl.NumVert());
-  DEBUG_ASSERT(face >= 0 && static_cast<size_t>(face) < faceNormals.size(),
-               logicErr, "PartitionFace: face normal missing");
-  if (face < 0 || static_cast<size_t>(face) >= faceNormals.size()) return out;
-  const vec3 nRaw = faceNormals[face];
+  DEBUG_ASSERT(face >= 0 && static_cast<size_t>(face) < impl.NumTri(), logicErr,
+               "PartitionFace: face out of range");
+  if (face < 0 || static_cast<size_t>(face) >= impl.NumTri()) return out;
+  // The walk frame comes from the face's OWN halfedge winding, not
+  // the stored faceNormal_: on self-intersecting inputs (folded
+  // sheets) the stored normal can be OPPOSITE the winding, which
+  // mirrors the projection and turns the face-on-left walk into a
+  // boundary-hugging face-on-right walk (observed on the hull
+  // fixture). CCW about this normal IS the halfedge order, by
+  // construction.
+  const vec3 fp0 = impl.vertPos_[impl.halfedge_.Start(3 * face)];
+  const vec3 fp1 = impl.vertPos_[impl.halfedge_.Start(3 * face + 1)];
+  const vec3 fp2 = impl.vertPos_[impl.halfedge_.Start(3 * face + 2)];
+  const vec3 nRaw = cross(fp1 - fp0, fp2 - fp0);
   const double nLen2 = dot(nRaw, nRaw);
   if (nLen2 == 0) return out;
   const vec3 n = nRaw / std::sqrt(nLen2);
@@ -1477,11 +1667,18 @@ FacePartition PartitionFace(const Manifold::Impl& impl, int face,
   // Directed sub-edges of the face graph. Original edges contribute
   // one halfedge per sub-edge along the face's CCW winding; chords
   // contribute BOTH directions, deduped per face by undirected vert
-  // pair (coincident chords otherwise create exact angular ties).
+  // pair (coincident chords otherwise create exact angular ties) AND
+  // against the face's own boundary sub-edges: a trace chord riding a
+  // subdivided boundary (step 6.5 cuts the PARTNER face; on its host
+  // the segment coincides with the boundary) would double a directed
+  // edge, and the walk's exact-tie handling of the doubles is
+  // hes-order-sensitive - skipping riders keeps the walk total and
+  // order-independent.
   struct SubHalfedge {
     int start, end;
   };
   std::vector<SubHalfedge> hes;
+  std::set<std::pair<int, int>> boundarySub;
   for (int k = 0; k < 3; ++k) {
     const Halfedge he = impl.halfedge_.Get(3 * face + k);
     const int a = he.startVert;
@@ -1502,6 +1699,8 @@ FacePartition PartitionFace(const Manifold::Impl& impl, int face,
     for (size_t i = 0; i + 1 < seq.size(); ++i) {
       if (seq[i] == seq[i + 1]) continue;  // snapped duplicates
       hes.push_back({seq[i], seq[i + 1]});
+      boundarySub.insert(
+          {std::min(seq[i], seq[i + 1]), std::max(seq[i], seq[i + 1])});
     }
   }
   std::set<std::pair<int, int>> seenSub;
@@ -1519,7 +1718,12 @@ FacePartition PartitionFace(const Manifold::Impl& impl, int face,
       const int a = seq[i];
       const int b = seq[i + 1];
       if (a == b) continue;
-      if (!seenSub.insert({std::min(a, b), std::max(a, b)}).second) continue;
+      const std::pair<int, int> key{std::min(a, b), std::max(a, b)};
+      if (boundarySub.count(key)) {
+        ++out.boundaryRidingSubEdgesSkipped;
+        continue;
+      }
+      if (!seenSub.insert(key).second) continue;
       hes.push_back({a, b});
       hes.push_back({b, a});
     }
@@ -1780,44 +1984,15 @@ CellComplex BuildCellComplex(const Manifold::Impl& impl,
   };
   for (auto& [key, entries] : fans) {
     std::sort(entries.begin(), entries.end(),
-              [&, &fanKey = key](const FanEntry& x, const FanEntry& y) {
+              [&](const FanEntry& x, const FanEntry& y) {
                 const int bx = bucketOf(x.dir2);
                 const int by = bucketOf(y.dir2);
                 if (bx != by) return bx < by;
                 const double c = x.dir2.x * y.dir2.y - x.dir2.y * y.dir2.x;
                 if (c != 0) return c > 0;
-                {  // TEMP DEBUG
-                  static int dumps = 0;
-                  if (dumps++ < 12) {
-                    const auto& px = polygons[x.polygon];
-                    const auto& py = polygons[y.polygon];
-                    fprintf(stderr,
-                            "RSI-TEMP: tie edge=(%d,%d) "
-                            "pA=%d(f%d m%d cw%d) pB=%d(f%d m%d cw%d) cycA=[",
-                            fanKey.first, fanKey.second, x.polygon, px.face,
-                            px.mult, (int)x.frontCcw, y.polygon, py.face,
-                            py.mult, (int)y.frontCcw);
-                    for (int v : px.cycle) fprintf(stderr, "%d ", v);
-                    fprintf(stderr, "] cycB=[");
-                    for (int v : py.cycle) fprintf(stderr, "%d ", v);
-                    fprintf(stderr, "]\n");
-                    for (int v : px.cycle) {
-                      const vec3 q = posOf(v);
-                      fprintf(stderr, "RSI-TEMP:   A %d (%.17g %.17g %.17g)\n",
-                              v, q.x, q.y, q.z);
-                    }
-                    for (int v : py.cycle) {
-                      const vec3 q = posOf(v);
-                      fprintf(stderr, "RSI-TEMP:   B %d (%.17g %.17g %.17g)\n",
-                              v, q.x, q.y, q.z);
-                    }
-                  }
-                }
-                // TEMP DEBUG: tie assert disabled to observe the
-                // downstream consequence; restore before commit.
-                // DEBUG_ASSERT(false, logicErr,
-                //              "BuildCellComplex: exact angular tie (step-12 "
-                //              "invariant failure)");
+                DEBUG_ASSERT(false, logicErr,
+                             "BuildCellComplex: exact angular tie (step-12 "
+                             "invariant failure)");
                 return x.polygon < y.polygon;
               });
   }
@@ -1950,6 +2125,7 @@ CellWinding ClassifyCells(const Manifold::Impl& impl,
   // impl's epsilon when it has one, else machine eps at the
   // arrangement's own scale.
   std::vector<vec3> normal(nP);
+  std::vector<double> polyArea2(nP, 0.0);  // (2 * area)^2, target ordering
   vec3 bbMin = posOf(polygons[0].cycle[0]);
   vec3 bbMax = bbMin;
   for (int p = 0; p < nP; ++p) {
@@ -1966,31 +2142,35 @@ CellWinding ClassifyCells(const Manifold::Impl& impl,
     const double len2 = dot(nsum, nsum);
     DEBUG_ASSERT(len2 > 0, logicErr, "ClassifyCells: degenerate polygon");
     normal[p] = len2 > 0 ? nsum / std::sqrt(len2) : vec3(0.0, 0.0, 1.0);
+    polyArea2[p] = len2;
   }
   const double scale = la::length(bbMax - bbMin);
   const double eps =
       std::max(impl.epsilon_, std::numeric_limits<double>::epsilon() * scale);
   const vec3 p0 = 0.5 * (bbMin + bbMax) + kSeedCastDir * (2.0 * scale);
 
-  // Ear triangulations (index triples into each cycle) for the cast's
-  // crossing tests and the targets' interior points. Triangle cycles
-  // skip Triangulate. TODO: reuse these for the emit's triangulation.
+  // Ear decomposition for the cast's crossing tests: a FAN from each
+  // cycle's first vert. Fan ears tile any simple polygon as a SIGNED
+  // winding decomposition (negative where a concavity puts the fan
+  // outside), and the cast kernel's direction-based step makes
+  // opposite-sign coverage cancel exactly - so the per-polygon
+  // crossing sum is right with no triangulator and no degeneracy
+  // checks (near-line sliver cycles made manifold::Triangulate's CCW
+  // check throw). Exactly-zero ears contribute exactly nothing and
+  // are skipped; near-zero ears stay and at worst graze a cast into
+  // its retry.
   std::vector<std::vector<ivec3>> ears(nP);
   for (int p = 0; p < nP; ++p) {
     const std::vector<int>& cyc = polygons[p].cycle;
-    if (cyc.size() == 3) {
-      ears[p] = {ivec3(0, 1, 2)};
-      continue;
-    }
-    const InPlaneBasis basis = FaceBasisFromNormal(normal[p]);
+    const int n = static_cast<int>(cyc.size());
     const vec3 origin = posOf(cyc[0]);
-    SimplePolygon poly2;
-    poly2.reserve(cyc.size());
-    for (const int v : cyc) {
-      const vec3 d = posOf(v) - origin;
-      poly2.push_back(vec2(dot(d, basis.u), dot(d, basis.v)));
+    for (int i = 1; i + 1 < n; ++i) {
+      const vec3 e1 = posOf(cyc[i]) - origin;
+      const vec3 e2 = posOf(cyc[i + 1]) - origin;
+      const vec3 c = cross(e1, e2);
+      if (dot(c, c) == 0.0) continue;  // exact-zero ear: contributes nothing
+      ears[p].push_back(ivec3(0, i, i + 1));
     }
-    ears[p] = Triangulate({poly2}, impl.epsilon_, true);
   }
 
   // Cell graph: polygon p joins its front cell (the +canonical-normal
@@ -2028,9 +2208,12 @@ CellWinding ClassifyCells(const Manifold::Impl& impl,
         }
       }
     }
-    // Separating polygons of this component, as cast targets. A
-    // component with none (a lone open sheet) needs no seed: its
-    // polygons are dropped whatever the winding.
+    // Separating polygons of this component, as cast targets, in
+    // DESCENDING-AREA order (ties to ascending polygon id): a big
+    // polygon's interior point sits far from its boundary, so the
+    // first target almost always casts cleanly; slivers sort last. A
+    // component with no separating polygon (a lone open sheet) needs
+    // no seed: its polygons are dropped whatever the winding.
     std::vector<int> candidates;
     for (int p = 0; p < nP; ++p) {
       if (compOf[cells.cellOf[2 * p]] == comp &&
@@ -2039,19 +2222,57 @@ CellWinding ClassifyCells(const Manifold::Impl& impl,
       }
     }
     if (candidates.empty()) continue;
+    std::sort(candidates.begin(), candidates.end(), [&](int a, int b) {
+      if (polyArea2[a] != polyArea2[b]) return polyArea2[a] > polyArea2[b];
+      return a < b;
+    });
     bool seeded = false;
     int tried = 0;
     for (const int q : candidates) {
-      if (tried == 3) break;
+      if (tried == kSeedCastMaxTargets) break;
       ++tried;
       ++out.seedCasts;
-      // Target: the centroid of q's first ear (a concave polygon's
-      // vert-centroid can fall outside it; an ear centroid cannot).
-      if (ears[q].empty()) continue;
-      const ivec3 ear = ears[q][0];
+      // Target: an interior point of q. Triangles use their centroid
+      // directly; longer cycles take the largest ear's centroid from
+      // a REAL triangulation (a concave polygon's vert-centroid - and
+      // a fan ear's - can fall outside it). A triangulator throw on a
+      // near-line sliver cycle just skips to the next target.
       const std::vector<int>& cyc = polygons[q].cycle;
-      const vec3 target =
-          (posOf(cyc[ear[0]]) + posOf(cyc[ear[1]]) + posOf(cyc[ear[2]])) / 3.0;
+      vec3 target;
+      if (cyc.size() == 3) {
+        target = (posOf(cyc[0]) + posOf(cyc[1]) + posOf(cyc[2])) / 3.0;
+      } else {
+        const InPlaneBasis basis = FaceBasisFromNormal(normal[q]);
+        const vec3 origin = posOf(cyc[0]);
+        SimplePolygon poly2;
+        poly2.reserve(cyc.size());
+        for (const int v : cyc) {
+          const vec3 d = posOf(v) - origin;
+          poly2.push_back(vec2(dot(d, basis.u), dot(d, basis.v)));
+        }
+        std::vector<ivec3> tris;
+        try {
+          tris = Triangulate({poly2}, std::max(impl.tolerance_, impl.epsilon_),
+                             true);
+        } catch (...) {
+          continue;
+        }
+        if (tris.empty()) continue;
+        double bestA = -1.0;
+        ivec3 best = tris[0];
+        for (const ivec3& t : tris) {
+          const vec2 a2 = poly2[t[1]] - poly2[t[0]];
+          const vec2 b2 = poly2[t[2]] - poly2[t[0]];
+          const double a = std::fabs(a2.x * b2.y - a2.y * b2.x);
+          if (a > bestA) {
+            bestA = a;
+            best = t;
+          }
+        }
+        target =
+            (posOf(cyc[best[0]]) + posOf(cyc[best[1]]) + posOf(cyc[best[2]])) /
+            3.0;
+      }
       // The cast must arrive transversally: P0 within eps of q's own
       // plane is a tangential arrival - retry.
       if (std::fabs(dot(p0 - target, normal[q])) <= eps) continue;
@@ -2064,8 +2285,10 @@ CellWinding ClassifyCells(const Manifold::Impl& impl,
       bool graze = false;
       for (int p = 0; p < nP && !graze; ++p) {
         if (p == q) continue;
-        int hits = 0;
-        int step = 0;
+        // SIGNED sum over the fan ears: where a concavity makes fan
+        // ears overlap, the opposite-orientation hits cancel exactly
+        // (the winding-decomposition argument behind the fan choice).
+        int stepSum = 0;
         for (const ivec3& e : ears[p]) {
           const CastResult r =
               CastSegmentAtEar(p0, target, posOf(polygons[p].cycle[e[0]]),
@@ -2075,17 +2298,9 @@ CellWinding ClassifyCells(const Manifold::Impl& impl,
             graze = true;
             break;
           }
-          if (r.kind == CastHit::kHit) {
-            ++hits;
-            step = r.step;
-          }
+          if (r.kind == CastHit::kHit) stepSum += r.step;
         }
-        // A segment meets a planar polygon's interior at most once
-        // (the plane crossing is a single point); a near-diagonal
-        // crossing grazes before it can double-count.
-        DEBUG_ASSERT(hits <= 1, logicErr,
-                     "ClassifyCells: multiple ear hits on one polygon");
-        if (hits > 0) wArr += step * polygons[p].mult;
+        if (!graze && stepSum != 0) wArr += stepSum * polygons[p].mult;
       }
       if (graze) continue;
       // Seed the side the segment arrives through: the front iff the
@@ -2523,17 +2738,46 @@ Manifold RunOverlapRemovalImpl(const Manifold& input, double eps) {
   const std::vector<EdgeTriIntersection> etIsects =
       FindEdgeTriIntersections(impl, edges, onEdgeLists, onTriLists, eps);
 
-  // Step 7: chords per tri-tri pair. EARLY-EXIT when none: covers
-  // both the clean-input case and the all-pairs-dropped case, and
-  // returns the input bit-identical.
+  // Step 7: chords per tri-tri pair.
   ChordEdges chordEdges = GenerateChordEdges(impl, edges, etIsects, eps);
+
+  // Step 6.5: coplanar trace chords - in-plane conformance for the
+  // eps-merge-flattened pancake class. Appended to the chord list
+  // BEFORE the early-exit, the per-face grouping, and step 8, so the
+  // whole arrangement machinery consumes them unchanged.
+  const std::vector<int> edgeOfHalfedge = BuildHalfedgeToEdgeIndex(impl, edges);
+  fprintf(stderr, "RSI-TEMP: pool after 7 = %zu\n",  // TEMP DEBUG
+          chordEdges.newVertPositions.size());
+  TraceChordResult trace = CoplanarTraceChords(
+      impl, edges, edgeOfHalfedge, std::move(chordEdges.newVertPositions),
+      tolerance, eps);
+  chordEdges.newVertPositions = std::move(trace.newVertPositions);
+  chordEdges.newEdges.insert(chordEdges.newEdges.end(), trace.chords.begin(),
+                             trace.chords.end());
+  fprintf(stderr, "RSI-TEMP: pool after 6.5 = %zu (baseId %d)\n",  // TEMP
+          chordEdges.newVertPositions.size(), baseId);
+  {  // TEMP DEBUG: trace chords incident to the hull tie faces.
+    for (const PiercedNewEdge& ch : trace.chords) {
+      if (ch.triA == 13843 || ch.triB == 13843 || ch.triA == 12273 ||
+          ch.triB == 12273 || ch.triA == 12275 || ch.triB == 12275) {
+        fprintf(stderr, "RSI-TEMP: trace chord {%d,%d} on (f%d,f%d)\n", ch.v0,
+                ch.v1, ch.triA, ch.triB);
+      }
+    }
+  }
+
+  // EARLY-EXIT when the COMBINED chord list is empty: covers the
+  // clean-input case (bit-identical return), the all-pairs-dropped
+  // case, and pancake-free coplanar contact.
   if (chordEdges.newEdges.empty()) {
     fprintf(stderr, "RSI-TEMP: early-exit (no chords)\n");  // TEMP DEBUG
     return input;
   }
 
-  // Pierce verts onto their piercing edges' on-edge lists, so the
-  // partition subdivides those halfedges at the pierce points.
+  // Boundary conformance for the trace crossings, then pierce verts
+  // onto their piercing edges' on-edge lists, so the partition
+  // subdivides those halfedges at the new verts.
+  AddVertsToOnEdgeLists(trace.onEdgeAdditions, onEdgeLists);
   PropagateNewVertsToOnEdgeLists(etIsects, chordEdges.resolvedIds, edges,
                                  onEdgeLists);
 
@@ -2554,19 +2798,67 @@ Manifold RunOverlapRemovalImpl(const Manifold& input, double eps) {
   const std::vector<ChordCrossing> clusters = MergeAndPropagateCrossings(
       impl, chords, chordEdges.newVertPositions, rawCrossings, chordsByFace,
       impl.faceNormal_, tolerance, eps);
-  const Step9Threading threaded = ResolveAndThreadClusters(
+  Step9Threading threaded = ResolveAndThreadClusters(
       impl, std::move(chords), std::move(chordEdges.newVertPositions), clusters,
       contacts, tolerance, eps);
+
+  // Step 9.5: unify new verts across allocation paths (the same
+  // geometric point computed through two frames lands up to ~10 * eps
+  // apart; unpaired twin sub-edges would read as open rims and
+  // collapse the cell complex).
+  const int unified =
+      UnifyArrangementVerts(impl, threaded.newVertPositions, edges, onEdgeLists,
+                            threaded.chords, eps);
+  fprintf(stderr,
+          "RSI-TEMP: unified %d new verts (baseId=%d pool=%zu)\n",  // TEMP
+          unified, baseId, threaded.newVertPositions.size());
 
   // Steps 10-11: partition every face (chordless faces still pick up
   // on-edge subdivision, so the arrangement conforms across shared
   // edges). TODO: parallelize per-face.
-  const std::vector<int> edgeOfHalfedge = BuildHalfedgeToEdgeIndex(impl, edges);
   std::vector<std::pair<int, std::vector<int>>> facePolygons;
   for (int f = 0; f < numTri; ++f) {
     FacePartition part = PartitionFace(
         impl, f, edges, edgeOfHalfedge, onEdgeLists, threaded.chords,
-        chordsByFace[f], threaded.newVertPositions, impl.faceNormal_);
+        chordsByFace[f], threaded.newVertPositions);
+    if (f == 13843) {  // TEMP DEBUG
+      const vec3 p0 = impl.vertPos_[impl.halfedge_.Start(3 * f)];
+      const vec3 p1 = impl.vertPos_[impl.halfedge_.Start(3 * f + 1)];
+      const vec3 p2 = impl.vertPos_[impl.halfedge_.Start(3 * f + 2)];
+      const vec3 wn = la::cross(p1 - p0, p2 - p0);
+      fprintf(stderr,
+              "RSI-TEMP: face %d cycle %d->%d->%d windingN=(%g,%g,%g) "
+              "storedN=(%g,%g,%g)\n",
+              f, impl.halfedge_.Start(3 * f), impl.halfedge_.Start(3 * f + 1),
+              impl.halfedge_.Start(3 * f + 2), wn.x, wn.y, wn.z,
+              impl.faceNormal_[f].x, impl.faceNormal_[f].y,
+              impl.faceNormal_[f].z);
+      fprintf(stderr, "RSI-TEMP: face %d boundary:", f);
+      for (int k = 0; k < 3; ++k) {
+        const int ei = edgeOfHalfedge[3 * f + k];
+        fprintf(stderr, " e(%d,%d)[", edges[ei].v0, edges[ei].v1);
+        for (size_t j = 0; j < onEdgeLists[ei].verts.size(); ++j) {
+          fprintf(stderr, "%d@%.4f ", onEdgeLists[ei].verts[j],
+                  onEdgeLists[ei].ts[j]);
+        }
+        fprintf(stderr, "]");
+      }
+      fprintf(stderr, "\nRSI-TEMP: face %d chords:", f);
+      for (const int ci : chordsByFace[f]) {
+        const NewEdgeWithExtras& ne = threaded.chords[ci];
+        fprintf(stderr, " {%d,%d x", ne.edge.v0, ne.edge.v1);
+        for (const int ev : ne.extraVerts) fprintf(stderr, "%d ", ev);
+        fprintf(stderr, "}");
+      }
+      fprintf(stderr, "\nRSI-TEMP: face %d -> %zu polys (riders %d):", f,
+              part.polygons.size(), part.boundaryRidingSubEdgesSkipped);
+      for (const std::vector<int>& cyc : part.polygons) {
+        fprintf(stderr, " [");
+        for (const int v : cyc) fprintf(stderr, "%d ", v);
+        fprintf(stderr, "]");
+      }
+      fprintf(stderr, "\n");
+    }
     for (std::vector<int>& cyc : part.polygons) {
       facePolygons.push_back({f, std::move(cyc)});
     }
@@ -2586,6 +2878,37 @@ Manifold RunOverlapRemovalImpl(const Manifold& input, double eps) {
       BuildCellComplex(impl, polys, threaded.newVertPositions);
   const CellWinding winding =
       ClassifyCells(impl, polys, threaded.newVertPositions, cellCx);
+  {  // TEMP DEBUG: classification shape
+    int separating = 0, kept = 0, k1fans = 0;
+    for (size_t p = 0; p < polys.size(); ++p) {
+      if (cellCx.cellOf[2 * p] != cellCx.cellOf[2 * p + 1]) ++separating;
+      if (winding.ok && winding.keep[p]) ++kept;
+    }
+    for (const EdgeFan& fan : cellCx.fans) {
+      if (fan.polygons.size() == 1) {
+        ++k1fans;
+        if (k1fans <= 8) {
+          const int bId = static_cast<int>(impl.NumVert());
+          const vec3 pa = GetPos3(fan.a, bId, impl, threaded.newVertPositions);
+          const vec3 pb = GetPos3(fan.b, bId, impl, threaded.newVertPositions);
+          fprintf(stderr,
+                  "RSI-TEMP: k1 rim (%d,%d) a=(%.17g,%.17g,%.17g) "
+                  "b=(%.17g,%.17g,%.17g) poly=%d face=%d\n",
+                  fan.a, fan.b, pa.x, pa.y, pa.z, pb.x, pb.y, pb.z,
+                  fan.polygons[0], polys[fan.polygons[0]].face);
+        }
+      }
+    }
+    std::map<int, int> whist;
+    for (const int w : winding.winding) ++whist[w];
+    fprintf(stderr,
+            "RSI-TEMP: classify polys=%zu cells=%d fans=%zu k1fans=%d "
+            "separating=%d kept=%d casts=%d ok=%d windings:",
+            polys.size(), cellCx.numCells, cellCx.fans.size(), k1fans,
+            separating, kept, winding.seedCasts, (int)winding.ok);
+    for (const auto& [w, c] : whist) fprintf(stderr, " %d:x%d", w, c);
+    fprintf(stderr, "\n");
+  }
   if (!winding.ok) {
     fprintf(stderr, "RSI-TEMP: fallback (classify !ok, casts=%d)\n",
             winding.seedCasts);  // TEMP DEBUG
@@ -2635,7 +2958,26 @@ Manifold RunOverlapRemovalImpl(const Manifold& input, double eps) {
       const vec3 d = ringPos[r] - origin;
       poly2.push_back(vec2(dot(d, basis.u), dot(d, basis.v)));
     }
-    const std::vector<ivec3> tris = Triangulate({poly2}, impl.epsilon_, true);
+    // Triangulate with epsilon-doubling retries: a kept cycle can
+    // carry micro-tails of original verts clustered above the step-1
+    // merge radius but below triangulable resolution (their ring ids
+    // are topologically pinned, so the cycle cannot be simplified).
+    // Widening epsilon moves the tail into the triangulator's own
+    // degenerate class; the resulting zero-area tris collapse at
+    // Manifold construction. Release builds return the same
+    // triangulation without the debug CCW check, so behavior matches.
+    std::vector<ivec3> tris;
+    double triEps = std::max(impl.tolerance_, impl.epsilon_);
+    bool triangulated = false;
+    for (int attempt = 0; attempt < 12 && !triangulated; ++attempt) {
+      try {
+        tris = Triangulate({poly2}, triEps, true);
+        triangulated = true;
+      } catch (...) {
+        triEps *= 2.0;
+      }
+    }
+    if (!triangulated) return input;  // give the gate its fallback
     for (const ivec3& t : tris) {
       outTris.push_back(ivec3(cyc[t[0]], cyc[t[1]], cyc[t[2]]));
     }
