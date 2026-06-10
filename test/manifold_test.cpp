@@ -1367,6 +1367,83 @@ TEST(OverlapRemoval, Step9FaceGateMergesDisjointPairs) {
   EXPECT_TRUE(threaded.chords[3].extraVerts.empty());  // outside c4's span
 }
 
+TEST(OverlapRemoval, Step9MergeReprojectsOntoHostFacePlane) {
+  // Multi-face cluster: crossing r0 hosts on face 7 (plane z = 0) and
+  // r1 on face 2 (plane x = 0.5); they unite via shared incident
+  // faces. host = min(7, 2) = 2, but members[0] is r0 - the plane
+  // POINT for re-projection must come from a member whose hosting
+  // face IS the host (r1), or the centroid is projected onto a plane
+  // through face 7's vertex with face 2's normal, landing on neither
+  // face (here x would collapse to 0 instead of staying 0.5).
+  const double eps = 1e-9;
+  const double tolerance = 1e-9;
+  Manifold::Impl impl;
+  std::vector<overlap_removal::NewEdgeWithExtras> chords = {
+      MakeChord(0, 1, 7, 9),   // c1 in z=0:    (0,0,0)-(1,0,0)
+      MakeChord(2, 3, 7, 11),  // c2 in z=0:    (0.5,-0.5,0)-(0.5,0.5,0)
+      MakeChord(4, 5, 2, 7),   // c3 in x=0.5:  (0.5,-0.5,5e-9)-(0.5,0.5,5e-9)
+      MakeChord(6, 7, 2, 9)};  // c4 in x=0.5:  varies z through y=0
+  std::vector<manifold::vec3> pos = {
+      {0.0, 0.0, 0.0},   {1.0, 0.0, 0.0},  {0.5, -0.5, 0.0}, {0.5, 0.5, 0.0},
+      {0.5, -0.5, 5e-9}, {0.5, 0.5, 5e-9}, {0.5, 0.0, -0.5}, {0.5, 0.0, 0.5}};
+  std::vector<std::vector<int>> byFace(8);
+  byFace[2] = {2, 3};
+  byFace[7] = {0, 1};
+  std::vector<manifold::vec3> normals(8, manifold::vec3(0.0, 0.0, 1.0));
+  normals[2] = manifold::vec3(1.0, 0.0, 0.0);
+  const manifold::VecView<const manifold::vec3> normalsView(normals.data(),
+                                                            normals.size());
+  std::vector<overlap_removal::ChordChordCrossing> raw =
+      overlap_removal::FindChordChordCrossings(impl, chords, pos, byFace,
+                                               normalsView, eps);
+  ASSERT_EQ(raw.size(), 2u);  // (c3,c4) at (0.5,0,5e-9); (c1,c2) at (0.5,0,0)
+  // FindChordChordCrossings emits raw ascending by face, which makes
+  // the first cluster member's face coincide with the host face. The
+  // merge must not DEPEND on that caller ordering - reverse it so the
+  // first member hosts on face 7 while the host face is 2.
+  std::reverse(raw.begin(), raw.end());
+  const std::vector<overlap_removal::ChordCrossing> merged =
+      overlap_removal::MergeAndPropagateCrossings(
+          impl, chords, pos, raw, byFace, normalsView, tolerance, eps);
+  ASSERT_EQ(merged.size(), 1u);              // shared incident faces unite
+  EXPECT_NEAR(merged[0].pos.x, 0.5, 1e-12);  // on the host plane, not x=0
+  EXPECT_NEAR(merged[0].pos.y, 0.0, 1e-12);
+}
+
+TEST(OverlapRemoval, Step9ThreadingPreservesStepEightExtras) {
+  // A pre-existing step-8 on-tri vert (id 4, t = 1e-9 - inside the
+  // endpoint-proximity zone the step-9 guard excludes) must survive a
+  // threading rebuild triggered by an unrelated crossing: the
+  // endpoint-zone guard applies to step-9-ADDED records only, not to
+  // verts step 8 already admitted under its weaker guard.
+  const double eps = 1e-9;
+  const double tolerance = 1e-9;
+  Manifold::Impl impl;
+  std::vector<overlap_removal::NewEdgeWithExtras> chords = {
+      MakeChord(0, 1, 0, 9), MakeChord(2, 3, 0, 11)};
+  chords[0].extraVerts = {4};
+  chords[0].extraTs = {1e-9};
+  std::vector<manifold::vec3> pos = {{0.0, 0.0, 0.0},
+                                     {1.0, 0.0, 0.0},
+                                     {0.5, -0.5, 0.0},
+                                     {0.5, 0.5, 0.0},
+                                     {1e-9, 0.0, 0.0}};
+  const std::vector<std::vector<int>> byFace = {{0, 1}};
+  const manifold::VecView<const manifold::vec3> normals(&kStep9FaceNormal, 1);
+  const std::vector<overlap_removal::ChordChordCrossing> raw =
+      overlap_removal::FindChordChordCrossings(impl, chords, pos, byFace,
+                                               normals, eps);
+  ASSERT_EQ(raw.size(), 1u);
+  const overlap_removal::Step9Threading threaded =
+      overlap_removal::ResolveAndThreadCrossings(
+          impl, std::move(chords), std::move(pos), raw, {}, tolerance, eps);
+  ASSERT_EQ(threaded.chords[0].extraVerts.size(), 2u);  // id 4 preserved
+  EXPECT_EQ(threaded.chords[0].extraVerts[0], 4);
+  EXPECT_EQ(threaded.chords[0].extraVerts[1], 5);  // the fresh crossing id
+  ASSERT_EQ(threaded.chords[1].extraVerts.size(), 1u);
+  EXPECT_EQ(threaded.chords[1].extraVerts[0], 5);
+}
+
 // White-box interior-pierce count via the internal checker (external
 // linkage in the linked manifold library), used to assert the
 // pierce-monotonicity contract that the public API does not expose.

@@ -891,6 +891,12 @@ Step9Threading ResolveAndThreadClusters(
     const double len = std::sqrt(abLen2);
     const double tGuard = snap / len;
     const double tDedup = eps / len;
+    // Pre-existing step-8 extras were admitted under step 8's weaker
+    // t-guard; the step-9 endpoint-zone guard applies only to NEWLY
+    // added records (contacts + crossings), so a rebuild does not
+    // silently drop legitimate near-endpoint on-tri verts.
+    const std::set<int> preexisting(nwe.extraVerts.begin(),
+                                    nwe.extraVerts.end());
     std::vector<std::pair<double, int>> recs;
     recs.reserve(ids.size());
     std::set<int> seenIds;
@@ -899,7 +905,8 @@ Step9Threading ResolveAndThreadClusters(
       if (!seenIds.insert(id).second) continue;
       const vec3 p = GetPos3(id, baseId, impl, newVertPositions);
       const double t = dot(p - a, ab) / abLen2;
-      if (t <= tGuard || t >= 1.0 - tGuard) continue;
+      const bool isNew = preexisting.count(id) == 0;
+      if (isNew && (t <= tGuard || t >= 1.0 - tGuard)) continue;
       recs.push_back({t, id});
     }
     std::sort(recs.begin(), recs.end());
@@ -1014,7 +1021,19 @@ std::vector<ChordCrossing> MergeAndPropagateCrossings(
       const double nLen2 = dot(nRaw, nRaw);
       if (nLen2 > 0) {
         const vec3 nrm = nRaw / std::sqrt(nLen2);
-        const vec3 planePt = GetPos3(chords[raw[members[0]].chordA].edge.v0,
+        // The plane point must lie on the HOST face's plane: take it
+        // from the first member hosted there. raw need not arrive in
+        // face order, so members[0]'s hosting face can differ from
+        // host - pairing host's normal with another face's point would
+        // project the centroid onto neither plane.
+        uint32_t hostMember = members[0];
+        for (const uint32_t m : members) {
+          if (raw[m].face == host) {
+            hostMember = m;
+            break;
+          }
+        }
+        const vec3 planePt = GetPos3(chords[raw[hostMember].chordA].edge.v0,
                                      baseId, impl, newVertPositions);
         centroid = centroid - dot(centroid - planePt, nrm) * nrm;
       }

@@ -1,9 +1,11 @@
-# Step 9 design v5: chord-chord crossings within each triangle
+# Step 9 design v6: chord-chord crossings within each triangle
 
 Working doc for the faithful #289 rebuild. Not for upstream; lives in docs/ so
 review subagents can read it. Clean up before any PR.
 
-v5 incorporates four adversarial review rounds. Round 1: architecture (output
+v6 = v5 + round 5 (the post-implementation review): two code bugs fixed (the
+host-plane point rule and the guard-scope rule below), two clarifications, one
+documented known-hole. v5 incorporates four adversarial review rounds. Round 1: architecture (output
 struct, kernel choice, k>=3 merge). Round 2: contract (kernel drops
 near-endpoint crossings; id-dedup; tolerance+eps; re-projection; stableEdgeId).
 Round 3: identity (the split-identity band -> the resolve-then-allocate rule;
@@ -114,9 +116,15 @@ extraVerts may now contain ids >= baseId. `GetPos3` handles both ranges; add
 3. **Collect raw crossings** (no ids yet): `{pos, ci, cj, tA, tB}`.
 4. **Nearby-crossing merge** (boolean2's nearby-intersection merge analog):
    union-find over raw crossings; unite when (structural) the two crossings
-   share a face AND (geometric) within 10*eps. Cluster position = centroid
-   (summed in ascending member order), then RE-PROJECTED onto the face plane
-   (round 3: centroid drift must not leave the plane). Face-gate rationale: a
+   share an incident face AND (geometric) within 10*eps. A crossing's
+   incident faces = its hosting face plus both chords' face pairs (round-5
+   clarification). Cluster position = centroid (summed in ascending member
+   order), then RE-PROJECTED onto the HOST face plane (round 3: centroid
+   drift must not leave the plane) - host = the lowest hosting face among
+   members, and the plane POINT must come from a member hosted on that face
+   (round-5 code bug: raw input need not arrive in face order, so the first
+   member's face can differ from host; pairing host's normal with another
+   face's point projects onto neither plane). Face-gate rationale: a
    4-chord concurrence yields crossings (c1,c2) and (c3,c4) sharing no chord
    but sharing the face; the 10*eps geometric gate still bounds what can
    merge. 10*eps note for 3D: inherited from boolean2's measured constant
@@ -162,8 +170,14 @@ extraVerts may now contain ids >= baseId. `GetPos3` handles both ranges; add
      vertex sits at/beyond the endpoint, whose id is already present.
    - id-dedup over the UNIFIED list (keep the first occurrence; round-3
      finding 1c),
-   - sort by recomputed t, t-dedup at eps/len(chord) as the backstop,
+   - sort by recomputed t (equal t's break by ascending id; the t-dedup keeps
+     the first - round-5 clarification),
+   - t-dedup at eps/len(chord) as the backstop,
    - write into extraVerts/extraTs.
+   GUARD SCOPE (round-5 code bug): the endpoint-zone guard applies to
+   step-9-ADDED records (contacts + crossings) only. Pre-existing step-8
+   extras were admitted under step 8's weaker (0,1) guard and must survive a
+   rebuild - dropping them loses legitimate arrangement verts.
 
 ## eps contract
 
@@ -205,6 +219,13 @@ extraVerts may now contain ids >= baseId. `GetPos3` handles both ranges; add
   merge absorbs moderate cases; genuinely tangent chords resolve via pass 0 /
   collinear handling. Accepted limitation, documented.
 - Disjoint chords: nothing inserted.
+- KNOWN HOLE (round 5, accepted): when tolerance > 9*eps, two clusters can
+  sit within tolerance+eps of each other yet beyond the 10*eps merge radius;
+  the later cluster cannot snap to the earlier one's fresh id (fresh ids are
+  not candidates until threading), so two near-coincident verts can be
+  allocated. The t-dedup backstop collapses them only when both land on one
+  chord within eps/len. Revisit if the tolerance-inflated regime becomes a
+  target.
 
 ## Increments (implement + test in this order)
 
@@ -266,3 +287,13 @@ resolve-then-allocate (the split-identity band exists with k=1).
   this; R4 confirmed cascading snaps bounded and (ii) otherwise consistent.)
 - R1 minors: DEBUG_ASSERT in AddInteriorVertsToNewEdges; increment-(ii)
   fixture constraint (now also: (ii) includes resolution).
+- R5 (post-implementation review, 3 lanes): spec-conformance lane found full
+  conformance; correctness lane found the two code bugs above (host-plane
+  point; guard scope), both fixed red-first and pinned
+  (Step9MergeReprojectsOntoHostFacePlane,
+  Step9ThreadingPreservesStepEightExtras); the tolerance>9eps fresh-id hole
+  documented as accepted. Test-adequacy lane: 7/10 pinned cases covered;
+  remaining additions TODO before any PR - collinear-overlap (HIGH), mixed id
+  space with a real Impl / baseId>0 (MEDIUM-HIGH), explicit id-dedup,
+  t-reorder-after-snap, end-to-end five-function composition, 9x-eps
+  documented-collapse.
