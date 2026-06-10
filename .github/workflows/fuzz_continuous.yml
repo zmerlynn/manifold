@@ -147,18 +147,16 @@ jobs:
             -DMANIFOLD_PYBIND=OFF \
             -DCMAKE_C_COMPILER=clang \
             -DCMAKE_CXX_COMPILER=clang++ \
-            -DMANIFOLD_CROSS_SECTION=ON \
             -DFUZZTEST_COMPATIBILITY_MODE=libfuzzer \
             -DMANIFOLD_PAR=ON \
             -DMANIFOLD_USE_BUILTIN_TBB=ON \
             -DTBB_SANITIZE=address \
             -DFETCHCONTENT_SOURCE_DIR_FUZZTEST=fuzztest \
             . -B build
-          # Request the cross_section_fuzz target explicitly. If CMake's
-          # `if(MANIFOLD_CROSS_SECTION)` block in test/CMakeLists.txt
-          # silently didn't add the target (it has happened in cross-
-          # repo configurations), the build fails loudly here rather
-          # than silently producing no binary.
+          # Request the cross_section_fuzz target explicitly so a configure
+          # that silently drops the target (it has happened in cross-repo
+          # configurations) fails loudly here rather than producing no
+          # binary.
           ASAN_OPTIONS=detect_container_overflow=0 \
             cmake --build build -j$(nproc) --target cross_section_fuzz
 
