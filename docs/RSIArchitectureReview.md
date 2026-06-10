@@ -299,4 +299,147 @@ architecture-boundary redesign, not an algorithm redesign.
 
 ## Part 2: the branch reviewed against Part 1
 
-(Filled by the adversarial review pass.)
+Produced by two independent review lanes: a design-critique lane that
+attacked Part 1 itself (its corrections are folded into Part 1 above;
+section 2.5 records what changed), and a branch-vs-design mapping lane
+that walked the branch surface against the design. Codex mirror lanes
+pending. Classification: ARCHITECTURE-DEBT (design right, branch
+diverges, migration warranted), DELIBERATE-V1 (defensible documented
+reduction), FINE (conformant or equally house-faithful).
+
+### 2.1 Architecture debt
+
+- **D1 (keystone): the internal seam is Manifold-typed.**
+  `RunOverlapRemoval(const Manifold&, double)` forces everything
+  downstream of it: the friend declaration + capture-less-lambda
+  `LeafImplFn` access trick in manifold.h/overlap_removal.cpp; MeshGL64
+  as internal currency at all three sites (step-1 merge hints +
+  `Manifold(mesh)` reconstruction with its documented mergedCount==0
+  lossiness dodge; `CheckSelfIntersection` reading `GetMeshGL64()`;
+  emit via `Manifold(outMesh)`); `InferEps(const Manifold&)` for a
+  bbox the Impl holds directly; and output metadata policy riding the
+  ctor's empty-runOriginalID branch implicitly instead of an explicit
+  derived-posture assignment. One refactor (the Part 1 seam:
+  `optional<Impl> RemoveOverlaps(const Impl&, double, ctx*)`)
+  dissolves the whole set. Migration: L, the structural keystone;
+  everything else queues behind it. Behavior pinned by the suite
+  (full-field fallback identity, rebuild determinism, tolerance
+  formula); the mergedCount==0 dodge's REASON must survive even though
+  the special case itself dissolves on the Impl path.
+- **D2: no ExecutionContext anywhere.** The member loads no ctx; the
+  pipeline takes none; no `IsCancelled` poll at any stage boundary.
+  Member-side this matches `Simplify` (which also skips ctx), but RSI
+  is in the heavy class with Boolean3/RefineToLength, and a caller
+  attaching a context today gets silent non-cancellation. Migration: M,
+  after D1 (the seam carries the ctx). Cancellation lands as the
+  Cancelled-status Impl of Part 1, with new tests (none exist to pin
+  this today).
+- **D3: the diagnostic duplicates the broad phase.**
+  `CheckSelfIntersection` rebuilds a `SortedBVH` from serialized tris
+  per call; `Impl::IsSelfIntersecting` queries the stored `collider_`
+  with fresh `GetFaceBoxMorton` boxes. The PREDICATE difference is
+  load-bearing and stays (strict Moller-Trumbore pierce count/depth vs
+  conservative distance); the BVH construction and `GetMeshGL64` read
+  are pure overhead. Migration: M, after D1 - `SelfIntersections` on
+  Impl in properties.cpp as the documented sibling.
+- **D4: SortedBVH's 1-leaf branch wraps a host defect silently.** The
+  workaround comment does not point upstream; as written it reads as
+  permanent. S to reference an upstream issue (filing one is an
+  external action - user's call); M to actually fix `Collider`.
+- **D5: one ~3k-line file.** The stage seams already exist; the
+  src/cross_section/ package precedent fits RSI's size. Migration: M,
+  mechanical, best done after D1 settles the seam signatures.
+
+### 2.2 Deliberate v1 reductions
+
+- **V1: serial driver.** Fine as a v1 policy. The accumulation shape is
+  the debt edge: `facePolygons` / `outTris` grow by cross-iteration
+  push_back, so enabling `autoPolicy` parallelism is a restructure
+  (pre-sized per-face slots + gather), not a flip. Part 1 rules that
+  shape in from day one; the branch needs the restructure first.
+  Migration: M, last - only after the Impl pipeline is stable and
+  re-verified.
+- **V2: properties dropped (positions-only output).** Documented in the
+  public comment, and the v2 hook EXISTS in the data flow:
+  `MergedPolygon.face` carries the first contributor's source face, and
+  `EmitTopology::ring2Vert` preserves enough to resolve original-vs-new
+  per ring vert at emit time (a post-cancellation polygon can span
+  several source faces, so v2 interpolation resolves per vert, not per
+  polygon). Gap: nothing in the code names these as the v2 hook -
+  `face` reads as dead. S: a comment claiming the hook so a cleanup
+  sweep cannot delete it.
+- **V3: step-1 merge via MeshGL64 merge hints.** Defensible v1 per Part
+  1's revised 1.4: it delegates collapse/cleanup to the well-tested ctor
+  sweep instead of hand-owning those invariants. Becomes debt only when
+  D1 lands (the Impl-level `MergeVertsEps` then owns the sweep
+  explicitly and the lossiness dodge dissolves).
+
+### 2.3 Conformant
+
+- **F1: zero-parameter public API.** Matches revised Part 1 (the
+  working eps is an event-identity scale, not a Simplify-style budget;
+  surfacing it as `tolerance` would be a category error). The two tests
+  needing explicit eps use the internal seam - house white-box
+  precedent; that include loses its reason to exist only if a public
+  `epsilon` is ever deliberately surfaced.
+- **F2: fallback arms return the input bit-identically** at every site;
+  member-side status propagation is `PropagateStatus` first, identical
+  to Simplify.
+- **F3: AlphaBudgetEpsilon in shared.h** next to MaxEpsilon.
+- **F4: overlap_removal_internal.h test seams** (not installed),
+  matching the impl.h/execution_impl.h precedent.
+- **F5: container choices.** std::vector internals with `Vec`/`VecView`
+  at the Collider interface; std::map/set where deterministic order is
+  incidentally useful - all within house practice (boolean_result uses
+  std::map too).
+- **F6: per-face read isolation holds** (each PartitionFace reads only
+  its face's inputs plus read-only shared state) - the parallel-ready
+  half of 1.7 that is already true; only the write side (V1) lags.
+
+### 2.4 Unpinned behaviors a migration could silently regress
+
+- `OriginalID() == -1` on a rebuilt output (the derived posture). If a
+  D1 emit accidentally calls `InitializeOriginal()`, OriginalID() flips
+  to a fresh nonnegative id with no test failing today. Pin it (S).
+- Cancellation semantics: nothing to pin until D2 exists; D2 brings its
+  own tests.
+
+### 2.5 What the design critique changed in Part 1
+
+For provenance: the from-scratch design itself went through an
+adversarial pass before the branch was mapped against it. It corrected
+the member ctx idiom to the real `std::atomic_load(&ctx_)` +
+`GetCsgLeafNode(ctx.get())` pattern; replaced an ambiguous
+nullopt-for-everything seam with the three-outcome form (cancellation
+carries `Error::Cancelled` status, matching `ADVANCE_PHASE_OR_RETURN`,
+instead of masquerading as fallback); replaced a nonexistent
+`Impl::Finish()` with the actual MeshGL-ctor sweep, stage by stage;
+split `tolerance_` (measured bound) from `epsilon_` (bbox-derived,
+never the working eps); withdrew the public `tolerance` parameter as a
+category error; downgraded the direct-Impl merge from "simpler" to
+"owns the invariant sweep" (making the branch's hint path a defensible
+v1); corrected the diagnostic-family claim to the real collider_
+lifecycle; and replaced the false "today's loop shape already
+satisfies this" parallelism claim with the pre-sized-slot
+prescription. The branch's no-parameter public API and its hint-based
+merge were VINDICATED by this pass - two places the original draft of
+the design would have steered worse than what is built.
+
+### 2.6 Migration order
+
+1. Immediately (S, no dependencies): the V2 hook comment; the
+   D4 upstream-issue pointer (user files the issue); the
+   `OriginalID() == -1` pin.
+2. D1, the keystone (L). Everything routes through it.
+3. D2 ctx threading (M) - the new seam takes ctx on day one of D1, so
+   in practice D1+D2 land together.
+4. D3 diagnostic family (M).
+5. D5 file split (M) - after seam signatures settle.
+6. V1 write-shape restructure, then optional parallel policy (M, last).
+
+Recommendation on timing vs upstreaming: D1 (+D2 riding it) before the
+upstream PR - the seam is exactly what maintainers will review, and
+shipping the friend/lambda + serialization round-trips invites a
+mandatory rework round. D3/D4/D5/V1 are honest post-landing items with
+this document as the record. The S items cost nothing and tighten the
+PR story now.
