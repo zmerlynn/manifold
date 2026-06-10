@@ -243,7 +243,10 @@ cell). One union-find sweep (`UnifyArrangementVerts`):
 - consumers remap in place: chord endpoints, extras, and on-edge lists, with
   ids deduped, endpoint entries dropped, and ts RECOMPUTED from the remapped
   positions then re-sorted (a remap moves the consumed position; a stale
-  order would hand the partition a crossed sub-edge sequence).
+  order would hand the partition a crossed sub-edge sequence). A recomputed
+  t outside (0, 1) drops the entry: a representative landing past an edge or
+  chord endpoint subdivides nothing - the interior rule every on-edge and
+  on-chord builder applies.
 
 ## Steps 10-11: per-face partition
 

@@ -2768,15 +2768,19 @@ TEST(OverlapRemoval, Step9SnapRadiusReachesStep95) {
 }
 
 TEST(OverlapRemoval, Step95RemapPastEndpointDropsFromLists) {
-  // A unification representative can land PAST an edge endpoint: the
-  // on-edge member at t ~ 0.96 unifies with a twin that snaps to an
-  // original 0.04 BEYOND the edge's far end. The remapped entry's
-  // recomputed t > 1 must DROP from the on-edge list (it subdivides
-  // nothing) - retaining it would hand PartitionFace a boundary
-  // sequence stepping outside the face.
+  // A unification representative can land PAST an edge endpoint. The
+  // on-edge member at t = 0.98 unifies with a twin hanging beyond the
+  // edge's far end; the globally nearest (member, original) pair is
+  // (the twin, an original at x = 2.08) - NOT the edge endpoint, which
+  // would drop via the endpoint check and never reach the range
+  // filter (the first version of this fixture made that mistake and
+  // discriminated nothing). The remapped entry's recomputed t = 1.04
+  // must DROP from the on-edge list (it subdivides nothing) -
+  // retaining it would hand PartitionFace a boundary sequence
+  // stepping outside the face.
   Manifold::Impl impl;
-  const manifold::vec3 verts[6] = {{0.0, 0.0, 0.0},   {1.0, 0.0, 0.0},
-                                   {0.0, 10.0, 0.0},  {1.04, 0.0, 0.0},
+  const manifold::vec3 verts[6] = {{0.0, 0.0, 0.0},   {2.0, 0.0, 0.0},
+                                   {0.0, 10.0, 0.0},  {2.08, 0.0, 0.0},
                                    {10.0, 10.0, 0.0}, {-10.0, 5.0, 0.0}};
   for (const auto& v : verts) impl.vertPos_.push_back(v);
   const int tris[2][3] = {{0, 1, 2}, {3, 4, 5}};
@@ -2790,23 +2794,73 @@ TEST(OverlapRemoval, Step95RemapPastEndpointDropsFromLists) {
     if (edges[e].v0 == 0 && edges[e].v1 == 1) e01 = static_cast<int>(e);
   }
   ASSERT_GE(e01, 0);
-  const double eps = 0.005;  // 10 eps = 0.05
-  // New vert 6 on edge (0,1) at t 0.96; new vert 7 at x = 1.005, only
-  // 0.035 from original 3 (x = 1.04). 6 and 7 unify (0.045 apart);
-  // nearest original across members = 3, PAST the edge's far end.
-  const std::vector<manifold::vec3> newPos = {{0.96, 0.0, 0.0},
-                                              {1.005, 0.0, 0.0}};
+  const double eps = 0.01;  // 10 eps = 0.1
+  // New vert 6 ON edge (0,1) at x = 1.96 (t = 0.98; 0.04 from endpoint
+  // v1, 0.12 from v3); new vert 7 at x = 2.05 (0.05 from v1, 0.03 from
+  // v3). 6 and 7 unify (0.09 apart, inside the 0.1 radius). Nearest
+  // across members: (7 -> v3, 0.03) beats (6 -> v1, 0.04) ->
+  // representative v3 at x = 2.08, PAST the edge's far end.
+  const std::vector<manifold::vec3> newPos = {{1.96, 0.0, 0.0},
+                                              {2.05, 0.0, 0.0}};
   std::vector<overlap_removal::EdgeVertList> onEdgeLists(edges.size());
   onEdgeLists[e01].verts = {6};
-  onEdgeLists[e01].ts = {0.96};
+  onEdgeLists[e01].ts = {0.98};
   std::vector<overlap_removal::NewEdgeWithExtras> chords = {
       {{6, 7, 0, 1}, {}, {}}};
   const overlap_removal::UnifyResult r = overlap_removal::UnifyArrangementVerts(
       impl, newPos, edges, onEdgeLists, chords, eps, {});
   EXPECT_GE(r.changed, 1);
+  EXPECT_EQ(chords[0].edge.v0, 3);  // premise: representative is v3
+  EXPECT_EQ(chords[0].edge.v1, 3);
   // The remapped entry (now original 3, t = 1.04) is OFF the edge.
   EXPECT_TRUE(onEdgeLists[e01].verts.empty())
       << "representative past the endpoint stayed in the on-edge list";
+
+  // MIRROR (chord-extras site): a long chord from v0 to new vert 7
+  // threads 6 as an extra at t ~ 0.956; after 6 and 7 unify to v3,
+  // the extra's recomputed t exceeds 1 (v3 sits past the remapped far
+  // endpoint... the endpoint ALSO remapped to v3, so the extra drops
+  // by the endpoint rule first). Pin the genuinely-past case instead:
+  // chord v0 -> 6 with extra 7 (t ~ 1.046 against the remapped chord
+  // v0 -> v3): extra 7 remaps to v3 = the chord's own new endpoint -
+  // again endpoint-dropped. The chord-extras range filter is only
+  // reachable when the EXTRA's representative differs from both
+  // remapped endpoints yet projects outside; build exactly that: a
+  // SECOND original v6 past v3, a third new vert 8 near it, chord
+  // v0 -> 7 with extra 8.
+  Manifold::Impl impl2;
+  const manifold::vec3 verts2[7] = {
+      {0.0, 0.0, 0.0},   {2.0, 0.0, 0.0},   {0.0, 10.0, 0.0}, {2.08, 0.0, 0.0},
+      {10.0, 10.0, 0.0}, {-10.0, 5.0, 0.0}, {2.30, 0.0, 0.0}};
+  for (const auto& v : verts2) impl2.vertPos_.push_back(v);
+  // Two open tris referencing all 7 verts (6 used via tri2's slot).
+  impl2.halfedge_.push_back(0, -1, -1);
+  impl2.halfedge_.push_back(1, -1, -1);
+  impl2.halfedge_.push_back(2, -1, -1);
+  impl2.halfedge_.push_back(3, -1, -1);
+  impl2.halfedge_.push_back(4, -1, -1);
+  impl2.halfedge_.push_back(6, -1, -1);
+  const std::vector<overlap_removal::Edge> edges2 =
+      overlap_removal::EnumerateEdges(impl2);
+  // New verts: 7 at x = 2.20 (the chord's far endpoint, between v3
+  // and v6, snapping to NEITHER: 0.12 from v3, 0.10 from v6 - both
+  // outside 10 eps with eps = 0.005, radius 0.05); 8 at x = 2.26 and
+  // 9 at x = 2.305: 8 and 9 unify (0.045 < 0.05) and 9's nearest
+  // original v6 (0.005) wins across members -> 8 remaps to v6 at
+  // x = 2.30, past the chord's far endpoint (t = 2.30 / 2.20 > 1).
+  const double eps2 = 0.005;
+  const std::vector<manifold::vec3> newPos2 = {
+      {2.20, 0.0, 0.0}, {2.26, 0.0, 0.0}, {2.305, 0.0, 0.0}};
+  std::vector<overlap_removal::EdgeVertList> onEdge2(edges2.size());
+  std::vector<overlap_removal::NewEdgeWithExtras> chords2 = {
+      {{0, 7, 0, 1}, {8}, {2.26 / 2.20}}};
+  const overlap_removal::UnifyResult r2 =
+      overlap_removal::UnifyArrangementVerts(impl2, newPos2, edges2, onEdge2,
+                                             chords2, eps2, {});
+  EXPECT_GE(r2.changed, 1);
+  EXPECT_EQ(chords2[0].edge.v1, 7);  // chord endpoint did NOT remap
+  EXPECT_TRUE(chords2[0].extraVerts.empty())
+      << "extra's representative past the chord endpoint stayed threaded";
 }
 
 TEST(OverlapRemoval, Step95ClusterSnapsToNearestOriginalAcrossMembers) {

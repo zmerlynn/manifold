@@ -24,6 +24,7 @@
 
 #include "collider.h"
 #include "cross_section/boolean2/predicates.h"  // IntersectSegments (step 9)
+#include "csg_tree.h"  // CsgLeafNode (direct leaf-Impl access)
 #include "disjoint_sets.h"
 #include "impl.h"
 #include "manifold/polygon.h"  // for Triangulate
@@ -367,7 +368,10 @@ double SegmentPiercesTriInterior(vec3 a, vec3 b, vec3 v0, vec3 v1, vec3 v2,
 // stays a thin fail-closed wrapper (every stage it composes is
 // declared in overlap_removal_internal.h, so the definition can
 // live here ahead of the stage implementations).
-Manifold RunOverlapRemovalImpl(const Manifold& input, double eps) {
+using LeafImplFn = std::shared_ptr<const Manifold::Impl> (*)(const Manifold&);
+
+Manifold RunOverlapRemovalImpl(const Manifold& input, double eps,
+                               LeafImplFn leafImplOf) {
   using la::cross;
   using la::dot;
   if (input.IsEmpty()) return input;
@@ -382,9 +386,11 @@ Manifold RunOverlapRemovalImpl(const Manifold& input, double eps) {
   if (work.IsEmpty() || work.Status() != Manifold::Error::NoError) {
     return input;
   }
-  // Impl via the public GetMeshGL64 round-trip, for halfedge /
-  // face-normal access.
-  const Manifold::Impl impl = Manifold::Impl(work.GetMeshGL64());
+  // Direct leaf-Impl access (halfedge / face-normal) - no mesh
+  // round-trip; RunOverlapRemoval supplies the accessor it is
+  // befriended for.
+  const std::shared_ptr<const Manifold::Impl> pImpl = leafImplOf(work);
+  const Manifold::Impl& impl = *pImpl;
   const double tolerance = std::max(impl.tolerance_, eps);
   const int baseId = static_cast<int>(impl.NumVert());
   const int numTri = static_cast<int>(impl.NumTri());
@@ -3320,14 +3326,19 @@ Manifold RunOverlapRemoval(const Manifold& input, double eps) {
   // own Triangulate checks - falls back to the input, preserving
   // pierce-monotonicity; the guard pattern matches polygon.cpp's
   // TriangulateIdxHalfedges.
+  // Capture-less lambda: inherits this friend function's access to
+  // Manifold's private leaf accessor, decays to a plain pointer.
+  const LeafImplFn leafImplOf = [](const Manifold& m) {
+    return m.GetCsgLeafNode().GetImpl();
+  };
 #ifdef MANIFOLD_DEBUG
   try {
-    return RunOverlapRemovalImpl(input, eps);
+    return RunOverlapRemovalImpl(input, eps, leafImplOf);
   } catch (...) {
     return input;
   }
 #else
-  return RunOverlapRemovalImpl(input, eps);
+  return RunOverlapRemovalImpl(input, eps, leafImplOf);
 #endif
 }
 

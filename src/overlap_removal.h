@@ -37,7 +37,8 @@ namespace overlap_removal {
 // production source). Returns the rebuilt manifold, or the input
 // BIT-IDENTICALLY on the early-exit and every fallback path.
 //
-// `eps` is optional: defaults to AlphaBudgetEpsilon(input.bbox_scale)
+// `eps` is optional: defaults to
+// AlphaBudgetEpsilon(input.BoundingBox().Scale(), 1000)
 // when 0 (= the production pipeline's choice). Callers that already
 // know their WORKING EPSILON can pass it explicitly (this is the
 // pipeline's computational scale, not the mesh tolerance - see the
