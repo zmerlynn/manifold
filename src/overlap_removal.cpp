@@ -746,6 +746,7 @@ TraceChordResult CoplanarTraceChords(const Manifold::Impl& impl,
   using la::dot;
   TraceChordResult out;
   out.newVertPositions = std::move(newVertPositions);
+  out.newVertSnapR.assign(out.newVertPositions.size(), eps);
   const int numTri = static_cast<int>(impl.NumTri());
   const int baseId = static_cast<int>(impl.NumVert());
   if (numTri < 2) return out;
@@ -999,9 +1000,14 @@ TraceChordResult CoplanarTraceChords(const Manifold::Impl& impl,
           }
           if (found >= 0) {
             ids[e] = found;
+            // The widest conditioning claim wins (feeds step 9.5's
+            // new-onto-original snap).
+            out.newVertSnapR[found - baseId] =
+                std::max(out.newVertSnapR[found - baseId], condR);
           } else {
             ids[e] = baseId + static_cast<int>(out.newVertPositions.size());
             out.newVertPositions.push_back(x3);
+            out.newVertSnapR.push_back(condR);
           }
           isNew[e] = true;
         }
@@ -1094,29 +1100,33 @@ int UnifyArrangementVerts(const Manifold::Impl& impl,
                           const std::vector<vec3>& newVertPositions,
                           const std::vector<Edge>& edges,
                           std::vector<EdgeVertList>& onEdgeLists,
-                          std::vector<NewEdgeWithExtras>& chords, double eps) {
+                          std::vector<NewEdgeWithExtras>& chords, double eps,
+                          const std::vector<double>& perVertSnapR) {
   using la::dot;
   const int baseId = static_cast<int>(impl.NumVert());
   const int nNew = static_cast<int>(newVertPositions.size());
   if (nNew == 0) return 0;
-  // One radius for both passes: the nearby-crossing merge radius
-  // (10 * eps), uniting new-new pairs (frame-to-frame spread of one
-  // computed point) and snapping new verts onto nearby originals.
-  // Ill-conditioned event twins beyond this radius are unified at
-  // their SOURCE with the per-event conditioned snap radius (steps
-  // 6.5 and 7), not by widening this sweep - blanket radii either
-  // left rims (10 eps) or rounded real geometry into corners and
-  // re-pierced (128 eps).
+  // New-new pairs unite at the nearby-crossing merge radius (10 *
+  // eps - frame-to-frame spread of one computed point). New verts
+  // snap onto nearby originals at the same radius, widened PER VERT
+  // by its conditioned allocation radius (TraceChordResult::
+  // newVertSnapR) - blanket widening was tried and rejected: it
+  // rounded real geometry into corners and re-pierced.
   const double radius = 10.0 * eps;
   const double radius2 = radius * radius;
-  const double snapR = radius;
-  const double snapR2 = snapR * snapR;
+  auto vertSnapR = [&](int j) {
+    const double cond =
+        static_cast<size_t>(j) < perVertSnapR.size() ? perVertSnapR[j] : 0.0;
+    return std::max(radius, cond);
+  };
+  double maxSnapR = radius;
+  for (int j = 0; j < nNew; ++j) maxSnapR = std::max(maxSnapR, vertSnapR(j));
 
   // Broad phase over the new verts; new-new self-collisions unite,
-  // and each ORIGINAL vert within the snap radius becomes a snap
-  // candidate for the new clusters (smallest original id wins).
+  // and each ORIGINAL vert within a new vert's snap radius becomes a
+  // snap candidate for its cluster (smallest original id wins).
   std::vector<Box> newBoxes(nNew);
-  const double half = 0.5 * snapR;
+  const double half = 0.5 * maxSnapR;
   for (int i = 0; i < nNew; ++i) {
     const vec3& p = newVertPositions[i];
     newBoxes[i] = Box(vec3(p.x - half, p.y - half, p.z - half),
@@ -1151,7 +1161,8 @@ int UnifyArrangementVerts(const Manifold::Impl& impl,
       const int v = static_cast<int>(qi);
       const int j = static_cast<int>(bvh.perm[li]);
       const vec3 d = newVertPositions[j] - impl.vertPos_[v];
-      if (dot(d, d) > snapR2) return;
+      const double r = vertSnapR(j);
+      if (dot(d, d) > r * r) return;
       if (snapTo[j] < 0 || v < snapTo[j]) snapTo[j] = v;
     };
     auto rec = MakeSimpleRecorder(hit);
@@ -1183,21 +1194,45 @@ int UnifyArrangementVerts(const Manifold::Impl& impl,
   if (changed == 0) return 0;
 
   // Remap consumers. Chord endpoints first; extras then dedup by id
-  // (keeping the first, lowest-t occurrence) and drop ids that became
-  // an endpoint.
+  // and drop ids that became an endpoint. Ts are RECOMPUTED from the
+  // remapped positions and re-sorted (review finding: a remap moves
+  // the consumed position by up to the merge radius, and a stale t
+  // order would make the partition build a crossed sub-edge
+  // sequence).
+  auto posOf = [&](int id) {
+    return id < baseId ? impl.vertPos_[id] : newVertPositions[id - baseId];
+  };
+  auto resortByT = [](std::vector<int>& vs, std::vector<double>& ts) {
+    std::vector<size_t> perm(vs.size());
+    std::iota(perm.begin(), perm.end(), 0);
+    std::stable_sort(perm.begin(), perm.end(),
+                     [&](size_t x, size_t y) { return ts[x] < ts[y]; });
+    std::vector<int> sv(vs.size());
+    std::vector<double> st(ts.size());
+    for (size_t k = 0; k < perm.size(); ++k) {
+      sv[k] = vs[perm[k]];
+      st[k] = ts[perm[k]];
+    }
+    vs = std::move(sv);
+    ts = std::move(st);
+  };
   for (NewEdgeWithExtras& nwe : chords) {
     nwe.edge.v0 = remap[nwe.edge.v0];
     nwe.edge.v1 = remap[nwe.edge.v1];
     std::vector<int> vs;
     std::vector<double> ts;
     std::set<int> seen;
+    const vec3 c0 = posOf(nwe.edge.v0);
+    const vec3 cd = posOf(nwe.edge.v1) - c0;
+    const double cLen2 = dot(cd, cd);
     for (size_t i = 0; i < nwe.extraVerts.size(); ++i) {
       const int v = remap[nwe.extraVerts[i]];
       if (v == nwe.edge.v0 || v == nwe.edge.v1) continue;
       if (!seen.insert(v).second) continue;
       vs.push_back(v);
-      ts.push_back(nwe.extraTs[i]);
+      ts.push_back(cLen2 > 0 ? dot(posOf(v) - c0, cd) / cLen2 : nwe.extraTs[i]);
     }
+    resortByT(vs, ts);
     nwe.extraVerts = std::move(vs);
     nwe.extraTs = std::move(ts);
   }
@@ -1207,13 +1242,17 @@ int UnifyArrangementVerts(const Manifold::Impl& impl,
     std::vector<int> vs;
     std::vector<double> ts;
     std::set<int> seen;
+    const vec3 e0 = impl.vertPos_[edges[e].v0];
+    const vec3 ed = impl.vertPos_[edges[e].v1] - e0;
+    const double eLen2 = dot(ed, ed);
     for (size_t i = 0; i < list.verts.size(); ++i) {
       const int v = remap[list.verts[i]];
       if (v == edges[e].v0 || v == edges[e].v1) continue;
       if (!seen.insert(v).second) continue;
       vs.push_back(v);
-      ts.push_back(list.ts[i]);
+      ts.push_back(eLen2 > 0 ? dot(posOf(v) - e0, ed) / eLen2 : list.ts[i]);
     }
+    resortByT(vs, ts);
     list.verts = std::move(vs);
     list.ts = std::move(ts);
   }
@@ -2285,6 +2324,11 @@ CellWinding ClassifyCells(const Manifold::Impl& impl,
       bool graze = false;
       for (int p = 0; p < nP && !graze; ++p) {
         if (p == q) continue;
+        // An open sheet (front == back cell) separates nothing and is
+        // excluded from the BFS - the cast must skip it too, or the
+        // seeded winding disagrees with what propagates from it
+        // (review finding).
+        if (cells.cellOf[2 * p] == cells.cellOf[2 * p + 1]) continue;
         // SIGNED sum over the fan ears: where a concavity makes fan
         // ears overlap, the opposite-orientation hits cancel exactly
         // (the winding-decomposition argument behind the fan choice).
@@ -2317,9 +2361,15 @@ CellWinding ClassifyCells(const Manifold::Impl& impl,
             seen[d] = true;
             out.winding[d] = out.winding[c] + m;
             frontier.push_back(d);
-          } else {
-            DEBUG_ASSERT(out.winding[d] == out.winding[c] + m, logicErr,
+          } else if (out.winding[d] != out.winding[c] + m) {
+            // A disagreement means the arrangement is not the closed
+            // surface the propagation assumes - fail the
+            // classification in release too, so the driver falls
+            // back (review finding; matches BuildEmitTopology).
+            DEBUG_ASSERT(false, logicErr,
                          "ClassifyCells: winding propagation disagreement");
+            out.ok = false;
+            return out;
           }
         }
       }
@@ -2808,7 +2858,7 @@ Manifold RunOverlapRemovalImpl(const Manifold& input, double eps) {
   // collapse the cell complex).
   const int unified =
       UnifyArrangementVerts(impl, threaded.newVertPositions, edges, onEdgeLists,
-                            threaded.chords, eps);
+                            threaded.chords, eps, trace.newVertSnapR);
   fprintf(stderr,
           "RSI-TEMP: unified %d new verts (baseId=%d pool=%zu)\n",  // TEMP
           unified, baseId, threaded.newVertPositions.size());
@@ -2969,7 +3019,10 @@ Manifold RunOverlapRemovalImpl(const Manifold& input, double eps) {
     std::vector<ivec3> tris;
     double triEps = std::max(impl.tolerance_, impl.epsilon_);
     bool triangulated = false;
-    for (int attempt = 0; attempt < 12 && !triangulated; ++attempt) {
+    // Cap at 64x (review finding): far beyond that the CCW check
+    // passes CW triangles spanning REAL geometry, not just
+    // micro-tails, and the gate cannot be relied on to catch a mix.
+    for (int attempt = 0; attempt < 7 && !triangulated; ++attempt) {
       try {
         tris = Triangulate({poly2}, triEps, true);
         triangulated = true;

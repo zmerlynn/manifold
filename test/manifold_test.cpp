@@ -2148,6 +2148,35 @@ TEST(OverlapRemoval, Step13NestedCubesInnerFacesNotKept) {
   }
 }
 
+TEST(OverlapRemoval, Step13SeedCastSkipsMembranes) {
+  // Review finding: an open sheet (k = 1 rims unite its front and
+  // back - a membrane) separates nothing and is excluded from the
+  // winding BFS, so the seed cast must not count crossings of it
+  // either - else the seeded winding disagrees with what the BFS
+  // propagates from it. A huge membrane hangs between the cast
+  // source and the cube: with the bug the cube seeds at w = 2 and
+  // nothing is kept.
+  Manifold::Impl impl;
+  std::vector<manifold::vec3> pos;
+  std::vector<overlap_removal::MergedPolygon> polys;
+  AppendCubePolys(0.0, 1.0, pos, polys);  // polys 0-11
+  pos.push_back({-10.0, -10.0, 2.0});     // 8
+  pos.push_back({20.0, -10.0, 2.0});      // 9
+  pos.push_back({-10.0, 20.0, 2.0});      // 10
+  polys.push_back({{8, 9, 10}, 1, 0});    // poly 12: the membrane
+  const overlap_removal::CellComplex cc =
+      overlap_removal::BuildCellComplex(impl, polys, pos);
+  ASSERT_EQ(cc.numCells, 3);  // outside, inside, membrane (united)
+  ASSERT_EQ(cc.cellOf[2 * 12], cc.cellOf[2 * 12 + 1]);  // premise
+  const overlap_removal::CellWinding cw =
+      overlap_removal::ClassifyCells(impl, polys, pos, cc);
+  ASSERT_TRUE(cw.ok);
+  for (int p = 0; p < 12; ++p) {
+    EXPECT_TRUE(cw.keep[p]) << "cube poly " << p;
+  }
+  EXPECT_FALSE(cw.keep[12]);  // the membrane separates nothing
+}
+
 TEST(OverlapRemoval, Step13BookTwinPairingSplitsSharedEdge) {
   // Two boxes sharing exactly one arrangement edge (verts 3 and 7 at
   // x = y = 1): the shared fan carries 4 kept faces. Inside-wedge
@@ -2261,6 +2290,43 @@ TEST(OverlapRemoval, Step95UnifyArrangementVerts) {
   // 5 remapped to 4 (kept).
   ASSERT_EQ(onEdgeLists[eAB].verts.size(), 1u);
   EXPECT_EQ(onEdgeLists[eAB].verts[0], 4);
+}
+
+TEST(OverlapRemoval, Step95UnifyRecomputesAndResortsTs) {
+  // Review finding: remapping an extra's id moves its consumed
+  // POSITION by up to the merge radius, so stored ts go stale and
+  // two adjacent extras can invert their true order - the partition
+  // would then build a crossed sub-edge sequence. After unification,
+  // extras must carry ts recomputed from the remapped positions and
+  // be re-sorted.
+  const Step10Fixture fx = MakeStep10Fixture();
+  const double eps = 1e-2;  // merge radius 10 eps = 0.1
+  const int v0 = std::min(fx.A, fx.B);
+  const int v1 = std::max(fx.A, fx.B);
+  const manifold::vec3 a = fx.impl.vertPos_[v0];
+  const manifold::vec3 b = fx.impl.vertPos_[v1];
+  auto along = [&](double t, double off) {
+    manifold::vec3 p = a + t * (b - a);
+    p.y += off;  // transverse to the x-axis edge, in the z = 0 face
+    return p;
+  };
+  // baseId = 4: ids 4, 5, 6. Extra 5 (t 0.30) unifies with 4
+  // (t 0.345, smaller id wins), jumping PAST extra 6 (t 0.32, held
+  // 0.15 off-axis - outside both clusters in 3D, same projected t).
+  const std::vector<manifold::vec3> newPos = {
+      along(0.345, 0.0), along(0.30, 0.0), along(0.32, 0.15)};
+  std::vector<overlap_removal::EdgeVertList> onEdgeLists(fx.edges.size());
+  std::vector<overlap_removal::NewEdgeWithExtras> chords = {
+      {{v0, v1, fx.face, 99}, {5, 6}, {0.30, 0.32}}};
+  const int changed = overlap_removal::UnifyArrangementVerts(
+      fx.impl, newPos, fx.edges, onEdgeLists, chords, eps);
+  EXPECT_EQ(changed, 1);  // 5 -> 4 only
+  ASSERT_EQ(chords[0].extraVerts.size(), 2u);
+  EXPECT_EQ(chords[0].extraVerts[0], 6);  // t 0.32 now precedes
+  EXPECT_EQ(chords[0].extraVerts[1], 4);  // t 0.345
+  ASSERT_EQ(chords[0].extraTs.size(), 2u);
+  EXPECT_LT(chords[0].extraTs[0], chords[0].extraTs[1]);
+  EXPECT_NEAR(chords[0].extraTs[1], 0.345, 1e-9);
 }
 
 // ---- Step 6.5 coplanar trace chords (docs/Steps10to13Design.md v6) ----

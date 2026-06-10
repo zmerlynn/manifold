@@ -118,8 +118,11 @@ propagation over the arrangement's volume cells - the 3D lift of boolean2's
 `FilterByWindingHalfedges`.
 
 1. **Half-faces.** Each merged polygon has front (+normal) and back. SIGN
-   CONVENTION (pinned, used identically by the seed cast and the BFS):
-   crossing front-to-back changes w by -mult; back-to-front by +mult.
+   CONVENTION (pinned, used identically by the seed cast and the BFS;
+   corrected post-implementation - the original draft had it inverted):
+   crossing front-to-back changes w by +mult (moving AGAINST the normal
+   enters what the surface element wraps); back-to-front by -mult. Derived
+   and pinned by Step13CubeClassifyKeepsAllFaces.
 2. **Radial edge fans.** Per arrangement edge (undirected vert pair):
    collect incident polygon-sides; sort radially by the in-face direction
    (edge-perpendicular into the polygon; locally well-defined regardless of

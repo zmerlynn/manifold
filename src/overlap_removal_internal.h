@@ -318,6 +318,14 @@ struct TraceChordResult {
   std::vector<PiercedNewEdge> chords;
   std::vector<vec3> newVertPositions;  // input extended (taken by value)
   std::vector<OnEdgeAddition> onEdgeAdditions;  // deduped (edge, vertId)
+  // Parallel to newVertPositions: each new vert's conditioned snap
+  // radius (eps for pre-existing pool entries; the capped
+  // eps / sin(angle) of the crossing for step-6.5 allocations,
+  // widened when a dedup hit claims more). Step 9.5 uses it for the
+  // new-onto-original snap, closing the review-found gap where one
+  // pair corner-snaps an ill-conditioned crossing while the partner
+  // pair allocates - leaving twins (10 eps, condR] apart.
+  std::vector<double> newVertSnapR;
   int intervalsRejected = 0;  // boundary-riding / grazing / sub-eps
 };
 TraceChordResult CoplanarTraceChords(const Manifold::Impl& impl,
@@ -448,11 +456,15 @@ Step9Threading ResolveAndThreadClusters(
 // chord endpoints, chord extras (id-dedup, endpoint drops), and
 // on-edge lists (id-dedup, endpoint drops, t re-sort). Returns the
 // number of ids remapped.
+// `perVertSnapR` (optional, parallel prefix of newVertPositions; see
+// TraceChordResult::newVertSnapR) widens the new-onto-original snap
+// for verts whose allocation was ill-conditioned.
 int UnifyArrangementVerts(const Manifold::Impl& impl,
                           const std::vector<vec3>& newVertPositions,
                           const std::vector<Edge>& edges,
                           std::vector<EdgeVertList>& onEdgeLists,
-                          std::vector<NewEdgeWithExtras>& chords, double eps);
+                          std::vector<NewEdgeWithExtras>& chords, double eps,
+                          const std::vector<double>& perVertSnapR = {});
 
 // ---- Steps 10-11: per-face partition (docs/Steps10to13Design.md) ----
 
