@@ -811,31 +811,32 @@ std::vector<ChordChordCrossing> FindChordChordCrossings(
   return out;
 }
 
-Step9Threading ResolveAndThreadCrossings(
+Step9Threading ResolveAndThreadClusters(
     const Manifold::Impl& impl, std::vector<NewEdgeWithExtras> chords,
     std::vector<vec3> newVertPositions,
-    const std::vector<ChordChordCrossing>& raw,
+    const std::vector<ChordCrossing>& clusters,
     const std::vector<OnChordContact>& contacts, double tolerance, double eps) {
   using la::dot;
   const int baseId = static_cast<int>(impl.NumVert());
   const double snap = tolerance + eps;
   const double snap2 = snap * snap;
-  // Canonical-id resolution: resolve-then-allocate, per crossing,
-  // symmetric across both chords. Candidates are every existing vert
-  // the crossing could BE - chord endpoints, already-threaded on-chord
-  // verts, and the pass-0 contacts (not yet threaded at this point) -
-  // within tolerance + eps. Nearest wins; ties take the smallest id.
-  // Only when no candidate exists is a fresh vert allocated. This is
-  // what prevents a crossing threading as an endpoint id on one chord
-  // and a fresh id on the other (the split-identity bug).
+  // Canonical-id resolution: resolve-then-allocate, per cluster,
+  // symmetric across ALL incident chords. Candidates are every
+  // existing vert the crossing could BE - chord endpoints,
+  // already-threaded on-chord verts, and the pass-0 contacts (not yet
+  // threaded at this point) - within tolerance + eps. Nearest wins;
+  // ties take the smallest id. Only when no candidate exists is a
+  // fresh vert allocated. This is what prevents a crossing threading
+  // as an endpoint id on one chord and a fresh id on another (the
+  // split-identity bug).
   std::vector<ChordCrossing> crossings;
-  crossings.reserve(raw.size());
-  for (const ChordChordCrossing& rc : raw) {
+  crossings.reserve(clusters.size());
+  for (const ChordCrossing& cl : clusters) {
     int best = -1;
     double bestD2 = 0.0;
     auto consider = [&](int id) {
       const vec3 p = GetPos3(id, baseId, impl, newVertPositions);
-      const vec3 dv = rc.pos - p;
+      const vec3 dv = cl.pos - p;
       const double d2 = dot(dv, dv);
       if (d2 > snap2) return;
       if (best < 0 || d2 < bestD2 || (d2 == bestD2 && id < best)) {
@@ -843,21 +844,26 @@ Step9Threading ResolveAndThreadCrossings(
         bestD2 = d2;
       }
     };
-    for (const int side : {rc.chordA, rc.chordB}) {
+    for (const int side : cl.chords) {
       const PiercedNewEdge& e = chords[side].edge;
       consider(e.v0);
       consider(e.v1);
       for (const int v : chords[side].extraVerts) consider(v);
     }
     for (const OnChordContact& c : contacts) {
-      if (c.chord == rc.chordA || c.chord == rc.chordB) consider(c.vertId);
+      if (std::find(cl.chords.begin(), cl.chords.end(), c.chord) !=
+          cl.chords.end()) {
+        consider(c.vertId);
+      }
     }
     int id = best;
     if (id < 0) {
       id = baseId + static_cast<int>(newVertPositions.size());
-      newVertPositions.push_back(rc.pos);
+      newVertPositions.push_back(cl.pos);
     }
-    crossings.push_back({rc.pos, id, {rc.chordA, rc.chordB}, {rc.tA, rc.tB}});
+    ChordCrossing rec = cl;
+    rec.id = id;
+    crossings.push_back(std::move(rec));
   }
   // Threading: per chord, the unified record list (existing extras +
   // pass-0 contacts + resolved crossings), with every t RECOMPUTED
@@ -910,6 +916,153 @@ Step9Threading ResolveAndThreadCrossings(
     nwe.extraTs = std::move(outT);
   }
   return {std::move(chords), std::move(newVertPositions), std::move(crossings)};
+}
+
+Step9Threading ResolveAndThreadCrossings(
+    const Manifold::Impl& impl, std::vector<NewEdgeWithExtras> chords,
+    std::vector<vec3> newVertPositions,
+    const std::vector<ChordChordCrossing>& raw,
+    const std::vector<OnChordContact>& contacts, double tolerance, double eps) {
+  // Singleton-cluster delegation: each raw crossing is its own
+  // cluster (increment (ii) form; MergeAndPropagateCrossings supplies
+  // real clusters in the full pipeline).
+  std::vector<ChordCrossing> clusters;
+  clusters.reserve(raw.size());
+  for (const ChordChordCrossing& rc : raw) {
+    clusters.push_back({rc.pos, -1, {rc.chordA, rc.chordB}, {rc.tA, rc.tB}});
+  }
+  return ResolveAndThreadClusters(impl, std::move(chords),
+                                  std::move(newVertPositions), clusters,
+                                  contacts, tolerance, eps);
+}
+
+std::vector<ChordCrossing> MergeAndPropagateCrossings(
+    const Manifold::Impl& impl, const std::vector<NewEdgeWithExtras>& chords,
+    const std::vector<vec3>& newVertPositions,
+    const std::vector<ChordChordCrossing>& raw,
+    const std::vector<std::vector<int>>& chordsByFace,
+    VecView<const vec3> faceNormals, double tolerance, double eps) {
+  using la::dot;
+  std::vector<ChordCrossing> out;
+  if (raw.empty()) return out;
+  const int baseId = static_cast<int>(impl.NumVert());
+  const double snap = tolerance + eps;
+  // New-to-new merge radius, matching boolean2's
+  // kIntersectionMergeEpsFactor (covers shallow crossings to ~6 deg).
+  const double mergeR = 10.0 * eps;
+  const double mergeR2 = mergeR * mergeR;
+
+  // Incident faces of a raw crossing: the hosting face plus both
+  // chords' face pairs.
+  const uint32_t n = static_cast<uint32_t>(raw.size());
+  std::vector<std::set<int>> rcFaces(n);
+  for (uint32_t i = 0; i < n; ++i) {
+    rcFaces[i].insert(raw[i].face);
+    for (const int ch : {raw[i].chordA, raw[i].chordB}) {
+      rcFaces[i].insert(chords[ch].edge.triA);
+      rcFaces[i].insert(chords[ch].edge.triB);
+    }
+  }
+
+  // Face-gated union-find in sorted pair order: unite when the two
+  // crossings share an incident face AND lie within 10 * eps. The
+  // FACE gate (not a chord gate) is what unites a 4-chord concurrence
+  // whose two crossings share no chord.
+  DisjointSets uf(n);
+  for (uint32_t i = 0; i < n; ++i) {
+    for (uint32_t j = i + 1; j < n; ++j) {
+      const vec3 d = raw[i].pos - raw[j].pos;
+      if (dot(d, d) > mergeR2) continue;
+      bool shareFace = false;
+      for (const int f : rcFaces[i]) {
+        if (rcFaces[j].count(f) > 0) {
+          shareFace = true;
+          break;
+        }
+      }
+      if (!shareFace) continue;
+      uf.unite(i, j);
+    }
+  }
+
+  // Clusters keyed by their smallest member index, members ascending,
+  // so output order and centroid summation are deterministic.
+  std::map<uint32_t, uint32_t> minOfRoot;
+  for (uint32_t i = 0; i < n; ++i) {
+    const uint32_t r = uf.find(i);
+    auto it = minOfRoot.find(r);
+    if (it == minOfRoot.end()) minOfRoot[r] = i;
+  }
+  std::map<uint32_t, std::vector<uint32_t>> byMin;
+  for (uint32_t i = 0; i < n; ++i) {
+    byMin[minOfRoot[uf.find(i)]].push_back(i);
+  }
+
+  for (const auto& [minIdx, members] : byMin) {
+    // Centroid in ascending member order, then re-projected onto the
+    // hosting face plane (lowest hosting face) so the merged position
+    // does not drift out of plane.
+    vec3 centroid(0.0, 0.0, 0.0);
+    int host = raw[members[0]].face;
+    for (const uint32_t m : members) {
+      centroid = centroid + raw[m].pos;
+      host = std::min(host, raw[m].face);
+    }
+    centroid = centroid / static_cast<double>(members.size());
+    if (host >= 0 && static_cast<size_t>(host) < faceNormals.size()) {
+      const vec3 nRaw = faceNormals[host];
+      const double nLen2 = dot(nRaw, nRaw);
+      if (nLen2 > 0) {
+        const vec3 nrm = nRaw / std::sqrt(nLen2);
+        const vec3 planePt = GetPos3(chords[raw[members[0]].chordA].edge.v0,
+                                     baseId, impl, newVertPositions);
+        centroid = centroid - dot(centroid - planePt, nrm) * nrm;
+      }
+    }
+
+    // Incident chords from the members' producing pairs...
+    ChordCrossing cluster{centroid, -1, {}, {}};
+    std::set<int> seenChords;
+    auto addChord = [&](int ch, double t) {
+      if (!seenChords.insert(ch).second) return;
+      cluster.chords.push_back(ch);
+      cluster.ts.push_back(t);
+    };
+    for (const uint32_t m : members) {
+      addChord(raw[m].chordA, raw[m].tA);
+      addChord(raw[m].chordB, raw[m].tB);
+    }
+    // ...plus eager propagation: every chord incident to any involved
+    // face that the merged position lies on (point-to-segment <= eps,
+    // the pass-0 endpoint-zone t-guard re-applied), so a k-fold point
+    // lands on all k chords even when a pairwise crossing was missed.
+    std::set<int> faces;
+    for (const uint32_t m : members) {
+      faces.insert(rcFaces[m].begin(), rcFaces[m].end());
+    }
+    const double eps2 = eps * eps;
+    for (const int f : faces) {
+      if (f < 0 || static_cast<size_t>(f) >= chordsByFace.size()) continue;
+      for (const int ch : chordsByFace[f]) {
+        if (seenChords.count(ch) > 0) continue;
+        const PiercedNewEdge& e = chords[ch].edge;
+        const vec3 a = GetPos3(e.v0, baseId, impl, newVertPositions);
+        const vec3 b = GetPos3(e.v1, baseId, impl, newVertPositions);
+        const vec3 ab = b - a;
+        const double abLen2 = dot(ab, ab);
+        if (abLen2 == 0) continue;
+        const double tGuard = snap / std::sqrt(abLen2);
+        const double t = dot(centroid - a, ab) / abLen2;
+        if (t <= tGuard || t >= 1.0 - tGuard) continue;
+        const vec3 closest = a + ab * t;
+        const vec3 dv = centroid - closest;
+        if (dot(dv, dv) > eps2) continue;
+        addChord(ch, t);
+      }
+    }
+    out.push_back(std::move(cluster));
+  }
+  return out;
 }
 
 void PropagateNewVertsToOnEdgeLists(

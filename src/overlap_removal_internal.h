@@ -354,6 +354,34 @@ Step9Threading ResolveAndThreadCrossings(
     const std::vector<ChordChordCrossing>& raw,
     const std::vector<OnChordContact>& contacts, double tolerance, double eps);
 
+// Step 9 pass 4-5 (increment (iii)): the nearby-crossing merge and
+// eager propagation. Raw crossings unite (union-find, sorted pair
+// order) when they share an incident face AND lie within 10 * eps -
+// the face gate, not a chord gate, so a 4-chord concurrence whose two
+// crossings share no chord still merges. Cluster position is the
+// member centroid (ascending member order), re-projected onto the
+// hosting face plane. Propagation then tests the cluster position
+// against every chord incident to any involved face (point-to-segment
+// <= eps, the pass-0 endpoint-zone t-guard re-applied) so a k-fold
+// point lands on all k chords even when a pairwise crossing was
+// missed. Output clusters carry id == -1; ResolveAndThreadClusters
+// assigns canonical ids.
+std::vector<ChordCrossing> MergeAndPropagateCrossings(
+    const Manifold::Impl& impl, const std::vector<NewEdgeWithExtras>& chords,
+    const std::vector<vec3>& newVertPositions,
+    const std::vector<ChordChordCrossing>& raw,
+    const std::vector<std::vector<int>>& chordsByFace,
+    VecView<const vec3> faceNormals, double tolerance, double eps);
+
+// Cluster form of ResolveAndThreadCrossings: resolution + threading
+// over merged clusters (k incident chords). ResolveAndThreadCrossings
+// delegates here with singleton clusters.
+Step9Threading ResolveAndThreadClusters(
+    const Manifold::Impl& impl, std::vector<NewEdgeWithExtras> chords,
+    std::vector<vec3> newVertPositions,
+    const std::vector<ChordCrossing>& clusters,
+    const std::vector<OnChordContact>& contacts, double tolerance, double eps);
+
 // Step 10 of the pipeline: propagate etIsect resolved verts onto
 // their piercing edges' on-edge lists, so the polygon walker
 // subdivides those halfedges at the new pierce points. Skips verts

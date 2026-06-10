@@ -1281,6 +1281,92 @@ TEST(OverlapRemoval, Step9CrossingSeesPassZeroContacts) {
   EXPECT_EQ(threaded.chords[1].extraVerts[0], 4);
 }
 
+TEST(OverlapRemoval, Step9ThreeConcurrentChordsShareOneVert) {
+  // Three chords concurrent at (0.5, 0, 0): the three pairwise
+  // crossings must merge into ONE cluster, resolve to ONE fresh id,
+  // and thread exactly once onto each of the three chords.
+  const double eps = 1e-9;
+  const double tolerance = 1e-9;
+  Manifold::Impl impl;
+  std::vector<overlap_removal::NewEdgeWithExtras> chords = {
+      MakeChord(0, 1, 0, 9),    // (0,0,0)-(1,0,0)
+      MakeChord(2, 3, 0, 11),   // (0.5,-0.5,0)-(0.5,0.5,0)
+      MakeChord(4, 5, 0, 13)};  // (0,-0.5,0)-(1,0.5,0): y = x - 0.5
+  std::vector<manifold::vec3> pos = {{0.0, 0.0, 0.0},  {1.0, 0.0, 0.0},
+                                     {0.5, -0.5, 0.0}, {0.5, 0.5, 0.0},
+                                     {0.0, -0.5, 0.0}, {1.0, 0.5, 0.0}};
+  const std::vector<std::vector<int>> byFace = {{0, 1, 2}};
+  const manifold::VecView<const manifold::vec3> normals(&kStep9FaceNormal, 1);
+  const std::vector<overlap_removal::ChordChordCrossing> raw =
+      overlap_removal::FindChordChordCrossings(impl, chords, pos, byFace,
+                                               normals, eps);
+  ASSERT_EQ(raw.size(), 3u);  // all three pairs cross
+  const std::vector<overlap_removal::ChordCrossing> merged =
+      overlap_removal::MergeAndPropagateCrossings(
+          impl, chords, pos, raw, byFace, normals, tolerance, eps);
+  ASSERT_EQ(merged.size(), 1u);
+  EXPECT_EQ(merged[0].chords.size(), 3u);
+  const overlap_removal::Step9Threading threaded =
+      overlap_removal::ResolveAndThreadClusters(
+          impl, std::move(chords), std::move(pos), merged, {}, tolerance, eps);
+  ASSERT_EQ(threaded.crossings.size(), 1u);
+  EXPECT_EQ(threaded.crossings[0].id, 6);           // one fresh vert
+  EXPECT_EQ(threaded.newVertPositions.size(), 7u);  // exactly one allocation
+  for (int ci : {0, 1, 2}) {
+    ASSERT_EQ(threaded.chords[ci].extraVerts.size(), 1u) << "chord " << ci;
+    EXPECT_EQ(threaded.chords[ci].extraVerts[0], 6) << "chord " << ci;
+    EXPECT_NEAR(threaded.chords[ci].extraTs[0], 0.5, 1e-9) << "chord " << ci;
+  }
+}
+
+TEST(OverlapRemoval, Step9FaceGateMergesDisjointPairs) {
+  // The face-gate regression (design round 3): crossings (c1,c2) and
+  // (c3,c4) share NO chord - a chord-gated merge would leave two
+  // distinct verts 5e-12 apart at a genuine 4-chord concurrence. The
+  // face gate + 10x-eps radius must unite them; resolution then snaps
+  // to the strictly-nearest existing endpoint, c2's top (id 3, 0.5e-12
+  // from the centroid vs 1e-12 for c4's bottom).
+  const double eps = 1e-12;
+  const double tolerance = 1e-12;
+  Manifold::Impl impl;
+  std::vector<overlap_removal::NewEdgeWithExtras> chords = {
+      MakeChord(0, 1, 0, 9),    // c1: (0,0,0)-(1,0,0)
+      MakeChord(2, 3, 0, 11),   // c2: (0.5,-0.1,0)-(0.5,2e-12,0)
+      MakeChord(4, 5, 0, 13),   // c3: (0,5e-12,0)-(1,5e-12,0)
+      MakeChord(6, 7, 0, 15)};  // c4: (0.5,3.5e-12,0)-(0.5,0.6,0)
+  std::vector<manifold::vec3> pos = {{0.0, 0.0, 0.0},     {1.0, 0.0, 0.0},
+                                     {0.5, -0.1, 0.0},    {0.5, 2e-12, 0.0},
+                                     {0.0, 5e-12, 0.0},   {1.0, 5e-12, 0.0},
+                                     {0.5, 3.5e-12, 0.0}, {0.5, 0.6, 0.0}};
+  const std::vector<std::vector<int>> byFace = {{0, 1, 2, 3}};
+  const manifold::VecView<const manifold::vec3> normals(&kStep9FaceNormal, 1);
+  const std::vector<overlap_removal::OnChordContact> contacts =
+      overlap_removal::FindOnChordEndpointContacts(impl, chords, pos, byFace,
+                                                   tolerance, eps);
+  const std::vector<overlap_removal::ChordChordCrossing> raw =
+      overlap_removal::FindChordChordCrossings(impl, chords, pos, byFace,
+                                               normals, eps);
+  ASSERT_EQ(raw.size(), 2u);  // only (c1,c2) and (c3,c4) properly cross
+  EXPECT_TRUE(raw[0].chordA != raw[1].chordA && raw[0].chordB != raw[1].chordB);
+  const std::vector<overlap_removal::ChordCrossing> merged =
+      overlap_removal::MergeAndPropagateCrossings(
+          impl, chords, pos, raw, byFace, normals, tolerance, eps);
+  ASSERT_EQ(merged.size(), 1u);  // face gate united the disjoint pairs
+  const overlap_removal::Step9Threading threaded =
+      overlap_removal::ResolveAndThreadClusters(impl, std::move(chords),
+                                                std::move(pos), merged,
+                                                contacts, tolerance, eps);
+  ASSERT_EQ(threaded.crossings.size(), 1u);
+  EXPECT_EQ(threaded.crossings[0].id, 3);           // snapped: tie -> id 3
+  EXPECT_EQ(threaded.newVertPositions.size(), 8u);  // no allocation
+  ASSERT_EQ(threaded.chords[0].extraVerts.size(), 1u);
+  EXPECT_EQ(threaded.chords[0].extraVerts[0], 3);
+  EXPECT_TRUE(threaded.chords[1].extraVerts.empty());  // id 3 is c2's endpoint
+  ASSERT_EQ(threaded.chords[2].extraVerts.size(), 1u);
+  EXPECT_EQ(threaded.chords[2].extraVerts[0], 3);
+  EXPECT_TRUE(threaded.chords[3].extraVerts.empty());  // outside c4's span
+}
+
 // White-box interior-pierce count via the internal checker (external
 // linkage in the linked manifold library), used to assert the
 // pierce-monotonicity contract that the public API does not expose.
