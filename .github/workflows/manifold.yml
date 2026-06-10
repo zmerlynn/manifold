@@ -409,13 +409,20 @@ jobs:
         rev: f1e26613f66997aa09d3026762e275de22b2daae
     - name: Build
       run: |
+        # cross_section_fuzz asserts ASan+UBSan at compile time; fuzztest's
+        # fuzzing mode supplies ASan, so add UBSan alongside it here.
         cmake \
           -DCMAKE_BUILD_TYPE=RelWithDebInfo \
           -DMANIFOLD_STRICT=ON \
           -DMANIFOLD_DEBUG=ON \
           -DMANIFOLD_FUZZ=ON \
           -DMANIFOLD_PYBIND=OFF \
+          -DCMAKE_C_COMPILER=clang \
           -DCMAKE_CXX_COMPILER=clang++ \
+          -DCMAKE_C_FLAGS="-fsanitize=undefined" \
+          -DCMAKE_CXX_FLAGS="-fsanitize=undefined" \
+          -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=undefined" \
+          -DCMAKE_SHARED_LINKER_FLAGS="-fsanitize=undefined" \
           -DFETCHCONTENT_SOURCE_DIR_FUZZTEST=fuzztest \
           . -B build
         ASAN_OPTIONS=detect_container_overflow=0 cmake --build build
