@@ -1715,8 +1715,14 @@ UnifyResult UnifyArrangementVerts(const Manifold::Impl& impl,
       const int v = remap[nwe.extraVerts[i]];
       if (v == nwe.edge.v0 || v == nwe.edge.v1) continue;
       if (!seen.insert(v).second) continue;
+      const double t =
+          cLen2 > 0 ? dot(posOf(v) - c0, cd) / cLen2 : nwe.extraTs[i];
+      // A representative can land PAST a chord endpoint (the nearest
+      // original beyond it); outside (0, 1) it subdivides nothing -
+      // the interior rule every on-edge/on-chord builder applies.
+      if (t <= 0.0 || t >= 1.0) continue;
       vs.push_back(v);
-      ts.push_back(cLen2 > 0 ? dot(posOf(v) - c0, cd) / cLen2 : nwe.extraTs[i]);
+      ts.push_back(t);
     }
     SortVertsByT(vs, ts);
     nwe.extraVerts = std::move(vs);
@@ -1735,8 +1741,10 @@ UnifyResult UnifyArrangementVerts(const Manifold::Impl& impl,
       const int v = remap[list.verts[i]];
       if (v == edges[e].v0 || v == edges[e].v1) continue;
       if (!seen.insert(v).second) continue;
+      const double t = eLen2 > 0 ? dot(posOf(v) - e0, ed) / eLen2 : list.ts[i];
+      if (t <= 0.0 || t >= 1.0) continue;  // representative past an endpoint
       vs.push_back(v);
-      ts.push_back(eLen2 > 0 ? dot(posOf(v) - e0, ed) / eLen2 : list.ts[i]);
+      ts.push_back(t);
     }
     SortVertsByT(vs, ts);
     list.verts = std::move(vs);

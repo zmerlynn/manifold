@@ -2767,6 +2767,48 @@ TEST(OverlapRemoval, Step9SnapRadiusReachesStep95) {
   EXPECT_TRUE(threads4) << "conditioned radius did not reach step 9.5";
 }
 
+TEST(OverlapRemoval, Step95RemapPastEndpointDropsFromLists) {
+  // A unification representative can land PAST an edge endpoint: the
+  // on-edge member at t ~ 0.96 unifies with a twin that snaps to an
+  // original 0.04 BEYOND the edge's far end. The remapped entry's
+  // recomputed t > 1 must DROP from the on-edge list (it subdivides
+  // nothing) - retaining it would hand PartitionFace a boundary
+  // sequence stepping outside the face.
+  Manifold::Impl impl;
+  const manifold::vec3 verts[6] = {{0.0, 0.0, 0.0},   {1.0, 0.0, 0.0},
+                                   {0.0, 10.0, 0.0},  {1.04, 0.0, 0.0},
+                                   {10.0, 10.0, 0.0}, {-10.0, 5.0, 0.0}};
+  for (const auto& v : verts) impl.vertPos_.push_back(v);
+  const int tris[2][3] = {{0, 1, 2}, {3, 4, 5}};
+  for (const auto& t : tris) {
+    for (int k = 0; k < 3; ++k) impl.halfedge_.push_back(t[k], -1, -1);
+  }
+  const std::vector<overlap_removal::Edge> edges =
+      overlap_removal::EnumerateEdges(impl);
+  int e01 = -1;
+  for (size_t e = 0; e < edges.size(); ++e) {
+    if (edges[e].v0 == 0 && edges[e].v1 == 1) e01 = static_cast<int>(e);
+  }
+  ASSERT_GE(e01, 0);
+  const double eps = 0.005;  // 10 eps = 0.05
+  // New vert 6 on edge (0,1) at t 0.96; new vert 7 at x = 1.005, only
+  // 0.035 from original 3 (x = 1.04). 6 and 7 unify (0.045 apart);
+  // nearest original across members = 3, PAST the edge's far end.
+  const std::vector<manifold::vec3> newPos = {{0.96, 0.0, 0.0},
+                                              {1.005, 0.0, 0.0}};
+  std::vector<overlap_removal::EdgeVertList> onEdgeLists(edges.size());
+  onEdgeLists[e01].verts = {6};
+  onEdgeLists[e01].ts = {0.96};
+  std::vector<overlap_removal::NewEdgeWithExtras> chords = {
+      {{6, 7, 0, 1}, {}, {}}};
+  const overlap_removal::UnifyResult r = overlap_removal::UnifyArrangementVerts(
+      impl, newPos, edges, onEdgeLists, chords, eps, {});
+  EXPECT_GE(r.changed, 1);
+  // The remapped entry (now original 3, t = 1.04) is OFF the edge.
+  EXPECT_TRUE(onEdgeLists[e01].verts.empty())
+      << "representative past the endpoint stayed in the on-edge list";
+}
+
 TEST(OverlapRemoval, Step95ClusterSnapsToNearestOriginalAcrossMembers) {
   // Review finding (round 2): each member's snapTo is its own nearest
   // original, but the CLUSTER representative was picked by smallest
