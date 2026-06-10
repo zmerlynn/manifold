@@ -1444,6 +1444,243 @@ TEST(OverlapRemoval, Step9ThreadingPreservesStepEightExtras) {
   EXPECT_EQ(threaded.chords[1].extraVerts[0], 5);
 }
 
+TEST(OverlapRemoval, Step9CollinearOverlapSnapsEndpointsNoCrossing) {
+  // Collinear overlapping chords: the kernel yields NO single crossing
+  // (the overlap interval defers to the step-12 multiplicity merge),
+  // but pass 0 must snap the overlap endpoints onto the other chord -
+  // counted, not silently dropped.
+  const double eps = 1e-9;
+  const double tolerance = 1e-9;
+  Manifold::Impl impl;
+  std::vector<overlap_removal::NewEdgeWithExtras> chords = {
+      MakeChord(0, 1, 0, 9),    // d: (0,0,0)-(1,0,0)
+      MakeChord(2, 3, 0, 11)};  // e: (0.3,0,0)-(1.3,0,0), overlap [0.3,1]
+  std::vector<manifold::vec3> pos = {
+      {0.0, 0.0, 0.0}, {1.0, 0.0, 0.0}, {0.3, 0.0, 0.0}, {1.3, 0.0, 0.0}};
+  const std::vector<std::vector<int>> byFace = {{0, 1}};
+  const manifold::VecView<const manifold::vec3> normals(&kStep9FaceNormal, 1);
+  EXPECT_TRUE(overlap_removal::FindChordChordCrossings(impl, chords, pos,
+                                                       byFace, normals, eps)
+                  .empty());
+  const std::vector<overlap_removal::OnChordContact> contacts =
+      overlap_removal::FindOnChordEndpointContacts(impl, chords, pos, byFace,
+                                                   tolerance, eps);
+  ASSERT_EQ(contacts.size(), 2u);
+  EXPECT_EQ(contacts[0].chord, 0);  // e's start rests on d at t = 0.3
+  EXPECT_EQ(contacts[0].vertId, 2);
+  EXPECT_NEAR(contacts[0].t, 0.3, 1e-12);
+  EXPECT_EQ(contacts[1].chord, 1);  // d's end rests on e at t = 0.7
+  EXPECT_EQ(contacts[1].vertId, 1);
+  EXPECT_NEAR(contacts[1].t, 0.7, 1e-12);
+  const overlap_removal::Step9Threading threaded =
+      overlap_removal::ResolveAndThreadCrossings(impl, std::move(chords),
+                                                 std::move(pos), {}, contacts,
+                                                 tolerance, eps);
+  ASSERT_EQ(threaded.chords[0].extraVerts.size(), 1u);
+  EXPECT_EQ(threaded.chords[0].extraVerts[0], 2);
+  ASSERT_EQ(threaded.chords[1].extraVerts.size(), 1u);
+  EXPECT_EQ(threaded.chords[1].extraVerts[0], 1);
+}
+
+TEST(OverlapRemoval, Step9ResolutionSnapsToRealMeshVert) {
+  // Mixed id space: a real Impl (tetrahedron, baseId == 4) supplies a
+  // chord endpoint with id < baseId. A crossing in the
+  // (eps, tolerance+eps] band of that REAL vert must resolve to its id
+  // through GetPos3's impl.vertPos_ branch - the path every
+  // empty-Impl test misses.
+  const double eps = 1e-9;
+  const double tolerance = 1e-9;
+  Manifold::Impl impl(Manifold::Tetrahedron().GetMeshGL64());
+  ASSERT_EQ(impl.NumVert(), 4u);  // baseId == 4
+  const manifold::vec3 v0 = impl.vertPos_[0];
+  // Chord d: real id 0 -> new id 4 along +x from v0; chord c crosses d
+  // at v0 + (1.5e-9, 0, 0), inside the band of real vert 0.
+  std::vector<overlap_removal::NewEdgeWithExtras> chords = {
+      MakeChord(0, 4, 0, 9), MakeChord(5, 6, 0, 11)};
+  std::vector<manifold::vec3> newPos = {
+      v0 + manifold::vec3(1.0, 0.0, 0.0),      // id 4
+      v0 + manifold::vec3(1.5e-9, -0.5, 0.0),  // id 5
+      v0 + manifold::vec3(1.5e-9, 0.5, 0.0)};  // id 6
+  const std::vector<std::vector<int>> byFace = {{0, 1}};
+  const manifold::VecView<const manifold::vec3> normals(&kStep9FaceNormal, 1);
+  const std::vector<overlap_removal::ChordChordCrossing> raw =
+      overlap_removal::FindChordChordCrossings(impl, chords, newPos, byFace,
+                                               normals, eps);
+  ASSERT_EQ(raw.size(), 1u);
+  const overlap_removal::Step9Threading threaded =
+      overlap_removal::ResolveAndThreadCrossings(
+          impl, std::move(chords), std::move(newPos), raw, {}, tolerance, eps);
+  ASSERT_EQ(threaded.crossings.size(), 1u);
+  EXPECT_EQ(threaded.crossings[0].id, 0);              // the REAL mesh vert
+  EXPECT_EQ(threaded.newVertPositions.size(), 3u);     // no allocation
+  EXPECT_TRUE(threaded.chords[0].extraVerts.empty());  // id 0 is d's endpoint
+  ASSERT_EQ(threaded.chords[1].extraVerts.size(), 1u);
+  EXPECT_EQ(threaded.chords[1].extraVerts[0], 0);
+  EXPECT_NEAR(threaded.chords[1].extraTs[0], 0.5, 1e-6);
+}
+
+TEST(OverlapRemoval, Step9IdDedupAcrossExtrasAndCrossing) {
+  // Explicit id-dedup: a step-8 extraVert already threads id 4 on the
+  // chord, and a crossing RESOLVES to the same id 4 - the unified
+  // dedup must leave exactly one entry, not two.
+  const double eps = 1e-9;
+  const double tolerance = 1e-9;
+  Manifold::Impl impl;
+  std::vector<overlap_removal::NewEdgeWithExtras> chords = {
+      MakeChord(0, 1, 0, 9), MakeChord(2, 3, 0, 11)};
+  chords[0].extraVerts = {4};
+  chords[0].extraTs = {0.5};
+  std::vector<manifold::vec3> pos = {{0.0, 0.0, 0.0},
+                                     {1.0, 0.0, 0.0},
+                                     {0.5, -0.5, 0.0},
+                                     {0.5, 0.5, 0.0},
+                                     {0.5, 1e-9, 0.0}};
+  const std::vector<std::vector<int>> byFace = {{0, 1}};
+  const manifold::VecView<const manifold::vec3> normals(&kStep9FaceNormal, 1);
+  const std::vector<overlap_removal::ChordChordCrossing> raw =
+      overlap_removal::FindChordChordCrossings(impl, chords, pos, byFace,
+                                               normals, eps);
+  ASSERT_EQ(raw.size(), 1u);
+  const overlap_removal::Step9Threading threaded =
+      overlap_removal::ResolveAndThreadCrossings(
+          impl, std::move(chords), std::move(pos), raw, {}, tolerance, eps);
+  ASSERT_EQ(threaded.crossings.size(), 1u);
+  EXPECT_EQ(threaded.crossings[0].id, 4);  // snapped to the step-8 vert
+  ASSERT_EQ(threaded.chords[0].extraVerts.size(), 1u);  // deduped, not two
+  EXPECT_EQ(threaded.chords[0].extraVerts[0], 4);
+  ASSERT_EQ(threaded.chords[1].extraVerts.size(), 1u);
+  EXPECT_EQ(threaded.chords[1].extraVerts[0], 4);
+}
+
+TEST(OverlapRemoval, Step9ThreadingRecomputeReordersAfterSnap) {
+  // The round-4 t-recompute rule, pinned against its exact regression:
+  // two crossings on one chord whose SNAPPED positions invert their
+  // pre-resolution t-order. tolerance is deliberately large (0.03) so
+  // each crossing snaps to its slanted chord's near endpoint, moving
+  // ALONG the host chord: pre t = (0.45, 0.46), post t = (0.475,
+  // 0.435). Threading must sort by the recomputed t's - stale ts give
+  // [id2, id4]; recomputed give [id4, id2].
+  const double eps = 1e-9;
+  const double tolerance = 0.03;
+  Manifold::Impl impl;
+  // c1 crosses d at 0.45 from ABOVE with its near endpoint at x=0.475;
+  // c2 crosses d at 0.46 from BELOW with its near endpoint at x=0.435.
+  // Approaching from opposite sides keeps c1 strictly left of c2 over
+  // their shared y-band, so c1 and c2 themselves never cross.
+  std::vector<overlap_removal::NewEdgeWithExtras> chords = {
+      MakeChord(0, 1, 0, 9),    // d: (0,0,0)-(1,0,0)
+      MakeChord(2, 3, 0, 11),   // c1: snap target (0.475, +0.001)
+      MakeChord(4, 5, 0, 13)};  // c2: snap target (0.435, -0.001)
+  std::vector<manifold::vec3> pos = {{0.0, 0.0, 0.0},      {1.0, 0.0, 0.0},
+                                     {0.475, 0.001, 0.0},  {0.39, -0.0024, 0.0},
+                                     {0.435, -0.001, 0.0}, {0.52, 0.0024, 0.0}};
+  const std::vector<std::vector<int>> byFace = {{0, 1, 2}};
+  const manifold::VecView<const manifold::vec3> normals(&kStep9FaceNormal, 1);
+  const std::vector<overlap_removal::ChordChordCrossing> raw =
+      overlap_removal::FindChordChordCrossings(impl, chords, pos, byFace,
+                                               normals, eps);
+  ASSERT_EQ(raw.size(), 2u);  // (d,c1) and (d,c2) only
+  const overlap_removal::Step9Threading threaded =
+      overlap_removal::ResolveAndThreadCrossings(
+          impl, std::move(chords), std::move(pos), raw, {}, tolerance, eps);
+  ASSERT_EQ(threaded.crossings.size(), 2u);
+  EXPECT_EQ(threaded.crossings[0].id, 2);  // snapped to c1's near endpoint
+  EXPECT_EQ(threaded.crossings[1].id, 4);  // snapped to c2's near endpoint
+  ASSERT_EQ(threaded.chords[0].extraVerts.size(), 2u);
+  EXPECT_EQ(threaded.chords[0].extraVerts[0], 4);  // 0.435 first
+  EXPECT_EQ(threaded.chords[0].extraVerts[1], 2);  // 0.475 second
+  EXPECT_LT(threaded.chords[0].extraTs[0], threaded.chords[0].extraTs[1]);
+}
+
+TEST(OverlapRemoval, Step9MergeRadiusCollapsesNearbyDistinctCrossings) {
+  // Documented collapse: two genuinely distinct crossings 9 * eps
+  // apart in one face merge by the 10x-eps radius alone (shrinking the
+  // radius below 9x would break this pin). The off-chord cost (the
+  // merged vert sits 4.5e-9 off each vertical chord) is the accepted
+  // error-budget trade.
+  const double eps = 1e-9;
+  const double tolerance = 1e-9;
+  Manifold::Impl impl;
+  std::vector<overlap_removal::NewEdgeWithExtras> chords = {
+      MakeChord(0, 1, 0, 9),    // d: (0,0,0)-(1,0,0)
+      MakeChord(2, 3, 0, 11),   // c1: vertical at x = 0.5
+      MakeChord(4, 5, 0, 13)};  // c2: vertical at x = 0.5 + 9e-9
+  std::vector<manifold::vec3> pos = {
+      {0.0, 0.0, 0.0}, {1.0, 0.0, 0.0},         {0.5, -0.5, 0.0},
+      {0.5, 0.5, 0.0}, {0.5 + 9e-9, -0.5, 0.0}, {0.5 + 9e-9, 0.5, 0.0}};
+  const std::vector<std::vector<int>> byFace = {{0, 1, 2}};
+  const manifold::VecView<const manifold::vec3> normals(&kStep9FaceNormal, 1);
+  const std::vector<overlap_removal::ChordChordCrossing> raw =
+      overlap_removal::FindChordChordCrossings(impl, chords, pos, byFace,
+                                               normals, eps);
+  ASSERT_EQ(raw.size(), 2u);  // (d,c1) and (d,c2); c1 || c2
+  const std::vector<overlap_removal::ChordCrossing> merged =
+      overlap_removal::MergeAndPropagateCrossings(
+          impl, chords, pos, raw, byFace, normals, tolerance, eps);
+  ASSERT_EQ(merged.size(), 1u);  // collapsed by the radius, not structure
+  EXPECT_NEAR(merged[0].pos.x, 0.5 + 4.5e-9, 1e-12);
+  const overlap_removal::Step9Threading threaded =
+      overlap_removal::ResolveAndThreadClusters(
+          impl, std::move(chords), std::move(pos), merged, {}, tolerance, eps);
+  EXPECT_EQ(threaded.newVertPositions.size(), 7u);  // one fresh vert
+  for (int ci : {0, 1, 2}) {
+    ASSERT_EQ(threaded.chords[ci].extraVerts.size(), 1u) << "chord " << ci;
+    EXPECT_EQ(threaded.chords[ci].extraVerts[0], 6) << "chord " << ci;
+  }
+}
+
+TEST(OverlapRemoval, Step9EndToEndComposition) {
+  // The five step-9 functions composed the way the production driver
+  // will call them: grouping -> pass 0 -> crossings -> merge ->
+  // resolve/thread, on the 3-concurrent fixture plus a resting
+  // endpoint, all in one flow.
+  const double eps = 1e-9;
+  const double tolerance = 1e-9;
+  Manifold::Impl impl;
+  std::vector<overlap_removal::NewEdgeWithExtras> chords = {
+      MakeChord(0, 1, 0, 9),    // d: (0,0,0)-(1,0,0)
+      MakeChord(2, 3, 0, 11),   // c: vertical through (0.5, 0)
+      MakeChord(4, 5, 0, 13)};  // e: endpoint 4 rests on d at t = 0.25
+  std::vector<manifold::vec3> pos = {{0.0, 0.0, 0.0},   {1.0, 0.0, 0.0},
+                                     {0.5, -0.5, 0.0},  {0.5, 0.5, 0.0},
+                                     {0.25, 1e-9, 0.0}, {0.25, 1.0, 0.0}};
+  std::vector<overlap_removal::PiercedNewEdge> newEdges;
+  for (const overlap_removal::NewEdgeWithExtras& nwe : chords) {
+    newEdges.push_back(nwe.edge);
+  }
+  const std::vector<std::vector<int>> byFace =
+      overlap_removal::GroupChordsByFace(newEdges, 1);
+  ASSERT_EQ(byFace.size(), 1u);
+  ASSERT_EQ(byFace[0].size(), 3u);
+  const manifold::VecView<const manifold::vec3> normals(&kStep9FaceNormal, 1);
+  const std::vector<overlap_removal::OnChordContact> contacts =
+      overlap_removal::FindOnChordEndpointContacts(impl, chords, pos, byFace,
+                                                   tolerance, eps);
+  ASSERT_EQ(contacts.size(), 1u);  // e's endpoint on d
+  EXPECT_EQ(contacts[0].vertId, 4);
+  const std::vector<overlap_removal::ChordChordCrossing> raw =
+      overlap_removal::FindChordChordCrossings(impl, chords, pos, byFace,
+                                               normals, eps);
+  ASSERT_EQ(raw.size(), 1u);  // only d x c properly cross
+  const std::vector<overlap_removal::ChordCrossing> merged =
+      overlap_removal::MergeAndPropagateCrossings(
+          impl, chords, pos, raw, byFace, normals, tolerance, eps);
+  ASSERT_EQ(merged.size(), 1u);
+  const overlap_removal::Step9Threading threaded =
+      overlap_removal::ResolveAndThreadClusters(impl, std::move(chords),
+                                                std::move(pos), merged,
+                                                contacts, tolerance, eps);
+  ASSERT_EQ(threaded.crossings.size(), 1u);
+  EXPECT_EQ(threaded.crossings[0].id, 6);               // fresh: far from id 4
+  EXPECT_EQ(threaded.newVertPositions.size(), 7u);      // one allocation
+  ASSERT_EQ(threaded.chords[0].extraVerts.size(), 2u);  // d: contact + cross
+  EXPECT_EQ(threaded.chords[0].extraVerts[0], 4);       // t = 0.25
+  EXPECT_EQ(threaded.chords[0].extraVerts[1], 6);       // t = 0.5
+  ASSERT_EQ(threaded.chords[1].extraVerts.size(), 1u);  // c: the crossing
+  EXPECT_EQ(threaded.chords[1].extraVerts[0], 6);
+  EXPECT_TRUE(threaded.chords[2].extraVerts.empty());  // e: id 4 is its own
+}
+
 // White-box interior-pierce count via the internal checker (external
 // linkage in the linked manifold library), used to assert the
 // pierce-monotonicity contract that the public API does not expose.
