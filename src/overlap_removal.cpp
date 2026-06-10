@@ -1522,7 +1522,9 @@ TraceChordResult CoplanarTraceChords(const Manifold::Impl& impl,
             out.onEdgeAdditions.push_back({edgeIdx, ids[e], tEdge});
           };
           addOn(srcFace, k, srcV[k], srcV[(k + 1) % 3]);
-          addOn(dstFace, clipK[e], dstV[clipK[e]], dstV[(clipK[e] + 1) % 3]);
+          if (clipK[e] >= 0) {  // arg exprs index dstV: guard before call
+            addOn(dstFace, clipK[e], dstV[clipK[e]], dstV[(clipK[e] + 1) % 3]);
+          }
         }
         const std::pair<int, int> key{std::min(ids[0], ids[1]),
                                       std::max(ids[0], ids[1])};
@@ -3117,8 +3119,13 @@ void PropagateNewVertsToOnEdgeLists(
     const vec3 ab = impl.vertPos_[edges[x.edgeIdx].v1] - a;
     const double abLen2 = dot(ab, ab);
     const vec3 p = GetPos3(v, baseId, impl, newVertPositions);
+    const double t = abLen2 > 0 ? dot(p - a, ab) / abLen2 : x.s;
+    // A snapped vert can project outside the edge's interior when the
+    // edge is short (~the snap radius): it then subdivides nothing
+    // here - the same (0, 1) interior rule the on-edge builders use.
+    if (t <= 0.0 || t >= 1.0) continue;
     list.verts.push_back(v);
-    list.ts.push_back(abLen2 > 0 ? dot(p - a, ab) / abLen2 : x.s);
+    list.ts.push_back(t);
     touched.push_back(x.edgeIdx);
   }
   // BuildOnEdgeVertLists left each list sorted by t, but the appends above

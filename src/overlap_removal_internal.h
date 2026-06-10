@@ -431,7 +431,8 @@ std::vector<int> BuildHalfedgeToEdgeIndex(const Manifold::Impl& impl,
                                           const std::vector<Edge>& edges);
 
 // Partition one face of the conforming step-9 arrangement into simple
-// sub-polygon cycles (CCW w.r.t. the face normal). The face's three
+// sub-polygon cycles (CCW w.r.t. the face's HALFEDGE WINDING - never
+// the stored faceNormal_, which folded sheets invert). The face's three
 // original edges contribute one halfedge per sub-edge (subdivided by
 // onEdgeLists); incident chords contribute BOTH directions per
 // sub-edge, deduped per face by undirected vert pair (coincident

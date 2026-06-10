@@ -2019,8 +2019,9 @@ TEST(OverlapRemoval, Step10InteriorIslandDetectedAndFailsClosed) {
   // and loop is not representable as simple cycles - the walk would
   // emit the loop in both orientations (step 12 cancels them) plus
   // the bare boundary, silently erasing the cut. The partition must
-  // DETECT the island (connectivity to the boundary) and report it so
-  // the driver fails the run closed.
+  // DETECT the island (a cycle-bearing chord component with fewer
+  // than two distinct boundary attachments) and report it so the
+  // driver fails the run closed.
   const Step10Fixture fx = MakeStep10Fixture();
   ASSERT_GE(fx.face, 0);
   const std::vector<overlap_removal::EdgeVertList> onEdgeLists(fx.edges.size());
@@ -2036,6 +2037,44 @@ TEST(OverlapRemoval, Step10InteriorIslandDetectedAndFailsClosed) {
                                      onEdgeLists, chords, {0, 1, 2}, newPos);
   EXPECT_GT(part.interiorIslandVerts, 0);
   EXPECT_TRUE(part.polygons.empty());  // no partition is emitted
+
+  // The PINCHED variant: the same loop attached to the boundary at
+  // exactly ONE vert (corner A). Vert-connectivity alone passes it,
+  // but the outer region is a pinched annulus - the walk splits at A
+  // and the loop still cancels. The cycle-aware detector must gate
+  // it: a cycle-bearing chord component with < 2 distinct boundary
+  // attachments. THE discriminating case between the two rules.
+  const std::vector<overlap_removal::NewEdgeWithExtras> pinched = {
+      {{std::min(fx.A, 4), std::max(fx.A, 4), fx.face, 99}, {}, {}},
+      {{4, 5, fx.face, 99}, {}, {}},
+      {{std::min(fx.A, 5), std::max(fx.A, 5), fx.face, 99}, {}, {}}};
+  const std::vector<manifold::vec3> pinchedPos = {{0.3, 0.2, 0.0},
+                                                  {0.2, 0.3, 0.0}};
+  const overlap_removal::FacePartition pinchedPart =
+      overlap_removal::PartitionFace(fx.impl, fx.face, fx.edges, fx.he2e,
+                                     onEdgeLists, pinched, {0, 1, 2},
+                                     pinchedPos);
+  EXPECT_GT(pinchedPart.interiorIslandVerts, 0);
+  EXPECT_TRUE(pinchedPart.polygons.empty());
+
+  // A proper DOUBLE crossing - a CYCLE-bearing component attached at
+  // two distinct boundary verts - splits into representable regions
+  // and must PASS (the gate must not over-fire; tree components are
+  // covered by the X-crossing fixture, this one pins cycles).
+  std::vector<overlap_removal::EdgeVertList> onEdge2(fx.edges.size());
+  Step10AddOnEdge(fx, onEdge2, fx.A, fx.B, 4, {0.5, 0.0, 0.0});
+  Step10AddOnEdge(fx, onEdge2, fx.A, fx.C, 5, {0.0, 0.5, 0.0});
+  const std::vector<overlap_removal::NewEdgeWithExtras> through = {
+      {{4, 6, fx.face, 99}, {}, {}},
+      {{5, 6, fx.face, 99}, {}, {}},
+      {{4, 5, fx.face, 99}, {}, {}}};
+  const std::vector<manifold::vec3> throughPos = {
+      {0.5, 0.0, 0.0}, {0.0, 0.5, 0.0}, {0.3, 0.3, 0.0}};
+  const overlap_removal::FacePartition throughPart =
+      overlap_removal::PartitionFace(fx.impl, fx.face, fx.edges, fx.he2e,
+                                     onEdge2, through, {0, 1, 2}, throughPos);
+  EXPECT_EQ(throughPart.interiorIslandVerts, 0);
+  EXPECT_GE(throughPart.polygons.size(), 3u);
 }
 
 TEST(OverlapRemoval, Step10ZeroLengthChordSkippedAndCleanFace) {
@@ -2714,6 +2753,10 @@ TEST(OverlapRemoval, Step9SnapRadiusReachesStep95) {
   // The crossing vert snapped onto original 4: both chords now thread
   // vert 4 where they threaded the fresh crossing id.
   EXPECT_GE(r.changed, 1);
+  // The conditioned snap moved the crossing 0.06 onto the original -
+  // PAST the 10 eps = 0.05 floor; maxMove must report it (the driver
+  // folds this into the exported tolerance as the step-9.5 term).
+  EXPECT_NEAR(r.maxMove, 0.06, 1e-9);
   bool threads4 = false;
   for (const overlap_removal::NewEdgeWithExtras& c : chords2) {
     for (const int v : c.extraVerts) {
@@ -2932,6 +2975,44 @@ Manifold::Impl MakeTwoTriImpl(const manifold::vec3 t1[3],
     for (int k = 0; k < 3; ++k) impl.halfedge_.push_back(t[k], -1, -1);
   }
   return impl;
+}
+
+TEST(OverlapRemoval, Step65OppositeCornerSnapDoesNotSubdivideEdge) {
+  // The opposite-corner exclusion: a crossing on T1's bottom edge that
+  // corner-snaps to T1's own APEX (the obtuse face's third vert, 0.45
+  // off the edge yet projecting to t ~ 0.475) must NOT thread the apex
+  // onto the bottom edge - the apex is a whole altitude away; only the
+  // chord uses the snapped id. Tolerance 0.5 makes the apex the
+  // nearest in-radius corner for both crossings.
+  const double eps = 1e-6;
+  const double tolerance = 0.5;
+  const manifold::vec3 t1[3] = {{0, 0, 0}, {4, 0, 0}, {1.9, 0.45, 0}};
+  const manifold::vec3 t2[3] = {
+      {1.5, -1, 0}, {1.9, 1, 0}, {2.5, -1, 0}};  // opposite winding
+  Manifold::Impl impl = MakeTwoTriImpl(t1, t2);
+  const int apexId = 2;  // t1[2]
+  const std::vector<overlap_removal::Edge> edges =
+      overlap_removal::EnumerateEdges(impl);
+  const std::vector<int> he2e =
+      overlap_removal::BuildHalfedgeToEdgeIndex(impl, edges);
+  const overlap_removal::TraceChordResult res =
+      overlap_removal::CoplanarTraceChords(impl, edges, he2e, {}, tolerance,
+                                           eps);
+  // Premise: the crossings snapped to the apex (a chord uses its id).
+  bool chordUsesApex = false;
+  for (const overlap_removal::PiercedNewEdge& ch : res.chords) {
+    if (ch.v0 == apexId || ch.v1 == apexId) chordUsesApex = true;
+  }
+  ASSERT_TRUE(chordUsesApex) << "premise: crossing snapped to the apex";
+  int bottomEdge = -1;
+  for (size_t e = 0; e < edges.size(); ++e) {
+    if (edges[e].v0 == 0 && edges[e].v1 == 1) bottomEdge = static_cast<int>(e);
+  }
+  ASSERT_GE(bottomEdge, 0);
+  for (const overlap_removal::OnEdgeAddition& a : res.onEdgeAdditions) {
+    EXPECT_FALSE(a.edge == bottomEdge && a.vertId == apexId)
+        << "apex threaded onto the edge it is the opposite corner of";
+  }
 }
 
 TEST(OverlapRemoval, Step65SourceGatedDedupKeepsDistinctPoolVert) {
@@ -3305,6 +3386,20 @@ TEST(Manifold, RemoveSelfIntersectionsApi) {
   ExpectMeshGL64Identical(cleaned, cube);
 }
 
+TEST(Manifold, RemoveSelfIntersectionsPropagatesErrorStatus) {
+  // An input whose status is already an error short-circuits to
+  // status propagation (like every other member function) - the
+  // pipeline never runs.
+  MeshGL64 open;  // a single triangle: not a closed manifold
+  open.numProp = 3;
+  open.vertProperties = {0, 0, 0, 1, 0, 0, 0, 1, 0};
+  open.triVerts = {0, 1, 2};
+  Manifold invalid((MeshGL64(open)));
+  ASSERT_NE(invalid.Status(), Manifold::Error::NoError);
+  Manifold cleaned = invalid.RemoveSelfIntersections();
+  EXPECT_EQ(cleaned.Status(), invalid.Status());
+}
+
 TEST(Manifold, RemoveSelfIntersectionsCleanInputUnchanged) {
   // A mesh with no self-intersections passes through bit-identically.
   Manifold sphere = Manifold::Sphere(1.0, 32);
@@ -3489,6 +3584,10 @@ TEST(Manifold, RemoveSelfIntersectionsToleranceCoversMergeDisplacement) {
   const double expectedMove = 0.5 * (kChain - 1) * spacing;
   ASSERT_GT(expectedMove, 10.0 * eps);  // fixture premise
   EXPECT_GE(cleaned.GetMeshGL64().tolerance, expectedMove * 0.97);
+  // ...and no wider: the formula takes the MAX of its terms, all of
+  // which this fixture bounds (an over-wide claim - e.g. a blanket
+  // conditioned-band term - would over-weld downstream consumers).
+  EXPECT_LE(cleaned.GetMeshGL64().tolerance, expectedMove * 1.03);
 }
 
 TEST(Manifold, RemoveSelfIntersectionsGluedBoxes) {
