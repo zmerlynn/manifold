@@ -23,7 +23,7 @@
 
 #include "../src/execution_impl.h"
 #include "../src/impl.h"
-#include "../src/overlap_removal.h"  // for RunOverlapRemoval (explicit eps)
+#include "../src/overlap_removal.h"  // for RemoveOverlaps (explicit eps)
 #include "../src/overlap_removal_internal.h"
 #include "manifold/cross_section.h"
 #include "test.h"
@@ -2956,6 +2956,16 @@ TEST(OverlapRemoval, Step13FoldedOppositeShellsDoNotCancel) {
   }
 }
 
+// Impl-typed view of a fixture Manifold for the Impl-to-Impl pipeline
+// seams (RemoveOverlaps, MergeVertsEps, CheckSelfIntersection). Goes
+// through the public MeshGL64 boundary + the Impl ctor - for an
+// already-constructed Manifold that round-trip is a fixed point
+// (sorted stays sorted), pinned by the fresh-rebuild determinism
+// test.
+Manifold::Impl MakeImpl(const Manifold& m) {
+  return Manifold::Impl(m.GetMeshGL64());
+}
+
 TEST(OverlapRemoval, Step1MergeLargeClusterConverges) {
   // A whole high-resolution sphere inside one eps-cluster at a large
   // coordinate: thousands of members collapse to one centroid. Sums
@@ -2965,13 +2975,39 @@ TEST(OverlapRemoval, Step1MergeLargeClusterConverges) {
   // the exact (count, value) pair, so this pins the CLASS - large
   // cluster, high coordinate - rather than one drift trace; the
   // structural guarantee is the skip itself).
+  //
   Manifold ball =
       Manifold::Sphere(1e-9, 64).Translate({774996.8, 774996.8, 774996.8});
   ASSERT_EQ(ball.Status(), Manifold::Error::NoError);
-  const size_t n = ball.GetMeshGL64().NumVert();
+  const MeshGL64 mesh = ball.GetMeshGL64();
+  const size_t n = mesh.NumVert();
   ASSERT_GT(n, 1000u);
+  // Hand-build the Impl from the exported geometry: at this
+  // coordinate scale a mesh-ctor round-trip (MakeImpl and the public
+  // Manifold(MeshGL64) alike) collapses the whole sub-epsilon sphere
+  // during construction - the documented export-reconstruction
+  // lossiness class - while the production driver receives the
+  // evaluated leaf Impl with every vert intact. CreateHalfedges plus
+  // bbox/epsilon is all the merge reads.
+  Manifold::Impl ballImpl;
+  ballImpl.vertPos_.resize_nofill(n);
+  for (size_t i = 0; i < n; ++i) {
+    ballImpl.vertPos_[i] = vec3(mesh.vertProperties[mesh.numProp * i + 0],
+                                mesh.vertProperties[mesh.numProp * i + 1],
+                                mesh.vertProperties[mesh.numProp * i + 2]);
+  }
+  Vec<ivec3> triProp;
+  triProp.reserve(mesh.NumTri());
+  for (size_t t = 0; t < mesh.NumTri(); ++t) {
+    triProp.push_back(ivec3(mesh.triVerts[3 * t + 0], mesh.triVerts[3 * t + 1],
+                            mesh.triVerts[3 * t + 2]));
+  }
+  ballImpl.CreateHalfedges(triProp);
+  ASSERT_TRUE(ballImpl.IsManifold());
+  ballImpl.CalculateBBox();
+  ballImpl.SetEpsilon();
   const overlap_removal::MergeVertsResult r =
-      overlap_removal::MergeVertsEps(ball, 1e-3);  // must not throw
+      overlap_removal::MergeVertsEps(ballImpl, 1e-3);  // must not throw
   EXPECT_EQ(r.mergedCount, static_cast<int>(n) - 1);
   EXPECT_LT(r.maxMove, 1e-6);  // members moved at most ~the sphere size
 }
@@ -3024,7 +3060,7 @@ TEST(OverlapRemoval, Step1MergeReportsMaxMove) {
   Manifold tet((MeshGL64(m)));
   ASSERT_EQ(tet.Status(), Manifold::Error::NoError);
   const overlap_removal::MergeVertsResult r =
-      overlap_removal::MergeVertsEps(tet, 1e-3);
+      overlap_removal::MergeVertsEps(MakeImpl(tet), 1e-3);
   EXPECT_EQ(r.mergedCount, 1);
   EXPECT_NEAR(r.maxMove, h / 2, 1e-15);
 }
@@ -3051,7 +3087,7 @@ TEST(OverlapRemoval, Step1MergeConvergesWhenHigherIdSortsFirst) {
   Manifold tet((MeshGL64(m)));
   ASSERT_EQ(tet.Status(), Manifold::Error::NoError);
   const overlap_removal::MergeVertsResult r =
-      overlap_removal::MergeVertsEps(tet, 1e-3);  // must not throw
+      overlap_removal::MergeVertsEps(MakeImpl(tet), 1e-3);  // must not throw
   EXPECT_EQ(r.mergedCount, 1);
   EXPECT_NEAR(r.maxMove, h / 2, 1e-15);
 }
@@ -3464,7 +3500,8 @@ TEST(OverlapRemoval, Step7PropagateDropsOutOfRangeSnappedT) {
 // linkage in the linked manifold library), used to assert the
 // pierce-monotonicity contract that the public API does not expose.
 int InteriorPierces(const Manifold& m) {
-  return overlap_removal::CheckSelfIntersection(m, 1e-12).interiorPierces;
+  return overlap_removal::CheckSelfIntersection(MakeImpl(m), 1e-12)
+      .interiorPierces;
 }
 
 // Bit-identical passthrough: the early-exit (empty chord list) and
@@ -3534,6 +3571,32 @@ TEST(Manifold, RemoveSelfIntersectionsPropagatesErrorStatus) {
   Manifold cleaned = invalid.RemoveSelfIntersections();
   EXPECT_EQ(cleaned.Status(), invalid.Status());
   ExpectMeshGL64Identical(cleaned, invalid);
+}
+
+TEST(Manifold, RemoveSelfIntersectionsCancelBeforeRun) {
+  // A pre-cancelled ExecutionContext stops the pipeline at its first
+  // stage boundary and the cancellation is OBSERVABLE: an empty
+  // result carrying Error::Cancelled, exactly like a cancelled
+  // boolean - never a silent input-return, which would be
+  // indistinguishable from "nothing to do". Discriminates poll
+  // removal: without the IsCancelled checks this pierce-free input
+  // early-exits to a bit-identical NoError passthrough.
+  Manifold cube = Manifold::Cube({1, 1, 1});
+  ExecutionContext ctx;
+  ctx.Cancel();
+  Manifold cleaned = cube.WithContext(ctx).RemoveSelfIntersections();
+  EXPECT_EQ(cleaned.Status(), Manifold::Error::Cancelled);
+  EXPECT_TRUE(cleaned.IsEmpty());
+}
+
+TEST(Manifold, RemoveSelfIntersectionsUncancelledContextRuns) {
+  // The ctx plumbing must not disturb an uncancelled run: same
+  // bit-identical clean-input passthrough as without a context.
+  Manifold cube = Manifold::Cube({1, 1, 1});
+  ExecutionContext ctx;
+  Manifold cleaned = cube.WithContext(ctx).RemoveSelfIntersections();
+  EXPECT_EQ(cleaned.Status(), Manifold::Error::NoError);
+  ExpectMeshGL64Identical(cleaned, cube);
 }
 
 TEST(Manifold, RemoveSelfIntersectionsCleanInputUnchanged) {
@@ -3656,10 +3719,15 @@ TEST(Manifold, RemoveSelfIntersectionsInteriorIslandFallsBack) {
   Manifold input((MeshGL64(m)));
   ASSERT_EQ(input.Status(), Manifold::Error::NoError);
   ASSERT_GT(InteriorPierces(input), 0);  // premise: genuinely pierces
-  Manifold cleaned = overlap_removal::RunOverlapRemoval(input, 1e-3);
-  EXPECT_EQ(cleaned.Status(), Manifold::Error::NoError);
-  ExpectMeshGL64Identical(cleaned, input);
-  EXPECT_EQ(InteriorPierces(cleaned), InteriorPierces(input));
+  // The fallback is STRUCTURAL at the seam: nullopt means the member
+  // returns *this - there is no almost-identical rebuilt mesh to
+  // compare. Without the island gate this input does not fall back -
+  // the pipeline EMITS a valid-but-wrong cube-only mesh (the cut
+  // cancels at step 12 and the stamping shell drops as nested), so
+  // has_value() discriminates gate removal.
+  const std::optional<Manifold::Impl> out =
+      overlap_removal::RemoveOverlaps(MakeImpl(input), 1e-3, nullptr);
+  EXPECT_FALSE(out.has_value());
 }
 
 TEST(Manifold, RemoveSelfIntersectionsToleranceCoversMergeDisplacement) {
@@ -3706,24 +3774,32 @@ TEST(Manifold, RemoveSelfIntersectionsToleranceCoversMergeDisplacement) {
   Manifold input((MeshGL64(m)));
   ASSERT_EQ(input.Status(), Manifold::Error::NoError);
   ASSERT_EQ(input.Decompose().size(), 2u);  // premise: two raw shells
-  Manifold cleaned = overlap_removal::RunOverlapRemoval(input, eps);
-  ASSERT_EQ(cleaned.Status(), Manifold::Error::NoError);
-  // Premise: the SUCCESS path - the glued shells welded into one
-  // (early-exit and every fallback would return the 2-component
-  // input bit-identically).
-  ASSERT_EQ(cleaned.Decompose().size(), 1u);
-  EXPECT_EQ(InteriorPierces(cleaned), 0);
-  EXPECT_NEAR(cleaned.Volume(), 1.0 + 0.5 * 0.5 * 0.5, 1e-6);
+  const std::optional<Manifold::Impl> out =
+      overlap_removal::RemoveOverlaps(MakeImpl(input), eps, nullptr);
+  // Premise: the SUCCESS path - a rebuilt Impl, not the nullopt
+  // fallback (early-exit and every fallback would hand the caller
+  // the 2-component input back bit-identically).
+  ASSERT_TRUE(out.has_value());
+  ASSERT_EQ(out->status_, Manifold::Error::NoError);
+  // The tolerance claim is asserted on the Impl field DIRECTLY - the
+  // exact value the pipeline computed, before any export flooring.
   // The chain ends moved (kChain - 1) / 2 * spacing = 10.8 eps to the
-  // strip centroid; the exported tolerance must cover it (the 10 eps
+  // strip centroid; the claimed tolerance must cover it (the 10 eps
   // floor alone is 0.010).
   const double expectedMove = 0.5 * (kChain - 1) * spacing;
   ASSERT_GT(expectedMove, 10.0 * eps);  // fixture premise
-  EXPECT_GE(cleaned.GetMeshGL64().tolerance, expectedMove * 0.97);
+  EXPECT_GE(out->tolerance_, expectedMove * 0.97);
   // ...and no wider: the formula takes the MAX of its terms, all of
   // which this fixture bounds (an over-wide claim - e.g. a blanket
   // conditioned-band term - would over-weld downstream consumers).
-  EXPECT_LE(cleaned.GetMeshGL64().tolerance, expectedMove * 1.03);
+  EXPECT_LE(out->tolerance_, expectedMove * 1.03);
+  // Geometric assertions go through the public mesh boundary, as a
+  // user would see the result.
+  Manifold cleaned(GetMeshGLImpl<double, uint64_t>(*out, -1));
+  ASSERT_EQ(cleaned.Status(), Manifold::Error::NoError);
+  ASSERT_EQ(cleaned.Decompose().size(), 1u);  // the glued shells welded
+  EXPECT_EQ(InteriorPierces(cleaned), 0);
+  EXPECT_NEAR(cleaned.Volume(), 1.0 + 0.5 * 0.5 * 0.5, 1e-6);
 }
 
 TEST(Manifold, RemoveSelfIntersectionsGluedBoxes) {
@@ -3843,11 +3919,18 @@ TEST(Manifold, RemoveSelfIntersectionsFarFromOrigin) {
   // origin-scale folded-shell fallback.
   EXPECT_EQ(cleaned.Decompose().size(), 3u);
   EXPECT_NEAR(cleaned.Volume(), result.Volume(), result.Volume() * 1e-3);
+  // The derived metadata posture: a rebuilt mesh is NOT an original
+  // (OriginalID() == -1, matching Manifold(MeshGL64) construction).
+  // An emit that called InitializeOriginal() instead would flip this
+  // to a fresh nonnegative id - an observable public change.
+  EXPECT_EQ(cleaned.OriginalID(), -1);
   // The documented output-tolerance floor: a successful rebuild's
   // tolerance covers at least the 10 x working-eps merge radius (the
-  // measured-displacement terms can only widen it further).
+  // measured-displacement terms can only widen it further). The bound
+  // spells out the pipeline's default eps (= InferEps on this input)
+  // through the public bbox, since the member infers it internally.
   EXPECT_GE(cleaned.GetMeshGL64().tolerance,
-            10.0 * overlap_removal::InferEps(result));
+            10.0 * AlphaBudgetEpsilon(result.BoundingBox().Scale(), 1000));
   // The documented positions-only rebuild contract: a successful
   // rebuild drops non-position properties to numProp == 3.
   Manifold propped = result.SetProperties(

@@ -412,20 +412,28 @@ Manifold Manifold::Simplify(double tolerance) const {
 /**
  * Removes geometric self-intersection pierces from this Manifold.
  *
- * Routes to overlap_removal::RunOverlapRemoval (the Emmett #289
- * arrangement -> cell complex -> winding classification pipeline).
- * Pierce-monotonicity is guaranteed: the returned manifold's
- * self-intersection count never exceeds the input's. Every PIPELINE
- * fallback path returns the original input unchanged; an input whose
- * status is already an error short-circuits to status propagation
- * below, like every other member function. See the manifold.h
- * declaration for the full contract.
+ * Routes to overlap_removal::RemoveOverlaps (the Emmett #289
+ * arrangement -> cell complex -> winding classification pipeline),
+ * Impl-to-Impl like Boolean3. Pierce-monotonicity is guaranteed: the
+ * returned manifold's self-intersection count never exceeds the
+ * input's. The pipeline returns nullopt on its early-exit and every
+ * fallback arm, and this member returns *this - so fallback
+ * bit-identity is structural, not constructed. An input whose status
+ * is already an error short-circuits to status propagation below,
+ * like every other member function. An attached ExecutionContext
+ * threads through for cancellation; a cancelled run returns an empty
+ * Manifold with Error::Cancelled (sticky, like the boolean ops). See
+ * the manifold.h declaration for the full contract.
  */
 Manifold Manifold::RemoveSelfIntersections() const {
-  auto leafImpl = GetCsgLeafNode().GetImpl();
+  auto ctx = std::atomic_load(&ctx_);
+  auto leafImpl = GetCsgLeafNode(ctx.get()).GetImpl();
   if (leafImpl->status_ != Error::NoError)
     return PropagateStatus(leafImpl->status_);
-  return overlap_removal::RunOverlapRemoval(*this);
+  std::optional<Impl> result =
+      overlap_removal::RemoveOverlaps(*leafImpl, /*eps=*/0.0, ctx.get());
+  if (!result) return *this;  // every fallback arm: the input, bit-identical
+  return Manifold(std::make_shared<Impl>(std::move(*result)));
 }
 
 /**

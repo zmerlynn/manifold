@@ -64,13 +64,6 @@ class CsgLeafNode;
  * properties are not mixed, there is no requirement that channels have
  * consistent meaning between different inputs.
  */
-class Manifold;
-namespace overlap_removal {
-// Backend of Manifold::RemoveSelfIntersections (src/overlap_removal.h);
-// declared here so it can be befriended for direct leaf-Impl access.
-Manifold RunOverlapRemoval(const Manifold& input, double eps);
-}  // namespace overlap_removal
-
 class Manifold {
  public:
   /** @name Basics
@@ -408,12 +401,6 @@ class Manifold {
 
   std::shared_ptr<CsgNode> LoadPNode() const;
   CsgLeafNode& GetCsgLeafNode(ExecutionContext::Impl* ctx = nullptr) const;
-
-  // The RemoveSelfIntersections backend reads the leaf Impl directly
-  // (halfedge / face-normal access) instead of round-tripping through
-  // GetMeshGL64.
-  friend Manifold overlap_removal::RunOverlapRemoval(const Manifold& input,
-                                                     double eps);
 };
 /** @} */
 

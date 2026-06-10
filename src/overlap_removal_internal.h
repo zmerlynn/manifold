@@ -17,11 +17,12 @@
 // Internal data structures + helper-function declarations for the
 // overlap-removal pipeline. Used by src/overlap_removal.cpp itself
 // and by no production caller - kept out of src/overlap_removal.h so
-// the public-to-src interface is just RunOverlapRemoval.
+// the src-internal seam is just RemoveOverlaps.
 
 #include <utility>  // for std::pair
 #include <vector>
 
+#include "impl.h"               // Manifold::Impl (held by value below)
 #include "manifold/common.h"    // vec3 alias
 #include "manifold/manifold.h"  // for Manifold
 
@@ -116,34 +117,40 @@ struct NewEdgeWithExtras {
   std::vector<double> extraTs;
 };
 
-// Setup helper: scale-invariant eps derived from a manifold's bounding-
+// Setup helper: scale-invariant eps derived from an impl's bounding-
 // box scale via AlphaBudgetEpsilon (in src/shared.h). Larger meshes get
 // larger eps.
-double InferEps(const Manifold& m);
+double InferEps(const Manifold::Impl& m);
 
 // Result of MergeVertsEps below. `maxMove` is the largest total
 // displacement any input vert received (final cluster centroid vs its
 // input position - a CHAIN of eps-pairs can move a member well beyond
 // eps across passes). The driver folds it into the output tolerance
-// claim.
+// claim. When `mergedCount == 0`, `impl` is left default-constructed
+// and the caller proceeds on its own input unchanged - nothing was
+// rebuilt, so nothing can have drifted.
 struct MergeVertsResult {
-  Manifold manifold;
+  Manifold::Impl impl;
   int mergedCount = 0;
   double maxMove = 0.0;
 };
 
 // Step 1 of the overlap-removal pipeline: merges all verts within eps
 // of each other. Iterates broad-phase Collider self-collisions +
-// DisjointSets union, applies cluster-centroid positions, emits the
-// merge hints via MeshGL64 mergeFromVert/mergeToVert. Returns the
-// merged manifold and the count of merged pairs.
+// DisjointSets union, applies cluster-centroid positions, then
+// rebuilds an Impl directly: tri verts remapped to cluster
+// representatives, collapsed tris dropped, followed by the house
+// construction sweep (CreateHalfedges, CleanupTopology,
+// SetNormalsAndCoplanar, RemoveDegenerates, RemoveUnreferencedVerts,
+// SortGeometry) - the same invariant chain the MeshGL ctor provides,
+// owned here because no ctor runs. The input's tolerance_ carries
+// into the rebuild (SetEpsilon floors, never lowers it).
 //
 // `mergedCount` is the authoritative answer to "did anything get
-// merged?" - `Manifold::NumVert()` may not reflect the merge if the
-// merged verts didn't cause any tri collapse (Manifold's
-// RemoveUnreferencedVerts sets unreferenced positions to NaN
-// without compacting vertPos_).
-MergeVertsResult MergeVertsEps(const Manifold& in, double eps,
+// merged?" - `NumVert()` may not reflect the merge if the merged
+// verts didn't cause any tri collapse (RemoveUnreferencedVerts sets
+// unreferenced positions to NaN without compacting vertPos_).
+MergeVertsResult MergeVertsEps(const Manifold::Impl& in, double eps,
                                int maxIter = kMergeVertsMaxIter);
 
 // Step 2 of the pipeline (the sketch's step 3 is subsumed by the
@@ -495,6 +502,12 @@ FacePartition PartitionFace(const Manifold::Impl& impl, int face,
 struct MergedPolygon {
   std::vector<int> cycle;  // the canonical rotation
   int mult;
+  // First contributor's source face. Unused by the positions-only v1
+  // emit, but it is the designed hook for property interpolation (the
+  // boolean_result pattern: barycentric on the source face for new
+  // verts, pass-through for originals - resolved PER VERT via
+  // EmitTopology::ring2Vert, since a post-cancellation polygon can
+  // span several source faces). Do not remove as dead.
   int face;
 };
 std::vector<MergedPolygon> MergePolygons(
@@ -635,7 +648,7 @@ struct SelfIntersectionResult {
   int trianglesTotal;
 };
 
-SelfIntersectionResult CheckSelfIntersection(const Manifold& m,
+SelfIntersectionResult CheckSelfIntersection(const Manifold::Impl& m,
                                              double relTol = 1e-12 /* =
                                                  kPipelineRelTol */);
 

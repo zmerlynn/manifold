@@ -347,33 +347,91 @@ double SegmentPiercesTriInterior(vec3 a, vec3 b, vec3 v0, vec3 v1, vec3 v2,
   return std::min(std::fabs(dA), std::fabs(dB)) / nMag;
 }
 
-// Pipeline body - file-local so the public RunOverlapRemoval below
+// Shared construction sweep for pipeline-built Impls (the
+// MergeVertsEps rebuild and the final emit): the same invariant chain
+// the MeshGL ctor runs - CreateHalfedges, manifoldness check,
+// CleanupTopology (pinched verts), SetNormalsAndCoplanar,
+// RemoveDegenerates, RemoveUnreferencedVerts, SortGeometry - stated
+// call by call because no ctor runs here, plus the explicit DERIVED
+// metadata posture: one fresh reserved meshID on every triRef,
+// originalID = -1. A rebuilt mesh is NOT an original (it matches what
+// Manifold(MeshGL64) produces, and OriginalID() stays -1); callers
+// wanting a provenance root use AsOriginal(). `toleranceSeed` lands
+// in tolerance_ BEFORE SetEpsilon, which floors it at the
+// bbox-derived epsilon_ and never lowers it - the working eps never
+// overwrites epsilon_. Invariant failures come back as an error
+// status (MakeEmpty), exactly as the ctor reports them.
+Manifold::Impl BuildImplFromTris(std::vector<vec3>&& positions,
+                                 const std::vector<ivec3>& tris,
+                                 double toleranceSeed) {
+  Manifold::Impl out;
+  out.vertPos_.resize_nofill(positions.size());
+  for (size_t i = 0; i < positions.size(); ++i) out.vertPos_[i] = positions[i];
+  Vec<ivec3> triProp;
+  triProp.reserve(tris.size());
+  for (const ivec3& t : tris) triProp.push_back(t);
+  out.CreateHalfedges(triProp);
+  if (!out.IsManifold()) {
+    out.MakeEmpty(Manifold::Error::NotManifold);
+    return out;
+  }
+  const int meshID = static_cast<int>(Manifold::Impl::ReserveIDs(1));
+  auto& triRef = out.meshRelation_.triRef;
+  triRef.resize_nofill(out.NumTri());
+  for (size_t tri = 0; tri < triRef.size(); ++tri) {
+    triRef[tri] = {meshID, meshID, -1, static_cast<int>(tri)};
+  }
+  out.meshRelation_.meshIDtransform[meshID] = {meshID, la::identity, false,
+                                               false};
+  out.meshRelation_.originalID = -1;
+  out.CalculateBBox();
+  out.tolerance_ = toleranceSeed;
+  out.SetEpsilon();
+  out.CleanupTopology();
+  out.SetNormalsAndCoplanar();
+  out.RemoveDegenerates();
+  out.RemoveUnreferencedVerts();
+  out.SortGeometry();
+  if (!out.IsFinite()) out.MakeEmpty(Manifold::Error::NonFiniteVertex);
+  return out;
+}
+
+// An Impl carrying cancellation as observable status - the
+// ADVANCE_PHASE_OR_RETURN idiom's return value. Never a silent
+// fallback: the member wraps it like any errored result.
+Manifold::Impl CancelledImpl() {
+  Manifold::Impl impl;
+  impl.MakeEmpty(Manifold::Error::Cancelled);
+  return impl;
+}
+
+// Pipeline body - file-local so the public RemoveOverlaps below
 // stays a thin fail-closed wrapper (every stage it composes is
 // declared in overlap_removal_internal.h, so the definition can
-// live here ahead of the stage implementations).
-using LeafImplFn = std::shared_ptr<const Manifold::Impl> (*)(const Manifold&);
-
-Manifold RunOverlapRemovalImpl(const Manifold& input, double eps,
-                               LeafImplFn leafImplOf) {
+// live here ahead of the stage implementations). Returns nullopt on
+// the early-exit and every fallback arm: the CALLER owns "return the
+// input bit-identically", which is a wrapper-identity concern, not a
+// pipeline concern.
+std::optional<Manifold::Impl> RemoveOverlapsImpl(const Manifold::Impl& input,
+                                                 double eps,
+                                                 ExecutionContext::Impl* ctx) {
   using la::cross;
   using la::dot;
-  if (input.IsEmpty()) return input;
+  if (input.IsEmpty()) return std::nullopt;
   if (eps <= 0) eps = InferEps(input);
   // The input's pierce count, computed once for the gate's
   // monotonicity arm.
   const int inputPierces = CheckSelfIntersection(input).interiorPierces;
+  if (IsCancelled(ctx)) return CancelledImpl();
 
-  // Step 1: merge verts within eps.
+  // Step 1: merge verts within eps. Zero merges leaves the input
+  // untouched (nothing rebuilt, nothing can drift).
   const MergeVertsResult merged = MergeVertsEps(input, eps);
-  const Manifold& work = merged.manifold;
-  if (work.IsEmpty() || work.Status() != Manifold::Error::NoError) {
-    return input;
+  const Manifold::Impl& impl = merged.mergedCount > 0 ? merged.impl : input;
+  if (impl.IsEmpty() || impl.status_ != Manifold::Error::NoError) {
+    return std::nullopt;
   }
-  // Direct leaf-Impl access (halfedge / face-normal) - no mesh
-  // round-trip; RunOverlapRemoval supplies the accessor it is
-  // befriended for.
-  const std::shared_ptr<const Manifold::Impl> pImpl = leafImplOf(work);
-  const Manifold::Impl& impl = *pImpl;
+  if (IsCancelled(ctx)) return CancelledImpl();
   const double tolerance = std::max(impl.tolerance_, eps);
   const int baseId = static_cast<int>(impl.NumVert());
   const int numTri = static_cast<int>(impl.NumTri());
@@ -405,9 +463,10 @@ Manifold RunOverlapRemovalImpl(const Manifold& input, double eps,
                              trace.chords.end());
 
   // EARLY-EXIT when the COMBINED chord list is empty: covers the
-  // clean-input case (bit-identical return), the all-pairs-dropped
-  // case, and pancake-free coplanar contact.
-  if (chordEdges.newEdges.empty()) return input;
+  // clean-input case (bit-identical return at the caller), the
+  // all-pairs-dropped case, and pancake-free coplanar contact.
+  if (chordEdges.newEdges.empty()) return std::nullopt;
+  if (IsCancelled(ctx)) return CancelledImpl();
 
   // Boundary conformance for the trace crossings, then pierce verts
   // onto their piercing edges' on-edge lists, so the partition
@@ -445,12 +504,14 @@ Manifold RunOverlapRemovalImpl(const Manifold& input, double eps,
   const UnifyResult unified =
       UnifyArrangementVerts(impl, threaded.newVertPositions, edges, onEdgeLists,
                             threaded.chords, eps, threaded.newVertSnapR);
+  if (IsCancelled(ctx)) return CancelledImpl();
 
   // Steps 10-11: partition every face (chordless faces still pick up
   // on-edge subdivision, so the arrangement conforms across shared
   // edges).
   std::vector<std::pair<int, std::vector<int>>> facePolygons;
   for (int f = 0; f < numTri; ++f) {
+    if ((f & 0xFF) == 0 && IsCancelled(ctx)) return CancelledImpl();
     FacePartition part = PartitionFace(
         impl, f, edges, halfedge2Edge, onEdgeLists, threaded.chords,
         face2Chords[f], threaded.newVertPositions);
@@ -458,7 +519,7 @@ Manifold RunOverlapRemovalImpl(const Manifold& input, double eps,
     // cycles are NOT a partition (the stamp class - see
     // FacePartition::interiorIslandVerts); emitting would silently
     // erase the cut and misclassify the stamping shell as nested.
-    if (part.interiorIslandVerts > 0) return input;
+    if (part.interiorIslandVerts > 0) return std::nullopt;
     for (std::vector<int>& cyc : part.polygons) {
       facePolygons.push_back({f, std::move(cyc)});
     }
@@ -466,7 +527,7 @@ Manifold RunOverlapRemovalImpl(const Manifold& input, double eps,
 
   // Step 12: canonical merge with signed multiplicity.
   const std::vector<MergedPolygon> polys = MergePolygons(facePolygons);
-  if (polys.empty()) return input;
+  if (polys.empty()) return std::nullopt;
 
   // Step 13: cells, winding, keep, emit topology. Classification or
   // topology failures (seed retries exhausted, unpaired halfedges,
@@ -475,7 +536,8 @@ Manifold RunOverlapRemovalImpl(const Manifold& input, double eps,
       BuildCellComplex(impl, polys, threaded.newVertPositions);
   const CellWinding winding =
       ClassifyCells(impl, polys, threaded.newVertPositions, cellCx, eps);
-  if (!winding.ok) return input;
+  if (!winding.ok) return std::nullopt;
+  if (IsCancelled(ctx)) return CancelledImpl();
   // GATE (fail closed): a folded cell that encloses real volume means
   // a tangent-degenerate contact folded a closed shell's two sides
   // into one cell (its polygons all read front == back and the keep
@@ -484,10 +546,10 @@ Manifold RunOverlapRemovalImpl(const Manifold& input, double eps,
   // threshold; see FoldedCellsEncloseVolume.
   if (FoldedCellsEncloseVolume(impl, polys, threaded.newVertPositions, cellCx,
                                eps)) {
-    return input;
+    return std::nullopt;
   }
   const EmitTopology topo = BuildEmitTopology(polys, cellCx, winding);
-  if (!topo.ok || topo.keptPolygons.empty()) return input;
+  if (!topo.ok || topo.keptPolygons.empty()) return std::nullopt;
 
   // Emit: one output vert per ring; triangulate each kept cycle in
   // its outward frame (Triangulate's CCW triangles project back
@@ -511,9 +573,8 @@ Manifold RunOverlapRemovalImpl(const Manifold& input, double eps,
                           ringPos[cyc[(i + 1) % cyc.size()]] - cycOrigin);
     }
     const double len2 = dot(nsum, nsum);
-    DEBUG_ASSERT(len2 > 0, logicErr,
-                 "RunOverlapRemoval: degenerate kept cycle");
-    if (len2 <= 0) return input;
+    DEBUG_ASSERT(len2 > 0, logicErr, "RemoveOverlaps: degenerate kept cycle");
+    if (len2 <= 0) return std::nullopt;
     const InPlaneBasis basis = FaceBasisFromNormal(nsum / std::sqrt(len2));
     SimplePolygon poly2;
     poly2.reserve(cyc.size());
@@ -552,46 +613,36 @@ Manifold RunOverlapRemovalImpl(const Manifold& input, double eps,
         triEps *= 2.0;
       }
     }
-    if (!triangulated) return input;  // give the gate its fallback
+    if (!triangulated) return std::nullopt;  // give the gate its fallback
 #else
     tris = Triangulate({poly2}, triEps, true);
 #endif
     // An empty triangulation of a >= 4-vert cycle would leave the
     // output topologically open: explicit fallback, matching the
     // debug ladder's, rather than relying on the volume gate.
-    if (tris.empty()) return input;
+    if (tris.empty()) return std::nullopt;
     for (const ivec3& t : tris) {
       outTris.push_back(ivec3(cyc[t[0]], cyc[t[1]], cyc[t[2]]));
     }
   }
 
-  // Output mesh: positions only (numProp = 3) - non-position
-  // properties are not preserved (documented). The tolerance claim
-  // propagates the pipeline's MEASURED applied movements: the 10 * eps
-  // floor covers the nearby-crossing merge radius (step-9 crossing
-  // merges, step-9.5 new-new unification), and the measured step-1
-  // cluster and step-9.5 remap displacements widen it when a chain or
-  // a conditioned snap moved a vert further. Ill-conditioned shallow-
-  // incidence corners can carry residual error beyond this, up to the
-  // conditioned band (eps / sin(incidence), capped at kCondSnapCapEps
-  // * eps) - a documented limitation, not part of the tolerance claim.
-  MeshGL64 outMesh;
-  outMesh.numProp = 3;
-  outMesh.tolerance =
-      std::max({tolerance, 10.0 * eps, merged.maxMove, unified.maxMove});
-  outMesh.vertProperties.reserve(ringPos.size() * 3);
-  for (const vec3& p : ringPos) {
-    outMesh.vertProperties.push_back(p.x);
-    outMesh.vertProperties.push_back(p.y);
-    outMesh.vertProperties.push_back(p.z);
-  }
-  outMesh.triVerts.reserve(outTris.size() * 3);
-  for (const ivec3& t : outTris) {
-    outMesh.triVerts.push_back(static_cast<uint64_t>(t[0]));
-    outMesh.triVerts.push_back(static_cast<uint64_t>(t[1]));
-    outMesh.triVerts.push_back(static_cast<uint64_t>(t[2]));
-  }
-  Manifold out(outMesh);
+  // Output: positions only - non-position properties are not
+  // preserved (documented; MergedPolygon::face is the designed v2
+  // hook). Built as an Impl directly, no Manifold(MeshGL64) in the
+  // loop: the invariant sweep and the metadata policy are deliberate
+  // calls in BuildImplFromTris, not ctor side effects. The tolerance
+  // claim propagates the pipeline's MEASURED applied movements: the
+  // 10 * eps floor covers the nearby-crossing merge radius (step-9
+  // crossing merges, step-9.5 new-new unification), and the measured
+  // step-1 cluster and step-9.5 remap displacements widen it when a
+  // chain or a conditioned snap moved a vert further. Ill-conditioned
+  // shallow-incidence corners can carry residual error beyond this, up
+  // to the conditioned band (eps / sin(incidence), capped at
+  // kCondSnapCapEps * eps) - a documented limitation, not part of the
+  // tolerance claim.
+  Manifold::Impl out = BuildImplFromTris(
+      std::move(ringPos), outTris,
+      std::max({tolerance, 10.0 * eps, merged.maxMove, unified.maxMove}));
 
   // GATE (thin, final): construction status, positive volume for a
   // non-empty input (NaN fails the comparison too), and pierce-
@@ -599,30 +650,32 @@ Manifold RunOverlapRemovalImpl(const Manifold& input, double eps,
   // winding-WEIGHTED integral, so heavy overlap legitimately shrinks
   // the measured volume (a full overlap reads 1/3). Gate failures
   // are an expected fallback for adversarial inputs, not asserts.
-  if (out.Status() != Manifold::Error::NoError) return input;
-  if (!(out.Volume() > 0)) return input;
-  if (CheckSelfIntersection(out).interiorPierces > inputPierces) return input;
+  if (out.status_ != Manifold::Error::NoError) return std::nullopt;
+  if (!(out.GetProperty(Manifold::Impl::Property::Volume) > 0)) {
+    return std::nullopt;
+  }
+  if (CheckSelfIntersection(out).interiorPierces > inputPierces) {
+    return std::nullopt;
+  }
   return out;
 }
 }  // namespace
 
-double InferEps(const Manifold& m) {
-  return AlphaBudgetEpsilon(m.BoundingBox().Scale(), 1000);
+double InferEps(const Manifold::Impl& m) {
+  return AlphaBudgetEpsilon(m.bBox_.Scale(), 1000);
 }
 
-MergeVertsResult MergeVertsEps(const Manifold& in, double eps, int maxIter) {
-  if (in.IsEmpty()) return {in, 0};
+MergeVertsResult MergeVertsEps(const Manifold::Impl& in, double eps,
+                               int maxIter) {
+  if (in.IsEmpty()) return {};
 
-  // Pull positions and triangles out via MeshGL64. Layout:
-  // vertProperties = [x0,y0,z0, x1,y1,z1, ...], numProp >= 3.
-  MeshGL64 mesh = in.GetMeshGL64();
-  const size_t n = mesh.NumVert();
+  // Cluster on a copy of the positions; `in.vertPos_` stays intact as
+  // the displacement baseline. Unreferenced verts (NaN positions, see
+  // RemoveUnreferencedVerts) ride along as inert singletons: NaN
+  // boxes overlap nothing, and no tri references them.
+  const size_t n = in.NumVert();
   std::vector<vec3> verts(n);
-  for (size_t i = 0; i < n; ++i) {
-    verts[i] = vec3(mesh.vertProperties[mesh.numProp * i + 0],
-                    mesh.vertProperties[mesh.numProp * i + 1],
-                    mesh.vertProperties[mesh.numProp * i + 2]);
-  }
+  for (size_t i = 0; i < n; ++i) verts[i] = in.vertPos_[i];
 
   // Per-pass: build eps/2-padded boxes, run Collider self-collision,
   // narrow-phase dist^2 < eps^2, unite via DisjointSets. Move each
@@ -708,49 +761,50 @@ MergeVertsResult MergeVertsEps(const Manifold& in, double eps, int maxIter) {
                "MergeVertsEps: hit kMergeVertsMaxIter without converging");
 
   // Total applied displacement (final centroid vs the INPUT position,
-  // still intact in vertProperties here) - exact, not a per-pass
-  // bound. The driver folds it into the output tolerance claim.
+  // still intact in in.vertPos_) - exact, not a per-pass bound. The
+  // driver folds it into the output tolerance claim. Singleton
+  // clusters never moved (the centroid of one vert is itself), so NaN
+  // riders contribute nothing here.
   double maxMove = 0.0;
   for (size_t i = 0; i < n; ++i) {
-    const vec3 orig(mesh.vertProperties[mesh.numProp * i + 0],
-                    mesh.vertProperties[mesh.numProp * i + 1],
-                    mesh.vertProperties[mesh.numProp * i + 2]);
-    const vec3 d = verts[i] - orig;
-    maxMove = std::max(maxMove, std::sqrt(la::dot(d, d)));
+    const vec3 d = verts[i] - in.vertPos_[i];
+    const double d2 = la::dot(d, d);
+    if (d2 > 0.0) maxMove = std::max(maxMove, std::sqrt(d2));
   }
 
-  // Apply merges via MeshGL64 hints. Same path manifold's sort.cpp
-  // uses for eps-merging during construction, so result is consistent
-  // with other Manifold-producing paths. Also overwrite each merged
-  // vert's position with its cluster centroid.
-  for (size_t i = 0; i < n; ++i) {
-    const vec3& p = verts[i];
-    mesh.vertProperties[mesh.numProp * i + 0] = p.x;
-    mesh.vertProperties[mesh.numProp * i + 1] = p.y;
-    mesh.vertProperties[mesh.numProp * i + 2] = p.z;
-  }
   std::vector<int> compRep(componentLabel.size(), -1);
   for (size_t i = 0; i < n; ++i) {
     const int comp = componentLabel[i];
     if (compRep[comp] == -1) compRep[comp] = static_cast<int>(i);
   }
-  mesh.mergeFromVert.clear();
-  mesh.mergeToVert.clear();
   int mergedCount = 0;
   for (size_t i = 0; i < n; ++i) {
-    const int rep = compRep[componentLabel[i]];
-    if (rep != static_cast<int>(i)) {
-      mesh.mergeFromVert.push_back(i);
-      mesh.mergeToVert.push_back(rep);
-      ++mergedCount;
+    if (compRep[componentLabel[i]] != static_cast<int>(i)) ++mergedCount;
+  }
+  // Zero merges: the caller proceeds on its own input - nothing was
+  // rebuilt, so nothing can have drifted.
+  if (mergedCount == 0) return {};
+
+  // Rebuild directly: every tri's verts remapped to their cluster
+  // representative (at the converged centroid positions held in
+  // `verts`); tris that collapse to fewer than three distinct verts
+  // drop here, the same dropping Manifold(MeshGL64) does with its
+  // distinct-vert check before CreateHalfedges. BuildImplFromTris then
+  // owns the construction sweep. The input's tolerance_ carries into
+  // the rebuild (SetEpsilon floors, never lowers it).
+  std::vector<ivec3> tris;
+  tris.reserve(in.NumTri());
+  for (size_t t = 0; t < in.NumTri(); ++t) {
+    ivec3 tv;
+    for (const int k : {0, 1, 2}) {
+      tv[k] = compRep[componentLabel[in.halfedge_.Start(3 * t + k)]];
+    }
+    if (tv[0] != tv[1] && tv[1] != tv[2] && tv[2] != tv[0]) {
+      tris.push_back(tv);
     }
   }
-  // Avoid round-trip when nothing was merged: GetMeshGL64 -> Manifold
-  // is lossy for some Subtract-derived inputs (back-side /
-  // run-transform info doesn't fully survive, producing incorrect
-  // geometry). When no merges to apply, the input is already correct.
-  if (mergedCount == 0) return {in, 0};
-  return {Manifold(mesh), mergedCount, maxMove};
+  return {BuildImplFromTris(std::move(verts), tris, in.tolerance_), mergedCount,
+          maxMove};
 }
 
 std::vector<Edge> EnumerateEdges(const Manifold::Impl& impl) {
@@ -3141,25 +3195,21 @@ void PropagateNewVertsToOnEdgeLists(
   }
 }
 
-SelfIntersectionResult CheckSelfIntersection(const Manifold& m, double relTol) {
+SelfIntersectionResult CheckSelfIntersection(const Manifold::Impl& m,
+                                             double relTol) {
   SelfIntersectionResult r{};
   if (m.IsEmpty()) return r;
-  MeshGL64 mesh = m.GetMeshGL64();
-  const size_t nTri = mesh.NumTri();
+  const size_t nTri = m.NumTri();
   r.trianglesTotal = static_cast<int>(nTri);
   if (nTri < 2) return r;
 
-  auto vp = [&](int idx) {
-    return vec3(mesh.vertProperties[mesh.numProp * idx + 0],
-                mesh.vertProperties[mesh.numProp * idx + 1],
-                mesh.vertProperties[mesh.numProp * idx + 2]);
-  };
+  auto vp = [&](int idx) { return m.vertPos_[idx]; };
   std::vector<Box> triBoxes(nTri);
   std::vector<std::array<int, 3>> triIdx(nTri);
   for (size_t t = 0; t < nTri; ++t) {
-    const int i0 = mesh.triVerts[3 * t + 0];
-    const int i1 = mesh.triVerts[3 * t + 1];
-    const int i2 = mesh.triVerts[3 * t + 2];
+    const int i0 = m.halfedge_.Start(3 * t + 0);
+    const int i1 = m.halfedge_.Start(3 * t + 1);
+    const int i2 = m.halfedge_.Start(3 * t + 2);
     triIdx[t] = {i0, i1, i2};
     Box b(vp(i0), vp(i1));
     b.Union(vp(i2));
@@ -3301,27 +3351,24 @@ bool FoldedCellsEncloseVolume(const Manifold::Impl& impl,
   return false;
 }
 
-Manifold RunOverlapRemoval(const Manifold& input, double eps) {
+std::optional<Manifold::Impl> RemoveOverlaps(const Manifold::Impl& input,
+                                             double eps,
+                                             ExecutionContext::Impl* ctx) {
   // Exceptions exist only in MANIFOLD_DEBUG builds (optional_assert.h
   // defines the error types there; release manifold is exception-free
   // and errors are status enums). Under MANIFOLD_DEBUG, a throwing
   // assertion anywhere in the pipeline - including inside manifold's
-  // own Triangulate checks - falls back to the input, preserving
-  // pierce-monotonicity; the guard pattern matches polygon.cpp's
-  // TriangulateIdxHalfedges.
-  // Capture-less lambda: inherits this friend function's access to
-  // Manifold's private leaf accessor, decays to a plain pointer.
-  const LeafImplFn leafImplOf = [](const Manifold& m) {
-    return m.GetCsgLeafNode().GetImpl();
-  };
+  // own Triangulate checks - becomes the nullopt fallback arm (the
+  // caller returns its input), preserving pierce-monotonicity; the
+  // guard pattern matches polygon.cpp's TriangulateIdxHalfedges.
 #ifdef MANIFOLD_DEBUG
   try {
-    return RunOverlapRemovalImpl(input, eps, leafImplOf);
+    return RemoveOverlapsImpl(input, eps, ctx);
   } catch (...) {
-    return input;
+    return std::nullopt;
   }
 #else
-  return RunOverlapRemovalImpl(input, eps, leafImplOf);
+  return RemoveOverlapsImpl(input, eps, ctx);
 #endif
 }
 

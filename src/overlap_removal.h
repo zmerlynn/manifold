@@ -14,36 +14,49 @@
 
 #pragma once
 
-// Public-to-src interface for the overlap-removal pipeline that backs
+// Src-internal interface for the overlap-removal pipeline that backs
 // Manifold::RemoveSelfIntersections() (declared in
 // include/manifold/manifold.h, implemented in src/manifold.cpp via
-// RunOverlapRemoval below).
+// RemoveOverlaps below).
 //
 // Internal types + the per-stage function seams live in
 // src/overlap_removal_internal.h - a test-only header, not part of
 // any installed public API; file-local kernels stay in
 // overlap_removal.cpp's anonymous namespace.
 
-#include "manifold/manifold.h"  // for Manifold
+#include <optional>
+
+#include "execution_impl.h"  // ExecutionContext::Impl, IsCancelled
+#include "impl.h"            // Manifold::Impl
 
 namespace manifold {
 namespace overlap_removal {
 
 // Top-level entry point composing the 13 #289 pipeline stages
 // (arrangement -> cell complex -> winding classification -> emit)
-// behind a fail-closed gate.
+// behind a fail-closed gate. Impl-to-Impl, like Boolean3: no Manifold
+// is held anywhere inside the pipeline.
 //
 // Backs Manifold::RemoveSelfIntersections() (= one and only caller in
-// production source). Returns the rebuilt manifold, or the input
-// BIT-IDENTICALLY on the early-exit and every fallback path.
+// production source; the member owns status propagation and wrapper
+// identity). Three outcomes:
+//  - a rebuilt Impl on success;
+//  - nullopt on the early-exit and EVERY fallback arm - the caller
+//    returns its own input bit-identically (wrapper identity is a
+//    Manifold concern, not a pipeline concern);
+//  - an Impl made empty with Error::Cancelled when `ctx` reports
+//    cancellation at a stage boundary (the ADVANCE_PHASE_OR_RETURN
+//    idiom: cancellation is observable status, never a silent
+//    fallback).
 //
-// `eps` is optional: defaults to
-// AlphaBudgetEpsilon(input.BoundingBox().Scale(), 1000)
-// when 0 (= the production pipeline's choice). Callers that already
-// know their WORKING EPSILON can pass it explicitly (this is the
-// pipeline's computational scale, not the mesh tolerance - see the
-// eps contract in docs/OverlapRemoval.md).
-Manifold RunOverlapRemoval(const Manifold& input, double eps = 0.0);
+// `eps` is the WORKING EPSILON (the pipeline's computational scale,
+// not the mesh tolerance - see the eps contract in
+// docs/OverlapRemoval.md). eps <= 0 derives
+// AlphaBudgetEpsilon(input.bBox_.Scale(), 1000), the production
+// pipeline's choice. `ctx` may be null (no cancellation checks).
+std::optional<Manifold::Impl> RemoveOverlaps(const Manifold::Impl& input,
+                                             double eps,
+                                             ExecutionContext::Impl* ctx);
 
 }  // namespace overlap_removal
 }  // namespace manifold
