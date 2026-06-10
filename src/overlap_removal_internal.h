@@ -683,14 +683,16 @@ struct SelfIntersectionResult {
 SelfIntersectionResult CheckSelfIntersection(const Manifold& m,
                                              double relTol = 1e-12);
 
-// Final-gate helper (pre-emit): true if any connected component of
-// folded polygons (front cell == back cell, grouped by fold cell +
-// shared vert) encloses mult-weighted signed volume beyond the
-// membrane bound area x kFoldedVolumePerAreaEps x eps. Folded
+// Final-gate helper (pre-emit): true if any EDGE-CONNECTED component
+// of folded polygons (front cell == back cell, grouped by fold cell +
+// shared undirected edge) encloses mult-weighted signed volume beyond
+// the membrane bound area x kFoldedVolumePerAreaEps x eps. Folded
 // membranes legitimately drop; a folded CLOSED shell means the
 // arrangement failed to embed it, and emitting would silently delete
-// its material - the driver falls back. Per component, not per cell:
-// opposite-orientation shells sharing one cell must not cancel.
+// its material - the driver falls back. Per component, not per cell
+// (and edge-connected, not vert-connected): opposite-orientation
+// shells sharing a cell - or merely touching at a snapped vert - must
+// not net their signed volumes.
 bool FoldedCellsEncloseVolume(const Manifold::Impl& impl,
                               const std::vector<MergedPolygon>& polys,
                               const std::vector<vec3>& newVertPositions,

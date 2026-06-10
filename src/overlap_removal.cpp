@@ -2792,16 +2792,18 @@ SelfIntersectionResult CheckSelfIntersection(const Manifold& m, double relTol) {
 // post-merge thickness is at most the 10 eps unification radius -
 // but a tangent-degenerate contact can fold a CLOSED shell's two
 // cells together, and dropping that fold silently deletes the
-// shell's material. Folded polygons group into CONNECTED COMPONENTS
-// (same fold cell + shared vert): per component, sum the
-// mult-weighted signed volume (tetra fan anchored at the component's
-// own centroid: origin-independent for a closed set, and the anchor
-// keeps an open sheet's pseudo-volume near zero) and compare against
-// the membrane bound area x kFoldedVolumePerAreaEps x eps. Per
-// COMPONENT, not per cell: two unrelated folded shells sharing one
-// cell with opposite orientations (a positive shell plus an inverted
-// twin) would otherwise cancel their signed volumes under the
-// threshold.
+// shell's material. Folded polygons group into EDGE-CONNECTED
+// components (same fold cell + shared undirected edge - the surface
+// notion: a vert-touch pinch between two shells must NOT merge them,
+// or a positive shell and an inverted twin touching at one snapped
+// vert would net their signed volumes to nothing). Per component,
+// sum the mult-weighted signed volume (tetra fan anchored at the
+// component's own centroid: origin-independent for a closed set,
+// near zero for a FLAT open sheet) and compare against the membrane
+// bound area x kFoldedVolumePerAreaEps x eps. A macro-BENT open fold
+// also trips the gate (its anchored cone volume is O(area x bend
+// depth)) - deliberate: an open fold of real extent is arrangement
+// damage, and falling back is the safe side.
 bool FoldedCellsEncloseVolume(const Manifold::Impl& impl,
                               const std::vector<MergedPolygon>& polys,
                               const std::vector<vec3>& newVertPositions,
@@ -2819,11 +2821,15 @@ bool FoldedCellsEncloseVolume(const Manifold::Impl& impl,
   if (folded.empty()) return false;
   const uint32_t nF = static_cast<uint32_t>(folded.size());
   DisjointSets uf(nF);
-  std::map<std::pair<int, int>, uint32_t> cellVert2First;
+  std::map<std::tuple<int, int, int>, uint32_t> cellEdge2First;
   for (uint32_t k = 0; k < nF; ++k) {
     const int c = cells.polySide2Cell[2 * folded[k]];
-    for (const int v : polys[folded[k]].cycle) {
-      const auto [it, fresh] = cellVert2First.insert({{c, v}, k});
+    const std::vector<int>& cyc = polys[folded[k]].cycle;
+    for (size_t i = 0; i < cyc.size(); ++i) {
+      const int u = cyc[i];
+      const int v = cyc[(i + 1) % cyc.size()];
+      const auto [it, fresh] =
+          cellEdge2First.insert({{c, std::min(u, v), std::max(u, v)}, k});
       if (!fresh) uf.unite(it->second, k);
     }
   }

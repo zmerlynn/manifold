@@ -2670,27 +2670,62 @@ TEST(OverlapRemoval, Step95ClusterSnapsToNearestOriginalAcrossMembers) {
 }
 
 TEST(OverlapRemoval, Step13FoldedOppositeShellsDoNotCancel) {
-  // Review finding (round 2): the folded-shell gate must evaluate
-  // CONNECTED COMPONENTS of folded polygons, not whole cells - a
-  // positive shell and an inverted twin folded into the SAME cell
-  // would otherwise net to zero signed volume and slip under the
-  // area threshold, silently deleting the positive shell. Hand-build
-  // that exact configuration: two disjoint unit cubes, one reversed,
-  // every polygon side mapped to ONE cell.
-  Manifold::Impl impl;
-  std::vector<manifold::vec3> pos;
-  std::vector<overlap_removal::MergedPolygon> polys;
-  AppendCubePolys(0.0, 1.0, pos, polys);  // +1 volume
-  const size_t firstReversed = polys.size();
-  AppendCubePolys(3.0, 4.0, pos, polys);  // disjoint twin...
-  for (size_t p = firstReversed; p < polys.size(); ++p) {
-    std::reverse(polys[p].cycle.begin(), polys[p].cycle.end());  // ...inverted
+  // Review findings (rounds 2-3): the folded-shell gate must evaluate
+  // EDGE-CONNECTED components of folded polygons, not whole cells and
+  // not vert-connected groups - a positive shell and an inverted twin
+  // folded into the SAME cell (or merely touching at one snapped
+  // vert) would otherwise net to zero signed volume and slip under
+  // the area threshold, silently deleting the positive shell.
+  // (a) Disjoint twin: two unit cubes, one reversed, one cell.
+  {
+    Manifold::Impl impl;
+    std::vector<manifold::vec3> pos;
+    std::vector<overlap_removal::MergedPolygon> polys;
+    AppendCubePolys(0.0, 1.0, pos, polys);  // +1 volume
+    const size_t firstReversed = polys.size();
+    AppendCubePolys(3.0, 4.0, pos, polys);  // disjoint twin...
+    for (size_t p = firstReversed; p < polys.size(); ++p) {
+      std::reverse(polys[p].cycle.begin(), polys[p].cycle.end());
+    }
+    overlap_removal::CellComplex cells;
+    cells.numCells = 1;
+    cells.polySide2Cell.assign(2 * polys.size(), 0);  // everything folded
+    EXPECT_TRUE(overlap_removal::FoldedCellsEncloseVolume(impl, polys, pos,
+                                                          cells,
+                                                          /*eps=*/1e-9));
   }
-  overlap_removal::CellComplex cells;
-  cells.numCells = 1;
-  cells.polySide2Cell.assign(2 * polys.size(), 0);  // everything folded
-  EXPECT_TRUE(overlap_removal::FoldedCellsEncloseVolume(impl, polys, pos, cells,
-                                                        /*eps=*/1e-9));
+  // (b) Vertex-touch twin: the reversed cube's corner vert id is
+  // REPLACED by the positive cube's coincident corner id (the
+  // post-step-9.5 snapped-vert configuration), pinching the two
+  // shells at one vert. Vert-connected grouping would merge them and
+  // cancel; edge-connected grouping must keep them apart and trip.
+  {
+    Manifold::Impl impl;
+    std::vector<manifold::vec3> pos;
+    std::vector<overlap_removal::MergedPolygon> polys;
+    AppendCubePolys(0.0, 1.0, pos, polys);
+    const size_t firstReversed = polys.size();
+    AppendCubePolys(1.0, 2.0, pos, polys);  // shares corner (1,1,1)
+    int sharedA = -1, sharedB = -1;
+    for (int v = 0; v < 8; ++v) {
+      if (pos[v] == manifold::vec3(1.0, 1.0, 1.0)) sharedA = v;
+      if (pos[8 + v] == manifold::vec3(1.0, 1.0, 1.0)) sharedB = 8 + v;
+    }
+    ASSERT_GE(sharedA, 0);
+    ASSERT_GE(sharedB, 0);
+    for (size_t p = firstReversed; p < polys.size(); ++p) {
+      std::reverse(polys[p].cycle.begin(), polys[p].cycle.end());
+      for (int& v : polys[p].cycle) {
+        if (v == sharedB) v = sharedA;  // pinch at the shared corner
+      }
+    }
+    overlap_removal::CellComplex cells;
+    cells.numCells = 1;
+    cells.polySide2Cell.assign(2 * polys.size(), 0);
+    EXPECT_TRUE(overlap_removal::FoldedCellsEncloseVolume(impl, polys, pos,
+                                                          cells,
+                                                          /*eps=*/1e-9));
+  }
 }
 
 TEST(OverlapRemoval, Step1MergeReportsMaxMove) {
@@ -2938,6 +2973,7 @@ void ExpectMeshGL64Identical(const Manifold& got, const Manifold& want) {
   EXPECT_EQ(g.runIndex, w.runIndex);
   EXPECT_EQ(g.runOriginalID, w.runOriginalID);
   EXPECT_EQ(g.runTransform, w.runTransform);
+  EXPECT_EQ(g.runFlags, w.runFlags);
   EXPECT_EQ(g.faceID, w.faceID);
   EXPECT_EQ(g.halfedgeTangent, w.halfedgeTangent);
 }

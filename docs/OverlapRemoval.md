@@ -382,12 +382,16 @@ That is correct for membranes - enclosed volume below area x thickness, and
 post-merge thickness is at most the 10 eps unification radius - but a
 tangent-degenerate contact can fold a CLOSED shell's two cells together, and
 dropping that fold silently deletes the shell (observed on the hull fixture:
-two of three disjoint hulls, 2/3 of the material). Per fold cell, sum the
-mult-weighted signed volume over its folded polygons (tetra fan anchored at
-the fold set's own centroid: origin-independent for a closed set, near zero
-for an open sheet) and fall back if any exceeds
+whole disjoint hulls, most of the material). Per EDGE-CONNECTED component
+of folded polygons (grouped by fold cell + shared undirected edge - per
+cell, or vert-connected grouping, would let a positive shell and an
+inverted twin that share a cell or merely touch at a snapped vert net
+their signed volumes to nothing), sum the mult-weighted signed volume
+(tetra fan anchored
+at the component's own centroid: origin-independent for a closed set, near
+zero for an open sheet) and fall back if any component exceeds
 `area x kFoldedVolumePerAreaEps (= 100) x eps` - 10x headroom over the
-thickest legitimate membrane, ~1e7 below a real shell.
+thickest legitimate membrane, orders of magnitude below a real shell.
 
 ## Determinism constraints (pinned)
 
@@ -449,13 +453,13 @@ numbers go stale instantly; the suite is the source of truth.)
      deep; a successful rebuild leaves a few residual pierces tens of eps
      deep - above the 10x-eps output tolerance, inside the conditioned band
      of that corner.
-   - **Folded shells**: the grazing contacts on the two outrigger hulls leave
-     vert clusters spread 2-4x the 10 eps unification radius (k = 1 rim
-     chains) and near-tangent k = 4 radial fans; either folds the entire
-     shell's front cell onto its back cell, so every polygon of that hull
-     reads front == back and the keep rule would silently delete the whole
-     component (volume -> 1/3). The folded-shell volume gate (Driver gate)
-     detects this and falls back to the input bit-identically.
+   - **Folded shells**: the grazing contacts on the outrigger hulls leave
+     vert clusters spread a few times past the 10 eps unification radius
+     (k = 1 rim chains) and near-tangent k = 4 radial fans; either folds the
+     entire shell's front cell onto its back cell, so every polygon of that
+     hull reads front == back and the keep rule would silently delete the
+     whole component. The folded-shell volume gate (Driver gate) detects
+     this and falls back to the input bit-identically.
    Far from the origin the same geometry succeeds (strict pierce
    reduction, all three hulls kept): the scale-derived eps absorbs the
    clusters and the residual sits within a few eps - INSIDE its working
