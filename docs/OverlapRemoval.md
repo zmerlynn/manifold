@@ -434,21 +434,22 @@ numbers go stale instantly; the suite is the source of truth.)
   step-9 -> 9.5 handoff, t recompute + re-sort); step-6 event-identity
   snap band; step-1 merge displacement and fixed-point convergence
   ordering; fold-gate membrane-pass / bent-open-trip / opposite-shell
-  non-cancellation arms; interior-island detection (unit + bit-identical
-  feature fallback); the driver folding the measured merge displacement
-  into the exported tolerance (the eps-chain-strip weld fixture).
+  non-cancellation arms; interior-island detection (the free-island,
+  pinched-loop, and proper-double-crossing cases).
 - `Manifold.RemoveSelfIntersections*` feature tests: API smoke; clean-input
   and Boolean-result passthrough (bit-identical); the hull fixture (the
   trimaran fold class - pins the folded-shell gate's bit-identical
   fallback, see Known limitations); the ovoid dense-sliver fixture (falls
   back bit-identically - the outcome is pinned, not which internal
-  guard fires); empty input;
-  idempotence
-  (fallback fixed point + success-path monotonicity); determinism;
-  far-from-origin (the same trimaran at scale: strict pierce reduction, all
-  components kept, volume preserved to the test's bar); glued boxes
-  (equal-face early-exit bit-identical; smaller-on-larger welds,
-  winding-faithfully, to one component).
+  guard fires); the interior-island stamp (bit-identical fallback; the
+  identity assert discriminates gate removal, which would emit a
+  wrong-but-valid mesh); the merge-displacement tolerance fixture (the
+  eps-chain-strip weld; mutation-checked against the formula); empty
+  input; idempotence (fallback fixed point + success-path monotonicity);
+  determinism; far-from-origin (the same trimaran at scale: strict pierce
+  reduction, all components preserved, volume preserved to the test's
+  bar); glued boxes (equal-face early-exit bit-identical;
+  smaller-on-larger welds, winding-faithfully, to one component).
 
 ## Known limitations
 
@@ -462,8 +463,8 @@ numbers go stale instantly; the suite is the source of truth.)
    (fixed wide anchors and conditioned isotropic/anisotropic step-7 snap
    variants alike) traded the twin-rim holes for MORE eps-overlap pierces
    and was reverted: moving geometry tens of eps deforms kept triangles whose
-   neighbors did not move with them. The class has two observed severities on
-   the hull fixture (multiple disjoint hulls grazed by one mask):
+   neighbors did not move with them. The class shows up at two severities
+   on the hull fixture (multiple disjoint hulls grazed by one mask):
    - **Micro-facet pierce residue**: input pierces run thousands of eps
      deep; a successful rebuild leaves residual pierces tens of eps
      deep - above the 10x-eps output tolerance, inside the conditioned band
@@ -476,10 +477,11 @@ numbers go stale instantly; the suite is the source of truth.)
      whole component. The folded-shell volume gate (Driver gate) detects
      this and falls back to the input bit-identically.
    Far from the origin the same geometry succeeds (strict pierce
-   reduction, every hull kept): the scale-derived eps absorbs the
+   reduction, every component preserved): the scale-derived eps absorbs the
    clusters and the residual sits within a few eps - INSIDE its working
    band. Closing the class soundly (resolving the fixture at origin scale
-   to zero pierces with all three hulls kept) needs exact/extended-precision
+   to zero pierces with every component preserved) needs
+   exact/extended-precision
    local predicates (the family Emmett deferred).
 2. **Dense slivers** (the ovoid class): the arrangement is not a closed
    surface after FP partitioning; the BFS disagreement guard detects it and
@@ -495,16 +497,21 @@ numbers go stale instantly; the suite is the source of truth.)
    10-eps floor plus the measured merge/unification displacements); see the
    eps contract's OUTPUT tolerance bullet for the exact formula.
 8. **Interior-island stamps** (gated fail-closed): a shell whose
-   intersection curve with a face stays strictly INTERIOR to it (a "stamp"
-   footprint touching no face boundary) creates a closed chord loop with no
-   boundary connection; the annulus between boundary and loop is not
-   representable as simple cycles, so the partition would emit the loop in
-   both orientations (canceled at step 12) and the bare boundary - silently
-   erasing the cut and misclassifying the stamping shell as nested. The
-   partition detects the disconnected sub-edge graph
-   (`FacePartition::interiorIslandVerts`) and the driver falls back
-   bit-identically. Resolving the class needs hole-aware faces (bridge
-   edges), a known arrangement technique deliberately out of scope.
+   intersection curve with a face does not properly cross its boundary - a
+   "stamp" footprint strictly interior to the face, or one PINCHED onto a
+   single boundary vert (reachable when a corner snap lands a loop endpoint
+   on a boundary vert) - creates a chord loop whose surrounding region is a
+   (possibly pinched) annulus, not representable as simple cycles. The
+   partition would emit the loop in both orientations (canceled at step 12)
+   and the bare boundary - silently erasing the cut and misclassifying the
+   stamping shell as nested. The partition gates this per chord-only
+   component: a cycle-bearing component with fewer than two distinct
+   boundary attachments (`FacePartition::interiorIslandVerts`) fails the
+   run closed, bit-identically. Deeper pinched compositions (e.g. nested
+   loops bridged through one attachment) may still pass the count and fall
+   to the downstream gates. Resolving the class needs hole-aware faces
+   (bridge edges), a known arrangement technique deliberately out of
+   scope.
 9. **Fold-gate residual**: two opposite-orientation folded shells that share
    a REAL undirected edge (same two snapped vert ids, without the coincident
    opposite polygons step 12 would cancel) are edge-connected into one

@@ -3413,8 +3413,10 @@ TEST(Manifold, RemoveSelfIntersectionsInteriorIslandFallsBack) {
   // A shell stamping through the INTERIOR of single large faces (its
   // footprint touching no face boundary) is the interior-island class:
   // the per-face partition cannot represent the annulus, so the run
-  // must fall back bit-identically rather than silently erase the cut
-  // and drop the stamping shell as nested (the pre-gate behavior).
+  // must fall back bit-identically. The identity assert DISCRIMINATES
+  // gate removal: without the gate this input does not fall back - it
+  // EMITS a valid-but-wrong cube-only mesh (the cut cancels at step 12
+  // and the stamping shell drops as nested), failing the check below.
   MeshGL64 m;
   m.numProp = 3;
   AppendBoxToMesh(m, {0, 0, 0}, {1, 1, 1});

@@ -220,19 +220,13 @@ CastResult CastSegmentAtEar(const vec3& p0, const vec3& p1, const vec3& a,
   return {CastHit::kHit, s1 > s0 ? -1 : 1};
 }
 
-// Morton-sorted BVH builder shared across pipeline stages. Each
-// stage that does broad-phase BVH overlap (MergeVertsEps,
-// BuildOnEdgeVertLists, BuildOnTriVertLists, FindEdgeTriIntersections,
-// CheckSelfIntersection) used to inline the same 15-line ritual:
-//   1. compute bbox = Union of leaf boxes
-//   2. compute Morton codes for each leaf
-//   3. build leaf2Orig + stable_sort by Morton code
-//   4. permute boxes / morton codes into sorted order
-//   5. construct Collider from sorted views
-// Hoisted here so all callers share one convention. Returns a
-// struct that owns the sorted storage; the contained Collider
-// has already copied the leaf boxes internally, so it remains
-// valid after move/copy of the wrapper.
+// Morton-sorted BVH wrapper shared by every broad-phase stage
+// (MergeVertsEps, the on-edge/on-tri builders,
+// FindEdgeTriIntersections, CheckSelfIntersection, step 9.5) - one
+// bbox/Morton/sort/permute convention for all callers. Owns the
+// sorted storage; the contained Collider has already copied the leaf
+// boxes internally, so it remains valid after move/copy of the
+// wrapper.
 struct SortedBVH {
   Collider collider;
   std::vector<Box> boxes;         // boxes in Morton-sorted order
@@ -241,11 +235,12 @@ struct SortedBVH {
 
   // Sequential broad phase: recorder.record(queryIdx, leafIdx) for
   // each query box overlapping a leaf box. Collider cannot represent
-  // a 1-leaf tree (NumLeaves() == 0 without internal nodes, and
-  // UpdateBoxes throws), so the single-leaf case - reachable e.g.
-  // when a pipeline run allocates exactly one new vert - is brute-
-  // forced with the same DoesOverlap test the tree uses. Callers
-  // must route queries through this, not collider.Collisions.
+  // a 1-leaf tree (no internal nodes: traversal silently returns no
+  // collisions, and the UpdateBoxes assertion fires only under
+  // MANIFOLD_DEBUG), so the single-leaf case - reachable e.g. when a
+  // pipeline run allocates exactly one new vert - is brute-forced
+  // with the same DoesOverlap test the tree uses. Callers must route
+  // queries through this, not collider.Collisions.
   template <typename Recorder, typename F>
   void Collisions(Recorder& recorder, F queryBox, int nQueries) const {
     if (boxes.size() == 1) {
@@ -1501,9 +1496,14 @@ TraceChordResult CoplanarTraceChords(const Manifold::Impl& impl,
           // radius OFF this edge; threading it here moves the edge's
           // polyline by that much - the same displacement the snap
           // itself accepted (the conditioned band of Known
-          // limitations #1), with ids consistent on both faces.
+          // limitations #1), with ids consistent on both faces. A
+          // snap to a face's OPPOSITE corner (not on the claimed
+          // edge) is excluded: on an obtuse near-degenerate face its
+          // projection can land in (0, 1) yet the vert is a whole
+          // edge away.
           auto addOn = [&](int face, int kk, const vec3& s0, const vec3& s1) {
             if (kk < 0) return;
+            if (ids[e] == triVert(face, (kk + 2) % 3)) return;
             const int edgeIdx = halfedge2Edge[3 * face + kk];
             if (edgeIdx < 0) return;
             if (ids[e] == edges[edgeIdx].v0 || ids[e] == edges[edgeIdx].v1) {
@@ -2267,15 +2267,22 @@ FacePartition PartitionFace(const Manifold::Impl& impl, int face,
   }
   if (hes.empty()) return out;
 
-  // INTERIOR-ISLAND GATE: a chord loop with no connection to the
-  // face's boundary (a shell "stamping" through this face's interior
-  // without crossing its edges) makes the region between boundary and
-  // loop an ANNULUS - not representable as simple cycles. The walk
-  // would emit the loop in both orientations (step 12 cancels them)
-  // plus the bare boundary, silently erasing the cut and
-  // misclassifying the stamping shell as nested. Detect by
-  // connectivity: every sub-edge vert must reach a boundary vert.
-  // The driver fails the run closed on a positive count.
+  // INTERIOR-ISLAND GATE: a chord LOOP that the face boundary does
+  // not properly cross (a shell "stamping" through this face's
+  // interior) bounds a hole - the region around it is an annulus, or
+  // a pinched annulus when the loop touches the boundary at exactly
+  // one vert - and neither is representable as simple cycles. The
+  // walk emits such a loop in both orientations (step 12 cancels
+  // them) plus the bare boundary, silently erasing the cut and
+  // misclassifying the stamping shell as nested. Detect per
+  // chord-only connected component: a component CONTAINING A CYCLE
+  // (more undirected sub-edges than a spanning tree) must attach to
+  // the face boundary at >= 2 DISTINCT verts (a proper crossing
+  // enters and exits; one attachment is a pinch, zero a free
+  // island - vert-connectivity alone misses the pinch). Trees
+  // (through-cut chains, spurs) pass at any attachment count. The
+  // driver fails the run closed on a positive count. Deeper pinched
+  // compositions are documented in Known limitations.
   {
     std::map<int, int> vert2Idx;
     auto idxOf = [&](int v) {
@@ -2283,29 +2290,37 @@ FacePartition PartitionFace(const Manifold::Impl& impl, int face,
           vert2Idx.insert({v, static_cast<int>(vert2Idx.size())});
       return it->second;
     };
-    for (const SubHalfedge& he : hes) {
-      idxOf(he.start);
-      idxOf(he.end);
+    for (const auto& [a, b] : seenSub) {
+      idxOf(a);
+      idxOf(b);
     }
-    DisjointSets uf(static_cast<uint32_t>(vert2Idx.size()));
-    for (const SubHalfedge& he : hes) {
-      uf.unite(static_cast<uint32_t>(idxOf(he.start)),
-               static_cast<uint32_t>(idxOf(he.end)));
-    }
-    std::set<uint32_t> boundaryRoots;
-    for (int k = 0; k < 3; ++k) {
-      const int v = impl.halfedge_.Get(3 * face + k).startVert;
-      const auto it = vert2Idx.find(v);
-      if (it != vert2Idx.end()) {
-        boundaryRoots.insert(uf.find(static_cast<uint32_t>(it->second)));
+    if (!vert2Idx.empty()) {
+      std::set<int> boundaryVerts;
+      for (const auto& [a, b] : boundarySub) {
+        boundaryVerts.insert(a);
+        boundaryVerts.insert(b);
       }
-    }
-    for (const auto& [v, idx] : vert2Idx) {
-      if (!boundaryRoots.count(uf.find(static_cast<uint32_t>(idx)))) {
-        ++out.interiorIslandVerts;
+      DisjointSets uf(static_cast<uint32_t>(vert2Idx.size()));
+      for (const auto& [a, b] : seenSub) {
+        uf.unite(static_cast<uint32_t>(vert2Idx[a]),
+                 static_cast<uint32_t>(vert2Idx[b]));
       }
+      std::map<uint32_t, int> compVerts, compEdges, compAttach;
+      for (const auto& [v, idx] : vert2Idx) {
+        const uint32_t r = uf.find(static_cast<uint32_t>(idx));
+        ++compVerts[r];
+        if (boundaryVerts.count(v)) ++compAttach[r];
+      }
+      for (const auto& [a, b] : seenSub) {
+        ++compEdges[uf.find(static_cast<uint32_t>(vert2Idx[a]))];
+      }
+      for (const auto& [r, nV] : compVerts) {
+        if (compEdges[r] >= nV && compAttach[r] < 2) {
+          out.interiorIslandVerts += nV;
+        }
+      }
+      if (out.interiorIslandVerts > 0) return out;
     }
-    if (out.interiorIslandVerts > 0) return out;
   }
 
   // Outgoing lists per vert, ordered CCW about the face normal by the

@@ -232,9 +232,10 @@ class Manifold {
    *     count never exceeds the input's.
    *   - Fail-closed: on any internal failure or gate trip (construction
    *     error, non-positive volume, more pierces than the input, or a
-   *     degenerate arrangement that would silently drop a closed shell),
-   *     the original input is returned unchanged. There is no
-   *     volume-ratio gate, sign-flip recovery, or repair pass.
+   *     degenerate arrangement that would silently corrupt the output -
+   *     a folded shell, an interior-island chord loop), the original
+   *     input is returned unchanged. There is no volume-ratio gate,
+   *     sign-flip recovery, or repair pass.
    *
    * A successful rebuild stores positions only (`numProp == 3`);
    * non-position properties and mesh metadata are not preserved.

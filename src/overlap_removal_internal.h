@@ -457,12 +457,14 @@ struct FacePartition {
   // while cutting the partner face. Skipped: doubling a directed
   // edge makes the walk's exact-tie handling order-sensitive.
   int boundaryRidingSubEdgesSkipped = 0;
-  // Verts of chord sub-edges with NO connection to the face's
-  // boundary (a closed chord loop strictly interior to the face -
-  // the "stamp" class). The annulus between boundary and loop is not
-  // representable as simple cycles, so the partition would silently
-  // erase the cut; a positive count means the polygons are NOT a
-  // partition of this face, and the driver fails the run closed.
+  // Verts of chord-only components that contain a CYCLE but attach
+  // to the face boundary at fewer than two distinct verts (the
+  // "stamp" class: a free interior loop, or a loop pinched onto one
+  // boundary vert). Such a hole's surrounding region is a (possibly
+  // pinched) annulus - not representable as simple cycles - so the
+  // partition would silently erase the cut; a positive count means
+  // the polygons are NOT a partition of this face, and the driver
+  // fails the run closed.
   int interiorIslandVerts = 0;
 };
 // The walk frame derives from the face's OWN halfedge winding (NOT
