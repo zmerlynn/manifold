@@ -15,6 +15,7 @@
 #include "overlap_removal.h"
 
 #include <algorithm>
+#include <array>
 #include <limits>
 #include <map>
 #include <numeric>
@@ -295,10 +296,10 @@ SortedBVH BuildSortedBVH(VecView<const Box> leafBoxes) {
     out.boxes[i] = leafBoxes[out.leaf2Orig[i]];
     out.morton[i] = rawMorton[out.leaf2Orig[i]];
   }
-  // Collider's constructor throws on a single leaf (no internal
-  // nodes, so NumLeaves() == 0 and UpdateBoxes rejects the box
-  // list); leave it empty and let SortedBVH::Collisions brute-force
-  // that case.
+  // Collider cannot represent a single leaf (no internal nodes;
+  // its traversal would silently return no collisions, and the
+  // UpdateBoxes assertion fires only under MANIFOLD_DEBUG); leave it
+  // empty and let SortedBVH::Collisions brute-force that case.
   if (n > 1) {
     out.collider =
         Collider(VecView<const Box>(out.boxes.data(), out.boxes.size()),
@@ -469,6 +470,11 @@ Manifold RunOverlapRemovalImpl(const Manifold& input, double eps) {
     FacePartition part = PartitionFace(
         impl, f, edges, halfedge2Edge, onEdgeLists, threaded.chords,
         face2Chords[f], threaded.newVertPositions);
+    // GATE (fail closed): an interior chord island means this face's
+    // cycles are NOT a partition (the stamp class - see
+    // FacePartition::interiorIslandVerts); emitting would silently
+    // erase the cut and misclassify the stamping shell as nested.
+    if (part.interiorIslandVerts > 0) return input;
     for (std::vector<int>& cyc : part.polygons) {
       facePolygons.push_back({f, std::move(cyc)});
     }
@@ -566,6 +572,10 @@ Manifold RunOverlapRemovalImpl(const Manifold& input, double eps) {
 #else
     tris = Triangulate({poly2}, triEps, true);
 #endif
+    // An empty triangulation of a >= 4-vert cycle would leave the
+    // output topologically open: explicit fallback, matching the
+    // debug ladder's, rather than relying on the volume gate.
+    if (tris.empty()) return input;
     for (const ivec3& t : tris) {
       outTris.push_back(ivec3(cyc[t[0]], cyc[t[1]], cyc[t[2]]));
     }
@@ -667,8 +677,8 @@ MergeVertsResult MergeVertsEps(const Manifold& in, double eps, int maxIter) {
     // members are already bit-identical KEEPS that position: summing
     // n equal doubles and dividing is not bit-idempotent at large n
     // (iterated-addition rounding), and a drifting "centroid" of an
-    // already-collapsed cluster could oscillate to the iteration cap
-    // With this skip, every cluster is
+    // already-collapsed cluster could oscillate to the iteration
+    // cap. With this skip, every cluster is
     // bit-identical one pass after it last grows, so convergence is
     // structural.
     int nComp = uf.connectedComponents(componentLabel);
@@ -752,9 +762,9 @@ MergeVertsResult MergeVertsEps(const Manifold& in, double eps, int maxIter) {
     }
   }
   // Avoid round-trip when nothing was merged: GetMeshGL64 -> Manifold
-  // is lossy for Subtract-derived inputs (back-side / run-transform
-  // info doesn't fully survive, observed as sign-flipped volume on
-  // Cray). When no merges to apply, the input is already correct.
+  // is lossy for some Subtract-derived inputs (back-side /
+  // run-transform info doesn't fully survive, producing incorrect
+  // geometry). When no merges to apply, the input is already correct.
   if (mergedCount == 0) return {in, 0};
   return {Manifold(mesh), mergedCount, maxMove};
 }
@@ -2257,6 +2267,47 @@ FacePartition PartitionFace(const Manifold::Impl& impl, int face,
   }
   if (hes.empty()) return out;
 
+  // INTERIOR-ISLAND GATE: a chord loop with no connection to the
+  // face's boundary (a shell "stamping" through this face's interior
+  // without crossing its edges) makes the region between boundary and
+  // loop an ANNULUS - not representable as simple cycles. The walk
+  // would emit the loop in both orientations (step 12 cancels them)
+  // plus the bare boundary, silently erasing the cut and
+  // misclassifying the stamping shell as nested. Detect by
+  // connectivity: every sub-edge vert must reach a boundary vert.
+  // The driver fails the run closed on a positive count.
+  {
+    std::map<int, int> vert2Idx;
+    auto idxOf = [&](int v) {
+      const auto [it, fresh] =
+          vert2Idx.insert({v, static_cast<int>(vert2Idx.size())});
+      return it->second;
+    };
+    for (const SubHalfedge& he : hes) {
+      idxOf(he.start);
+      idxOf(he.end);
+    }
+    DisjointSets uf(static_cast<uint32_t>(vert2Idx.size()));
+    for (const SubHalfedge& he : hes) {
+      uf.unite(static_cast<uint32_t>(idxOf(he.start)),
+               static_cast<uint32_t>(idxOf(he.end)));
+    }
+    std::set<uint32_t> boundaryRoots;
+    for (int k = 0; k < 3; ++k) {
+      const int v = impl.halfedge_.Get(3 * face + k).startVert;
+      const auto it = vert2Idx.find(v);
+      if (it != vert2Idx.end()) {
+        boundaryRoots.insert(uf.find(static_cast<uint32_t>(it->second)));
+      }
+    }
+    for (const auto& [v, idx] : vert2Idx) {
+      if (!boundaryRoots.count(uf.find(static_cast<uint32_t>(idx)))) {
+        ++out.interiorIslandVerts;
+      }
+    }
+    if (out.interiorIslandVerts > 0) return out;
+  }
+
   // Outgoing lists per vert, ordered CCW about the face normal by the
   // atan2-free comparator (half-plane bucket + cross sign - the
   // boolean2 winding_filter pattern; no trig in the decision path).
@@ -2819,8 +2870,8 @@ CellWinding ClassifyCells(const Manifold::Impl& impl,
       break;
     }
     if (!seeded) {
-      // Three grazing targets: a degenerate configuration the caller
-      // handles by falling back to the input.
+      // Every target in the retry budget grazed: a degenerate
+      // configuration the caller handles by falling back to the input.
       DEBUG_ASSERT(false, logicErr,
                    "ClassifyCells: seed cast retries exhausted");
       out.ok = false;

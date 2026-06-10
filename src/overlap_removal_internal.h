@@ -457,6 +457,13 @@ struct FacePartition {
   // while cutting the partner face. Skipped: doubling a directed
   // edge makes the walk's exact-tie handling order-sensitive.
   int boundaryRidingSubEdgesSkipped = 0;
+  // Verts of chord sub-edges with NO connection to the face's
+  // boundary (a closed chord loop strictly interior to the face -
+  // the "stamp" class). The annulus between boundary and loop is not
+  // representable as simple cycles, so the partition would silently
+  // erase the cut; a positive count means the polygons are NOT a
+  // partition of this face, and the driver fails the run closed.
+  int interiorIslandVerts = 0;
 };
 // The walk frame derives from the face's OWN halfedge winding (NOT
 // the stored faceNormal_, which can oppose the winding on folded
@@ -555,11 +562,13 @@ struct CellWinding {
 // effective graze margin is max(epsHint, impl.epsilon_, machine eps
 // at the arrangement scale) - without the hint the cast would run at
 // impl.epsilon_, which can be tighter than the epsilon the
-// arrangement itself was built with.
+// arrangement itself was built with. Deliberately NO default: a
+// caller omitting it would silently reintroduce that skew; unit
+// fixtures with no pipeline eps pass a non-positive hint.
 CellWinding ClassifyCells(const Manifold::Impl& impl,
                           const std::vector<MergedPolygon>& polygons,
                           const std::vector<vec3>& newVertPositions,
-                          const CellComplex& cells, double epsHint = -1.0);
+                          const CellComplex& cells, double epsHint);
 
 // ---- Step 13 emit topology: inside-wedge twins + vertex rings ----
 

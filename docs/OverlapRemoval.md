@@ -46,7 +46,8 @@ exist only in MANIFOLD_DEBUG builds (optional_assert.h defines the error
 types there; release manifold is exception-free and all RSI failure arms
 are status-based) - under MANIFOLD_DEBUG the entry point wraps the body in
 try/catch so a throwing assertion anywhere falls back to the input, the
-polygon.cpp guard pattern. EARLY-EXIT: if the combined chord list
+polygon.cpp guard pattern (two inner debug-only catches have local roles:
+the emit triangulation retry ladder and the seed-cast target skip). EARLY-EXIT: if the combined chord list
 (transversal + trace) is empty, the input is returned bit-identical - this
 covers clean inputs, the all-pairs-dropped case, and pancake-free coplanar
 contact.
@@ -433,7 +434,9 @@ numbers go stale instantly; the suite is the source of truth.)
   step-9 -> 9.5 handoff, t recompute + re-sort); step-6 event-identity
   snap band; step-1 merge displacement and fixed-point convergence
   ordering; fold-gate membrane-pass / bent-open-trip / opposite-shell
-  non-cancellation arms.
+  non-cancellation arms; interior-island detection (unit + bit-identical
+  feature fallback); the driver folding the measured merge displacement
+  into the exported tolerance (the eps-chain-strip weld fixture).
 - `Manifold.RemoveSelfIntersections*` feature tests: API smoke; clean-input
   and Boolean-result passthrough (bit-identical); the hull fixture (the
   trimaran fold class - pins the folded-shell gate's bit-identical
@@ -491,7 +494,18 @@ numbers go stale instantly; the suite is the source of truth.)
 7. Output tolerance widens to cover the pipeline's applied movements (the
    10-eps floor plus the measured merge/unification displacements); see the
    eps contract's OUTPUT tolerance bullet for the exact formula.
-8. **Fold-gate residual**: two opposite-orientation folded shells that share
+8. **Interior-island stamps** (gated fail-closed): a shell whose
+   intersection curve with a face stays strictly INTERIOR to it (a "stamp"
+   footprint touching no face boundary) creates a closed chord loop with no
+   boundary connection; the annulus between boundary and loop is not
+   representable as simple cycles, so the partition would emit the loop in
+   both orientations (canceled at step 12) and the bare boundary - silently
+   erasing the cut and misclassifying the stamping shell as nested. The
+   partition detects the disconnected sub-edge graph
+   (`FacePartition::interiorIslandVerts`) and the driver falls back
+   bit-identically. Resolving the class needs hole-aware faces (bridge
+   edges), a known arrangement technique deliberately out of scope.
+9. **Fold-gate residual**: two opposite-orientation folded shells that share
    a REAL undirected edge (same two snapped vert ids, without the coincident
    opposite polygons step 12 would cancel) are edge-connected into one
    component and can net their signed volumes under the threshold. Requires

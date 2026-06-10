@@ -23,6 +23,7 @@
 
 #include "../src/execution_impl.h"
 #include "../src/impl.h"
+#include "../src/overlap_removal.h"  // for RunOverlapRemoval (explicit eps)
 #include "../src/overlap_removal_internal.h"
 #include "manifold/cross_section.h"
 #include "test.h"
@@ -2012,6 +2013,31 @@ TEST(OverlapRemoval, Step10BoundaryRiderResultIsChordOrderInvariant) {
   EXPECT_EQ(results[0], results[2]);
 }
 
+TEST(OverlapRemoval, Step10InteriorIslandDetectedAndFailsClosed) {
+  // The stamp class: a closed chord loop strictly interior to the
+  // face, no connection to its boundary. The annulus between boundary
+  // and loop is not representable as simple cycles - the walk would
+  // emit the loop in both orientations (step 12 cancels them) plus
+  // the bare boundary, silently erasing the cut. The partition must
+  // DETECT the island (connectivity to the boundary) and report it so
+  // the driver fails the run closed.
+  const Step10Fixture fx = MakeStep10Fixture();
+  ASSERT_GE(fx.face, 0);
+  const std::vector<overlap_removal::EdgeVertList> onEdgeLists(fx.edges.size());
+  // A triangle of chords between three interior verts (ids 4-6).
+  const std::vector<overlap_removal::NewEdgeWithExtras> chords = {
+      {{4, 5, fx.face, 99}, {}, {}},
+      {{5, 6, fx.face, 99}, {}, {}},
+      {{4, 6, fx.face, 99}, {}, {}}};
+  const std::vector<manifold::vec3> newPos = {
+      {0.2, 0.2, 0.0}, {0.5, 0.2, 0.0}, {0.2, 0.5, 0.0}};
+  const overlap_removal::FacePartition part =
+      overlap_removal::PartitionFace(fx.impl, fx.face, fx.edges, fx.he2e,
+                                     onEdgeLists, chords, {0, 1, 2}, newPos);
+  EXPECT_GT(part.interiorIslandVerts, 0);
+  EXPECT_TRUE(part.polygons.empty());  // no partition is emitted
+}
+
 TEST(OverlapRemoval, Step10ZeroLengthChordSkippedAndCleanFace) {
   // A zero-length chord (step-9 snapping collapsed it) is skipped and
   // counted; with no effective cuts the face partitions into its own
@@ -2237,7 +2263,7 @@ TEST(OverlapRemoval, Step13CubeClassifyKeepsAllFaces) {
       overlap_removal::BuildCellComplex(impl, polys, pos);
   ASSERT_EQ(cc.numCells, 2);
   const overlap_removal::CellWinding cw =
-      overlap_removal::ClassifyCells(impl, polys, pos, cc);
+      overlap_removal::ClassifyCells(impl, polys, pos, cc, /*epsHint=*/-1.0);
   ASSERT_TRUE(cw.ok);
   EXPECT_EQ(cw.seedCasts, 1);
   ASSERT_EQ(cw.winding.size(), 2u);
@@ -2276,7 +2302,7 @@ TEST(OverlapRemoval, Step13NestedCubesInnerFacesNotKept) {
       overlap_removal::BuildCellComplex(impl, polys, pos);
   ASSERT_EQ(cc.numCells, 4);
   const overlap_removal::CellWinding cw =
-      overlap_removal::ClassifyCells(impl, polys, pos, cc);
+      overlap_removal::ClassifyCells(impl, polys, pos, cc, /*epsHint=*/-1.0);
   ASSERT_TRUE(cw.ok);
   EXPECT_EQ(cw.seedCasts, 2);
   ASSERT_EQ(cw.winding.size(), 4u);
@@ -2316,7 +2342,7 @@ TEST(OverlapRemoval, Step13SeedCastSkipsMembranes) {
   ASSERT_EQ(cc.numCells, 3);  // outside, inside, membrane (united)
   ASSERT_EQ(cc.polySide2Cell[2 * 12], cc.polySide2Cell[2 * 12 + 1]);  // premise
   const overlap_removal::CellWinding cw =
-      overlap_removal::ClassifyCells(impl, polys, pos, cc);
+      overlap_removal::ClassifyCells(impl, polys, pos, cc, /*epsHint=*/-1.0);
   ASSERT_TRUE(cw.ok);
   for (int p = 0; p < 12; ++p) {
     EXPECT_TRUE(cw.keep[p]) << "cube poly " << p;
@@ -2357,7 +2383,7 @@ TEST(OverlapRemoval, Step13BookTwinPairingSplitsSharedEdge) {
   // Outside, inside-A, inside-B; one component (joined via outside).
   ASSERT_EQ(cc.numCells, 3);
   const overlap_removal::CellWinding cw =
-      overlap_removal::ClassifyCells(impl, polys, pos, cc);
+      overlap_removal::ClassifyCells(impl, polys, pos, cc, /*epsHint=*/-1.0);
   ASSERT_TRUE(cw.ok);
   EXPECT_EQ(cw.seedCasts, 1);
   const overlap_removal::EmitTopology et =
@@ -2465,7 +2491,7 @@ TEST(OverlapRemoval, Step13ConcaveSeedTargetUsesRealTriangulationEar) {
       overlap_removal::BuildCellComplex(impl, polys, pos);
   ASSERT_EQ(cc.numCells, 2);
   const overlap_removal::CellWinding cw =
-      overlap_removal::ClassifyCells(impl, polys, pos, cc);
+      overlap_removal::ClassifyCells(impl, polys, pos, cc, /*epsHint=*/-1.0);
   ASSERT_TRUE(cw.ok);
   EXPECT_EQ(cw.seedCasts, 1);  // the first (largest) target cast cleanly
   for (size_t p = 0; p < polys.size(); ++p) {
@@ -3381,6 +3407,86 @@ void AppendBoxToMesh(MeshGL64& m, const vec3& lo, const vec3& hi) {
     m.triVerts.push_back(b + t[1]);
     m.triVerts.push_back(b + t[2]);
   }
+}
+
+TEST(Manifold, RemoveSelfIntersectionsInteriorIslandFallsBack) {
+  // A shell stamping through the INTERIOR of single large faces (its
+  // footprint touching no face boundary) is the interior-island class:
+  // the per-face partition cannot represent the annulus, so the run
+  // must fall back bit-identically rather than silently erase the cut
+  // and drop the stamping shell as nested (the pre-gate behavior).
+  MeshGL64 m;
+  m.numProp = 3;
+  AppendBoxToMesh(m, {0, 0, 0}, {1, 1, 1});
+  // Strictly inside the bottom face's y > x tri, poking through.
+  AppendBoxToMesh(m, {0.15, 0.55, -0.3}, {0.35, 0.75, 0.3});
+  Manifold input((MeshGL64(m)));
+  ASSERT_EQ(input.Status(), Manifold::Error::NoError);
+  ASSERT_GT(InteriorPierces(input), 0);  // premise: genuinely pierces
+  Manifold cleaned = overlap_removal::RunOverlapRemoval(input, 1e-3);
+  EXPECT_EQ(cleaned.Status(), Manifold::Error::NoError);
+  ExpectMeshGL64Identical(cleaned, input);
+  EXPECT_EQ(InteriorPierces(cleaned), InteriorPierces(input));
+}
+
+TEST(Manifold, RemoveSelfIntersectionsToleranceCoversMergeDisplacement) {
+  // The one output-tolerance formula term nothing else discriminated:
+  // the driver folding the MEASURED step-1 merge displacement into the
+  // exported tolerance. A 25-vert eps-chain strip on the cube's top
+  // face (consecutive spacing 0.9 eps, so the whole strip transitively
+  // merges to its centroid) moves its END verts ~10.8 eps - past the
+  // 10 eps floor - while a smaller box glued onto the x = 1 face far
+  // away welds through the step-6.5 trace path (the proven success
+  // class; transversal raw-shell placements all land on documented
+  // drop/gate edges). Dropping merged.maxMove from the formula exports
+  // exactly the 10 eps floor and fails the bound below.
+  const double eps = 1e-3;
+  const int kChain = 25;
+  const double spacing = 0.9 * eps;
+  const double x0 = 0.5 - 0.5 * (kChain - 1) * spacing;
+  MeshGL64 m;
+  m.numProp = 3;
+  AppendBoxToMesh(m, {0, 0, 0}, {1, 1, 1});  // verts 0-7
+  // Replace the top face (z = 1: verts 4,5,7,6; table tris {4,5,7},
+  // {4,7,6} = entries 2,3) with fans around the chain strip.
+  m.triVerts.erase(m.triVerts.begin() + 6, m.triVerts.begin() + 12);
+  const uint64_t c0 = m.NumVert();
+  for (int i = 0; i < kChain; ++i) {
+    m.vertProperties.push_back(x0 + i * spacing);
+    m.vertProperties.push_back(0.5);
+    m.vertProperties.push_back(1.0);
+  }
+  auto tri = [&](uint64_t a, uint64_t b, uint64_t c) {
+    m.triVerts.push_back(a);
+    m.triVerts.push_back(b);
+    m.triVerts.push_back(c);
+  };
+  // South of the strip: fan from corner 4 (CCW seen from +z).
+  tri(4, 5, c0 + kChain - 1);
+  for (int i = kChain - 1; i > 0; --i) tri(4, c0 + i, c0 + i - 1);
+  // North: fan from corner 6.
+  for (int i = 0; i + 1 < kChain; ++i) tri(6, c0 + i, c0 + i + 1);
+  tri(6, c0 + kChain - 1, 7);
+  tri(4, c0, 6);               // west cap
+  tri(5, 7, c0 + kChain - 1);  // east cap
+  AppendBoxToMesh(m, {1.0, 0.25, 0.25}, {1.5, 0.75, 0.75});
+  Manifold input((MeshGL64(m)));
+  ASSERT_EQ(input.Status(), Manifold::Error::NoError);
+  ASSERT_EQ(input.Decompose().size(), 2u);  // premise: two raw shells
+  Manifold cleaned = overlap_removal::RunOverlapRemoval(input, eps);
+  ASSERT_EQ(cleaned.Status(), Manifold::Error::NoError);
+  // Premise: the SUCCESS path - the glued shells welded into one
+  // (early-exit and every fallback would return the 2-component
+  // input bit-identically).
+  ASSERT_EQ(cleaned.Decompose().size(), 1u);
+  EXPECT_EQ(InteriorPierces(cleaned), 0);
+  EXPECT_NEAR(cleaned.Volume(), 1.0 + 0.5 * 0.5 * 0.5, 1e-6);
+  // The chain ends moved (kChain - 1) / 2 * spacing = 10.8 eps to the
+  // strip centroid; the exported tolerance must cover it (the 10 eps
+  // floor alone is 0.010).
+  const double expectedMove = 0.5 * (kChain - 1) * spacing;
+  ASSERT_GT(expectedMove, 10.0 * eps);  // fixture premise
+  EXPECT_GE(cleaned.GetMeshGL64().tolerance, expectedMove * 0.97);
 }
 
 TEST(Manifold, RemoveSelfIntersectionsGluedBoxes) {
