@@ -90,7 +90,6 @@ echo "wiping $BUILD_DIR for fresh configure..."
 rm -rf "$BUILD_DIR"
 
 cmake -B "$BUILD_DIR" \
-  -DMANIFOLD_CROSS_SECTION=ON \
   -DMANIFOLD_TEST=ON \
   -DMANIFOLD_DEBUG=ON \
   . 2>&1 | tail -3
