@@ -15,6 +15,7 @@
 #include "overlap_removal.h"
 
 #include <algorithm>
+#include <limits>
 #include <numeric>
 
 #include "collider.h"
@@ -91,6 +92,14 @@ constexpr int kPairSymPhase35MaxIter = 64;
 constexpr int kCascadeDropMaxPass = 16;
 constexpr int kCycleWalkerGuard = 4096;
 constexpr int kEarClipGuard = 4096;
+
+// kSeedCastDir: direction from the arrangement bbox center to the
+//   seed cast's source point P0 (step 13.4), at 2x the bbox diagonal.
+//   A fixed generic unit vector - no axis alignment, no rational
+//   component ratios - so casts into typical axis-aligned inputs
+//   avoid edge/vert grazes on the first try. Unit to ~4 digits;
+//   only its genericity and ~1 magnitude matter.
+const vec3 kSeedCastDir(0.278773, 0.581753, 0.764101);
 }  // namespace
 
 SortedBVH BuildSortedBVH(VecView<const Box> leafBoxes) {
@@ -1466,6 +1475,271 @@ CellComplex BuildCellComplex(const Manifold::Impl& impl,
     }
     out.fans.push_back(std::move(fan));
   }
+  return out;
+}
+
+namespace {
+// Seed-cast segment-vs-ear-triangle kernel (step 13.4). Transversal
+// crossings only: anything within eps (a length) of a degenerate
+// contact - a segment endpoint on the triangle's plane near the
+// triangle, a crossing within eps of an ear edge (polygon boundary
+// or interior diagonal alike), a near-in-plane segment - reports
+// kGraze, which invalidates the WHOLE cast. The retry-on-next-target
+// loop replaces SoS here; a per-polygon skip would corrupt the seed
+// by a silent +-mult, so there is none.
+enum class CastHit { kMiss, kHit, kGraze };
+struct CastResult {
+  CastHit kind;
+  int step;  // on kHit: the winding increment per unit multiplicity,
+             // -sign(dot(p1 - p0, ear normal))
+};
+CastResult CastSegmentAtEar(const vec3& p0, const vec3& p1, const vec3& a,
+                            const vec3& b, const vec3& c, double eps) {
+  using la::cross;
+  using la::dot;
+  const vec3 nRaw = cross(b - a, c - a);
+  const double nLen = std::sqrt(dot(nRaw, nRaw));
+  if (nLen == 0) return {CastHit::kGraze, 0};  // degenerate ear
+  const vec3 n = nRaw / nLen;
+  const double s0 = dot(p0 - a, n);
+  const double s1 = dot(p1 - a, n);
+  // Signed distance of an in-plane point from the ear's boundary:
+  // the min over edges of the inward edge-line distance, positive
+  // strictly interior. n perp each edge, so cross(n, dir) is unit.
+  auto edgeMargin = [&](const vec3& x) {
+    double dMin = std::numeric_limits<double>::infinity();
+    const vec3 tri[3] = {a, b, c};
+    for (int e = 0; e < 3; ++e) {
+      const vec3 from = tri[e];
+      vec3 dir = tri[(e + 1) % 3] - from;
+      dir = dir / std::sqrt(dot(dir, dir));
+      dMin = std::min(dMin, dot(cross(n, dir), x - from));
+    }
+    return dMin;
+  };
+  const bool near0 = std::fabs(s0) <= eps;
+  const bool near1 = std::fabs(s1) <= eps;
+  if (near0 && near1) return {CastHit::kGraze, 0};  // nearly in-plane
+  if (near0 || near1) {
+    // One endpoint within eps of the plane: degenerate only if its
+    // plane contact is at/near the triangle itself - a coplanar
+    // polygon far from the contact is a clean miss.
+    const vec3 xNear = near0 ? p0 - n * s0 : p1 - n * s1;
+    return {edgeMargin(xNear) <= -eps ? CastHit::kMiss : CastHit::kGraze, 0};
+  }
+  if ((s0 > 0) == (s1 > 0)) return {CastHit::kMiss, 0};
+  const vec3 x = p0 + (p1 - p0) * (s0 / (s0 - s1));
+  const double margin = edgeMargin(x);
+  if (std::fabs(margin) <= eps) return {CastHit::kGraze, 0};
+  if (margin < 0) return {CastHit::kMiss, 0};
+  return {CastHit::kHit, s1 > s0 ? -1 : 1};
+}
+}  // namespace
+
+CellWinding ClassifyCells(const Manifold::Impl& impl,
+                          const std::vector<MergedPolygon>& polygons,
+                          const std::vector<vec3>& newVertPositions,
+                          const CellComplex& cells) {
+  using la::cross;
+  using la::dot;
+  CellWinding out;
+  const int nP = static_cast<int>(polygons.size());
+  out.winding.assign(cells.numCells, 0);
+  out.keep.assign(nP, false);
+  out.flip.assign(nP, false);
+  if (nP == 0) {
+    out.ok = true;
+    return out;
+  }
+  const int baseId = static_cast<int>(impl.NumVert());
+  auto posOf = [&](int id) {
+    return GetPos3(id, baseId, impl, newVertPositions);
+  };
+
+  // Canonical Newell normals (the frame each signed multiplicity is
+  // measured against), the arrangement bbox, and a length-correct
+  // graze margin: the impl's epsilon when it has one, else machine
+  // eps at the arrangement's own scale.
+  std::vector<vec3> normal(nP);
+  vec3 bbMin = posOf(polygons[0].cycle[0]);
+  vec3 bbMax = bbMin;
+  for (int p = 0; p < nP; ++p) {
+    const std::vector<int>& cyc = polygons[p].cycle;
+    vec3 nsum(0.0, 0.0, 0.0);
+    for (size_t i = 0; i < cyc.size(); ++i) {
+      const vec3 pa = posOf(cyc[i]);
+      nsum = nsum + cross(pa, posOf(cyc[(i + 1) % cyc.size()]));
+      bbMin = la::min(bbMin, pa);
+      bbMax = la::max(bbMax, pa);
+    }
+    const double len2 = dot(nsum, nsum);
+    DEBUG_ASSERT(len2 > 0, logicErr, "ClassifyCells: degenerate polygon");
+    normal[p] = len2 > 0 ? nsum / std::sqrt(len2) : vec3(0.0, 0.0, 1.0);
+  }
+  const double scale = la::length(bbMax - bbMin);
+  const double eps =
+      std::max(impl.epsilon_, std::numeric_limits<double>::epsilon() * scale);
+  const vec3 p0 = 0.5 * (bbMin + bbMax) + kSeedCastDir * (2.0 * scale);
+
+  // Ear triangulations (index triples into each cycle) for the cast's
+  // crossing tests and the targets' interior points. Triangle cycles
+  // skip Triangulate. TODO: reuse these for the emit's triangulation.
+  std::vector<std::vector<ivec3>> ears(nP);
+  for (int p = 0; p < nP; ++p) {
+    const std::vector<int>& cyc = polygons[p].cycle;
+    if (cyc.size() == 3) {
+      ears[p] = {ivec3(0, 1, 2)};
+      continue;
+    }
+    const InPlaneBasis basis = FaceBasisFromNormal(normal[p]);
+    const vec3 origin = posOf(cyc[0]);
+    SimplePolygon poly2;
+    poly2.reserve(cyc.size());
+    for (const int v : cyc) {
+      const vec3 d = posOf(v) - origin;
+      poly2.push_back(vec2(dot(d, basis.u), dot(d, basis.v)));
+    }
+    ears[p] = Triangulate({poly2}, impl.epsilon_, true);
+  }
+
+  // Cell graph: polygon p joins its front cell (the +canonical-normal
+  // side, key 2p) to its back (2p + 1); crossing front to back moves
+  // AGAINST the normal - entering what the surface element wraps - so
+  // the winding gains the signed multiplicity. A polygon whose two
+  // sides united (an open sheet, k = 1 rim) separates nothing and
+  // propagates nothing; the keep rule below never keeps it.
+  std::vector<std::vector<std::pair<int, int>>> adj(cells.numCells);
+  for (int p = 0; p < nP; ++p) {
+    const int cF = cells.cellOf[2 * p];
+    const int cB = cells.cellOf[2 * p + 1];
+    if (cF == cB) continue;
+    adj[cF].push_back({cB, polygons[p].mult});
+    adj[cB].push_back({cF, -polygons[p].mult});
+  }
+
+  // Per connected component of the cell graph: seed one cell by a
+  // segment cast, then propagate by BFS. Components are discovered in
+  // ascending cell order and targets tried in ascending polygon
+  // order - deterministic.
+  std::vector<int> compOf(cells.numCells, -1);
+  std::vector<bool> seen(cells.numCells, false);
+  int numComps = 0;
+  for (int c0 = 0; c0 < cells.numCells; ++c0) {
+    if (compOf[c0] >= 0) continue;
+    const int comp = numComps++;
+    std::vector<int> compCells{c0};
+    compOf[c0] = comp;
+    for (size_t i = 0; i < compCells.size(); ++i) {
+      for (const auto& [d, m] : adj[compCells[i]]) {
+        if (compOf[d] < 0) {
+          compOf[d] = comp;
+          compCells.push_back(d);
+        }
+      }
+    }
+    // Separating polygons of this component, as cast targets. A
+    // component with none (a lone open sheet) needs no seed: its
+    // polygons are dropped whatever the winding.
+    std::vector<int> candidates;
+    for (int p = 0; p < nP; ++p) {
+      if (compOf[cells.cellOf[2 * p]] == comp &&
+          cells.cellOf[2 * p] != cells.cellOf[2 * p + 1]) {
+        candidates.push_back(p);
+      }
+    }
+    if (candidates.empty()) continue;
+    bool seeded = false;
+    int tried = 0;
+    for (const int q : candidates) {
+      if (tried == 3) break;
+      ++tried;
+      ++out.seedCasts;
+      // Target: the centroid of q's first ear (a concave polygon's
+      // vert-centroid can fall outside it; an ear centroid cannot).
+      if (ears[q].empty()) continue;
+      const ivec3 ear = ears[q][0];
+      const std::vector<int>& cyc = polygons[q].cycle;
+      const vec3 target =
+          (posOf(cyc[ear[0]]) + posOf(cyc[ear[1]]) + posOf(cyc[ear[2]])) / 3.0;
+      // The cast must arrive transversally: P0 within eps of q's own
+      // plane is a tangential arrival - retry.
+      if (std::fabs(dot(p0 - target, normal[q])) <= eps) continue;
+      // Count signed crossings of the open segment P0 -> target
+      // against ALL other polygons (other components' included - the
+      // true ambient winding is exactly what a nested component
+      // cannot learn from its own polygons). Q itself is excluded:
+      // counting it would measure the far side.
+      int wArr = 0;
+      bool graze = false;
+      for (int p = 0; p < nP && !graze; ++p) {
+        if (p == q) continue;
+        int hits = 0;
+        int step = 0;
+        for (const ivec3& e : ears[p]) {
+          const CastResult r =
+              CastSegmentAtEar(p0, target, posOf(polygons[p].cycle[e[0]]),
+                               posOf(polygons[p].cycle[e[1]]),
+                               posOf(polygons[p].cycle[e[2]]), eps);
+          if (r.kind == CastHit::kGraze) {
+            graze = true;
+            break;
+          }
+          if (r.kind == CastHit::kHit) {
+            ++hits;
+            step = r.step;
+          }
+        }
+        // A segment meets a planar polygon's interior at most once
+        // (the plane crossing is a single point); a near-diagonal
+        // crossing grazes before it can double-count.
+        DEBUG_ASSERT(hits <= 1, logicErr,
+                     "ClassifyCells: multiple ear hits on one polygon");
+        if (hits > 0) wArr += step * polygons[p].mult;
+      }
+      if (graze) continue;
+      // Seed the side the segment arrives through: the front iff the
+      // canonical normal points back along the arrival direction.
+      const int side = dot(target - p0, normal[q]) < 0 ? 0 : 1;
+      const int seedCell = cells.cellOf[2 * q + side];
+      out.winding[seedCell] = wArr;
+      seen[seedCell] = true;
+      std::vector<int> frontier{seedCell};
+      for (size_t i = 0; i < frontier.size(); ++i) {
+        const int c = frontier[i];
+        for (const auto& [d, m] : adj[c]) {
+          if (!seen[d]) {
+            seen[d] = true;
+            out.winding[d] = out.winding[c] + m;
+            frontier.push_back(d);
+          } else {
+            DEBUG_ASSERT(out.winding[d] == out.winding[c] + m, logicErr,
+                         "ClassifyCells: winding propagation disagreement");
+          }
+        }
+      }
+      seeded = true;
+      break;
+    }
+    if (!seeded) {
+      // Three grazing targets: a degenerate configuration the caller
+      // handles by falling back to the input.
+      DEBUG_ASSERT(false, logicErr,
+                   "ClassifyCells: seed cast retries exhausted");
+      out.ok = false;
+      return out;
+    }
+  }
+
+  // Keep a polygon iff exactly one side is inside (winding > 0);
+  // orient kept polygons with the normal toward the outside cell, so
+  // flip exactly those whose front is the inside.
+  for (int p = 0; p < nP; ++p) {
+    const bool inFront = out.winding[cells.cellOf[2 * p]] > 0;
+    const bool inBack = out.winding[cells.cellOf[2 * p + 1]] > 0;
+    out.keep[p] = inFront != inBack;
+    out.flip[p] = out.keep[p] && inFront;
+  }
+  out.ok = true;
   return out;
 }
 

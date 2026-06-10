@@ -139,7 +139,8 @@ propagation over the arrangement's volume cells - the 3D lift of boolean2's
    - Target: an interior point of a chosen polygon Q = the centroid of the
      first ear of Q's triangulation (a concave polygon's vert-centroid can
      fall outside it).
-   - Source: P0 = global bbox center + kProbeRayDir * 2x bbox extents.
+   - Source: P0 = arrangement bbox center + kSeedCastDir * 2x bbox diagonal
+     (a fixed generic unit direction; it is a segment cast, not a ray).
    - Count signed crossings of the open segment (P0 -> target) against ALL
      merged polygons EXCLUDING Q (counting Q would measure the far side).
      The arrival winding seeds the cell adjacent to Q's P0-FACING half-face:

@@ -1934,6 +1934,26 @@ bool Step13SameCell(const overlap_removal::CellComplex& cc, int sideA,
                     int sideB) {
   return cc.cellOf[sideA] == cc.cellOf[sideB];
 }
+
+// Appends the 8 verts and 12 outward-wound triangles of the
+// axis-aligned cube [lo, hi]^3 as merged polygons (mult +1). Vert i
+// has x = hi iff i & 1, y = hi iff i & 2, z = hi iff i & 4.
+void AppendCubePolys(double lo, double hi, std::vector<manifold::vec3>& pos,
+                     std::vector<overlap_removal::MergedPolygon>& polys) {
+  const int b = static_cast<int>(pos.size());
+  for (int i = 0; i < 8; ++i) {
+    pos.push_back({(i & 1) ? hi : lo, (i & 2) ? hi : lo, (i & 4) ? hi : lo});
+  }
+  const int tris[12][3] = {{0, 2, 3}, {0, 3, 1},   // -z
+                           {4, 5, 7}, {4, 7, 6},   // +z
+                           {0, 1, 5}, {0, 5, 4},   // -y
+                           {2, 7, 3}, {2, 6, 7},   // +y
+                           {0, 4, 6}, {0, 6, 2},   // -x
+                           {1, 7, 5}, {1, 3, 7}};  // +x
+  for (const auto& t : tris) {
+    polys.push_back({{b + t[0], b + t[1], b + t[2]}, 1, 0});
+  }
+}
 }  // namespace
 
 TEST(OverlapRemoval, Step13TetraSurfaceHasTwoCells) {
@@ -2010,6 +2030,84 @@ TEST(OverlapRemoval, Step13BipyramidWithInternalFaceHasThreeCells) {
   EXPECT_FALSE(Step13SameCell(cc, 0, 1));
   EXPECT_FALSE(Step13SameCell(cc, 0, 7));
   EXPECT_FALSE(Step13SameCell(cc, 1, 7));
+}
+
+TEST(OverlapRemoval, Step13CubeClassifyKeepsAllFaces) {
+  // A single outward cube: two cells with windings 0 (outside) and 1
+  // (inside); every face separates them and is kept. The bottom face
+  // is one quad polygon passed in its REVERSED representation (cycle
+  // reversed, mult -1): classification must be representation-
+  // invariant, and only that polygon - whose canonical normal points
+  // inside - gets the emit-orientation flip. The quad is the first
+  // polygon, so the seed cast targets its first Triangulate ear.
+  Manifold::Impl impl;
+  std::vector<manifold::vec3> pos;
+  std::vector<overlap_removal::MergedPolygon> polys;
+  AppendCubePolys(0.0, 1.0, pos, polys);
+  // Replace the two bottom tris with the reversed quad: outward is
+  // {0, 2, 3, 1} (Newell -z), so the reversed form carries mult -1.
+  polys.erase(polys.begin(), polys.begin() + 2);
+  polys.insert(polys.begin(), {{1, 3, 2, 0}, -1, 0});
+  const overlap_removal::CellComplex cc =
+      overlap_removal::BuildCellComplex(impl, polys, pos);
+  ASSERT_EQ(cc.numCells, 2);
+  const overlap_removal::CellWinding cw =
+      overlap_removal::ClassifyCells(impl, polys, pos, cc);
+  ASSERT_TRUE(cw.ok);
+  EXPECT_EQ(cw.seedCasts, 1);
+  ASSERT_EQ(cw.winding.size(), 2u);
+  ASSERT_EQ(cw.keep.size(), 11u);
+  ASSERT_EQ(cw.flip.size(), 11u);
+  for (int p = 0; p < 11; ++p) {
+    EXPECT_TRUE(cw.keep[p]) << "polygon " << p;
+    const int wFront = cw.winding[cc.cellOf[2 * p]];
+    const int wBack = cw.winding[cc.cellOf[2 * p + 1]];
+    if (p == 0) {
+      // Reversed representation: front (+canonical normal) is inside.
+      EXPECT_EQ(wFront, 1);
+      EXPECT_EQ(wBack, 0);
+      EXPECT_TRUE(cw.flip[p]);
+    } else {
+      EXPECT_EQ(wFront, 0) << "polygon " << p;
+      EXPECT_EQ(wBack, 1) << "polygon " << p;
+      EXPECT_FALSE(cw.flip[p]) << "polygon " << p;
+    }
+  }
+}
+
+TEST(OverlapRemoval, Step13NestedCubesInnerFacesNotKept) {
+  // Two disjoint outward cubes, one inside the other: two cell-graph
+  // components (no shared arrangement edges, so the between-region is
+  // represented by two cells, one per component). The inner
+  // component's seed cast passes through the outer wall, measuring
+  // its true ambient winding 1; the inner faces then separate w 1|2 -
+  // both inside - and are NOT kept, while the outer faces (0|1) are.
+  Manifold::Impl impl;
+  std::vector<manifold::vec3> pos;
+  std::vector<overlap_removal::MergedPolygon> polys;
+  AppendCubePolys(-2.0, 2.0, pos, polys);
+  AppendCubePolys(-0.5, 0.5, pos, polys);
+  const overlap_removal::CellComplex cc =
+      overlap_removal::BuildCellComplex(impl, polys, pos);
+  ASSERT_EQ(cc.numCells, 4);
+  const overlap_removal::CellWinding cw =
+      overlap_removal::ClassifyCells(impl, polys, pos, cc);
+  ASSERT_TRUE(cw.ok);
+  EXPECT_EQ(cw.seedCasts, 2);
+  ASSERT_EQ(cw.winding.size(), 4u);
+  ASSERT_EQ(cw.keep.size(), 24u);
+  for (int p = 0; p < 12; ++p) {
+    EXPECT_TRUE(cw.keep[p]) << "outer " << p;
+    EXPECT_FALSE(cw.flip[p]) << "outer " << p;
+    EXPECT_EQ(cw.winding[cc.cellOf[2 * p]], 0) << "outer front " << p;
+    EXPECT_EQ(cw.winding[cc.cellOf[2 * p + 1]], 1) << "outer back " << p;
+  }
+  for (int p = 12; p < 24; ++p) {
+    EXPECT_FALSE(cw.keep[p]) << "inner " << p;
+    EXPECT_FALSE(cw.flip[p]) << "inner " << p;
+    EXPECT_EQ(cw.winding[cc.cellOf[2 * p]], 1) << "inner front " << p;
+    EXPECT_EQ(cw.winding[cc.cellOf[2 * p + 1]], 2) << "inner back " << p;
+  }
 }
 
 // White-box interior-pierce count via the internal checker (external

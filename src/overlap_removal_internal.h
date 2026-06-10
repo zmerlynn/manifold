@@ -460,6 +460,40 @@ CellComplex BuildCellComplex(const Manifold::Impl& impl,
                              const std::vector<MergedPolygon>& polygons,
                              const std::vector<vec3>& newVertPositions);
 
+// ---- Step 13.4-13.5: winding seed + propagation + keep ----
+
+// Winding classification of the cell complex. Per connected component
+// of the cell graph (cells joined where a polygon separates them), a
+// segment cast from outside the arrangement's bbox to an interior
+// point of one of the component's polygons (the centroid of its first
+// ear) seeds the arrival-side cell with the true ambient winding:
+// signed crossings are counted against ALL other polygons, including
+// other components' - which is why an extreme-vertex seed is wrong
+// for nested components. BFS then propagates windings through the
+// component (crossing a polygon front to back adds its signed
+// multiplicity). A cast within eps of any degenerate contact
+// (endpoint on a surface, edge/vert graze, near-parallel plane) is
+// invalid in FULL - never skip one polygon and keep counting - and is
+// retried on the component's next polygon (up to 3 targets); a
+// component exhausting its targets fails the classification
+// (ok = false, the driver falls back to the input). A polygon whose
+// two sides landed in one cell (an open sheet united through its rim)
+// separates nothing: it propagates no winding and is never kept.
+// Keep a polygon iff exactly one side is inside (winding > 0); flip
+// marks kept polygons whose canonical cycle's normal points toward
+// the inside cell (the emit reverses those so normals face outside).
+struct CellWinding {
+  std::vector<int> winding;  // [cell] -> winding number
+  std::vector<bool> keep;    // [polygon]
+  std::vector<bool> flip;    // [polygon] -> reverse cycle on emit
+  int seedCasts = 0;         // casts attempted, retries included
+  bool ok = false;
+};
+CellWinding ClassifyCells(const Manifold::Impl& impl,
+                          const std::vector<MergedPolygon>& polygons,
+                          const std::vector<vec3>& newVertPositions,
+                          const CellComplex& cells);
+
 // Step 10 of the pipeline: propagate etIsect resolved verts onto
 // their piercing edges' on-edge lists, so the polygon walker
 // subdivides those halfedges at the new pierce points. Skips verts
