@@ -31,8 +31,8 @@ namespace overlap_removal {
 
 // Iteration-cap default for MergeVertsEps (a parameter default, so it
 // lives here rather than in overlap_removal.cpp's anonymous
-// namespace). Each pass moves merged verts to centroid and iterates
-// if any pair moved or unioned; converges in 1-3 passes for working
+// namespace). Each pass moves merged verts to centroid and repeats
+// until positions stabilize; converges in a few passes for working
 // fixtures. The cap is a tripwire against pathological inputs.
 constexpr int kMergeVertsMaxIter = 8;
 
@@ -116,51 +116,6 @@ struct NewEdgeWithExtras {
   std::vector<int> extraVerts;  // sorted along the edge
   std::vector<double> extraTs;
 };
-
-// Morton-sorted BVH builder shared across pipeline stages. Each
-// stage that does broad-phase BVH overlap (MergeVertsEps,
-// BuildOnEdgeVertLists, BuildOnTriVertLists, FindEdgeTriIntersections,
-// CheckSelfIntersection) used to inline the same 15-line ritual:
-//   1. compute bbox = Union of leaf boxes
-//   2. compute Morton codes for each leaf
-//   3. build leaf2Orig + stable_sort by Morton code
-//   4. permute boxes / morton codes into sorted order
-//   5. construct Collider from sorted views
-// Hoisted here so all callers share one convention. Returns a
-// struct that owns the sorted storage; the contained Collider
-// has already copied the leaf boxes internally, so it remains
-// valid after move/copy of the wrapper.
-struct SortedBVH {
-  Collider collider;
-  std::vector<Box> boxes;         // boxes in Morton-sorted order
-  std::vector<uint32_t> morton;   // sorted Morton codes (parallel to boxes)
-  std::vector<size_t> leaf2Orig;  // [sorted leaf idx] -> input idx
-
-  // Sequential broad phase: recorder.record(queryIdx, leafIdx) for
-  // each query box overlapping a leaf box. Collider cannot represent
-  // a 1-leaf tree (NumLeaves() == 0 without internal nodes, and
-  // UpdateBoxes throws), so the single-leaf case - reachable e.g.
-  // when a pipeline run allocates exactly one new vert - is brute-
-  // forced with the same DoesOverlap test the tree uses. Callers
-  // must route queries through this, not collider.Collisions.
-  template <typename Recorder, typename F>
-  void Collisions(Recorder& recorder, F queryBox, int nQueries) const {
-    if (boxes.size() == 1) {
-      auto& local = recorder.local();
-      for (int q = 0; q < nQueries; ++q) {
-        if (queryBox(q).DoesOverlap(boxes[0])) recorder.record(q, 0, local);
-      }
-      return;
-    }
-    collider.Collisions<false>(recorder, queryBox, nQueries,
-                               /*parallel=*/false);
-  }
-};
-
-// Build a Morton-sorted BVH from a list of leaf boxes. The bbox
-// covering all leaves is computed internally (= Union of inputs).
-// Empty input returns a SortedBVH with an empty Collider.
-SortedBVH BuildSortedBVH(VecView<const Box> leafBoxes);
 
 // Setup helper: scale-invariant eps derived from a manifold's bounding-
 // box scale via AlphaBudgetEpsilon (in src/shared.h). Larger meshes get
@@ -362,8 +317,11 @@ std::vector<ChordChordCrossing> FindChordChordCrossings(
     const std::vector<std::vector<int>>& face2Chords,
     VecView<const vec3> faceNormals, double eps);
 
-// Step 9 passes 5-7 (increment (ii): single crossings, no merge yet).
-// Canonical-id resolution is resolve-then-allocate: snap to any
+// Step 9 singleton-cluster form (each raw crossing its own cluster;
+// the test seam for resolution/threading without the merge -
+// production goes through MergeAndPropagateCrossings +
+// ResolveAndThreadClusters). Canonical-id resolution is
+// resolve-then-allocate: snap to any
 // existing endpoint / on-chord vert / pass-0 contact within
 // tolerance + eps BEFORE allocating, symmetric across both chords -
 // a crossing must never thread as an endpoint id on one chord and a
@@ -394,11 +352,11 @@ Step9Threading ResolveAndThreadCrossings(
     const std::vector<ChordChordCrossing>& raw,
     const std::vector<OnChordContact>& contacts, double tolerance, double eps);
 
-// Step 9 pass 4-5 (increment (iii)): the nearby-crossing merge and
-// eager propagation. Raw crossings unite (union-find, sorted pair
-// order) when they share an incident face AND lie within 10 * eps -
-// the face gate, not a chord gate, so a 4-chord concurrence whose two
-// crossings share no chord still merges. Cluster position is the
+// Step 9 nearby-crossing merge and eager propagation (runs between
+// FindChordChordCrossings and ResolveAndThreadClusters). Raw crossings unite
+// (union-find, sorted pair order) when they share an incident face AND lie
+// within 10 * eps - the face gate, not a chord gate, so a 4-chord concurrence
+// whose two crossings share no chord still merges. Cluster position is the
 // member centroid (ascending member order), re-projected onto the
 // hosting face plane. Propagation then tests the cluster position
 // against every chord incident to any involved face (point-to-segment
@@ -443,9 +401,12 @@ Step9Threading ResolveAndThreadClusters(
 // number of ids remapped plus the largest position displacement any
 // remap applied (|pos(old) - pos(representative)|) - the driver folds
 // that into the output tolerance claim.
-// `perVertSnapR` (optional, parallel prefix of newVertPositions; see
+// `perVertSnapR` (parallel prefix of newVertPositions; see
 // TraceChordResult::newVertSnapR) widens the new-onto-original snap
-// for verts whose allocation was ill-conditioned.
+// for verts whose allocation was ill-conditioned. Deliberately NO
+// default argument: the driver must pass the threaded radii, and a
+// default would let that handoff sever silently (review finding) -
+// callers with no radii pass {} explicitly.
 struct UnifyResult {
   int changed = 0;
   double maxMove = 0.0;
@@ -456,7 +417,7 @@ UnifyResult UnifyArrangementVerts(const Manifold::Impl& impl,
                                   std::vector<EdgeVertList>& onEdgeLists,
                                   std::vector<NewEdgeWithExtras>& chords,
                                   double eps,
-                                  const std::vector<double>& perVertSnapR = {});
+                                  const std::vector<double>& perVertSnapR);
 
 // ---- Steps 10-11: per-face partition (docs/OverlapRemoval.md) ----
 
@@ -642,30 +603,6 @@ void PropagateNewVertsToOnEdgeLists(
     const std::vector<EdgeTriIntersection>& etIsects,
     const std::vector<int>& etIsect2Vert, const std::vector<Edge>& edges,
     std::vector<EdgeVertList>& onEdgeLists);
-
-// Position lookup helper that handles both original-mesh verts (id
-// < baseId, into impl.vertPos_) and step-7 chord verts (id >=
-// baseId, into newVertPositions). Used in many pipeline functions.
-vec3 GetPos3(int id, int baseId, const Manifold::Impl& impl,
-             const std::vector<vec3>& newVertPositions);
-
-// Geometric pierce predicate: does segment a-b strictly pierce
-// triangle interior (v0, v1, v2)? Returns the pierce magnitude
-// (perpendicular distance from nearer endpoint to plane) if yes,
-// 0 if no.
-//
-// "Strict" excludes:
-//   - Endpoint exactly on the plane (within FP tolerance).
-//   - Intersection at a triangle edge or vertex.
-// Used by the CheckSelfIntersection diagnostic (the driver's
-// pierce-monotonicity gate and the test-side pierce counter).
-//
-// `relTol` is the FP-noise threshold below which an endpoint is
-// considered "on the plane" (returns 0). It is NOT a tolerance for
-// filtering "small" pierces; it prevents zero-by-zero in the t
-// computation.
-double SegmentPiercesTriInterior(vec3 a, vec3 b, vec3 v0, vec3 v1, vec3 v2,
-                                 double relTol = 1e-12);
 
 // Diagnostic for self-intersections in a Manifold. Counts piercing
 // triangle pairs via BVH broad phase + SegmentPiercesTriInterior

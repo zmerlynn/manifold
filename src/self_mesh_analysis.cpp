@@ -132,10 +132,10 @@ SelfMeshAnalysis AnalyzeSelfMesh(const Manifold::Impl& M,
   // parallel union order - same connectivity, different rep across
   // runs. Since the rep's vertNormal_ becomes the eps-offset probe
   // direction, a different rep gives a different probe -> different
-  // ray-cast winding -> different keep decisions. Symptom: 1/5 runs
-  // on self-intersect produced k=1=645 instead of k=1=379 (with
-  // pierce 2061 vs 312). Fix: re-anchor each component to its
-  // smallest-id member (= deterministic regardless of union order).
+  // ray-cast winding -> different keep decisions (observed as
+  // run-to-run keep/pierce count differences under parallel union
+  // order). Fix: re-anchor each component to its smallest-id member
+  // (= deterministic regardless of union order).
   std::map<int, int> compMinId;  // raw uA.find(v) -> smallest v in component
   for (size_t v = 0; v < nVert; ++v) {
     const int c = static_cast<int>(uA.find(v));

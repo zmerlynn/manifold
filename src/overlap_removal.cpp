@@ -65,13 +65,12 @@ constexpr double kBarycentricFloor = 1e-12;
 // kSeedCastMaxTargets: seed-cast target retries per cell-graph
 //   component. Targets are tried in descending-area order, so the
 //   budget only matters when the biggest polygons all graze - 8 is
-//   generous headroom over the observed 1-2.
+//   generous headroom over typical usage.
 // kCondSnapCapEps: cap, in eps units, on the condition-aware
 //   corner-snap radius for trace-chord crossings (step 6.5). A
 //   crossing's position error scales as eps / sin(angle) between the
-//   two edge lines; near-parallel boundaries at a near-triple-point
-//   corner were observed to need ~80 eps. 128 covers that with
-//   headroom while keeping the snap local.
+//   two edge lines; 128 covers the observed near-parallel corner
+//   class with headroom while keeping the snap local.
 // kFoldedVolumePerAreaEps: final-gate threshold, in eps units, on a
 //   folded cell's enclosed volume PER unit folded area. A fold set
 //   (polygons whose front and back cells united, e.g. across a k = 1
@@ -219,7 +218,46 @@ CastResult CastSegmentAtEar(const vec3& p0, const vec3& p1, const vec3& a,
   if (margin < 0) return {CastHit::kMiss, 0};
   return {CastHit::kHit, s1 > s0 ? -1 : 1};
 }
-}  // namespace
+
+// Morton-sorted BVH builder shared across pipeline stages. Each
+// stage that does broad-phase BVH overlap (MergeVertsEps,
+// BuildOnEdgeVertLists, BuildOnTriVertLists, FindEdgeTriIntersections,
+// CheckSelfIntersection) used to inline the same 15-line ritual:
+//   1. compute bbox = Union of leaf boxes
+//   2. compute Morton codes for each leaf
+//   3. build leaf2Orig + stable_sort by Morton code
+//   4. permute boxes / morton codes into sorted order
+//   5. construct Collider from sorted views
+// Hoisted here so all callers share one convention. Returns a
+// struct that owns the sorted storage; the contained Collider
+// has already copied the leaf boxes internally, so it remains
+// valid after move/copy of the wrapper.
+struct SortedBVH {
+  Collider collider;
+  std::vector<Box> boxes;         // boxes in Morton-sorted order
+  std::vector<uint32_t> morton;   // sorted Morton codes (parallel to boxes)
+  std::vector<size_t> leaf2Orig;  // [sorted leaf idx] -> input idx
+
+  // Sequential broad phase: recorder.record(queryIdx, leafIdx) for
+  // each query box overlapping a leaf box. Collider cannot represent
+  // a 1-leaf tree (NumLeaves() == 0 without internal nodes, and
+  // UpdateBoxes throws), so the single-leaf case - reachable e.g.
+  // when a pipeline run allocates exactly one new vert - is brute-
+  // forced with the same DoesOverlap test the tree uses. Callers
+  // must route queries through this, not collider.Collisions.
+  template <typename Recorder, typename F>
+  void Collisions(Recorder& recorder, F queryBox, int nQueries) const {
+    if (boxes.size() == 1) {
+      auto& local = recorder.local();
+      for (int q = 0; q < nQueries; ++q) {
+        if (queryBox(q).DoesOverlap(boxes[0])) recorder.record(q, 0, local);
+      }
+      return;
+    }
+    collider.Collisions<false>(recorder, queryBox, nQueries,
+                               /*parallel=*/false);
+  }
+};
 
 SortedBVH BuildSortedBVH(VecView<const Box> leafBoxes) {
   SortedBVH out;
@@ -268,6 +306,68 @@ SortedBVH BuildSortedBVH(VecView<const Box> leafBoxes) {
   }
   return out;
 }
+
+// Position lookup helper that handles both original-mesh verts (id
+// < baseId, into impl.vertPos_) and step-7 chord verts (id >=
+// baseId, into newVertPositions). Used in many pipeline functions.
+vec3 GetPos3(int id, int baseId, const Manifold::Impl& impl,
+             const std::vector<vec3>& newVertPositions) {
+  if (id < baseId) {
+    DEBUG_ASSERT(id >= 0 && id < static_cast<int>(impl.vertPos_.size()),
+                 logicErr, "GetPos3: original vert id out of range");
+    return impl.vertPos_[id];
+  }
+  const int j = id - baseId;
+  DEBUG_ASSERT(j >= 0 && j < static_cast<int>(newVertPositions.size()),
+               logicErr, "GetPos3: chord vert id beyond newVertPositions");
+  return newVertPositions[j];
+}
+
+// Geometric pierce predicate: does segment a-b strictly pierce
+// triangle interior (v0, v1, v2)? Returns the pierce magnitude
+// (perpendicular distance from nearer endpoint to plane) if yes,
+// 0 if no.
+//
+// "Strict" excludes:
+//   - Endpoint exactly on the plane (within FP tolerance).
+//   - Intersection at a triangle edge or vertex.
+// Used by the CheckSelfIntersection diagnostic (the driver's
+// pierce-monotonicity gate and the test-side pierce counter).
+//
+// `relTol` is the FP-noise threshold below which an endpoint is
+// considered "on the plane" (returns 0). It is NOT a tolerance for
+// filtering "small" pierces; it prevents zero-by-zero in the t
+// computation.
+double SegmentPiercesTriInterior(vec3 a, vec3 b, vec3 v0, vec3 v1, vec3 v2,
+                                 double relTol = 1e-12) {
+  using la::cross;
+  using la::dot;
+  const vec3 e1 = v1 - v0;
+  const vec3 e2 = v2 - v0;
+  const vec3 n = cross(e1, e2);
+  const double nMag = std::sqrt(dot(n, n));
+  if (nMag == 0) return 0.0;
+  const double scaleA = std::sqrt(dot(a - v0, a - v0));
+  const double scaleB = std::sqrt(dot(b - v0, b - v0));
+  const double dTol = relTol * nMag * std::max(scaleA, scaleB);
+  const double dA = dot(a - v0, n);
+  const double dB = dot(b - v0, n);
+  if (std::fabs(dA) < dTol || std::fabs(dB) < dTol) return 0.0;
+  if (dA * dB >= 0) return 0.0;
+  const double t = dA / (dA - dB);
+  const vec3 p = a + t * (b - a);
+  const vec3 c0 = cross(v1 - v0, p - v0);
+  const vec3 c1 = cross(v2 - v1, p - v1);
+  const vec3 c2 = cross(v0 - v2, p - v2);
+  const double d0 = dot(c0, n);
+  const double d1 = dot(c1, n);
+  const double d2 = dot(c2, n);
+  const double bTol = relTol * nMag * nMag;
+  if (!(d0 > bTol && d1 > bTol && d2 > bTol)) return 0.0;
+  return std::min(std::fabs(dA), std::fabs(dB)) / nMag;
+}
+
+}  // namespace
 
 double InferEps(const Manifold& m) {
   return AlphaBudgetEpsilon(m.BoundingBox().Scale(), 1000);
@@ -320,18 +420,36 @@ MergeVertsResult MergeVertsEps(const Manifold& in, double eps, int maxIter) {
     auto qf = [&](int i) { return bvh.boxes[i]; };
     bvh.Collisions(recorder, qf, static_cast<int>(n));
 
-    // Update positions to per-cluster centroid.
+    // Update positions to per-cluster centroid. A cluster whose
+    // members are already bit-identical KEEPS that position: summing
+    // n equal doubles and dividing is not bit-idempotent at large n
+    // (iterated-addition rounding), and a drifting "centroid" of an
+    // already-collapsed cluster could oscillate to the iteration cap
+    // (termination-pass finding). With this skip, every cluster is
+    // bit-identical one pass after it last grows, so convergence is
+    // structural.
     int nComp = uf.connectedComponents(componentLabel);
     std::vector<vec3> sumByComp(nComp, vec3(0, 0, 0));
     std::vector<int> countByComp(nComp, 0);
+    std::vector<vec3> firstByComp(nComp, vec3(0, 0, 0));
+    std::vector<bool> allEqualByComp(nComp, true);
     for (size_t i = 0; i < n; ++i) {
-      sumByComp[componentLabel[i]] += verts[i];
-      ++countByComp[componentLabel[i]];
+      const int c = componentLabel[i];
+      if (countByComp[c] == 0) {
+        firstByComp[c] = verts[i];
+      } else if (verts[i].x != firstByComp[c].x ||
+                 verts[i].y != firstByComp[c].y ||
+                 verts[i].z != firstByComp[c].z) {
+        allEqualByComp[c] = false;
+      }
+      sumByComp[c] += verts[i];
+      ++countByComp[c];
     }
     bool moved = false;
     for (size_t i = 0; i < n; ++i) {
-      const vec3 newPos = sumByComp[componentLabel[i]] /
-                          static_cast<double>(countByComp[componentLabel[i]]);
+      const int c = componentLabel[i];
+      if (allEqualByComp[c]) continue;  // collapsed: keep, bit-idempotent
+      const vec3 newPos = sumByComp[c] / static_cast<double>(countByComp[c]);
       if (newPos.x != verts[i].x || newPos.y != verts[i].y ||
           newPos.z != verts[i].z) {
         verts[i] = newPos;
@@ -423,8 +541,9 @@ std::vector<EdgeVertList> BuildOnEdgeVertLists(const Manifold::Impl& impl,
   std::vector<EdgeVertList> out(nE);
   if (nE == 0 || nV == 0) return out;
 
-  // vert->neighbor adjacency for the thin-tri-apex skip below:
-  // GenerateChordEdges.
+  // vert->neighbor adjacency for the thin-tri-apex skip below (a
+  // vert neighboring BOTH edge endpoints is a structural apex, not a
+  // real on-edge overlap).
   std::vector<std::set<int>> adj(nV);
   for (size_t i = 0; i < impl.halfedge_.size(); ++i) {
     const int s = impl.halfedge_.Start(i);
@@ -739,15 +858,15 @@ ChordEdges GenerateChordEdges(const Manifold::Impl& impl,
 
   // Emit chords (= 2-endpoint pairs) or interior vert records (= 1-
   // endpoint pairs); drop 0 / >= 3.
-  for (auto& [key, eps_set] : pairEndpoints) {
-    if (eps_set.size() == 2) {
-      auto it = eps_set.begin();
+  for (auto& [key, endpoints] : pairEndpoints) {
+    if (endpoints.size() == 2) {
+      auto it = endpoints.begin();
       const int a = *it++;
       const int b = *it;
       const int v0 = std::min(a, b);
       const int v1 = std::max(a, b);
       r.newEdges.push_back({v0, v1, key.first, key.second});
-    } else if (eps_set.size() == 1) {
+    } else if (endpoints.size() == 1) {
       // Single shared endpoint (edge-tip touch, no through-pierce): no
       // chord edge is emitted and nothing further is recorded.
     } else {
@@ -755,19 +874,6 @@ ChordEdges GenerateChordEdges(const Manifold::Impl& impl,
     }
   }
   return r;
-}
-
-vec3 GetPos3(int id, int baseId, const Manifold::Impl& impl,
-             const std::vector<vec3>& newVertPositions) {
-  if (id < baseId) {
-    DEBUG_ASSERT(id >= 0 && id < static_cast<int>(impl.vertPos_.size()),
-                 logicErr, "GetPos3: original vert id out of range");
-    return impl.vertPos_[id];
-  }
-  const int j = id - baseId;
-  DEBUG_ASSERT(j >= 0 && j < static_cast<int>(newVertPositions.size()),
-               logicErr, "GetPos3: chord vert id beyond newVertPositions");
-  return newVertPositions[j];
 }
 
 std::vector<NewEdgeWithExtras> AddInteriorVertsToNewEdges(
@@ -1013,10 +1119,10 @@ TraceChordResult CoplanarTraceChords(const Manifold::Impl& impl,
         }
         // Resolve the two endpoint ids. t == 0/1: the src edge's own
         // vert. Crossings: snap to the nearest of the pair's six
-        // corners at tolerance + eps (ties to smallest id - the
-        // step-9 convention), else allocate, deduping new-to-new at
-        // eps first-found over the whole new-vert pool (the step-7
-        // convention applied to the combined pool).
+        // corners at max(tolerance + eps, the conditioned radius)
+        // (ties to smallest id - the step-9 convention), else
+        // allocate, deduping new-to-new over the whole pool at the
+        // SOURCE-GATED radius (see below).
         int ids[2];
         int clipK[2] = {k0, k1};
         vec3 pos3[2] = {P0, P1};
@@ -1067,7 +1173,9 @@ TraceChordResult CoplanarTraceChords(const Manifold::Impl& impl,
             const int vid = c < 3 ? triVert(fa, c) : triVert(fb, c - 3);
             const vec3 dv = (c < 3 ? av[c] : bv[c - 3]) - x3;
             const double dd = std::sqrt(dot(dv, dv));
-            if (dd < bestD || (dd == bestD && best >= 0 && vid < best)) {
+            // <= on the first hit: "within" the radius is inclusive
+            // (a corner exactly at the boundary still snaps).
+            if (dd < bestD || (dd == bestD && (best < 0 || vid < best))) {
               bestD = dd;
               best = vid;
             }
@@ -1136,6 +1244,11 @@ TraceChordResult CoplanarTraceChords(const Manifold::Impl& impl,
           const vec3 resolvedPos = ids[e] < baseId
                                        ? impl.vertPos_[ids[e]]
                                        : out.newVertPositions[ids[e] - baseId];
+          // A corner-snapped id can sit up to the conditioned corner
+          // radius OFF this edge; threading it here moves the edge's
+          // polyline by that much - the same displacement the snap
+          // itself accepted (the conditioned band of Known
+          // limitations #1), with ids consistent on both faces.
           auto addOn = [&](int face, int kk, const vec3& s0, const vec3& s1) {
             if (kk < 0) return;
             const int edgeIdx = halfedge2Edge[3 * face + kk];
@@ -1629,7 +1742,7 @@ Step9Threading ResolveAndThreadCrossings(
     const std::vector<ChordChordCrossing>& raw,
     const std::vector<OnChordContact>& contacts, double tolerance, double eps) {
   // Singleton-cluster delegation: each raw crossing is its own
-  // cluster (increment (ii) form; MergeAndPropagateCrossings supplies
+  // cluster (the test seam; MergeAndPropagateCrossings supplies
   // real clusters in the full pipeline).
   std::vector<ChordCrossing> clusters;
   clusters.reserve(raw.size());
@@ -2062,7 +2175,10 @@ std::vector<MergedPolygon> MergePolygons(
     // A simple cycle with distinct verts is never rotation-equivalent
     // to its own reversal, so fwd != bwd and the sign is well-defined:
     // +1 when the canonical form comes from the cycle as walked, -1
-    // from the reversal.
+    // from the reversal. A palindromic equality would mean the
+    // partition emitted a non-simple cycle - assert, do not miscount.
+    DEBUG_ASSERT(fwd != bwd, logicErr,
+                 "MergePolygons: cycle equals its own reversal");
     const bool forward = fwd < bwd;
     Entry& e = merged[forward ? fwd : bwd];
     if (e.face < 0) e.face = face;
@@ -2700,35 +2816,6 @@ void PropagateNewVertsToOnEdgeLists(
   for (int e : touched) {
     SortVertsByT(onEdgeLists[e].verts, onEdgeLists[e].ts);
   }
-}
-
-double SegmentPiercesTriInterior(vec3 a, vec3 b, vec3 v0, vec3 v1, vec3 v2,
-                                 double relTol) {
-  using la::cross;
-  using la::dot;
-  const vec3 e1 = v1 - v0;
-  const vec3 e2 = v2 - v0;
-  const vec3 n = cross(e1, e2);
-  const double nMag = std::sqrt(dot(n, n));
-  if (nMag == 0) return 0.0;
-  const double scaleA = std::sqrt(dot(a - v0, a - v0));
-  const double scaleB = std::sqrt(dot(b - v0, b - v0));
-  const double dTol = relTol * nMag * std::max(scaleA, scaleB);
-  const double dA = dot(a - v0, n);
-  const double dB = dot(b - v0, n);
-  if (std::fabs(dA) < dTol || std::fabs(dB) < dTol) return 0.0;
-  if (dA * dB >= 0) return 0.0;
-  const double t = dA / (dA - dB);
-  const vec3 p = a + t * (b - a);
-  const vec3 c0 = cross(v1 - v0, p - v0);
-  const vec3 c1 = cross(v2 - v1, p - v1);
-  const vec3 c2 = cross(v0 - v2, p - v2);
-  const double d0 = dot(c0, n);
-  const double d1 = dot(c1, n);
-  const double d2 = dot(c2, n);
-  const double bTol = relTol * nMag * nMag;
-  if (!(d0 > bTol && d1 > bTol && d2 > bTol)) return 0.0;
-  return std::min(std::fabs(dA), std::fabs(dB)) / nMag;
 }
 
 SelfIntersectionResult CheckSelfIntersection(const Manifold& m, double relTol) {

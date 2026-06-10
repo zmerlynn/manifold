@@ -2525,9 +2525,10 @@ TEST(OverlapRemoval, Step95UnifyArrangementVerts) {
   onEdgeLists[eAB].ts = {0.1, 0.5};
   std::vector<overlap_removal::NewEdgeWithExtras> chords = {
       {{std::min(5, fx.C), std::max(5, fx.C), fx.face, 99}, {4}, {0.4}}};
-  const int changed = overlap_removal::UnifyArrangementVerts(
-                          fx.impl, newPos, fx.edges, onEdgeLists, chords, eps)
-                          .changed;
+  const int changed =
+      overlap_removal::UnifyArrangementVerts(fx.impl, newPos, fx.edges,
+                                             onEdgeLists, chords, eps, {})
+          .changed;
   EXPECT_EQ(changed, 2);  // 5 -> 4 and 6 -> A
   EXPECT_EQ(std::min(chords[0].edge.v0, chords[0].edge.v1), fx.C);
   EXPECT_EQ(std::max(chords[0].edge.v0, chords[0].edge.v1), 4);
@@ -2565,9 +2566,10 @@ TEST(OverlapRemoval, Step95UnifyRecomputesAndResortsTs) {
   std::vector<overlap_removal::EdgeVertList> onEdgeLists(fx.edges.size());
   std::vector<overlap_removal::NewEdgeWithExtras> chords = {
       {{v0, v1, fx.face, 99}, {5, 6}, {0.30, 0.32}}};
-  const int changed = overlap_removal::UnifyArrangementVerts(
-                          fx.impl, newPos, fx.edges, onEdgeLists, chords, eps)
-                          .changed;
+  const int changed =
+      overlap_removal::UnifyArrangementVerts(fx.impl, newPos, fx.edges,
+                                             onEdgeLists, chords, eps, {})
+          .changed;
   EXPECT_EQ(changed, 1);  // 5 -> 4 only
   ASSERT_EQ(chords[0].extraVerts.size(), 2u);
   EXPECT_EQ(chords[0].extraVerts[0], 6);  // t 0.32 now precedes
@@ -2594,9 +2596,10 @@ TEST(OverlapRemoval, Step95UnifySnapsToNearestOriginal) {
   std::vector<overlap_removal::EdgeVertList> onEdgeLists(fx.edges.size());
   std::vector<overlap_removal::NewEdgeWithExtras> chords = {
       {{std::min(4, fx.C), std::max(4, fx.C), fx.face, 99}, {}, {}}};
-  const int changed = overlap_removal::UnifyArrangementVerts(
-                          fx.impl, newPos, fx.edges, onEdgeLists, chords, eps)
-                          .changed;
+  const int changed =
+      overlap_removal::UnifyArrangementVerts(fx.impl, newPos, fx.edges,
+                                             onEdgeLists, chords, eps, {})
+          .changed;
   EXPECT_EQ(changed, 1);
   EXPECT_EQ(std::min(chords[0].edge.v0, chords[0].edge.v1), std::min(hi, fx.C));
   EXPECT_EQ(std::max(chords[0].edge.v0, chords[0].edge.v1), std::max(hi, fx.C));
@@ -2622,7 +2625,7 @@ TEST(OverlapRemoval, Step95UnifyWidensSnapByPerVertRadius) {
     std::vector<overlap_removal::NewEdgeWithExtras> chords = chordsProto;
     const overlap_removal::UnifyResult r =
         overlap_removal::UnifyArrangementVerts(fx.impl, newPos, fx.edges,
-                                               onEdgeLists, chords, eps);
+                                               onEdgeLists, chords, eps, {});
     EXPECT_EQ(r.changed, 0);
     EXPECT_EQ(r.maxMove, 0.0);
   }
@@ -2633,6 +2636,66 @@ TEST(OverlapRemoval, Step95UnifyWidensSnapByPerVertRadius) {
   EXPECT_NEAR(r.maxMove, 0.3, 1e-12);  // |p - hi|, the applied snap
   EXPECT_EQ(std::min(chords[0].edge.v0, chords[0].edge.v1), std::min(hi, fx.C));
   EXPECT_EQ(std::max(chords[0].edge.v0, chords[0].edge.v1), std::max(hi, fx.C));
+}
+
+TEST(OverlapRemoval, Step9SnapRadiusReachesStep95) {
+  // The driver handoff the review flagged as severable: a conditioned
+  // step-9 allocation's radius must ride Step9Threading::newVertSnapR
+  // into step 9.5 and widen its new-onto-original snap, composed the
+  // way the driver composes them. An original vert sits 0.06 from the
+  // crossing - outside the 10 eps = 0.05 default, inside the cluster's
+  // 0.1 conditioned radius - so the snap happens ONLY if the radii
+  // flow through.
+  const double eps = 0.005;
+  const double tolerance = eps;
+  // A real impl supplies the original verts (id 4 at x = 0.56 is the
+  // snap target; the rest are far).
+  Manifold::Impl impl;
+  const manifold::vec3 verts[6] = {{0.0, -5.0, 0.0}, {10.0, 0.0, 0.0},
+                                   {0.0, 10.0, 0.0}, {-10.0, 0.0, 0.0},
+                                   {0.56, 0.0, 0.0}, {-10.0, 5.0, 0.0}};
+  for (const auto& v : verts) impl.vertPos_.push_back(v);
+  const int tris[2][3] = {{0, 1, 2}, {3, 4, 5}};
+  for (const auto& t : tris) {
+    for (int k = 0; k < 3; ++k) impl.halfedge_.push_back(t[k], -1, -1);
+  }
+  const std::vector<overlap_removal::Edge> edges =
+      overlap_removal::EnumerateEdges(impl);
+  const int baseId = static_cast<int>(impl.NumVert());  // 6
+  // Two chords (new endpoints 6-9) crossing at (0.5, 0, 0).
+  std::vector<overlap_removal::NewEdgeWithExtras> chords = {
+      {{baseId + 0, baseId + 1, 0, 9}, {}, {}},
+      {{baseId + 2, baseId + 3, 0, 11}, {}, {}}};
+  std::vector<manifold::vec3> pos = {
+      {0.0, 0.0, 0.0}, {1.0, 0.0, 0.0}, {0.5, -0.5, 0.0}, {0.5, 0.5, 0.0}};
+  // Hand-built cluster at the crossing with a conditioned radius of
+  // 0.1 (production computation of this radius is pinned by
+  // Step9ShallowCrossingCarriesConditionedRadius).
+  const std::vector<overlap_removal::ChordCrossing> clusters = {
+      {{0.5, 0.0, 0.0}, -1, {0, 1}, {0.5, 0.5}, 0.1}};
+  const overlap_removal::Step9Threading threaded =
+      overlap_removal::ResolveAndThreadClusters(impl, std::move(chords),
+                                                std::move(pos), {}, clusters,
+                                                {}, tolerance, eps);
+  ASSERT_EQ(threaded.newVertPositions.size(), 5u);  // fresh crossing
+  ASSERT_EQ(threaded.newVertSnapR.size(), 5u);
+  EXPECT_EQ(threaded.newVertSnapR[4], 0.1);  // carried
+  std::vector<overlap_removal::EdgeVertList> onEdgeLists(edges.size());
+  std::vector<overlap_removal::NewEdgeWithExtras> chords2 = threaded.chords;
+  const overlap_removal::UnifyResult r = overlap_removal::UnifyArrangementVerts(
+      impl, threaded.newVertPositions, edges, onEdgeLists, chords2, eps,
+      threaded.newVertSnapR);
+  // The crossing vert snapped onto original 4: both chords now thread
+  // vert 4 where they threaded the fresh crossing id.
+  EXPECT_GE(r.changed, 1);
+  bool threads4 = false;
+  for (const overlap_removal::NewEdgeWithExtras& c : chords2) {
+    for (const int v : c.extraVerts) {
+      EXPECT_NE(v, baseId + 4);  // the fresh id must be gone
+      if (v == 4) threads4 = true;
+    }
+  }
+  EXPECT_TRUE(threads4) << "conditioned radius did not reach step 9.5";
 }
 
 TEST(OverlapRemoval, Step95ClusterSnapsToNearestOriginalAcrossMembers) {
@@ -2662,7 +2725,7 @@ TEST(OverlapRemoval, Step95ClusterSnapsToNearestOriginalAcrossMembers) {
   std::vector<overlap_removal::NewEdgeWithExtras> chords = {
       {{6, 7, 0, 1}, {}, {}}};
   const overlap_removal::UnifyResult r = overlap_removal::UnifyArrangementVerts(
-      impl, newPos, edges, onEdgeLists, chords, eps);
+      impl, newPos, edges, onEdgeLists, chords, eps, {});
   EXPECT_EQ(r.changed, 2);          // both members remap to the cluster rep
   EXPECT_EQ(chords[0].edge.v0, 3);  // nearest across members, NOT id 0
   EXPECT_EQ(chords[0].edge.v1, 3);  // (a collapsed chord: both ends remap)
@@ -3391,7 +3454,14 @@ TEST(Manifold, RemoveSelfIntersectionsFarFromOrigin) {
   Manifold cleanedProps = propped.RemoveSelfIntersections();
   EXPECT_EQ(cleanedProps.Status(), Manifold::Error::NoError);
   ASSERT_LT(InteriorPierces(cleanedProps), InteriorPierces(propped));
-  EXPECT_EQ(cleanedProps.GetMeshGL64().numProp, 3u);
+  const MeshGL64 freshM = cleanedProps.GetMeshGL64();
+  EXPECT_EQ(freshM.numProp, 3u);
+  // Rebuilt metadata is construction-fresh, never inherited: a new
+  // originalID and no tangents (faceID is populated by construction
+  // itself, so emptiness is not the contract there; the passthrough/
+  // fallback tests pin the opposite - full-field identity).
+  EXPECT_NE(freshM.runOriginalID, propped.GetMeshGL64().runOriginalID);
+  EXPECT_TRUE(freshM.halfedgeTangent.empty());
 }
 
 TEST(Manifold, MeshID) {

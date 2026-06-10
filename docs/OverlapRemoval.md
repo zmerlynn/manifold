@@ -422,13 +422,18 @@ numbers go stale instantly; the suite is the source of truth.)
   target, seed-cast exhaustion); emit topology (the book fixture pinning
   twin pairing + ring splitting, odd-fan fail-closed); step 6.5 (pancake
   quad, coplanar neighbors, plane-gate offset, full-through cuts, on-edge
-  additions); step 9.5 (unification, nearest-original, per-vert radius
-  carry, t recompute + re-sort); step-1 merge displacement.
+  additions, snapped-endpoint edge subdivision); step 9.5 (unification,
+  nearest-original, per-vert radius carry including the composed
+  step-9 -> 9.5 handoff, t recompute + re-sort); step-6 event-identity
+  snap band; step-1 merge displacement and fixed-point convergence
+  ordering; fold-gate membrane-pass / bent-open-trip / opposite-shell
+  non-cancellation arms.
 - `Manifold.RemoveSelfIntersections*` feature tests: API smoke; clean-input
   and Boolean-result passthrough (bit-identical); the hull fixture (the
   trimaran fold class - pins the folded-shell gate's bit-identical
   fallback, see Known limitations); the ovoid dense-sliver fixture (falls
-  back via the BFS-disagreement guard, monotonic); empty input; idempotence
+  back via the BFS-disagreement guard, bit-identically); empty input;
+  idempotence
   (fallback fixed point + success-path monotonicity); determinism;
   far-from-origin (the same trimaran at scale: strict pierce reduction, all
   components kept, volume preserved to the test's bar); glued boxes
@@ -444,11 +449,11 @@ numbers go stale instantly; the suite is the source of truth.)
    corner.
    The exact arrangement has a micro-triangle facet there that per-face FP
    partitions cannot consistently produce. Every snap policy beyond ~10 eps
-   (16/128-eps anchors, conditioned isotropic and anisotropic-capsule step-7
-   snaps) traded the twin-rim holes for MORE eps-overlap pierces and was
-   reverted: moving geometry tens of eps deforms kept triangles whose
+   (fixed wide anchors and conditioned isotropic/anisotropic step-7 snap
+   variants alike) traded the twin-rim holes for MORE eps-overlap pierces
+   and was reverted: moving geometry tens of eps deforms kept triangles whose
    neighbors did not move with them. The class has two observed severities on
-   the hull fixture (a trimaran: three disjoint hulls grazed by one mask):
+   the hull fixture (multiple disjoint hulls grazed by one mask):
    - **Micro-facet pierce residue**: input pierces run thousands of eps
      deep; a successful rebuild leaves a few residual pierces tens of eps
      deep - above the 10x-eps output tolerance, inside the conditioned band
@@ -461,7 +466,7 @@ numbers go stale instantly; the suite is the source of truth.)
      whole component. The folded-shell volume gate (Driver gate) detects
      this and falls back to the input bit-identically.
    Far from the origin the same geometry succeeds (strict pierce
-   reduction, all three hulls kept): the scale-derived eps absorbs the
+   reduction, every hull kept): the scale-derived eps absorbs the
    clusters and the residual sits within a few eps - INSIDE its working
    band. Closing the class soundly (resolving the fixture at origin scale
    to zero pierces with all three hulls kept) needs exact/extended-precision
