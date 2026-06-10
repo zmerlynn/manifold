@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <limits>
 #include <numeric>
+#include <tuple>
 
 #include "collider.h"
 #include "cross_section/boolean2/predicates.h"  // IntersectSegments (step 9)
@@ -1738,6 +1739,190 @@ CellWinding ClassifyCells(const Manifold::Impl& impl,
     const bool inBack = out.winding[cells.cellOf[2 * p + 1]] > 0;
     out.keep[p] = inFront != inBack;
     out.flip[p] = out.keep[p] && inFront;
+  }
+  out.ok = true;
+  return out;
+}
+
+EmitTopology BuildEmitTopology(const std::vector<MergedPolygon>& polygons,
+                               const CellComplex& cells,
+                               const CellWinding& winding) {
+  EmitTopology out;
+  const int nP = static_cast<int>(polygons.size());
+  // Kept polygons in output (outward) orientation, arrangement ids.
+  std::vector<int> keptIdxOf(nP, -1);
+  for (int p = 0; p < nP; ++p) {
+    if (!winding.keep[p]) continue;
+    keptIdxOf[p] = static_cast<int>(out.keptPolygons.size());
+    out.keptPolygons.push_back(p);
+    std::vector<int> cyc = polygons[p].cycle;
+    if (winding.flip[p]) std::reverse(cyc.begin(), cyc.end());
+    out.outCycles.push_back(std::move(cyc));
+  }
+  const int nK = static_cast<int>(out.keptPolygons.size());
+  if (nK == 0) {
+    out.ok = true;  // nothing kept: an empty emit is consistent
+    return out;
+  }
+
+  // Halfedge ids: cycleStart[k] + cycle position. A simple cycle
+  // visits an undirected edge at most once, so (kept polygon, edge)
+  // names a halfedge uniquely.
+  std::vector<int> cycleStart(nK + 1, 0);
+  for (int k = 0; k < nK; ++k) {
+    cycleStart[k + 1] =
+        cycleStart[k] + static_cast<int>(out.outCycles[k].size());
+  }
+  const int nH = cycleStart[nK];
+  std::map<std::tuple<int, int, int>, int> posOfEdge;  // (k, lo, hi) -> pos
+  std::vector<int> hStart(nH), hNextInCycle(nH), hKept(nH);
+  for (int k = 0; k < nK; ++k) {
+    const std::vector<int>& cyc = out.outCycles[k];
+    const int len = static_cast<int>(cyc.size());
+    for (int s = 0; s < len; ++s) {
+      const int u = cyc[s];
+      const int v = cyc[(s + 1) % len];
+      posOfEdge[{k, std::min(u, v), std::max(u, v)}] = s;
+      hStart[cycleStart[k] + s] = u;
+      hNextInCycle[cycleStart[k] + s] = cycleStart[k] + (s + 1) % len;
+      hKept[cycleStart[k] + s] = k;
+    }
+  }
+
+  // Twin assignment per radial fan, restricted to kept polygons:
+  // consecutive kept entries flanking an INSIDE wedge are twins. The
+  // wedge CCW of fan entry x is entry x's CCW-facing side's cell;
+  // dropped entries inside the kept-to-kept span cannot change
+  // inside-ness (equal on both of their sides), so that first cell
+  // speaks for the merged wedge. Alternation (each kept polygon
+  // flips inside-ness) gives each kept entry exactly one inside-
+  // wedge partner; failures mark the topology inconsistent and ok
+  // stays false for the caller's fallback.
+  std::vector<int> twin(nH, -1);
+  bool consistent = true;
+  for (const EdgeFan& fan : cells.fans) {
+    std::vector<int> keptPos;
+    for (size_t i = 0; i < fan.polygons.size(); ++i) {
+      if (winding.keep[fan.polygons[i]]) {
+        keptPos.push_back(static_cast<int>(i));
+      }
+    }
+    if (keptPos.empty()) continue;
+    if (keptPos.size() % 2 != 0) {
+      DEBUG_ASSERT(false, logicErr,
+                   "BuildEmitTopology: odd kept count at a fan");
+      consistent = false;
+      continue;
+    }
+    const size_t kc = keptPos.size();
+    for (size_t i = 0; i < kc; ++i) {
+      const int x = keptPos[i];
+      const int y = keptPos[(i + 1) % kc];
+      const int wedgeCell =
+          cells.cellOf[2 * fan.polygons[x] + (fan.frontCcw[x] ? 0 : 1)];
+      if (winding.winding[wedgeCell] <= 0) continue;  // outside wedge
+      const int ka = keptIdxOf[fan.polygons[x]];
+      const int kb = keptIdxOf[fan.polygons[y]];
+      const auto ita = posOfEdge.find({ka, fan.a, fan.b});
+      const auto itb = posOfEdge.find({kb, fan.a, fan.b});
+      if (ita == posOfEdge.end() || itb == posOfEdge.end()) {
+        DEBUG_ASSERT(false, logicErr,
+                     "BuildEmitTopology: fan polygon missing its edge");
+        consistent = false;
+        continue;
+      }
+      const int ha = cycleStart[ka] + ita->second;
+      const int hb = cycleStart[kb] + itb->second;
+      // Twins bound the same inside region with outward normals, so
+      // they traverse the shared edge antiparallel.
+      const bool aForward = out.outCycles[ka][ita->second] == fan.a;
+      const bool bForward = out.outCycles[kb][itb->second] == fan.a;
+      if (aForward == bForward || twin[ha] != -1 || twin[hb] != -1) {
+        DEBUG_ASSERT(false, logicErr, "BuildEmitTopology: twin conflict");
+        consistent = false;
+        continue;
+      }
+      twin[ha] = hb;
+      twin[hb] = ha;
+    }
+  }
+  for (int h = 0; h < nH && consistent; ++h) {
+    if (twin[h] < 0) {
+      DEBUG_ASSERT(false, logicErr, "BuildEmitTopology: unpaired halfedge");
+      consistent = false;
+    }
+  }
+  if (!consistent) return out;
+
+  // Vertex rings: orbits of nextAroundVert(h) =
+  // nextInPolygonCycle(twin(h)), walked on the kept-polygon graph
+  // (pre-triangulation). One output vert per orbit; the ring-
+  // separation argument makes every output edge carry exactly 2
+  // halfedges (release-checked below).
+  std::vector<int> orbitOf(nH, -1);
+  struct Orbit {
+    int vert;
+    int minPoly;
+  };
+  std::vector<Orbit> orbits;
+  for (int h0 = 0; h0 < nH; ++h0) {
+    if (orbitOf[h0] >= 0) continue;
+    const int id = static_cast<int>(orbits.size());
+    Orbit orb{hStart[h0], std::numeric_limits<int>::max()};
+    int h = h0;
+    do {
+      orbitOf[h] = id;
+      orb.minPoly = std::min(orb.minPoly, out.keptPolygons[hKept[h]]);
+      DEBUG_ASSERT(hStart[h] == orb.vert, logicErr,
+                   "BuildEmitTopology: orbit left its vert");
+      h = hNextInCycle[twin[h]];
+    } while (h != h0);
+    orbits.push_back(orb);
+  }
+  // Deterministic ring numbering by (geometric vert, smallest
+  // incident kept polygon) - unique, since a simple cycle starts at
+  // a vert once, putting each polygon in one orbit per vert.
+  std::vector<int> order(orbits.size());
+  std::iota(order.begin(), order.end(), 0);
+  std::sort(order.begin(), order.end(), [&](int a, int b) {
+    if (orbits[a].vert != orbits[b].vert) {
+      return orbits[a].vert < orbits[b].vert;
+    }
+    return orbits[a].minPoly < orbits[b].minPoly;
+  });
+  std::vector<int> ringOfOrbit(orbits.size());
+  out.ringVert.resize(orbits.size());
+  for (size_t r = 0; r < order.size(); ++r) {
+    DEBUG_ASSERT(r == 0 || orbits[order[r - 1]].vert != orbits[order[r]].vert ||
+                     orbits[order[r - 1]].minPoly != orbits[order[r]].minPoly,
+                 logicErr, "BuildEmitTopology: duplicate ring key");
+    ringOfOrbit[order[r]] = static_cast<int>(r);
+    out.ringVert[r] = orbits[order[r]].vert;
+  }
+  for (int k = 0; k < nK; ++k) {
+    std::vector<int>& cyc = out.outCycles[k];
+    for (size_t s = 0; s < cyc.size(); ++s) {
+      cyc[s] = ringOfOrbit[orbitOf[cycleStart[k] + static_cast<int>(s)]];
+    }
+  }
+
+  // Belt-and-suspenders: exactly 2 halfedges per output (ring, ring)
+  // edge, in release too - a violation feeds the driver's gate.
+  std::map<std::pair<int, int>, int> edgeCount;
+  for (const std::vector<int>& cyc : out.outCycles) {
+    for (size_t s = 0; s < cyc.size(); ++s) {
+      const int u = cyc[s];
+      const int v = cyc[(s + 1) % cyc.size()];
+      ++edgeCount[{std::min(u, v), std::max(u, v)}];
+    }
+  }
+  for (const auto& [e, n] : edgeCount) {
+    if (n != 2) {
+      DEBUG_ASSERT(false, logicErr,
+                   "BuildEmitTopology: output edge without exactly 2 "
+                   "halfedges");
+      return out;
+    }
   }
   out.ok = true;
   return out;

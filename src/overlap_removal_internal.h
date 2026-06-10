@@ -494,6 +494,38 @@ CellWinding ClassifyCells(const Manifold::Impl& impl,
                           const std::vector<vec3>& newVertPositions,
                           const CellComplex& cells);
 
+// ---- Step 13 emit topology: inside-wedge twins + vertex rings ----
+
+// Explicit output topology for the kept polygons. CreateHalfedges
+// pairs halfedges by sort order, which mis-pairs when more than two
+// kept polygons meet at an arrangement edge, so the twins are
+// assigned here first: at each radial fan, restricted to kept
+// polygons, the two flanking the same INSIDE (winding > 0) wedge are
+// twins - bare fan adjacency would pair across an outside wedge and
+// invert orientation (e.g. weld two solids that share the edge).
+// Dropped polygons between two consecutive kept ones cannot change
+// the wedge's inside-ness (a dropped polygon has equal inside-ness on
+// both sides), so consecutive-kept wedges are well-defined.
+// The twin assignment defines an abstract closed surface over the
+// kept polygons (pre-triangulation); vertex rings are its orbits
+// nextAroundVert(h) = nextInPolygonCycle(twin(h)), one output vert id
+// per ring - two solids touching at a vert or edge get distinct
+// output verts (subsumes SplitPinchedVerts), and by the ring-
+// separation argument every output edge carries exactly 2 halfedges
+// (release-checked into ok, DEBUG_ASSERTed). Rings are numbered by
+// (geometric vert id, smallest incident kept polygon) -
+// deterministic. Cycles are emitted in OUTWARD orientation
+// (CellWinding::flip applied) over ring ids.
+struct EmitTopology {
+  std::vector<int> keptPolygons;            // ascending polygon ids
+  std::vector<std::vector<int>> outCycles;  // [kept idx] -> ring-id cycle
+  std::vector<int> ringVert;                // [ring id] -> arrangement vert
+  bool ok = false;  // closed + exactly-2-halfedges checks passed
+};
+EmitTopology BuildEmitTopology(const std::vector<MergedPolygon>& polygons,
+                               const CellComplex& cells,
+                               const CellWinding& winding);
+
 // Step 10 of the pipeline: propagate etIsect resolved verts onto
 // their piercing edges' on-edge lists, so the polygon walker
 // subdivides those halfedges at the new pierce points. Skips verts

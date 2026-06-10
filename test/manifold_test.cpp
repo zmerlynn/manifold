@@ -1935,15 +1935,12 @@ bool Step13SameCell(const overlap_removal::CellComplex& cc, int sideA,
   return cc.cellOf[sideA] == cc.cellOf[sideB];
 }
 
-// Appends the 8 verts and 12 outward-wound triangles of the
-// axis-aligned cube [lo, hi]^3 as merged polygons (mult +1). Vert i
-// has x = hi iff i & 1, y = hi iff i & 2, z = hi iff i & 4.
-void AppendCubePolys(double lo, double hi, std::vector<manifold::vec3>& pos,
-                     std::vector<overlap_removal::MergedPolygon>& polys) {
-  const int b = static_cast<int>(pos.size());
-  for (int i = 0; i < 8; ++i) {
-    pos.push_back({(i & 1) ? hi : lo, (i & 2) ? hi : lo, (i & 4) ? hi : lo});
-  }
+// Appends the 12 outward-wound triangles of an axis-aligned box over
+// the given 8 vert ids as merged polygons (mult +1), where vert i is
+// the corner with x = hi.x iff i & 1, y = hi.y iff i & 2, z = hi.z
+// iff i & 4.
+void AppendBoxTris(const int (&ids)[8],
+                   std::vector<overlap_removal::MergedPolygon>& polys) {
   const int tris[12][3] = {{0, 2, 3}, {0, 3, 1},   // -z
                            {4, 5, 7}, {4, 7, 6},   // +z
                            {0, 1, 5}, {0, 5, 4},   // -y
@@ -1951,8 +1948,21 @@ void AppendCubePolys(double lo, double hi, std::vector<manifold::vec3>& pos,
                            {0, 4, 6}, {0, 6, 2},   // -x
                            {1, 7, 5}, {1, 3, 7}};  // +x
   for (const auto& t : tris) {
-    polys.push_back({{b + t[0], b + t[1], b + t[2]}, 1, 0});
+    polys.push_back({{ids[t[0]], ids[t[1]], ids[t[2]]}, 1, 0});
   }
+}
+
+// Appends the 8 verts and 12 outward-wound triangles of the
+// axis-aligned cube [lo, hi]^3.
+void AppendCubePolys(double lo, double hi, std::vector<manifold::vec3>& pos,
+                     std::vector<overlap_removal::MergedPolygon>& polys) {
+  const int b = static_cast<int>(pos.size());
+  int ids[8];
+  for (int i = 0; i < 8; ++i) {
+    pos.push_back({(i & 1) ? hi : lo, (i & 2) ? hi : lo, (i & 4) ? hi : lo});
+    ids[i] = b + i;
+  }
+  AppendBoxTris(ids, polys);
 }
 }  // namespace
 
@@ -2107,6 +2117,88 @@ TEST(OverlapRemoval, Step13NestedCubesInnerFacesNotKept) {
     EXPECT_FALSE(cw.flip[p]) << "inner " << p;
     EXPECT_EQ(cw.winding[cc.cellOf[2 * p]], 1) << "inner front " << p;
     EXPECT_EQ(cw.winding[cc.cellOf[2 * p + 1]], 2) << "inner back " << p;
+  }
+}
+
+TEST(OverlapRemoval, Step13BookTwinPairingSplitsSharedEdge) {
+  // Two boxes sharing exactly one arrangement edge (verts 3 and 7 at
+  // x = y = 1): the shared fan carries 4 kept faces. Inside-wedge
+  // twin pairing must pair each box's own two faces (bare fan
+  // adjacency would pair across an OUTSIDE wedge and weld the
+  // solids), so ring extraction yields TWO output verts at each
+  // shared vert - 16 rings over 14 geometric verts - and a closed
+  // surface: every directed ring-id edge appears once, with its
+  // antiparallel twin. One tri is passed in reversed representation
+  // (cycle reversed, mult -1) to pin flip handling; all output cycles
+  // must come out wound outward.
+  Manifold::Impl impl;
+  std::vector<manifold::vec3> pos;
+  std::vector<overlap_removal::MergedPolygon> polys;
+  AppendCubePolys(0.0, 1.0, pos, polys);  // box A: verts 0-7
+  // Box B = [1,2] x [1,2] x [0,1] shares A's verts 3 = (1,1,0) and
+  // 7 = (1,1,1) (its corners 0 and 4).
+  pos.push_back({2.0, 1.0, 0.0});  // 8
+  pos.push_back({1.0, 2.0, 0.0});  // 9
+  pos.push_back({2.0, 2.0, 0.0});  // 10
+  pos.push_back({2.0, 1.0, 1.0});  // 11
+  pos.push_back({1.0, 2.0, 1.0});  // 12
+  pos.push_back({2.0, 2.0, 1.0});  // 13
+  const int bIds[8] = {3, 8, 9, 10, 7, 11, 12, 13};
+  AppendBoxTris(bIds, polys);
+  // Reversed representation for one of A's bottom tris.
+  ASSERT_EQ(polys[0].cycle, (std::vector<int>{0, 2, 3}));
+  polys[0] = {{3, 2, 0}, -1, 0};
+  const overlap_removal::CellComplex cc =
+      overlap_removal::BuildCellComplex(impl, polys, pos);
+  // Outside, inside-A, inside-B; one component (joined via outside).
+  ASSERT_EQ(cc.numCells, 3);
+  const overlap_removal::CellWinding cw =
+      overlap_removal::ClassifyCells(impl, polys, pos, cc);
+  ASSERT_TRUE(cw.ok);
+  EXPECT_EQ(cw.seedCasts, 1);
+  const overlap_removal::EmitTopology et =
+      overlap_removal::BuildEmitTopology(polys, cc, cw);
+  ASSERT_TRUE(et.ok);
+  ASSERT_EQ(et.keptPolygons.size(), 24u);
+  ASSERT_EQ(et.outCycles.size(), 24u);
+  // Rings: one per vert except the shared-edge verts, which carry one
+  // ring per solid.
+  ASSERT_EQ(et.ringVert.size(), 16u);
+  int rings3 = 0;
+  int rings7 = 0;
+  for (const int v : et.ringVert) {
+    rings3 += v == 3;
+    rings7 += v == 7;
+  }
+  EXPECT_EQ(rings3, 2);
+  EXPECT_EQ(rings7, 2);
+  // Closed in ring space: each directed edge once, twin antiparallel.
+  std::map<std::pair<int, int>, int> directed;
+  for (const std::vector<int>& cyc : et.outCycles) {
+    ASSERT_EQ(cyc.size(), 3u);
+    for (size_t i = 0; i < cyc.size(); ++i) {
+      ++directed[{cyc[i], cyc[(i + 1) % cyc.size()]}];
+    }
+  }
+  for (const auto& [e, n] : directed) {
+    EXPECT_EQ(n, 1) << e.first << "->" << e.second;
+    const auto rev = directed.find({e.second, e.first});
+    EXPECT_TRUE(rev != directed.end() && rev->second == 1)
+        << e.first << "->" << e.second << " unpaired";
+  }
+  // Outward orientation, reversed-representation tri included: each
+  // output tri's normal points away from its box's center.
+  for (size_t k = 0; k < et.keptPolygons.size(); ++k) {
+    const manifold::vec3 center = et.keptPolygons[k] < 12
+                                      ? manifold::vec3(0.5, 0.5, 0.5)
+                                      : manifold::vec3(1.5, 1.5, 0.5);
+    const std::vector<int>& cyc = et.outCycles[k];
+    const manifold::vec3 a = pos[et.ringVert[cyc[0]]];
+    const manifold::vec3 b = pos[et.ringVert[cyc[1]]];
+    const manifold::vec3 c = pos[et.ringVert[cyc[2]]];
+    const manifold::vec3 n = la::cross(b - a, c - a);
+    EXPECT_GT(la::dot(n, (a + b + c) / 3.0 - center), 0.0)
+        << "kept polygon " << et.keptPolygons[k];
   }
 }
 
