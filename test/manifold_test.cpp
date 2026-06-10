@@ -1935,7 +1935,10 @@ TEST(OverlapRemoval, Step10WalkFrameIgnoresStoredNormal) {
   // The walk frame derives from the halfedge WINDING, not the stored
   // faceNormal_ (folded-sheet faces arrive with the two disagreeing -
   // SortGeometry can deliver either). Inverting the stored normal must
-  // not change the partition.
+  // not change the partition, and - the discriminating assert, since
+  // cycle SIZES are topological - every output cycle must stay CCW
+  // about the WINDING normal: a regression to the stored normal
+  // mirrors the projection and flips the output orientation.
   Step10Fixture fx = MakeStep10Fixture();
   ASSERT_GE(fx.face, 0);
   fx.impl.faceNormal_[fx.face] = -fx.impl.faceNormal_[fx.face];
@@ -1948,10 +1951,28 @@ TEST(OverlapRemoval, Step10WalkFrameIgnoresStoredNormal) {
   const overlap_removal::FacePartition part = overlap_removal::PartitionFace(
       fx.impl, fx.face, fx.edges, fx.he2e, onEdgeLists, chords, {0}, newPos);
   ASSERT_EQ(part.polygons.size(), 2u);
+  const int baseId = static_cast<int>(fx.impl.NumVert());
+  auto posOf = [&](int id) {
+    return id < baseId ? fx.impl.vertPos_[id] : newPos[id - baseId];
+  };
+  const manifold::vec3 p0 =
+      fx.impl.vertPos_[fx.impl.halfedge_.Start(3 * fx.face)];
+  const manifold::vec3 p1 =
+      fx.impl.vertPos_[fx.impl.halfedge_.Start(3 * fx.face + 1)];
+  const manifold::vec3 p2 =
+      fx.impl.vertPos_[fx.impl.halfedge_.Start(3 * fx.face + 2)];
+  const manifold::vec3 windingN = la::cross(p1 - p0, p2 - p0);
   std::multiset<size_t> sizes;
   for (const std::vector<int>& poly : part.polygons) {
     EXPECT_TRUE(Step10CycleIsSimple(poly));
     sizes.insert(poly.size());
+    const manifold::vec3 origin = posOf(poly[0]);
+    manifold::vec3 nsum(0, 0, 0);
+    for (size_t i = 0; i < poly.size(); ++i) {
+      nsum = nsum + la::cross(posOf(poly[i]) - origin,
+                              posOf(poly[(i + 1) % poly.size()]) - origin);
+    }
+    EXPECT_GT(la::dot(nsum, windingN), 0.0) << "cycle wound against winding";
   }
   EXPECT_EQ(sizes, (std::multiset<size_t>{3, 4}));
 }
@@ -2614,6 +2635,64 @@ TEST(OverlapRemoval, Step95UnifyWidensSnapByPerVertRadius) {
   EXPECT_EQ(std::max(chords[0].edge.v0, chords[0].edge.v1), std::max(hi, fx.C));
 }
 
+TEST(OverlapRemoval, Step95ClusterSnapsToNearestOriginalAcrossMembers) {
+  // Review finding (round 2): each member's snapTo is its own nearest
+  // original, but the CLUSTER representative was picked by smallest
+  // id across members - a farther small-id original could beat the
+  // adjacent corner. Fixture: originals at x = 0 (id 0) and x = 0.08
+  // (id 3); new verts at x = 0.035 (member nearest = id 0, d = 0.035)
+  // and x = 0.07 (member nearest = id 3, d = 0.01) unify into one
+  // cluster (0.035 apart < 10 eps = 0.05). Nearest across members is
+  // id 3; the old id-priority rule picked id 0.
+  Manifold::Impl impl;
+  const manifold::vec3 verts[6] = {{0.0, 0.0, 0.0},   {10.0, 0.0, 0.0},
+                                   {0.0, 10.0, 0.0},  {0.08, 0.0, 0.0},
+                                   {10.0, 10.0, 0.0}, {-10.0, 5.0, 0.0}};
+  for (const auto& v : verts) impl.vertPos_.push_back(v);
+  const int tris[2][3] = {{0, 1, 2}, {3, 4, 5}};
+  for (const auto& t : tris) {
+    for (int k = 0; k < 3; ++k) impl.halfedge_.push_back(t[k], -1, -1);
+  }
+  const std::vector<overlap_removal::Edge> edges =
+      overlap_removal::EnumerateEdges(impl);
+  const double eps = 0.005;
+  const std::vector<manifold::vec3> newPos = {{0.035, 0.0, 0.0},
+                                              {0.07, 0.0, 0.0}};  // ids 6, 7
+  std::vector<overlap_removal::EdgeVertList> onEdgeLists(edges.size());
+  std::vector<overlap_removal::NewEdgeWithExtras> chords = {
+      {{6, 7, 0, 1}, {}, {}}};
+  const overlap_removal::UnifyResult r = overlap_removal::UnifyArrangementVerts(
+      impl, newPos, edges, onEdgeLists, chords, eps);
+  EXPECT_EQ(r.changed, 2);          // both members remap to the cluster rep
+  EXPECT_EQ(chords[0].edge.v0, 3);  // nearest across members, NOT id 0
+  EXPECT_EQ(chords[0].edge.v1, 3);  // (a collapsed chord: both ends remap)
+  EXPECT_NEAR(r.maxMove, 0.045, 1e-12);  // member at 0.035 -> rep at 0.08
+}
+
+TEST(OverlapRemoval, Step13FoldedOppositeShellsDoNotCancel) {
+  // Review finding (round 2): the folded-shell gate must evaluate
+  // CONNECTED COMPONENTS of folded polygons, not whole cells - a
+  // positive shell and an inverted twin folded into the SAME cell
+  // would otherwise net to zero signed volume and slip under the
+  // area threshold, silently deleting the positive shell. Hand-build
+  // that exact configuration: two disjoint unit cubes, one reversed,
+  // every polygon side mapped to ONE cell.
+  Manifold::Impl impl;
+  std::vector<manifold::vec3> pos;
+  std::vector<overlap_removal::MergedPolygon> polys;
+  AppendCubePolys(0.0, 1.0, pos, polys);  // +1 volume
+  const size_t firstReversed = polys.size();
+  AppendCubePolys(3.0, 4.0, pos, polys);  // disjoint twin...
+  for (size_t p = firstReversed; p < polys.size(); ++p) {
+    std::reverse(polys[p].cycle.begin(), polys[p].cycle.end());  // ...inverted
+  }
+  overlap_removal::CellComplex cells;
+  cells.numCells = 1;
+  cells.polySide2Cell.assign(2 * polys.size(), 0);  // everything folded
+  EXPECT_TRUE(overlap_removal::FoldedCellsEncloseVolume(impl, polys, pos, cells,
+                                                        /*eps=*/1e-9));
+}
+
 TEST(OverlapRemoval, Step1MergeReportsMaxMove) {
   // The step-1 merge's applied displacement feeds the driver's output
   // tolerance claim. One eps-pair (verts 0 and 3, 2^-11 apart so the
@@ -2841,9 +2920,10 @@ int InteriorPierces(const Manifold& m) {
 }
 
 // Bit-identical passthrough: the early-exit (empty chord list) and
-// every fallback arm return the input Manifold exactly - field-level
-// MeshGL64 equality, not just volume/count agreement (review finding:
-// loose bounds let a remesh or tolerance change slip through).
+// every fallback arm return the input Manifold exactly - every
+// exported MeshGL64 field, not just volume/count agreement (review
+// finding: loose bounds let a remesh, a tolerance change, or a
+// metadata drop slip through).
 void ExpectMeshGL64Identical(const Manifold& got, const Manifold& want) {
   const MeshGL64 g = got.GetMeshGL64();
   const MeshGL64 w = want.GetMeshGL64();
@@ -2853,6 +2933,13 @@ void ExpectMeshGL64Identical(const Manifold& got, const Manifold& want) {
   EXPECT_EQ(g.vertProperties, w.vertProperties);
   EXPECT_EQ(g.triVerts, w.triVerts);
   EXPECT_EQ(g.tolerance, w.tolerance);
+  EXPECT_EQ(g.mergeFromVert, w.mergeFromVert);
+  EXPECT_EQ(g.mergeToVert, w.mergeToVert);
+  EXPECT_EQ(g.runIndex, w.runIndex);
+  EXPECT_EQ(g.runOriginalID, w.runOriginalID);
+  EXPECT_EQ(g.runTransform, w.runTransform);
+  EXPECT_EQ(g.faceID, w.faceID);
+  EXPECT_EQ(g.halfedgeTangent, w.halfedgeTangent);
 }
 
 TEST(Manifold, RemoveSelfIntersectionsApi) {
@@ -3040,9 +3127,11 @@ TEST(Manifold, RemoveSelfIntersectionsIdempotent) {
 }
 
 TEST(Manifold, RemoveSelfIntersectionsDeterministic) {
-  // The pipeline is deterministic: repeated runs on the same input produce
-  // identical output. Guards against the documented per-vert / pair-sym
-  // ordering regressions.
+  // The pipeline is deterministic: repeated runs on the same input
+  // produce identical output. The origin-scale hull exercises the
+  // fallback path; the far-from-origin variant exercises the FULL
+  // rebuild (review finding: the fallback runs alone would pin only
+  // trivial identity, not pipeline-ordering determinism).
   Manifold body = Manifold(ReadTestMeshGL64OBJ("hull-body.obj"));
   Manifold mask = Manifold(ReadTestMeshGL64OBJ("hull-mask.obj"));
   Manifold result = body - mask;
@@ -3055,6 +3144,17 @@ TEST(Manifold, RemoveSelfIntersectionsDeterministic) {
     const MeshGL64 againMesh = again.GetMeshGL64();
     EXPECT_EQ(againMesh.triVerts, firstMesh.triVerts);
     EXPECT_EQ(againMesh.vertProperties, firstMesh.vertProperties);
+  }
+  Manifold far = result.Translate({1e4, 1e4, 1e4});
+  Manifold farFirst = far.RemoveSelfIntersections();
+  ASSERT_EQ(farFirst.Status(), Manifold::Error::NoError);
+  ASSERT_LT(InteriorPierces(farFirst), InteriorPierces(far));  // success path
+  const MeshGL64 farFirstMesh = farFirst.GetMeshGL64();
+  for (int i = 0; i < 2; ++i) {
+    Manifold again = far.RemoveSelfIntersections();
+    const MeshGL64 againMesh = again.GetMeshGL64();
+    EXPECT_EQ(againMesh.triVerts, farFirstMesh.triVerts);
+    EXPECT_EQ(againMesh.vertProperties, farFirstMesh.vertProperties);
   }
 }
 
@@ -3079,6 +3179,18 @@ TEST(Manifold, RemoveSelfIntersectionsFarFromOrigin) {
   // origin-scale folded-shell fallback.
   EXPECT_EQ(cleaned.Decompose().size(), 3u);
   EXPECT_NEAR(cleaned.Volume(), result.Volume(), result.Volume() * 1e-3);
+  // The documented positions-only rebuild contract: a successful
+  // rebuild drops non-position properties to numProp == 3.
+  Manifold propped = result.SetProperties(
+      2, [](double* prop, manifold::vec3 p, const double*) {
+        prop[0] = p.x;
+        prop[1] = p.y;
+      });
+  ASSERT_EQ(propped.GetMeshGL64().numProp, 5u);  // 3 position + 2 props
+  Manifold cleanedProps = propped.RemoveSelfIntersections();
+  EXPECT_EQ(cleanedProps.Status(), Manifold::Error::NoError);
+  ASSERT_LT(InteriorPierces(cleanedProps), InteriorPierces(propped));
+  EXPECT_EQ(cleanedProps.GetMeshGL64().numProp, 3u);
 }
 
 TEST(Manifold, MeshID) {

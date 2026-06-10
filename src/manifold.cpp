@@ -415,8 +415,10 @@ Manifold Manifold::Simplify(double tolerance) const {
  * Routes to overlap_removal::RunOverlapRemoval (the Emmett #289
  * arrangement -> cell complex -> winding classification pipeline).
  * Pierce-monotonicity is guaranteed: the returned manifold's
- * self-intersection count never exceeds the input's. Every fallback
- * path returns the original input unchanged. See the manifold.h
+ * self-intersection count never exceeds the input's. Every PIPELINE
+ * fallback path returns the original input unchanged; an input whose
+ * status is already an error short-circuits to status propagation
+ * below, like every other member function. See the manifold.h
  * declaration for the full contract.
  */
 Manifold Manifold::RemoveSelfIntersections() const {

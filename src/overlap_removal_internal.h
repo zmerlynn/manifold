@@ -19,14 +19,12 @@
 // and by no production caller - kept out of src/overlap_removal.h so
 // the public-to-src interface is just RunOverlapRemoval.
 
-#include <map>
-#include <set>
+#include <utility>  // for std::pair
 #include <vector>
 
 #include "collider.h"           // for Collider, Box
 #include "manifold/common.h"    // vec3 alias
 #include "manifold/manifold.h"  // for Manifold
-#include "overlap_removal.h"    // for RunOverlapRemoval
 
 namespace manifold {
 namespace overlap_removal {
@@ -219,8 +217,10 @@ std::vector<TriVertList> BuildOnTriVertLists(const Manifold::Impl& impl,
 // Step 6 of the pipeline: edge-pierces-triangle events via BVH +
 // Moller-Trumbore narrow phase. Strict-interior gates on segment
 // parameter (0 < s < 1) AND barycentric (all > 0). Snaps the pierce
-// point to the nearest existing vert within tolerance + eps (the
-// pipeline-wide new-onto-existing radius), ties to smallest id.
+// point to the nearest existing vert within eps - event identity at
+// the computational scale (the step-1 old-old convention;
+// arrangement-wide identification happens at step 9.5), ties to
+// smallest id.
 //
 // Includes pierces where the edge endpoint coincides with a tri vert
 // (= the shared-vert pierce case post-Boolean merge), which the classic
@@ -228,7 +228,7 @@ std::vector<TriVertList> BuildOnTriVertLists(const Manifold::Impl& impl,
 std::vector<EdgeTriIntersection> FindEdgeTriIntersections(
     const Manifold::Impl& impl, const std::vector<Edge>& edges,
     const std::vector<EdgeVertList>& onEdgeLists,
-    const std::vector<TriVertList>& onTriLists, double tolerance, double eps);
+    const std::vector<TriVertList>& onTriLists, double eps);
 
 // Step 7 phase 2 of the pipeline: resolve etIsect events to vert
 // ids (snapping or allocating fresh), group by tri-tri pair, and
@@ -262,17 +262,20 @@ std::vector<NewEdgeWithExtras> AddInteriorVertsToNewEdges(
 // cancellation cannot fire, and BuildCellComplex hits exact angular
 // ties. For each BVH pair surviving the plane gate (every vert within
 // eps of the LARGER face's plane), both faces' edges are clipped
-// against the other face in ONE shared frame (the lower face id's, so
-// a crossing is computed once and shares its id across both clip
-// directions). An interval qualifies iff it is longer than eps AND
-// its midpoint is interior to the other face by > eps (full-through
-// cuts qualify - their midpoints are interior; boundary-riding
-// intervals from coplanar neighbors never do, so clean flat meshes
-// emit nothing). Crossing endpoints snap to the pair's six corners at
-// tolerance + eps (nearest, ties to smallest - the step-9
-// convention), then dedup new-to-new at eps first-found (the step-7
-// convention); an endpoint farther than eps from either original 3D
-// edge rejects its interval (the near-grazing guard). Each qualifying
+// against the other face in ONE shared frame (the gate face's - the
+// larger, ties to the lower id - so a crossing is computed once and
+// shares its id across both clip directions). An interval qualifies
+// iff it is longer than eps AND its midpoint is interior to the other
+// face by > eps (full-through cuts qualify - their midpoints are
+// interior; boundary-riding intervals from coplanar neighbors never
+// do, so clean flat meshes emit nothing). Crossing endpoints snap to
+// the pair's six corners at max(tolerance + eps, the conditioned
+// radius) (nearest, ties to smallest - the step-9 convention), then
+// dedup new-to-new over the pool at the SOURCE-GATED radius
+// min(this crossing's conditioned radius, the entry's recorded
+// radius), eps-floored; an endpoint farther than eps from either
+// original 3D edge rejects its interval (the near-grazing guard).
+// Each qualifying
 // interval emits a chord lying on BOTH faces; new crossing verts on
 // original mesh edges are returned as explicit on-edge additions
 // (one per edge - an X crossing gets two records with one vert id).
@@ -426,12 +429,14 @@ Step9Threading ResolveAndThreadClusters(
 // (the crossing's lever arm on long near-parallel edges), and a pair
 // of such twins subdivides a shared sub-edge inconsistently across
 // faces - the unpaired sub-edges then read as open rims, whose
-// ambient unification collapses the cell complex (observed: 21 rims
-// merged 14k polygons' cells into 3). One union-find sweep at the
+// ambient unification collapses the cell complex (observed: a handful
+// of rims merged nearly every cell). One union-find sweep at the
 // nearby-crossing merge radius (10 * eps - the design's existing
 // "same point computed twice" constant) unites new-new pairs and
-// snaps new verts onto originals within the same radius (smallest id
-// wins, originals before new). Consumers are remapped in place:
+// snaps new verts onto originals within max(that radius, the vert's
+// recorded conditioned radius) - NEAREST wins across the cluster,
+// ties to the smallest id, originals before new. Consumers are
+// remapped in place:
 // chord endpoints, chord extras (id-dedup, endpoint drops), and
 // on-edge lists (id-dedup, endpoint drops, t re-sort). Returns the
 // number of ids remapped plus the largest position displacement any
@@ -625,9 +630,12 @@ EmitTopology BuildEmitTopology(const std::vector<MergedPolygon>& polygons,
 
 // Step 10 of the pipeline: propagate etIsect resolved verts onto
 // their piercing edges' on-edge lists, so the partition
-// subdivides those halfedges at the new pierce points. Skips verts
-// that are already edge endpoints or already in the list.
+// subdivides those halfedges at the new pierce points. t is
+// recomputed from the RESOLVED vert's position (a snapped event's
+// raw parameter can order against the geometry). Skips verts that
+// are already edge endpoints or already in the list.
 void PropagateNewVertsToOnEdgeLists(
+    const Manifold::Impl& impl, const std::vector<vec3>& newVertPositions,
     const std::vector<EdgeTriIntersection>& etIsects,
     const std::vector<int>& etIsect2Vert, const std::vector<Edge>& edges,
     std::vector<EdgeVertList>& onEdgeLists);
@@ -637,10 +645,6 @@ void PropagateNewVertsToOnEdgeLists(
 // baseId, into newVertPositions). Used in many pipeline functions.
 vec3 GetPos3(int id, int baseId, const Manifold::Impl& impl,
              const std::vector<vec3>& newVertPositions);
-
-// Conversion helper: Manifold -> Impl via the public GetMeshGL64() API,
-// to access internal halfedge / face-normal data.
-Manifold::Impl ImplFromManifold(const Manifold& m);
 
 // Geometric pierce predicate: does segment a-b strictly pierce
 // triangle interior (v0, v1, v2)? Returns the pierce magnitude
@@ -678,6 +682,19 @@ struct SelfIntersectionResult {
 
 SelfIntersectionResult CheckSelfIntersection(const Manifold& m,
                                              double relTol = 1e-12);
+
+// Final-gate helper (pre-emit): true if any connected component of
+// folded polygons (front cell == back cell, grouped by fold cell +
+// shared vert) encloses mult-weighted signed volume beyond the
+// membrane bound area x kFoldedVolumePerAreaEps x eps. Folded
+// membranes legitimately drop; a folded CLOSED shell means the
+// arrangement failed to embed it, and emitting would silently delete
+// its material - the driver falls back. Per component, not per cell:
+// opposite-orientation shells sharing one cell must not cancel.
+bool FoldedCellsEncloseVolume(const Manifold::Impl& impl,
+                              const std::vector<MergedPolygon>& polys,
+                              const std::vector<vec3>& newVertPositions,
+                              const CellComplex& cells, double eps);
 
 }  // namespace overlap_removal
 }  // namespace manifold

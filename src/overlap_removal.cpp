@@ -16,7 +16,9 @@
 
 #include <algorithm>
 #include <limits>
+#include <map>
 #include <numeric>
+#include <set>
 #include <tuple>
 
 #include "collider.h"
@@ -109,6 +111,38 @@ InPlaneBasis FaceBasisFromNormal(const vec3& n) {
   return {u, cross(n, u)};
 }
 
+// Projection of p onto the line through a along ab (abLen2 =
+// dot(ab, ab) > 0): the parameter t and the squared distance from
+// the line. The shared kernel of the on-edge collection, the
+// chord-interior threading, and the step-9 contact/propagation
+// passes - callers apply their own t-range guards and radii.
+struct LineProj {
+  double t;
+  double distSq;
+};
+LineProj ProjectToLine(const vec3& p, const vec3& a, const vec3& ab,
+                       double abLen2) {
+  using la::dot;
+  const double t = dot(p - a, ab) / abLen2;
+  const vec3 d = p - (a + ab * t);
+  return {t, dot(d, d)};
+}
+
+// Conditioned snap radius of a crossing of two 2D directions: the
+// position error scales as eps / sin(angle) (the near-parallel lever
+// arm), eps-floored and capped at kCondSnapCapEps * eps; degenerate
+// directions take the cap. Shared by step 6.5's trace crossings and
+// step 9's chord-chord crossings.
+double ConditionedSnapRadius(const vec2& d1, const vec2& d2, double eps) {
+  const double l1 = std::sqrt(d1.x * d1.x + d1.y * d1.y);
+  const double l2 = std::sqrt(d2.x * d2.x + d2.y * d2.y);
+  const double crossAbs = std::fabs(d1.x * d2.y - d1.y * d2.x);
+  return (l1 > 0 && l2 > 0 && crossAbs > 0)
+             ? std::max(eps, std::min(eps * l1 * l2 / crossAbs,
+                                      kCondSnapCapEps * eps))
+             : kCondSnapCapEps * eps;
+}
+
 // Sort a parallel (vert id, edge parameter t) pair by t, breaking
 // exact-t ties by ascending id so the order is independent of
 // insertion order. Steps 8-11 consume these lists as monotone-t
@@ -195,10 +229,20 @@ SortedBVH BuildSortedBVH(VecView<const Box> leafBoxes) {
   for (const auto& b : leafBoxes) bbox = bbox.Union(b);
   // MortonCode divides by the bbox extent per axis; a zero-extent axis
   // (e.g. all leaf centers coplanar) would yield NaN and an undefined
-  // uint cast. Pad such axes - any positive extent maps all centers to
-  // bucket 0 on that axis consistently.
-  for (int k : {0, 1, 2})
-    if (!(bbox.max[k] - bbox.min[k] > 0.0)) bbox.max[k] = bbox.min[k] + 1.0;
+  // uint cast. Pad such axes with a scale-aware delta - a constant pad
+  // is a no-op past 2^53 ULP scale (1e20 + 1.0 == 1e20), so size the
+  // pad to the coordinate's own magnitude. Any positive extent maps
+  // all centers to bucket 0 on that axis consistently.
+  for (int k : {0, 1, 2}) {
+    if (!(bbox.max[k] - bbox.min[k] > 0.0)) {
+      const double pad =
+          std::max(1.0, std::fabs(bbox.min[k]) * 4.0 *
+                            std::numeric_limits<double>::epsilon());
+      bbox.max[k] = bbox.min[k] + pad;
+      DEBUG_ASSERT(bbox.max[k] - bbox.min[k] > 0.0, logicErr,
+                   "BuildSortedBVH: degenerate axis pad failed");
+    }
+  }
   std::vector<uint32_t> rawMorton(n);
   for (size_t i = 0; i < n; ++i)
     rawMorton[i] = Collider::MortonCode(leafBoxes[i].Center(), bbox);
@@ -227,10 +271,6 @@ SortedBVH BuildSortedBVH(VecView<const Box> leafBoxes) {
 
 double InferEps(const Manifold& m) {
   return AlphaBudgetEpsilon(m.BoundingBox().Scale(), 1000);
-}
-
-Manifold::Impl ImplFromManifold(const Manifold& m) {
-  return Manifold::Impl(m.GetMeshGL64());
 }
 
 MergeVertsResult MergeVertsEps(const Manifold& in, double eps, int maxIter) {
@@ -393,13 +433,14 @@ std::vector<EdgeVertList> BuildOnEdgeVertLists(const Manifold::Impl& impl,
 
   // Per-edge eps-padded AABB (BVH leaves) and per-vert eps-padded AABB
   // (queries).
+  const vec3 pad(eps, eps, eps);
   std::vector<Box> edgeBoxes(nE);
   for (size_t i = 0; i < nE; ++i) {
     const vec3 v0 = impl.vertPos_[edges[i].v0];
     const vec3 v1 = impl.vertPos_[edges[i].v1];
     Box b(v0, v1);
-    b.Union(vec3(b.min.x - eps, b.min.y - eps, b.min.z - eps));
-    b.Union(vec3(b.max.x + eps, b.max.y + eps, b.max.z + eps));
+    b.min -= pad;
+    b.max += pad;
     edgeBoxes[i] = b;
   }
   std::vector<Box> vertBoxes(nV);
@@ -413,8 +454,7 @@ std::vector<EdgeVertList> BuildOnEdgeVertLists(const Manifold::Impl& impl,
       BuildSortedBVH(VecView<const Box>(edgeBoxes.data(), edgeBoxes.size()));
 
   std::vector<std::vector<std::pair<double, int>>> hitsByEdge(nE);
-  auto onCollision = [&](size_t vertIdxQ, size_t edgeIdxL) {
-    const size_t vertIdx = vertIdxQ;
+  auto onCollision = [&](size_t vertIdx, size_t edgeIdxL) {
     const size_t edgeIdx = bvh.leaf2Orig[edgeIdxL];
     const auto& edge = edges[edgeIdx];
     if (static_cast<int>(vertIdx) == edge.v0 ||
@@ -422,18 +462,13 @@ std::vector<EdgeVertList> BuildOnEdgeVertLists(const Manifold::Impl& impl,
       return;
     if (adj[vertIdx].count(edge.v0) && adj[vertIdx].count(edge.v1)) return;
     const vec3 a = impl.vertPos_[edge.v0];
-    const vec3 b = impl.vertPos_[edge.v1];
-    const vec3 ab = b - a;
+    const vec3 ab = impl.vertPos_[edge.v1] - a;
     const double abLen2 = dot(ab, ab);
     if (abLen2 == 0) return;
-    const vec3 p = impl.vertPos_[vertIdx];
-    const vec3 ap = p - a;
-    const double t = dot(ap, ab) / abLen2;
-    if (t <= 0.0 || t >= 1.0) return;
-    const vec3 closest = a + ab * t;
-    const vec3 d = p - closest;
-    if (dot(d, d) <= eps2)
-      hitsByEdge[edgeIdx].emplace_back(t, static_cast<int>(vertIdx));
+    const LineProj pr = ProjectToLine(impl.vertPos_[vertIdx], a, ab, abLen2);
+    if (pr.t <= 0.0 || pr.t >= 1.0) return;
+    if (pr.distSq <= eps2)
+      hitsByEdge[edgeIdx].emplace_back(pr.t, static_cast<int>(vertIdx));
   };
   auto recorder = MakeSimpleRecorder(onCollision);
   auto qf = [&](int i) { return vertBoxes[i]; };
@@ -461,6 +496,7 @@ std::vector<TriVertList> BuildOnTriVertLists(const Manifold::Impl& impl,
   std::vector<TriVertList> out(nT);
   if (nT == 0 || nV == 0) return out;
 
+  const vec3 pad(eps, eps, eps);
   std::vector<Box> triBoxes(nT);
   for (size_t t = 0; t < nT; ++t) {
     const int v0 = impl.halfedge_.Start(3 * t + 0);
@@ -468,8 +504,8 @@ std::vector<TriVertList> BuildOnTriVertLists(const Manifold::Impl& impl,
     const int v2 = impl.halfedge_.Start(3 * t + 2);
     Box b(impl.vertPos_[v0], impl.vertPos_[v1]);
     b.Union(impl.vertPos_[v2]);
-    b.Union(vec3(b.min.x - eps, b.min.y - eps, b.min.z - eps));
-    b.Union(vec3(b.max.x + eps, b.max.y + eps, b.max.z + eps));
+    b.min -= pad;
+    b.max += pad;
     triBoxes[t] = b;
   }
   std::vector<Box> vertBoxes(nV);
@@ -528,25 +564,32 @@ std::vector<TriVertList> BuildOnTriVertLists(const Manifold::Impl& impl,
 std::vector<EdgeTriIntersection> FindEdgeTriIntersections(
     const Manifold::Impl& impl, const std::vector<Edge>& edges,
     const std::vector<EdgeVertList>& onEdgeLists,
-    const std::vector<TriVertList>& onTriLists, double tolerance, double eps) {
+    const std::vector<TriVertList>& onTriLists, double eps) {
   using la::cross;
   using la::dot;
   std::vector<EdgeTriIntersection> out;
   const size_t nE = edges.size();
   const size_t nT = impl.NumTri();
   if (nE == 0 || nT == 0) return out;
-  // New-to-old snap radius: tolerance + eps, the pipeline-wide
-  // new-onto-existing term (matches steps 6.5, 8, and 9).
-  const double snapR = tolerance + eps;
+  // Snap radius: eps - EVENT IDENTITY at the computational scale, the
+  // same scale as the step-1 old-old merge (stored positions are the
+  // geometry; only the pipeline's own error is absorbed). NOT the
+  // tolerance + eps allocation radius: events in the (eps, 10 eps]
+  // band are unified onto originals by step 9.5 anyway, and a
+  // tolerance-scale radius on a tolerance-inflated input would drag
+  // pierce events onto far verts and deform the arrangement (the
+  // documented re-pierce class).
+  const double snapR = eps;
   const double snapR2 = snapR * snapR;
 
+  const vec3 pad(eps, eps, eps);
   std::vector<Box> edgeBoxes(nE);
   for (size_t i = 0; i < nE; ++i) {
     const vec3 v0 = impl.vertPos_[edges[i].v0];
     const vec3 v1 = impl.vertPos_[edges[i].v1];
     Box b(v0, v1);
-    b.Union(vec3(b.min.x - eps, b.min.y - eps, b.min.z - eps));
-    b.Union(vec3(b.max.x + eps, b.max.y + eps, b.max.z + eps));
+    b.min -= pad;
+    b.max += pad;
     edgeBoxes[i] = b;
   }
   std::vector<Box> triBoxes(nT);
@@ -556,15 +599,14 @@ std::vector<EdgeTriIntersection> FindEdgeTriIntersections(
     const int v2 = impl.halfedge_.Start(3 * t + 2);
     Box b(impl.vertPos_[v0], impl.vertPos_[v1]);
     b.Union(impl.vertPos_[v2]);
-    b.Union(vec3(b.min.x - eps, b.min.y - eps, b.min.z - eps));
-    b.Union(vec3(b.max.x + eps, b.max.y + eps, b.max.z + eps));
+    b.min -= pad;
+    b.max += pad;
     triBoxes[t] = b;
   }
   SortedBVH bvh =
       BuildSortedBVH(VecView<const Box>(edgeBoxes.data(), edgeBoxes.size()));
 
-  auto onCollision = [&](size_t triIdxQ, size_t edgeIdxL) {
-    const size_t triIdx = triIdxQ;
+  auto onCollision = [&](size_t triIdx, size_t edgeIdxL) {
     const size_t edgeIdx = bvh.leaf2Orig[edgeIdxL];
     const Edge& edge = edges[edgeIdx];
     if (static_cast<int>(triIdx) == edge.halfedgeForward / 3 ||
@@ -609,15 +651,11 @@ std::vector<EdgeTriIntersection> FindEdgeTriIntersections(
         bw <= kBarycentricFloor)
       return;
 
-    // Snap to the NEAREST existing vert within tolerance + eps (ties
-    // to smallest id - order-independent, unlike first-found). Wider
-    // CONDITIONED radii were tried for the shallow-incidence twin-
-    // event class and rejected: a pierce through eps-separated
-    // stacked sheets puts its twin events tens of eps apart, but
-    // those are geometrically REAL distinct points - snapping across
-    // that span deforms the arrangement and trades the twin rims for
-    // eps-overlap pierces (31 -> 7/9 instead of -> 3 on the hull
-    // fixture).
+    // Snap to the NEAREST existing vert within eps (ties to smallest
+    // id - order-independent, unlike first-found). Event identity at
+    // the computational scale only: wider radii deform the
+    // arrangement and re-pierce (docs/OverlapRemoval.md, Known
+    // limitations); arrangement-wide identification is step 9.5's.
     int snapTo = -1;
     double snapBest = std::numeric_limits<double>::infinity();
     auto trySnap = [&](int v) {
@@ -767,15 +805,11 @@ std::vector<NewEdgeWithExtras> AddInteriorVertsToNewEdges(
       DEBUG_ASSERT(v >= 0 && v < baseId, logicErr,
                    "AddInteriorVertsToNewEdges: candidate must be an "
                    "original-mesh vert");
-      const vec3 p = impl.vertPos_[v];
-      const vec3 ap = p - a;
-      const double t = dot(ap, ab) / abLen2;
-      if (t <= 0.0 || t >= 1.0) return;
-      const vec3 closest = a + ab * t;
-      const vec3 d = p - closest;
-      if (dot(d, d) > eps2) return;
+      const LineProj pr = ProjectToLine(impl.vertPos_[v], a, ab, abLen2);
+      if (pr.t <= 0.0 || pr.t >= 1.0) return;
+      if (pr.distSq > eps2) return;
       nwe.extraVerts.push_back(v);
-      nwe.extraTs.push_back(t);
+      nwe.extraTs.push_back(pr.t);
     };
     for (int v : onTriLists[edge.triA].verts) check(v);
     for (int v : onTriLists[edge.triB].verts) check(v);
@@ -1016,24 +1050,16 @@ TraceChordResult CoplanarTraceChords(const Manifold::Impl& impl,
             grazeReject = true;
             break;
           }
-          // Conditioning of THIS crossing: its position error scales
-          // as eps / sin(angle) of the two edge lines (the lever arm
-          // of near-parallel boundaries), eps-floored and capped at
-          // kCondSnapCapEps * eps. Kept SEPARATE from the snap base:
-          // the tolerance + eps new-to-old term must never widen the
-          // new-to-new dedup below.
+          // Conditioning of THIS crossing (see ConditionedSnapRadius).
+          // Kept SEPARATE from the snap base: the tolerance + eps
+          // new-to-old term must never widen the new-to-new dedup
+          // below.
           double condOnly = eps;
           if (clipK[e] >= 0) {
             const vec2 d1(q.x - p.x, q.y - p.y);
             const vec2 d2(dst2[(clipK[e] + 1) % 3].x - dst2[clipK[e]].x,
                           dst2[(clipK[e] + 1) % 3].y - dst2[clipK[e]].y);
-            const double l1 = std::sqrt(d1.x * d1.x + d1.y * d1.y);
-            const double l2 = std::sqrt(d2.x * d2.x + d2.y * d2.y);
-            const double crossAbs = std::fabs(d1.x * d2.y - d1.y * d2.x);
-            condOnly = (l1 > 0 && l2 > 0 && crossAbs > 0)
-                           ? std::max(eps, std::min(eps * l1 * l2 / crossAbs,
-                                                    kCondSnapCapEps * eps))
-                           : kCondSnapCapEps * eps;
+            condOnly = ConditionedSnapRadius(d1, d2, eps);
           }
           // Corner snap (new-to-old): the step-9 base radius, widened
           // by the conditioning; nearest, ties to smallest id.
@@ -1183,7 +1209,7 @@ UnifyResult UnifyArrangementVerts(const Manifold::Impl& impl,
 
   // Broad phase over the new verts; new-new self-collisions unite,
   // and each ORIGINAL vert within a new vert's snap radius becomes a
-  // snap candidate for its cluster (smallest original id wins).
+  // snap candidate for its cluster (nearest wins, ties to smallest).
   std::vector<Box> newBoxes(nNew);
   const double half = 0.5 * maxSnapR;
   for (int i = 0; i < nNew; ++i) {
@@ -1212,8 +1238,8 @@ UnifyResult UnifyArrangementVerts(const Manifold::Impl& impl,
   // id-priority pick could jump past the adjacent corner to a far
   // small-id vert under a wide conditioned radius).
   std::vector<int> snapTo(nNew, -1);
+  std::vector<double> snapD2(nNew, std::numeric_limits<double>::infinity());
   {
-    std::vector<double> snapD2(nNew, std::numeric_limits<double>::infinity());
     std::vector<Box> origBoxes(baseId);  // empty boxes overlap nothing
     for (int v = 0; v < baseId; ++v) {
       const vec3& p = impl.vertPos_[v];
@@ -1240,15 +1266,23 @@ UnifyResult UnifyArrangementVerts(const Manifold::Impl& impl,
     bvh.Collisions(rec, qfOrig, baseId);
   }
 
-  // Cluster reps: the smallest snap-original anywhere in the cluster,
-  // else baseId + the smallest member index.
+  // Cluster reps: the NEAREST snap-original anywhere in the cluster
+  // (each member's snapTo is already its own nearest; across members
+  // compare those distances, ties to the smaller id - an id-priority
+  // pick could choose a far small-id original over an adjacent
+  // corner), else baseId + the smallest member index.
   std::vector<int> repOriginal(nNew, -1);
+  std::vector<double> repOriginalD2(nNew,
+                                    std::numeric_limits<double>::infinity());
   std::vector<int> repMember(nNew, -1);
   for (int i = 0; i < nNew; ++i) {
     const int r = static_cast<int>(uf.find(static_cast<uint32_t>(i)));
     if (repMember[r] < 0 || i < repMember[r]) repMember[r] = i;
-    if (snapTo[i] >= 0 && (repOriginal[r] < 0 || snapTo[i] < repOriginal[r])) {
+    if (snapTo[i] >= 0 &&
+        (snapD2[i] < repOriginalD2[r] ||
+         (snapD2[i] == repOriginalD2[r] && snapTo[i] < repOriginal[r]))) {
       repOriginal[r] = snapTo[i];
+      repOriginalD2[r] = snapD2[i];
     }
   }
   std::vector<int> remap(baseId + nNew);
@@ -1359,13 +1393,11 @@ std::vector<OnChordContact> FindOnChordEndpointContacts(
         for (const int e : {c.v0, c.v1}) {
           if (e == d.v0 || e == d.v1) continue;
           const vec3 p = GetPos3(e, baseId, impl, newVertPositions);
-          const double t = dot(p - a, ab) / abLen2;
-          if (t <= tGuard || t >= 1.0 - tGuard) continue;
-          const vec3 closest = a + ab * t;
-          const vec3 dv = p - closest;
-          if (dot(dv, dv) > snap2) continue;
+          const LineProj pr = ProjectToLine(p, a, ab, abLen2);
+          if (pr.t <= tGuard || pr.t >= 1.0 - tGuard) continue;
+          if (pr.distSq > snap2) continue;
           if (!seen.insert({di, e}).second) continue;
-          out.push_back({di, e, t});
+          out.push_back({di, e, pr.t});
         }
       }
     }
@@ -1437,17 +1469,8 @@ std::vector<ChordChordCrossing> FindChordChordCrossings(
         const double tA = dot(p2 - a0, da) / dot(da, da);
         const double tB = dot(p2 - b0, db) / dot(db, db);
         const vec3 pos = planePt + p2.x * u + p2.y * v;
-        // Conditioning of THIS crossing: eps / sin(angle) of the two
-        // chord lines, eps-floored and capped - the step-6.5 formula.
-        const double l1 = std::sqrt(dot(da, da));
-        const double l2 = std::sqrt(dot(db, db));
-        const double crossAbs = std::fabs(da.x * db.y - da.y * db.x);
-        const double condR =
-            (l1 > 0 && l2 > 0 && crossAbs > 0)
-                ? std::max(eps, std::min(eps * l1 * l2 / crossAbs,
-                                         kCondSnapCapEps * eps))
-                : kCondSnapCapEps * eps;
-        out.push_back({pos, ci, cj, tA, tB, static_cast<int>(face), condR});
+        out.push_back({pos, ci, cj, tA, tB, static_cast<int>(face),
+                       ConditionedSnapRadius(da, db, eps)});
       }
     }
   }
@@ -1731,12 +1754,10 @@ std::vector<ChordCrossing> MergeAndPropagateCrossings(
         const double abLen2 = dot(ab, ab);
         if (abLen2 == 0) continue;
         const double tGuard = snap / std::sqrt(abLen2);
-        const double t = dot(centroid - a, ab) / abLen2;
-        if (t <= tGuard || t >= 1.0 - tGuard) continue;
-        const vec3 closest = a + ab * t;
-        const vec3 dv = centroid - closest;
-        if (dot(dv, dv) > eps2) continue;
-        addChord(ch, t);
+        const LineProj pr = ProjectToLine(centroid, a, ab, abLen2);
+        if (pr.t <= tGuard || pr.t >= 1.0 - tGuard) continue;
+        if (pr.distSq > eps2) continue;
+        addChord(ch, pr.t);
       }
     }
     out.push_back(std::move(cluster));
@@ -2622,11 +2643,18 @@ EmitTopology BuildEmitTopology(const std::vector<MergedPolygon>& polygons,
 }
 
 void PropagateNewVertsToOnEdgeLists(
+    const Manifold::Impl& impl, const std::vector<vec3>& newVertPositions,
     const std::vector<EdgeTriIntersection>& etIsects,
     const std::vector<int>& etIsect2Vert, const std::vector<Edge>& edges,
     std::vector<EdgeVertList>& onEdgeLists) {
-  // For each etIsect, add the resolved vert id to the on-edge list of the
-  // piercing edge with parameter t = x.s. Skip if the vert is the edge's
+  using la::dot;
+  const int baseId = static_cast<int>(impl.NumVert());
+  // For each etIsect, add the resolved vert id to the on-edge list of
+  // the piercing edge. t is recomputed from the RESOLVED position, not
+  // taken from the raw event parameter x.s: a snapped event's vert
+  // sits up to the snap radius from the event point, and two nearby
+  // events' stale parameters could order against the geometry (the
+  // partition assumes monotone t). Skip if the vert is the edge's
   // endpoint or already in the list.
   std::vector<int> touched;
   for (size_t i = 0; i < etIsects.size(); ++i) {
@@ -2636,8 +2664,12 @@ void PropagateNewVertsToOnEdgeLists(
     if (v == edges[x.edgeIdx].v0 || v == edges[x.edgeIdx].v1) continue;
     if (std::find(list.verts.begin(), list.verts.end(), v) != list.verts.end())
       continue;
+    const vec3 a = impl.vertPos_[edges[x.edgeIdx].v0];
+    const vec3 ab = impl.vertPos_[edges[x.edgeIdx].v1] - a;
+    const double abLen2 = dot(ab, ab);
+    const vec3 p = GetPos3(v, baseId, impl, newVertPositions);
     list.verts.push_back(v);
-    list.ts.push_back(x.s);
+    list.ts.push_back(abLen2 > 0 ? dot(p - a, ab) / abLen2 : x.s);
     touched.push_back(x.edgeIdx);
   }
   // BuildOnEdgeVertLists left each list sorted by t, but the appends above
@@ -2753,19 +2785,23 @@ SelfIntersectionResult CheckSelfIntersection(const Manifold& m, double relTol) {
   return r;
 }
 
-namespace {
-// Final-gate helper: does any folded cell enclose real volume?
+// Final-gate helper: does any folded surface enclose real volume?
 // Polygons whose two sides united (front cell == back cell, e.g.
 // across a k = 1 rim) are dropped by the keep rule. That is correct
 // for flat membranes - enclosed volume below area x thickness, and
 // post-merge thickness is at most the 10 eps unification radius -
 // but a tangent-degenerate contact can fold a CLOSED shell's two
 // cells together, and dropping that fold silently deletes the
-// shell's material. Sum each fold cell's mult-weighted signed volume
-// (tetra fan anchored at the fold set's own centroid: origin-
-// independent for a closed set, and the anchor keeps an open sheet's
-// pseudo-volume near zero) and compare against the membrane bound
-// area x kFoldedVolumePerAreaEps x eps.
+// shell's material. Folded polygons group into CONNECTED COMPONENTS
+// (same fold cell + shared vert): per component, sum the
+// mult-weighted signed volume (tetra fan anchored at the component's
+// own centroid: origin-independent for a closed set, and the anchor
+// keeps an open sheet's pseudo-volume near zero) and compare against
+// the membrane bound area x kFoldedVolumePerAreaEps x eps. Per
+// COMPONENT, not per cell: two unrelated folded shells sharing one
+// cell with opposite orientations (a positive shell plus an inverted
+// twin) would otherwise cancel their signed volumes under the
+// threshold.
 bool FoldedCellsEncloseVolume(const Manifold::Impl& impl,
                               const std::vector<MergedPolygon>& polys,
                               const std::vector<vec3>& newVertPositions,
@@ -2774,25 +2810,47 @@ bool FoldedCellsEncloseVolume(const Manifold::Impl& impl,
   auto posOf = [&](int id) {
     return GetPos3(id, baseId, impl, newVertPositions);
   };
-  std::vector<vec3> centroid(cells.numCells, vec3(0.0, 0.0, 0.0));
-  std::vector<int> centroidVerts(cells.numCells, 0);
+  std::vector<int> folded;  // polygon ids with front == back
   for (size_t p = 0; p < polys.size(); ++p) {
-    const int c = cells.polySide2Cell[2 * p];
-    if (c != cells.polySide2Cell[2 * p + 1]) continue;
-    for (const int v : polys[p].cycle) {
-      centroid[c] = centroid[c] + posOf(v);
-      ++centroidVerts[c];
+    if (cells.polySide2Cell[2 * p] == cells.polySide2Cell[2 * p + 1]) {
+      folded.push_back(static_cast<int>(p));
     }
   }
-  for (int c = 0; c < cells.numCells; ++c) {
+  if (folded.empty()) return false;
+  const uint32_t nF = static_cast<uint32_t>(folded.size());
+  DisjointSets uf(nF);
+  std::map<std::pair<int, int>, uint32_t> cellVert2First;
+  for (uint32_t k = 0; k < nF; ++k) {
+    const int c = cells.polySide2Cell[2 * folded[k]];
+    for (const int v : polys[folded[k]].cycle) {
+      const auto [it, fresh] = cellVert2First.insert({{c, v}, k});
+      if (!fresh) uf.unite(it->second, k);
+    }
+  }
+  std::vector<uint32_t> root(nF);
+  std::map<uint32_t, uint32_t> root2Comp;
+  for (uint32_t k = 0; k < nF; ++k) {
+    root[k] = uf.find(k);
+    root2Comp.insert({root[k], static_cast<uint32_t>(root2Comp.size())});
+  }
+  const size_t nComp = root2Comp.size();
+  std::vector<vec3> centroid(nComp, vec3(0.0, 0.0, 0.0));
+  std::vector<int> centroidVerts(nComp, 0);
+  for (uint32_t k = 0; k < nF; ++k) {
+    const uint32_t comp = root2Comp[root[k]];
+    for (const int v : polys[folded[k]].cycle) {
+      centroid[comp] = centroid[comp] + posOf(v);
+      ++centroidVerts[comp];
+    }
+  }
+  for (size_t c = 0; c < nComp; ++c) {
     if (centroidVerts[c] > 0) centroid[c] = centroid[c] / centroidVerts[c];
   }
-  std::vector<double> volume(cells.numCells, 0.0);
-  std::vector<double> area(cells.numCells, 0.0);
-  for (size_t p = 0; p < polys.size(); ++p) {
-    const int c = cells.polySide2Cell[2 * p];
-    if (c != cells.polySide2Cell[2 * p + 1]) continue;
-    const std::vector<int>& cyc = polys[p].cycle;
+  std::vector<double> volume(nComp, 0.0);
+  std::vector<double> area(nComp, 0.0);
+  for (uint32_t k = 0; k < nF; ++k) {
+    const uint32_t comp = root2Comp[root[k]];
+    const std::vector<int>& cyc = polys[folded[k]].cycle;
     const vec3 a0 = posOf(cyc[0]);
     vec3 nsum(0.0, 0.0, 0.0);
     double vol = 0.0;
@@ -2801,13 +2859,12 @@ bool FoldedCellsEncloseVolume(const Manifold::Impl& impl,
       const vec3 b = posOf(cyc[i + 1]);
       const vec3 cr = la::cross(a - a0, b - a0);
       nsum = nsum + cr;
-      vol += la::dot(a0 - centroid[c], cr) / 6.0;
+      vol += la::dot(a0 - centroid[comp], cr) / 6.0;
     }
-    volume[c] += polys[p].mult * vol;
-    area[c] += 0.5 * std::sqrt(la::dot(nsum, nsum));
+    volume[comp] += polys[folded[k]].mult * vol;
+    area[comp] += 0.5 * std::sqrt(la::dot(nsum, nsum));
   }
-  for (int c = 0; c < cells.numCells; ++c) {
-    if (centroidVerts[c] == 0) continue;
+  for (size_t c = 0; c < nComp; ++c) {
     if (std::fabs(volume[c]) > area[c] * kFoldedVolumePerAreaEps * eps) {
       return true;
     }
@@ -2815,6 +2872,7 @@ bool FoldedCellsEncloseVolume(const Manifold::Impl& impl,
   return false;
 }
 
+namespace {
 Manifold RunOverlapRemovalImpl(const Manifold& input, double eps) {
   using la::cross;
   using la::dot;
@@ -2830,7 +2888,9 @@ Manifold RunOverlapRemovalImpl(const Manifold& input, double eps) {
   if (work.IsEmpty() || work.Status() != Manifold::Error::NoError) {
     return input;
   }
-  const Manifold::Impl impl = ImplFromManifold(work);
+  // Impl via the public GetMeshGL64 round-trip, for halfedge /
+  // face-normal access.
+  const Manifold::Impl impl = Manifold::Impl(work.GetMeshGL64());
   const double tolerance = std::max(impl.tolerance_, eps);
   const int baseId = static_cast<int>(impl.NumVert());
   const int numTri = static_cast<int>(impl.NumTri());
@@ -2842,8 +2902,8 @@ Manifold RunOverlapRemovalImpl(const Manifold& input, double eps) {
   const std::vector<TriVertList> onTriLists = BuildOnTriVertLists(impl, eps);
 
   // Step 6: edge-pierces-tri events.
-  const std::vector<EdgeTriIntersection> etIsects = FindEdgeTriIntersections(
-      impl, edges, onEdgeLists, onTriLists, tolerance, eps);
+  const std::vector<EdgeTriIntersection> etIsects =
+      FindEdgeTriIntersections(impl, edges, onEdgeLists, onTriLists, eps);
 
   // Step 7: chords per tri-tri pair.
   ChordEdges chordEdges = GenerateChordEdges(impl, edges, etIsects, eps);
@@ -2869,8 +2929,8 @@ Manifold RunOverlapRemovalImpl(const Manifold& input, double eps) {
   // onto their piercing edges' on-edge lists, so the partition
   // subdivides those halfedges at the new verts.
   AddVertsToOnEdgeLists(trace.onEdgeAdditions, onEdgeLists);
-  PropagateNewVertsToOnEdgeLists(etIsects, chordEdges.etIsect2Vert, edges,
-                                 onEdgeLists);
+  PropagateNewVertsToOnEdgeLists(impl, chordEdges.newVertPositions, etIsects,
+                                 chordEdges.etIsect2Vert, edges, onEdgeLists);
 
   // Step 8: on-tri verts onto chord interiors.
   std::vector<NewEdgeWithExtras> chords = AddInteriorVertsToNewEdges(
@@ -2904,7 +2964,7 @@ Manifold RunOverlapRemovalImpl(const Manifold& input, double eps) {
 
   // Steps 10-11: partition every face (chordless faces still pick up
   // on-edge subdivision, so the arrangement conforms across shared
-  // edges). TODO: parallelize per-face.
+  // edges).
   std::vector<std::pair<int, std::vector<int>>> facePolygons;
   for (int f = 0; f < numTri; ++f) {
     FacePartition part = PartitionFace(

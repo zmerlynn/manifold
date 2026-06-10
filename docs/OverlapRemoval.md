@@ -27,7 +27,7 @@ assumptions hold in doubles, and add no new algorithmic ideas.
 | 2 | `EnumerateEdges` | canonical undirected edges with halfedge pairs |
 | 4 | `BuildOnEdgeVertLists` | verts within eps of an edge's interior, sorted by t |
 | 5 | `BuildOnTriVertLists` | verts within eps of a tri's interior (strict barycentric) |
-| 6 | `FindEdgeTriIntersections` | transversal edge-pierces-tri events (BVH + Moller-Trumbore), snapped to the nearest existing vert within tolerance + eps |
+| 6 | `FindEdgeTriIntersections` | transversal edge-pierces-tri events (BVH + Moller-Trumbore), snapped to the nearest existing vert within eps |
 | 7 | `GenerateChordEdges` | one chord per tri-tri pair with exactly 2 pierce endpoints; event-vert resolution |
 | 6.5 | `CoplanarTraceChords` | in-plane conformance cuts between coplanar overlapping faces (below) |
 | - | `AddVertsToOnEdgeLists`, `PropagateNewVertsToOnEdgeLists` | pierce + trace verts subdivide the edges they lie on |
@@ -40,12 +40,12 @@ assumptions hold in doubles, and add no new algorithmic ideas.
 | emit | `BuildEmitTopology` + driver | inside-wedge twins, vertex rings, triangulation, MeshGL64 |
 | gate | driver | folded-shell volume (pre-emit) + status / volume / pierce-monotonicity, else return input |
 
-The driver (`RunOverlapRemovalImpl`) composes these serially
-(`// TODO: parallelize` markers only) inside a try/catch that returns the
-input on any internal throw. EARLY-EXIT: if the combined chord list
-(transversal + trace) is empty, the input is returned bit-identical - this
-covers clean inputs, the all-pairs-dropped case, and pancake-free coplanar
-contact.
+The driver (`RunOverlapRemovalImpl`) composes these serially (per-face
+parallelization is an open follow-up; nothing is parallel yet) inside a
+try/catch that returns the input on any internal throw. EARLY-EXIT: if the
+combined chord list (transversal + trace) is empty, the input is returned
+bit-identical - this covers clean inputs, the all-pairs-dropped case, and
+pancake-free coplanar contact.
 
 ## House terminology and style (from the boolean2 review logs)
 
@@ -69,10 +69,18 @@ One absolute pipeline epsilon `eps` (from `InferEps` =
 `AlphaBudgetEpsilon(bbox scale, 1000)` unless the caller passes one), used as:
 
 - 1x eps: kernel acceptance, on-chord propagation, trace-interval length and
-  interior-margin qualification, grazing guards, new-to-new event dedup.
+  interior-margin qualification, grazing guards, new-to-new event dedup, AND
+  step 6's pierce-event vert snap. The step-6 snap is EVENT IDENTITY among
+  one mesh's stored coordinates - the step-1 old-old scale, absorbing only
+  the pipeline's own error - not an allocation snap: events in the
+  (eps, 10 eps] band are unified onto originals by step 9.5 anyway, and a
+  tolerance-scale radius on a tolerance-inflated input would drag pierce
+  events onto far verts and deform the arrangement.
 - `tolerance + eps` (with `tolerance = max(impl.tolerance_, eps)` from the
-  post-merge impl): all snaps onto EXISTING ids - new-to-old, matching
-  boolean2's `newToOldThresh` (prior drift plus current-op error).
+  post-merge impl): snaps that resolve NEW verts against existing ids at
+  ALLOCATION time - step 6.5's corner-snap base, step 9's crossing
+  resolution and on-chord contacts - matching boolean2's `newToOldThresh`
+  (prior drift plus current-op error).
 - 10x eps: the nearby-crossing merge radius (new-to-new for the SAME point
   computed twice), matching boolean2's `kIntersectionMergeEpsFactor`; reused
   by step 9.5's sweep.
@@ -217,8 +225,8 @@ Steps 6.5, 7, and 9 each dedup their own allocations, but the same geometric
 point computed through two different frames lands up to ~10 * eps apart, and
 a pair of such twins subdivides a shared sub-edge inconsistently across faces.
 The unpaired sub-edges then read as open rims, whose ambient unification
-collapses the cell complex (observed: 21 rims merged 14k polygons' cells into
-3). One union-find sweep (`UnifyArrangementVerts`):
+collapses the cell complex (observed: a handful of rims merged nearly every
+cell). One union-find sweep (`UnifyArrangementVerts`):
 
 - new-new pairs unite within 10 * eps (the merge-radius philosophy);
 - new verts snap onto ORIGINAL verts within max(10 * eps, the vert's recorded
@@ -396,32 +404,40 @@ thickest legitimate membrane, ~1e7 below a real shell.
 
 ## Validation
 
+(Coverage is described by KIND, not count - counts and exact observed
+numbers go stale instantly; the suite is the source of truth.)
+
 `test/manifold_test.cpp`:
-- 39 `OverlapRemoval.*` unit tests: step-9 kernel/merge/resolution/threading
-  (18); partition including the X-crossing, dangling-spur, coincident-dedup,
-  zero-length, and boundary-riding cases; step-12 canonicalization and
-  cancellation; cell complex (tetra, bipyramid-with-internal-face); winding
-  classification (cube with a reversed-representation quad, nested cubes,
-  membrane-across-the-cast); emit topology (the 4-kept-at-an-edge book
-  fixture pinning twin pairing + ring splitting); step 6.5 (pancake quad with
-  different diagonals, coplanar neighbors emit nothing, on-edge additions);
-  step 9.5 (unification, t recompute + re-sort).
+- `OverlapRemoval.*` unit tests per stage: step-9 kernel/merge/resolution/
+  threading (including the split-identity, face-gate, conditioned-radius,
+  and re-sort pins); partition (X-crossing, dangling-spur, coincident-dedup,
+  zero-length, boundary-riding, chord-order invariance, stored-normal
+  inversion); step-12 canonicalization and cancellation; cell complex
+  (tetra, bipyramid-with-internal-face); winding classification (reversed
+  representation, nested cubes, membrane-across-the-cast, concave seed
+  target, seed-cast exhaustion); emit topology (the book fixture pinning
+  twin pairing + ring splitting, odd-fan fail-closed); step 6.5 (pancake
+  quad, coplanar neighbors, plane-gate offset, full-through cuts, on-edge
+  additions); step 9.5 (unification, nearest-original, per-vert radius
+  carry, t recompute + re-sort); step-1 merge displacement.
 - `Manifold.RemoveSelfIntersections*` feature tests: API smoke; clean-input
-  passthrough; Boolean-result passthrough; the hull fixture (the trimaran
-  fold class - pins the folded-shell gate's bit-identical fallback, see
-  Known limitations); the ovoid dense-sliver fixture (falls back via the
-  BFS-disagreement guard, monotonic); empty input; idempotence; determinism
-  (5 identical reruns); far-from-origin at 1e4 (strict reduction, 38 -> 19,
-  all three hulls kept, volume within 0.02%); glued boxes (equal-face
-  early-exit bit-identical; smaller-on-larger welds, winding-faithfully, to
-  one component).
+  and Boolean-result passthrough (bit-identical); the hull fixture (the
+  trimaran fold class - pins the folded-shell gate's bit-identical
+  fallback, see Known limitations); the ovoid dense-sliver fixture (falls
+  back via the BFS-disagreement guard, monotonic); empty input; idempotence
+  (fallback fixed point + success-path monotonicity); determinism;
+  far-from-origin (the same trimaran at scale: strict pierce reduction, all
+  components kept, volume preserved to the test's bar); glued boxes
+  (equal-face early-exit bit-identical; smaller-on-larger welds,
+  winding-faithfully, to one component).
 
 ## Known limitations
 
 1. **The tangent-degenerate contact class** (the hull fixture). A
    shallow-incidence edge piercing two eps-SEPARATED coplanar sheets produces
    twin step-7 events that are geometrically REAL distinct points
-   ~eps/sin(incidence) apart (observed 44x eps), beside an original corner.
+   ~eps/sin(incidence) apart (observed at tens of eps), beside an original
+   corner.
    The exact arrangement has a micro-triangle facet there that per-face FP
    partitions cannot consistently produce. Every snap policy beyond ~10 eps
    (16/128-eps anchors, conditioned isotropic and anisotropic-capsule step-7
@@ -429,10 +445,10 @@ thickest legitimate membrane, ~1e7 below a real shell.
    reverted: moving geometry tens of eps deforms kept triangles whose
    neighbors did not move with them. The class has two observed severities on
    the hull fixture (a trimaran: three disjoint hulls grazed by one mask):
-   - **Micro-facet pierce residue**: input pierces reach 1.46e-6 deep
-     (~4100x eps); a successful rebuild leaves 3 residual at 1.10e-8
-     (~31x eps) - above the 10x-eps output tolerance, inside the conditioned
-     band of that corner.
+   - **Micro-facet pierce residue**: input pierces run thousands of eps
+     deep; a successful rebuild leaves a few residual pierces tens of eps
+     deep - above the 10x-eps output tolerance, inside the conditioned band
+     of that corner.
    - **Folded shells**: the grazing contacts on the two outrigger hulls leave
      vert clusters spread 2-4x the 10 eps unification radius (k = 1 rim
      chains) and near-tangent k = 4 radial fans; either folds the entire
@@ -440,12 +456,12 @@ thickest legitimate membrane, ~1e7 below a real shell.
      reads front == back and the keep rule would silently delete the whole
      component (volume -> 1/3). The folded-shell volume gate (Driver gate)
      detects this and falls back to the input bit-identically.
-   At 1e4 the same geometry succeeds (38 -> 19 pierces, all three hulls
-   kept): the scale-derived eps is large enough to absorb the clusters; the
-   residual (6.5e-8) is ~2.9x its eps - INSIDE its working band. Closing the
-   class soundly (resolving the fixture at origin scale to 0 pierces with
-   all three hulls kept) needs exact/extended-precision local predicates
-   (the family Emmett deferred).
+   Far from the origin the same geometry succeeds (strict pierce
+   reduction, all three hulls kept): the scale-derived eps absorbs the
+   clusters and the residual sits within a few eps - INSIDE its working
+   band. Closing the class soundly (resolving the fixture at origin scale
+   to zero pierces with all three hulls kept) needs exact/extended-precision
+   local predicates (the family Emmett deferred).
 2. **Dense slivers** (the ovoid class): the arrangement is not a closed
    surface after FP partitioning; the BFS disagreement guard detects it and
    the pipeline falls back to the input, monotonic by construction.
@@ -456,7 +472,9 @@ thickest legitimate membrane, ~1e7 below a real shell.
 5. **Welding**: coincident interior walls separating w = 1|1 drop (see step
    6.5's semantics note) - winding-faithful, documented, pinned by fixture.
 6. **Properties**: non-position properties are not preserved (numProp = 3).
-7. Output tolerance is max(input tolerance, 10 eps); see the eps contract.
+7. Output tolerance widens to cover the pipeline's applied movements (the
+   10-eps floor plus the measured merge/unification displacements); see the
+   eps contract's OUTPUT tolerance bullet for the exact formula.
 
 ## Relationship to #289 and design history
 
