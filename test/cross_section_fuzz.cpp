@@ -133,11 +133,11 @@ std::map<int, int> ComputeBalance(const std::vector<Edge>& edges) {
   return balance;
 }
 
-bool CheckTopologicalValidity(
-    const manifold::boolean2::OverlapResult& result,
-    const std::vector<manifold::boolean2::EdgeM>& inputEdges,
-    const std::vector<int>& inputVert2Merged, int numMergedVerts) {
-  std::vector<manifold::boolean2::EdgeM> remapped;
+bool CheckTopologicalValidity(const manifold::OverlapResult& result,
+                              const std::vector<manifold::EdgeM>& inputEdges,
+                              const std::vector<int>& inputVert2Merged,
+                              int numMergedVerts) {
+  std::vector<manifold::EdgeM> remapped;
   remapped.reserve(inputEdges.size());
   for (const auto& edge : inputEdges) {
     const int a = inputVert2Merged[edge.v0];
@@ -167,10 +167,10 @@ void ExpectFinite(const manifold::Polygons& polys) {
 }
 
 void ExpectBoolean2TopologyValid(const manifold::Polygons& polys) {
-  const auto [verts, edges] = manifold::boolean2::PolygonsToInput(polys);
+  const auto [verts, edges] = manifold::PolygonsToInput(polys);
   if (verts.empty()) return;
-  const double eps = manifold::boolean2::InferEps(polys, {});
-  const auto result = manifold::boolean2::RemoveOverlaps2D(verts, edges, eps);
+  const double eps = manifold::InferEps(polys, {});
+  const auto result = manifold::RemoveOverlaps2D(verts, edges, eps);
   EXPECT_TRUE(CheckTopologicalValidity(result, edges, result.inputVert2Merged,
                                        result.numMergedVerts));
 }
@@ -1158,11 +1158,11 @@ void RemoveOverlapsDeterminismAcrossThreadCounts(
   manifold::Polygons r1, r4;
   {
     tbb::global_control gc(tbb::global_control::max_allowed_parallelism, 1);
-    r1 = manifold::boolean2::ApplyFillRule(input, 0.0);
+    r1 = manifold::ApplyFillRule(input, 0.0);
   }
   {
     tbb::global_control gc(tbb::global_control::max_allowed_parallelism, 4);
-    r4 = manifold::boolean2::ApplyFillRule(input, 0.0);
+    r4 = manifold::ApplyFillRule(input, 0.0);
   }
 
   ASSERT_EQ(r1.size(), r4.size())
@@ -1238,7 +1238,7 @@ void CanonicalSubEdgeIdempotence(const std::vector<int>& v0s,
   if (v0s.size() != v1s.size() || v0s.size() != mults.size()) return;
   if (v0s.empty() || v0s.size() > 256) return;
 
-  manifold::boolean2::CanonicalSubEdges sub;
+  manifold::CanonicalSubEdges sub;
   for (size_t i = 0; i < v0s.size(); ++i) {
     sub.Add(v0s[i], v1s[i], mults[i]);
   }
@@ -1274,17 +1274,17 @@ void BVHPairEnumerationMatchesBruteForce(const std::vector<double>& xs,
   const double eps = std::pow(10.0, logEps);
   if (!std::isfinite(eps) || eps <= 0.0) return;
 
-  std::vector<manifold::boolean2::Box2> boxes;
+  std::vector<manifold::Box2> boxes;
   boxes.reserve(xs.size());
   for (size_t i = 0; i < xs.size(); ++i) {
     if (!std::isfinite(xs[i]) || !std::isfinite(ys[i])) return;
-    boxes.push_back(manifold::boolean2::BoxOf2DPoint({xs[i], ys[i]}, eps));
+    boxes.push_back(manifold::BoxOf2DPoint({xs[i], ys[i]}, eps));
   }
 
-  const auto bvh = manifold::boolean2::BVHBuildFromBoxes(boxes);
+  const auto bvh = manifold::BVHBuildFromBoxes(boxes);
 
   std::vector<std::pair<int, int>> bvhPairs;
-  manifold::boolean2::CollidePairs(bvh, boxes, [&](int qi, int origLeafIdx) {
+  manifold::CollidePairs(bvh, boxes, [&](int qi, int origLeafIdx) {
     bvhPairs.emplace_back(qi, origLeafIdx);
   });
   std::sort(bvhPairs.begin(), bvhPairs.end());
@@ -1329,10 +1329,10 @@ void VertexMergeIdempotence(const std::vector<double>& xs,
     verts.push_back({xs[i], ys[i]});
   }
 
-  const auto m1 = manifold::boolean2::MergeVerts(verts, eps);
+  const auto m1 = manifold::MergeVerts(verts, eps);
   if (m1.verts.empty()) return;
 
-  const auto m2 = manifold::boolean2::MergeVerts(m1.verts, eps);
+  const auto m2 = manifold::MergeVerts(m1.verts, eps);
   EXPECT_EQ(m2.verts.size(), m1.verts.size())
       << "MergeVerts not idempotent: pass1 produced " << m1.verts.size()
       << " verts, pass2 produced " << m2.verts.size() << " (n=" << xs.size()
@@ -1358,12 +1358,12 @@ void PredicatesIdentities(const std::vector<double>& radii) {
   if (radii.size() < 4) return;
   const manifold::SimplePolygon loop = StarPolygon(radii);
   if (loop.size() < 4) return;
-  const double area = manifold::boolean2::SignedArea(loop);
+  const double area = manifold::SignedArea(loop);
   if (!std::isfinite(area)) return;
 
   // 1. SignedArea sign-flips under loop reversal.
   manifold::SimplePolygon reversed(loop.rbegin(), loop.rend());
-  const double areaRev = manifold::boolean2::SignedArea(reversed);
+  const double areaRev = manifold::SignedArea(reversed);
   ASSERT_TRUE(std::isfinite(areaRev));
   const double areaTol = 1e-9 * (1.0 + std::fabs(area));
   EXPECT_NEAR(area, -areaRev, areaTol)
@@ -1376,7 +1376,7 @@ void PredicatesIdentities(const std::vector<double>& radii) {
   //     algebraically but isn't exposed to fuzz callers any more.)
   const double maxCoord =
       std::max({std::fabs(loop.front().x), std::fabs(loop.front().y), 1.0});
-  const double eps = manifold::boolean2::EpsilonFromScale(maxCoord);
+  const double eps = manifold::EpsilonFromScale(maxCoord);
 
   // 3. IntersectSegments is order-symmetric in the segment pair.
   // Pair every edge with the edge two steps later (so they share no
@@ -1387,14 +1387,12 @@ void PredicatesIdentities(const std::vector<double>& radii) {
     if (j + 1 >= loop.size()) break;
     if (j + 1 == loop.size() && i == 0) continue;  // shared endpoint
     manifold::vec2 outAB, outBA;
-    const manifold::boolean2::GraphSegment2D segA{loop[i], loop[i + 1],
-                                                  static_cast<int>(i)};
-    const manifold::boolean2::GraphSegment2D segB{loop[j], loop[j + 1],
-                                                  static_cast<int>(j)};
-    const bool hitAB =
-        manifold::boolean2::IntersectSegments(segA, segB, eps, &outAB);
-    const bool hitBA =
-        manifold::boolean2::IntersectSegments(segB, segA, eps, &outBA);
+    const manifold::GraphSegment2D segA{loop[i], loop[i + 1],
+                                        static_cast<int>(i)};
+    const manifold::GraphSegment2D segB{loop[j], loop[j + 1],
+                                        static_cast<int>(j)};
+    const bool hitAB = manifold::IntersectSegments(segA, segB, eps, &outAB);
+    const bool hitBA = manifold::IntersectSegments(segB, segA, eps, &outBA);
     EXPECT_EQ(hitAB, hitBA)
         << "IntersectSegments not order-symmetric at (i,j)=(" << i << "," << j
         << ")";
@@ -1420,7 +1418,7 @@ void PredicatesIdentities(const std::vector<double>& radii) {
 //
 // Sibling property to BooleanCommutativity: that one tests the binary
 // boolean entry points; this one tests the unary multi-loop ingestion
-// path. Targets boolean2::Boolean2D / its containment pre-step.
+// path. Targets Boolean2D / its containment pre-step.
 void InputLoopOrderInvariance(const std::vector<double>& radiiA,
                               const std::vector<double>& radiiB,
                               const std::vector<double>& radiiC, double txA,
