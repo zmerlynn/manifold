@@ -196,6 +196,26 @@ struct SortedBVH {
   std::vector<Box> boxes;        // boxes in Morton-sorted order
   std::vector<uint32_t> morton;  // sorted Morton codes (parallel to boxes)
   std::vector<size_t> perm;      // perm[sortedIdx] = origIdx
+
+  // Sequential broad phase: recorder.record(queryIdx, leafIdx) for
+  // each query box overlapping a leaf box. Collider cannot represent
+  // a 1-leaf tree (NumLeaves() == 0 without internal nodes, and
+  // UpdateBoxes throws), so the single-leaf case - reachable e.g.
+  // when a pipeline run allocates exactly one new vert - is brute-
+  // forced with the same DoesOverlap test the tree uses. Callers
+  // must route queries through this, not collider.Collisions.
+  template <typename Recorder, typename F>
+  void Collisions(Recorder& recorder, F queryBox, int nQueries) const {
+    if (boxes.size() == 1) {
+      auto& local = recorder.local();
+      for (int q = 0; q < nQueries; ++q) {
+        if (queryBox(q).DoesOverlap(boxes[0])) recorder.record(q, 0, local);
+      }
+      return;
+    }
+    collider.Collisions<false>(recorder, queryBox, nQueries,
+                               /*parallel=*/false);
+  }
 };
 
 // Build a Morton-sorted BVH from a list of leaf boxes. The bbox
@@ -208,10 +228,15 @@ SortedBVH BuildSortedBVH(VecView<const Box> leafBoxes);
 // larger eps.
 double InferEps(const Manifold& m);
 
-// Result of MergeVertsEps below.
+// Result of MergeVertsEps below. `maxMove` is the largest total
+// displacement any input vert received (final cluster centroid vs its
+// input position - a CHAIN of eps-pairs can move a member well beyond
+// eps across passes). The driver folds it into the output tolerance
+// claim.
 struct MergeVertsResult {
   Manifold manifold;
   int mergedCount = 0;
+  double maxMove = 0.0;
 };
 
 // Step 1 of the overlap-removal pipeline: merges all verts within eps
@@ -253,7 +278,8 @@ std::vector<TriVertList> BuildOnTriVertLists(const Manifold::Impl& impl,
 // Step 6 of the pipeline: edge-pierces-triangle events via BVH +
 // Moller-Trumbore narrow phase. Strict-interior gates on segment
 // parameter (0 < s < 1) AND barycentric (all > 0). Snaps the pierce
-// point to an existing vert if within eps.
+// point to the nearest existing vert within tolerance + eps (the
+// pipeline-wide new-onto-existing radius), ties to smallest id.
 //
 // Includes pierces where the edge endpoint coincides with a tri vert
 // (= the shared-vert pierce case post-Boolean merge), which the classic
@@ -261,7 +287,7 @@ std::vector<TriVertList> BuildOnTriVertLists(const Manifold::Impl& impl,
 std::vector<EdgeTriIntersection> FindEdgeTriIntersections(
     const Manifold::Impl& impl, const std::vector<Edge>& edges,
     const std::vector<EdgeVertList>& onEdgeLists,
-    const std::vector<TriVertList>& onTriLists, double eps);
+    const std::vector<TriVertList>& onTriLists, double tolerance, double eps);
 
 // Step 7 phase 2 of the pipeline: resolve etIsect events to vert
 // ids (snapping or allocating fresh), group by tri-tri pair, and
@@ -378,6 +404,12 @@ struct ChordChordCrossing {
   int chordA, chordB;  // indices into the chord vector
   double tA, tB;       // parameter along each chord
   int face;            // face whose plane hosted the kernel call
+  // Conditioned radius of this crossing: eps / sin(angle between the
+  // chord lines), eps-floored, capped at kCondSnapCapEps * eps - the
+  // same conditioning as step 6.5's trace crossings. Carried through
+  // clusters and allocation so step 9.5's new-onto-original snap can
+  // widen for ill-conditioned step-9 verts too.
+  double snapR;
 };
 std::vector<ChordChordCrossing> FindChordChordCrossings(
     const Manifold::Impl& impl, const std::vector<NewEdgeWithExtras>& chords,
@@ -399,15 +431,21 @@ struct ChordCrossing {
   int id;                   // canonical vert id (existing or fresh)
   std::vector<int> chords;  // incident chords
   std::vector<double> ts;   // parallel to chords (pre-recompute)
+  double snapR = 0.0;       // max member conditioned radius (see above)
 };
 struct Step9Threading {
   std::vector<NewEdgeWithExtras> chords;
   std::vector<vec3> newVertPositions;
+  // Parallel to newVertPositions: per-vert conditioned snap radius
+  // (the incoming TraceChordResult::newVertSnapR entries, extended
+  // with each fresh crossing vert's cluster radius, widened when a
+  // snap onto an existing new vert claims more). Step 9.5 consumes it.
+  std::vector<double> newVertSnapR;
   std::vector<ChordCrossing> crossings;
 };
 Step9Threading ResolveAndThreadCrossings(
     const Manifold::Impl& impl, std::vector<NewEdgeWithExtras> chords,
-    std::vector<vec3> newVertPositions,
+    std::vector<vec3> newVertPositions, std::vector<double> newVertSnapR,
     const std::vector<ChordChordCrossing>& raw,
     const std::vector<OnChordContact>& contacts, double tolerance, double eps);
 
@@ -435,7 +473,7 @@ std::vector<ChordCrossing> MergeAndPropagateCrossings(
 // delegates here with singleton clusters.
 Step9Threading ResolveAndThreadClusters(
     const Manifold::Impl& impl, std::vector<NewEdgeWithExtras> chords,
-    std::vector<vec3> newVertPositions,
+    std::vector<vec3> newVertPositions, std::vector<double> newVertSnapR,
     const std::vector<ChordCrossing>& clusters,
     const std::vector<OnChordContact>& contacts, double tolerance, double eps);
 
@@ -455,16 +493,23 @@ Step9Threading ResolveAndThreadClusters(
 // wins, originals before new). Consumers are remapped in place:
 // chord endpoints, chord extras (id-dedup, endpoint drops), and
 // on-edge lists (id-dedup, endpoint drops, t re-sort). Returns the
-// number of ids remapped.
+// number of ids remapped plus the largest position displacement any
+// remap applied (|pos(old) - pos(representative)|) - the driver folds
+// that into the output tolerance claim.
 // `perVertSnapR` (optional, parallel prefix of newVertPositions; see
 // TraceChordResult::newVertSnapR) widens the new-onto-original snap
 // for verts whose allocation was ill-conditioned.
-int UnifyArrangementVerts(const Manifold::Impl& impl,
-                          const std::vector<vec3>& newVertPositions,
-                          const std::vector<Edge>& edges,
-                          std::vector<EdgeVertList>& onEdgeLists,
-                          std::vector<NewEdgeWithExtras>& chords, double eps,
-                          const std::vector<double>& perVertSnapR = {});
+struct UnifyResult {
+  int changed = 0;
+  double maxMove = 0.0;
+};
+UnifyResult UnifyArrangementVerts(const Manifold::Impl& impl,
+                                  const std::vector<vec3>& newVertPositions,
+                                  const std::vector<Edge>& edges,
+                                  std::vector<EdgeVertList>& onEdgeLists,
+                                  std::vector<NewEdgeWithExtras>& chords,
+                                  double eps,
+                                  const std::vector<double>& perVertSnapR = {});
 
 // ---- Steps 10-11: per-face partition (docs/Steps10to13Design.md) ----
 

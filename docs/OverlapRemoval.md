@@ -38,7 +38,7 @@ assumptions hold in doubles, and add no new algorithmic ideas.
 | 12 | `MergePolygons` | canonical-cycle merge with signed multiplicity; coincident opposite pairs cancel |
 | 13 | `BuildCellComplex`, `ClassifyCells` | radial fans -> volume cells -> seed cast -> winding BFS -> keep |
 | emit | `BuildEmitTopology` + driver | inside-wedge twins, vertex rings, triangulation, MeshGL64 |
-| gate | driver | status / volume / pierce-monotonicity, else return input |
+| gate | driver | folded-shell volume (pre-emit) + status / volume / pierce-monotonicity, else return input |
 
 The driver (`RunOverlapRemovalImpl`) composes these serially
 (`// TODO: parallelize` markers only) inside a try/catch that returns the
@@ -342,16 +342,30 @@ topology explicitly:
 ## Driver gate
 
 Return the input unless (a) `out.Status() == NoError`, (b) `out.Volume() > 0`
-for non-empty input (NaN fails too), and (c) pierce-monotonicity:
+for non-empty input (NaN fails too), (c) pierce-monotonicity:
 `CheckSelfIntersection(out) <= CheckSelfIntersection(input)` (input count
-computed once, early). NO volume-ratio tripwire: the input volume is the
-winding-WEIGHTED integral - an overlap lobe at w = k counts k times - so the
-legitimate output/input ratio is (2-f)/(2+f) for overlap fraction f (1/3 at
-full overlap); any constant bound vetoes correct outputs on exactly the
-heavy-overlap inputs the feature targets. Gate trips are the expected
-fallback for adversarial inputs, not asserts; internal invariants (BFS
-disagreement, odd kept fans, unpaired halfedges) keep their DEBUG_ASSERTs and
-fail closed in release.
+computed once, early), and (d) the folded-shell volume gate below. NO
+volume-ratio tripwire: the input volume is the winding-WEIGHTED integral - an
+overlap lobe at w = k counts k times - so the legitimate output/input ratio
+is (2-f)/(2+f) for overlap fraction f (1/3 at full overlap); any constant
+bound vetoes correct outputs on exactly the heavy-overlap inputs the feature
+targets. Gate trips are the expected fallback for adversarial inputs, not
+asserts; internal invariants (BFS disagreement, odd kept fans, unpaired
+halfedges) keep their DEBUG_ASSERTs and fail closed in release.
+
+**Folded-shell volume gate** (`FoldedCellsEncloseVolume`, pre-emit): polygons
+whose front and back cells united (front == back, e.g. across a k = 1 rim or
+through a mis-ordered near-tangent radial fan) are dropped by the keep rule.
+That is correct for membranes - enclosed volume below area x thickness, and
+post-merge thickness is at most the 10 eps unification radius - but a
+tangent-degenerate contact can fold a CLOSED shell's two cells together, and
+dropping that fold silently deletes the shell (observed on the hull fixture:
+two of three disjoint hulls, 2/3 of the material). Per fold cell, sum the
+mult-weighted signed volume over its folded polygons (tetra fan anchored at
+the fold set's own centroid: origin-independent for a closed set, near zero
+for an open sheet) and fall back if any exceeds
+`area x kFoldedVolumePerAreaEps (= 100) x eps` - 10x headroom over the
+thickest legitimate membrane, ~1e7 below a real shell.
 
 ## Determinism constraints (pinned)
 
@@ -379,33 +393,45 @@ fail closed in release.
   different diagonals, coplanar neighbors emit nothing, on-edge additions);
   step 9.5 (unification, t recompute + re-sort).
 - `Manifold.RemoveSelfIntersections*` feature tests: API smoke; clean-input
-  passthrough; Boolean-result passthrough; the hull fixture (31 pierces ->
-  3, see Known limitations - the bar assertion is the open decision); the
-  ovoid dense-sliver fixture (falls back via the BFS-disagreement guard,
-  monotonic); empty input; idempotence; determinism (5 identical reruns);
-  far-from-origin at 1e4 (strict reduction, 38 -> 19); glued boxes
-  (equal-face early-exit bit-identical; smaller-on-larger welds,
-  winding-faithfully, to one component).
-- Full `manifold_test`: 494/495 (the hull bar is the one red).
+  passthrough; Boolean-result passthrough; the hull fixture (the trimaran
+  fold class - pins the folded-shell gate's bit-identical fallback, see
+  Known limitations); the ovoid dense-sliver fixture (falls back via the
+  BFS-disagreement guard, monotonic); empty input; idempotence; determinism
+  (5 identical reruns); far-from-origin at 1e4 (strict reduction, 38 -> 19,
+  all three hulls kept, volume within 0.02%); glued boxes (equal-face
+  early-exit bit-identical; smaller-on-larger welds, winding-faithfully, to
+  one component).
 
 ## Known limitations
 
-1. **The conditioned-twin micro-facet residue.** A shallow-incidence edge
-   piercing two eps-SEPARATED coplanar sheets produces twin step-7 events
-   that are geometrically REAL distinct points ~eps/sin(incidence) apart
-   (observed 44x eps), beside an original corner. The exact arrangement has a
-   micro-triangle facet there that per-face FP partitions cannot consistently
-   produce. Every snap policy beyond ~10 eps (16/128-eps anchors, conditioned
-   isotropic and anisotropic-capsule step-7 snaps) traded the twin-rim holes
-   for MORE eps-overlap pierces and was reverted: moving geometry tens of eps
-   deforms kept triangles whose neighbors did not move with them. Measured on
-   the hull fixture: input pierces reach 1.46e-6 deep (~4100x eps); the 3
-   residual sit at 1.10e-8 (~31x eps) - above the 10x-eps output tolerance,
-   inside the conditioned band of that corner. At 1e4 the far-from-origin
+1. **The tangent-degenerate contact class** (the hull fixture). A
+   shallow-incidence edge piercing two eps-SEPARATED coplanar sheets produces
+   twin step-7 events that are geometrically REAL distinct points
+   ~eps/sin(incidence) apart (observed 44x eps), beside an original corner.
+   The exact arrangement has a micro-triangle facet there that per-face FP
+   partitions cannot consistently produce. Every snap policy beyond ~10 eps
+   (16/128-eps anchors, conditioned isotropic and anisotropic-capsule step-7
+   snaps) traded the twin-rim holes for MORE eps-overlap pierces and was
+   reverted: moving geometry tens of eps deforms kept triangles whose
+   neighbors did not move with them. The class has two observed severities on
+   the hull fixture (a trimaran: three disjoint hulls grazed by one mask):
+   - **Micro-facet pierce residue**: input pierces reach 1.46e-6 deep
+     (~4100x eps); a successful rebuild leaves 3 residual at 1.10e-8
+     (~31x eps) - above the 10x-eps output tolerance, inside the conditioned
+     band of that corner.
+   - **Folded shells**: the grazing contacts on the two outrigger hulls leave
+     vert clusters spread 2-4x the 10 eps unification radius (k = 1 rim
+     chains) and near-tangent k = 4 radial fans; either folds the entire
+     shell's front cell onto its back cell, so every polygon of that hull
+     reads front == back and the keep rule would silently delete the whole
+     component (volume -> 1/3). The folded-shell volume gate (Driver gate)
+     detects this and falls back to the input bit-identically.
+   At 1e4 the same geometry succeeds (38 -> 19 pierces, all three hulls
+   kept): the scale-derived eps is large enough to absorb the clusters; the
    residual (6.5e-8) is ~2.9x its eps - INSIDE its working band. Closing the
-   class soundly needs exact/extended-precision local predicates (the family
-   Emmett deferred), or the hull bar becomes a measured
-   EXPECT_LE(residual <= conditioned band) - decision pending.
+   class soundly (resolving the fixture at origin scale to 0 pierces with
+   all three hulls kept) needs exact/extended-precision local predicates
+   (the family Emmett deferred).
 2. **Dense slivers** (the ovoid class): the arrangement is not a closed
    surface after FP partitioning; the BFS disagreement guard detects it and
    the pipeline falls back to the input, monotonic by construction.
