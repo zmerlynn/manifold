@@ -1,128 +1,448 @@
 # Overlap Removal (RemoveSelfIntersections)
 
-`Manifold::RemoveSelfIntersections()` returns a new manifold with no more
-geometric self-intersections than the input. Boolean operations produce
+`Manifold::RemoveSelfIntersections()` returns a new manifold whose surface is
+the boundary of the input's winding > 0 region, with no more geometric
+self-intersections than the input. Boolean operations produce
 topology-manifold output (every edge shared by exactly two triangles), but the
-result may still contain pairs of triangles whose interiors cross. This pass
-detects and removes those pierces while preserving topology manifold-ness, or
+result may still contain triangle pairs whose interiors cross. This pass
+resolves the full surface arrangement and reclassifies it by winding, or
 returns the input unchanged when it cannot.
 
-It is implemented in `src/overlap_removal.{h,cpp}` (+ `src/overlap_removal_
-internal.h`) with the per-vertex two-sided winding classifier in
-`src/self_mesh_analysis.{h,cpp}`. The geometric SoS kernels it relies on are
-Boolean3's own (`Shadow01`, `Kernel02`, `Kernel11`, `Kernel12` in
-`src/boolean3.cpp`), reused through `Manifold::Impl::RayCast`.
+It is a faithful implementation of Emmett Lalish's 13-step sketch
+(#289, the 2024-05-14 comment), with no recovery scaffold: no cap walker, no
+pierce reducers, no post-hoc repair. Every kept output triangle exists because
+the global winding classification kept it. Implemented in
+`src/overlap_removal.{h,cpp}` + `src/overlap_removal_internal.h`; the only
+production caller is `Manifold::RemoveSelfIntersections()`.
 
-## Goals
+Two passes (6.5 and 9.5 below) are not in the sketch. Both exist because the
+sketch is written as if arithmetic were exact; they make its implicit
+assumptions hold in doubles, and add no new algorithmic ideas.
 
-- Stricter than Boolean: Boolean3 guarantees topology-manifold output; this pass
-  additionally drives down geometric self-intersection pierces.
-- Safe by construction: never return output worse than the input. If the
-  pipeline cannot improve the mesh, it returns the input (see Guarantee).
-- Opt-in and side-effect-free: a pure query method; it does not change Boolean.
+## Pipeline overview
 
-## Algorithm Outline
+| step | function | role |
+|---|---|---|
+| 1 | `MergeVertsEps` | eps-merge near-coincident verts (cluster centroids, MeshGL64 merge hints) |
+| 2 | `EnumerateEdges` | canonical undirected edges with halfedge pairs |
+| 4 | `BuildOnEdgeVertLists` | verts within eps of an edge's interior, sorted by t |
+| 5 | `BuildOnTriVertLists` | verts within eps of a tri's interior (strict barycentric) |
+| 6 | `FindEdgeTriIntersections` | transversal edge-pierces-tri events (BVH + Moller-Trumbore), snapped to existing verts within eps |
+| 7 | `GenerateChordEdges` | one chord per tri-tri pair with exactly 2 pierce endpoints; event-vert resolution |
+| 6.5 | `CoplanarTraceChords` | in-plane conformance cuts between coplanar overlapping faces (below) |
+| - | `AddVertsToOnEdgeLists`, `PropagateNewVertsToOnEdgeLists` | pierce + trace verts subdivide the edges they lie on |
+| 8 | `AddInteriorVertsToNewEdges` | on-tri verts threaded onto chord interiors |
+| 9 | `FindOnChordEndpointContacts`, `FindChordChordCrossings`, `MergeAndPropagateCrossings`, `ResolveAndThreadClusters` | chord-chord crossings within each face (below) |
+| 9.5 | `UnifyArrangementVerts` | arrangement-wide new-vert unification (below) |
+| 10-11 | `PartitionFace` | per-face simple-cycle partition by angular walk |
+| 12 | `MergePolygons` | canonical-cycle merge with signed multiplicity; coincident opposite pairs cancel |
+| 13 | `BuildCellComplex`, `ClassifyCells` | radial fans -> volume cells -> seed cast -> winding BFS -> keep |
+| emit | `BuildEmitTopology` + driver | inside-wedge twins, vertex rings, triangulation, MeshGL64 |
+| gate | driver | status / volume / pierce-monotonicity, else return input |
 
-The pipeline follows Smith's robust-arrangement framework (issue #289), adapting
-its 2D arrangement to a 3D triangle mesh:
+The driver (`RunOverlapRemovalImpl`) composes these serially
+(`// TODO: parallelize` markers only) inside a try/catch that returns the
+input on any internal throw. EARLY-EXIT: if the combined chord list
+(transversal + trace) is empty, the input is returned bit-identical - this
+covers clean inputs, the all-pairs-dropped case, and pancake-free coplanar
+contact.
 
-1. `MergeVertsEps` - epsilon-merge near-coincident verts.
-2-5. Enumerate edges, build the on-edge and in-triangle vertex lists.
-6. `FindEdgeTriIntersections` - edge-pierces-triangle events (Moller-Trumbore
-   narrow phase over a BVH broad phase), snapped to existing verts where close.
-7. `GenerateChordEdges` - one chord edge per intersecting triangle pair.
-8-10. Propagate interior verts onto chords; subdivide each triangle's halfedges
-   at the on-edge verts.
-11. `WalkPolygons` - assemble the sub-polygons of each split triangle by an
-   angle-sorted next-around-face walk; only closed cycles are emitted.
-12-13. `TriangulateAndEmit` - classify each sub-polygon keep/drop via the
-   two-sided winding classifier, triangulate the kept ones, and run a
-   pierce-aware surface-cap walker plus pre/post-cap pierce reducers to close
-   residual boundaries and drop overlapping output triangles.
+## House terminology and style (from the boolean2 review logs)
 
-A pair-symmetric chord-enforcement step (Phases 1-3.5) reconciles the keep
-decisions across both triangles of every chord so the output stays manifold.
+- halfedge structure (not DCEL); near-line sliver (not T-junction);
+  nearby-crossing merge (not duplicate-crossing); on-edge / on-tri / on-chord
+  vert lists for verts lying on a primitive within eps.
+- Determinism is hard: any `std::` trig deciding output geometry is a bug -
+  use `math::` (vendored deterministic); the current design needs no trig at
+  all (half-plane bucket + cross sign ordering throughout).
+- Return result structs, never out-pointers (mutating-reference parameters
+  only where the sibling precedent does, e.g. on-edge list insertion).
+  `DEBUG_ASSERT` not `assert` (compiled out unless MANIFOLD_ASSERT &&
+  MANIFOLD_DEBUG - not a production guard). `la::cross`/`la::dot` directly.
+  `static_cast`, no C-casts. Dimensionally-correct thresholds: eps is a
+  LENGTH; area ~ L^2 compares against length * eps.
+- TDD: red first, failing for the stated reason.
 
-## The Classifier
+## The eps contract
 
-`AnalyzeSelfMesh` computes, per vertex, the winding numbers of the mesh just
-above and just below the surface (probed at `v +/- eps * n(v)` and ray-cast).
-A sub-polygon is kept when it lies on the boundary of the `winding >= 1` region.
-Components are found by a `DisjointSets` flood-fill that breaks at pierced
-("broken") halfedges, so each component needs only one ray-cast. Probe scale and
-direction are shared (`ProbeMeshScale`, `kProbeRayDir`) so the per-vertex and
-per-polygon probes agree.
+One absolute pipeline epsilon `eps` (from `InferEps` =
+`AlphaBudgetEpsilon(bbox scale, 1000)` unless the caller passes one), used as:
 
-## Guarantee
+- 1x eps: kernel acceptance, on-chord propagation, trace-interval length and
+  interior-margin qualification, grazing guards, new-to-new event dedup.
+- `tolerance + eps` (with `tolerance = max(impl.tolerance_, eps)` from the
+  post-merge impl): all snaps onto EXISTING ids - new-to-old, matching
+  boolean2's `newToOldThresh` (prior drift plus current-op error).
+- 10x eps: the nearby-crossing merge radius (new-to-new for the SAME point
+  computed twice), matching boolean2's `kIntersectionMergeEpsFactor`; reused
+  by step 9.5's sweep.
+- eps / sin(angle), capped at `kCondSnapCapEps` (128) x eps: the CONDITIONED
+  radius of a computed crossing whose defining lines are near-parallel (the
+  lever arm). Used by step 6.5's corner snap and new-to-new dedup, and carried
+  per-vert into step 9.5's original-vert snap. Conditioned radii apply only
+  where the conditioning is computable at the source; blanket widening was
+  tried and rejected (it moves real geometry and re-pierces - see
+  Known limitations).
+- eps / len: per-chord t-space guards and dedup backstops.
+- `ClassifyCells` receives the driver's eps as a hint and runs at
+  max(hint, impl.epsilon_, machine eps at the arrangement scale) - without
+  the hint it would probe at `impl.epsilon_`, which can be tighter than the
+  epsilon the arrangement was built with.
+- OUTPUT tolerance: `max(tolerance, 10 * eps)` - the pipeline deliberately
+  moves verts by up to the merge radius, and claiming the input tolerance
+  would overstate the output's precision. Ill-conditioned shallow-incidence
+  corners can carry residual error beyond this, up to the conditioned band -
+  a documented limitation, not part of the tolerance claim.
 
-- **Pierce-monotonicity.** The returned manifold's self-intersection count (a
-  tolerance-thresholded interior-pierce count) never exceeds the input's. The
-  count may stay equal while the geometry is re-triangulated; a pierce-free input
-  is returned as an equivalent re-meshed manifold, not bit-identical.
-- **Fallback.** Two paths return the input. An *in-band gate reject* - pipeline
-  output non-manifold, output volume drift over 50%, sign flip, or more pierces
-  than the input - returns the input either unchanged or in its epsilon-merged
-  form, whichever has no more pierces; a sign-flipped output is reverse-wound
-  and re-checked before this fallback. An *internal exception* (a debug
-  assertion, allocation failure, or a throwing constructor) returns the original
-  input unchanged: no epsilon-merge runs on the throw path, since MergeVertsEps
-  can itself assert or produce a non-manifold.
+## Step 6.5: coplanar trace chords
 
-The gate enforcing this lives at the end of `RunOverlapRemovalImpl`; the pierce
-metric is `CheckSelfIntersection`.
+Step 1's eps-merge flattens Boolean SoS slivers into zero-volume pancakes -
+coplanar overlapping faces with opposite orientations - by design: step 12's
+signed-multiplicity cancellation consumes the coincidences. But step 6 finds
+only TRANSVERSAL intersections; coplanar pairs produce no chords, the sheets'
+partitions never conform in-plane, cancellation cannot fire, and
+`BuildCellComplex` hits exact angular ties. This pass does the in-plane
+cutting the sketch implicitly assumes:
 
-## Relationship to #289
+1. **Detect.** BVH tri-tri broad phase; plane gate: all six verts within eps
+   of the LARGER face's plane (a near-zero-area sliver's own plane is noise).
+2. **Single-frame clip.** ALL geometry for a pair is computed in ONE frame
+   (the lower face id's `FaceBasisFromNormal`); each face's 3 edges clip
+   against the other's projected triangle (convex clip, one interval per
+   edge). The same geometric crossing is computed once and shares its id
+   across both clip directions by construction.
+3. **Interval qualification.** An interval becomes a chord iff (a) longer
+   than eps AND (b) its MIDPOINT is interior to the other face by > eps.
+   Midpoint, not endpoints: a full-through cut - the generic overlap case -
+   has BOTH endpoints on the boundary yet an interior midpoint; an
+   endpoint-margin predicate would reject exactly the cuts conformance needs.
+   Distance-to-boundary is concave along a segment in a convex face, so the
+   midpoint margin >= half the deepest penetration: only dips shallower than
+   2 * eps are rejected, the same FP-degenerate band the grazing guard skips.
+   Boundary-riding intervals (coplanar NEIGHBORS - any flat region of any
+   mesh) never qualify, so clean flat meshes keep the early-exit, and
+   equal-size face-glued solids pass through bit-identical.
+4. **Endpoint ids.** t = 0/1 endpoints use the source edge's vert id.
+   Crossing endpoints snap to the nearest of the pair's six corners within
+   the CONDITIONED radius (max(tolerance + eps, eps/sin(angle)) capped -
+   nearest, ties to smallest id, the step-9 convention), else allocate,
+   deduping new-to-new at the conditioned radius over the whole pool (the
+   step-7 convention, conditioned). The allocation's conditioned radius is
+   recorded per vert (`TraceChordResult::newVertSnapR`) for step 9.5. A
+   lifted endpoint farther than eps from either original 3D edge rejects its
+   interval (the near-grazing guard - conformance we provably cannot compute
+   is skipped, not corrupted).
+5. **Chords + boundary conformance.** Each qualifying interval emits a
+   `PiercedNewEdge{v0, v1, faceA, faceB}` - it lies on BOTH coplanar faces,
+   so the existing chord model applies verbatim (dedup within the pair; the
+   partition's per-face dedup absorbs cross-pair repeats). New crossing verts
+   on original mesh edges return as explicit (edge, vert, t) additions - an
+   X crossing gets one record per edge with one shared vert id - applied by
+   `AddVertsToOnEdgeLists` (id-dedup + per-edge t re-sort).
+6. **Compose.** Trace chords append to the chord list BEFORE the early-exit,
+   before `GroupChordsByFace`, and before step 8 - one grouping then feeds
+   step 8 extras, step 9 crossings (trace-vs-regular and trace-vs-trace),
+   and the partition with no further changes.
 
-Smith's framework (UCAM-CL-TR-766) resolves an arrangement of primitives with
-Simulation-of-Simplicity (SoS) so every orientation test is decided
-unambiguously. The 3D kernels - `Shadow01` (0D-1D), `Kernel02` (0D-2D),
-`Kernel11` (1D-1D), `Kernel12` (1D-2D) - are the same ones Boolean3 uses for its
-own intersection cascade; overlap removal reuses them through `RayCast` rather
-than re-implementing them. Steps 1-13 above map onto Emmett Lalish's 13-step
-#289 sketch; the winding classification is step 13.
+Semantics note: a coincident interior wall separating winding 1|1
+(differently-sized solids glued face to face) DROPS by the step-13 keep rule -
+the output is the winding-faithful welded solid. Correct #289 behavior, not a
+regression: the input's w > 0 region IS one solid. Equal-size glued faces
+never reach the pipeline (no qualifying intervals; early-exit).
+
+## Step 9: chord-chord crossings within each face
+
+Completes the per-face arrangement: after step 9 the chord set is CONFORMING
+(no two sub-edges cross except at shared vert ids). Geometry only - no
+classification.
+
+0. **On-chord endpoint pass** (`FindOnChordEndpointContacts`): a chord
+   endpoint lying on another same-face chord's interior, within
+   tolerance + eps and inside the t-guard
+   (t in ((tol+eps)/len, 1 - (tol+eps)/len) - the endpoint-proximity zone is
+   excluded in t-space), recorded into the explicit `OnChordContact`
+   accumulator. Required because the crossing kernel REJECTS near-endpoint
+   crossings (`AwayFromEndpoints`); without this pass those contacts are
+   silently lost as near-line slivers.
+1. **Group** (`GroupChordsByFace`): chord indices with triA==t or triB==t.
+2. **Pairwise crossings** (`FindChordChordCrossings`): per face, per sorted
+   chord pair: re-project endpoints onto the face plane (drift from prior
+   merges is zeroed by construction), map to 2D via the face's orthonormal
+   in-plane basis (`FaceBasisFromNormal` - a true isometry, eps2d == eps3d),
+   call `boolean2::IntersectSegments` with stableEdgeId = the chord's global
+   index, lift accepted crossings back to 3D.
+3. **Nearby-crossing merge** (`MergeAndPropagateCrossings`): union-find over
+   raw crossings; unite when they share an incident face (hosting face plus
+   both chords' face pairs) AND lie within 10 * eps. Cluster position =
+   member centroid (ascending order), re-projected onto the HOST face plane
+   via a member hosted there. The face gate (not a chord gate) is what
+   unifies a 4-chord concurrence whose two crossings share no chord.
+4. **Eager propagation**: each cluster position is tested against EVERY chord
+   incident to any involved face (point-to-segment <= eps, the same t-guard),
+   so a k-fold point lands on all k chords even when a pairwise intersection
+   was missed.
+5. **Resolve-then-allocate** (`ResolveAndThreadClusters`): per cluster, ONCE,
+   symmetric across all incident chords: candidates within tolerance + eps =
+   every incident chord endpoint, their existing extras, and the pass-0
+   accumulator; nearest wins (ties to smallest id); else allocate. A crossing
+   can therefore never thread as an endpoint id on one chord and a fresh id
+   on another (the split-identity class).
+6. **Threading**: per chord, unify pass-0 records and resolved clusters;
+   RECOMPUTE every t from the resolved position; drop step-9-added records
+   whose recomputed t leaves the guarded range (pre-existing step-8 extras
+   survive - they were admitted under step 8's weaker guard); id-dedup, sort
+   by t (ties by id), eps/len t-dedup backstop.
+
+Known accepted hole: when tolerance > 9 * eps, two clusters can sit within
+tolerance + eps of each other yet beyond the 10 * eps merge radius and
+allocate two near-coincident fresh ids; the t-dedup backstop collapses them
+only when both land on one chord. Revisit if the tolerance-inflated regime
+becomes a target.
+
+## Step 9.5: arrangement-wide new-vert unification
+
+Steps 6.5, 7, and 9 each dedup their own allocations, but the same geometric
+point computed through two different frames lands up to ~10 * eps apart, and
+a pair of such twins subdivides a shared sub-edge inconsistently across faces.
+The unpaired sub-edges then read as open rims, whose ambient unification
+collapses the cell complex (observed: 21 rims merged 14k polygons' cells into
+3). One union-find sweep (`UnifyArrangementVerts`):
+
+- new-new pairs unite within 10 * eps (the merge-radius philosophy);
+- new verts snap onto ORIGINAL verts within max(10 * eps, the vert's recorded
+  conditioned radius) - smallest id wins, originals before new;
+- consumers remap in place: chord endpoints, extras, and on-edge lists, with
+  ids deduped, endpoint entries dropped, and ts RECOMPUTED from the remapped
+  positions then re-sorted (a remap moves the consumed position; a stale
+  order would hand the partition a crossed sub-edge sequence).
+
+## Steps 10-11: per-face partition
+
+`PartitionFace` partitions one face of the conforming arrangement into simple
+sub-polygon cycles, CCW with respect to the face's OWN HALFEDGE WINDING:
+
+- **The walk frame comes from the winding, not the stored faceNormal_**: on
+  folded self-intersecting sheets the stored normal can be bit-exactly
+  OPPOSITE the winding, which mirrors the projection and turns the
+  face-on-left walk into a boundary hugger. The winding is the orientation
+  the multiplicities mean.
+- The face's three original edges contribute one halfedge per sub-edge
+  (subdivided by the on-edge lists); incident chords contribute BOTH
+  directions per sub-edge, deduped per face by undirected vert pair
+  (coincident chords otherwise create exact angular ties) AND against the
+  face's own boundary sub-edges (a trace chord rides its source edge by
+  construction; on its host the doubled directed edge made the walk's
+  exact-tie handling hes-order-sensitive - skipped, counted).
+- Next-pointer rule: the smallest left turn among unvisited outgoing
+  halfedges, skipping the immediate reverse UNLESS it is the sole candidate
+  (the U-turn that traverses dangling-chord spurs instead of stalling).
+  Closure is VERTEX ARRIVAL (the boolean2 OutEdgesToPolygons pattern).
+- Each closed cycle splits at repeated vert ids (the PushSimpleLoops
+  pattern); sub-3-vert loops are spurs - dropped, counted. A >= 3-vert cycle
+  with EXACTLY zero projected area is a flattened spur (coincident post-merge
+  positions under distinct ids, or an exactly-collinear out-and-back) -
+  dropped, counted; its Newell normal would be undefined downstream.
+  Tiny-but-nonzero areas are REAL slivers and pass.
+- Zero-length chords (step-9 snapping can collapse v0 == v1): skipped,
+  counted.
+
+## Step 12: canonical polygon merge
+
+`MergePolygons`: the canonical key of a cycle is the lexicographically
+smallest rotation among all rotations of the cycle AND of its reversal; the
+sign is +1 when the canonical form comes from the cycle as walked (CCW by the
+face winding), -1 from the reversal. A simple cycle is never
+rotation-equivalent to its own reversal, so the sign is well-defined. Equal
+keys sum multiplicities; zero sums drop (coincident opposite-facing surfaces
+cancel - the pancake killer, fed by step 6.5's conformance). Output ordered
+by canonical key.
+
+## Step 13: cells, winding, keep
+
+The 3D lift of boolean2's twin-coupled winding filter: keep exactly the
+polygons separating winding <= 0 from > 0, by GLOBAL propagation over volume
+cells - never per-face classification plus repair.
+
+SIGN CONVENTION (pinned; used identically by the seed cast and the BFS):
+crossing a polygon front-to-back (front = +canonical-Newell side) changes w
+by +mult - moving AGAINST the normal enters what the surface element wraps.
+Pinned by `Step13CubeClassifyKeepsAllFaces`.
+
+1. **Radial fans** (`BuildCellComplex`): per arrangement edge, incident
+   polygons sorted CCW about the edge axis by their in-face direction
+   (cross(normal, walk) - exact locally, convex or not), using the atan2-free
+   comparator. An exact angular tie is a step-12 invariant failure
+   (DEBUG_ASSERT; with conformance in place none remain on the fixtures).
+   Newell normals are computed RELATIVE to each cycle's first vert - absolute
+   positions cancel catastrophically for eps-thin slivers far from the origin.
+2. **Wedges -> cells**: union-find over polygon sides (2p + side); between
+   angularly-consecutive fan entries, unite the CCW-facing side of the
+   earlier with the CW-facing side of the later. A k = 1 fan is an open
+   sheet's rim: its single wedge wraps and unites the polygon's own front and
+   back, as the ambient space does. Cells renumbered by smallest member key.
+3. **Seed cast** (`ClassifyCells`): per connected component of the cell graph,
+   a segment from P0 = arrangement bbox center + `kSeedCastDir` * 2x the bbox
+   diagonal to an interior point of a component polygon, counting SIGNED
+   crossings against ALL other separating polygons (other components'
+   included - the true ambient winding is what a nested component cannot
+   learn from its own polygons; open sheets are skipped, matching the BFS).
+   Crossing tests run against a SIGNED FAN decomposition of each cycle (fan
+   ears from the first vert tile any simple polygon with signed coverage; the
+   kernel's direction-based steps cancel opposite-orientation overlap
+   exactly; exact-zero ears contribute exactly nothing and are skipped).
+   Any contact within eps of degenerate - endpoint on a surface, ear-edge
+   graze, near-in-plane segment - invalidates the WHOLE cast (never skip one
+   polygon and keep counting); retried on the component's next target.
+   Targets are tried in DESCENDING-AREA order (ties ascending id) up to
+   `kSeedCastMaxTargets` (8): big polygons' interior points sit far from
+   their boundaries; slivers sort last. Triangle targets use their centroid;
+   longer cycles take the largest ear of a REAL triangulation (a fan ear of a
+   concave cycle can sit outside it); a triangulator throw skips to the next
+   target. Exhaustion fails the classification (driver falls back).
+4. **BFS**: w(back) = w(front) + mult across each separating polygon; a
+   disagreement fails the classification in release too (ok = false) - the
+   arrangement is not the closed surface the propagation assumes.
+5. **Keep**: keep p iff IsInside(w_front) != IsInside(w_back), IsInside =
+   w > 0; flip marks kept polygons whose canonical normal faces the inside
+   (the emit reverses them so normals face outside). A polygon whose sides
+   landed in one cell (a membrane) separates nothing and is never kept.
+
+## Emit: twins, rings, triangulation
+
+`CreateHalfedges` pairs halfedges by sort order, which mis-pairs when more
+than two kept polygons meet at an edge, so `BuildEmitTopology` assigns the
+topology explicitly:
+
+1. **Inside-wedge twins**: at each radial fan restricted to kept polygons,
+   the two flanking the same INSIDE (w > 0) wedge are twins - bare fan
+   adjacency would pair across an outside wedge and weld solids that merely
+   share an edge. Dropped polygons between consecutive kept ones cannot
+   change the wedge's inside-ness. Odd kept fans, twin conflicts, and
+   unpaired halfedges fail the topology (ok = false; driver falls back).
+2. **Vertex rings**: orbits of nextAroundVert(h) = nextInPolygonCycle(twin(h))
+   on the kept-polygon graph (pre-triangulation); one output vert per orbit -
+   two solids touching at a vert or edge get distinct output verts (subsumes
+   SplitPinchedVerts). Ring-separation argument: an orbit traces a link
+   circle of the abstract surface; inside-wedge twins pair non-interleaved
+   germ-sides around a fan, so one circle cannot pass through an edge's
+   direction twice - every output edge carries exactly 2 halfedges
+   (release-checked into ok). Rings numbered by (geometric vert, smallest
+   incident kept polygon) - deterministic.
+3. **Triangulation**: each kept cycle in its outward frame (its own
+   relative-origin Newell basis), `manifold::Triangulate` with
+   epsilon-doubling retries capped at 64x (a kept cycle can carry micro-tails
+   of original verts clustered above the merge radius but below triangulable
+   resolution; their ring ids are topologically pinned, so the cycle cannot
+   be simplified - widening epsilon moves the tail into the triangulator's
+   own degenerate class, and the zero-area output tris collapse at Manifold
+   construction; far beyond 64x the CCW check would pass CW triangles over
+   real geometry). Output MeshGL64: numProp = 3 - non-position properties
+   are NOT preserved.
+
+## Driver gate
+
+Return the input unless (a) `out.Status() == NoError`, (b) `out.Volume() > 0`
+for non-empty input (NaN fails too), and (c) pierce-monotonicity:
+`CheckSelfIntersection(out) <= CheckSelfIntersection(input)` (input count
+computed once, early). NO volume-ratio tripwire: the input volume is the
+winding-WEIGHTED integral - an overlap lobe at w = k counts k times - so the
+legitimate output/input ratio is (2-f)/(2+f) for overlap fraction f (1/3 at
+full overlap); any constant bound vetoes correct outputs on exactly the
+heavy-overlap inputs the feature targets. Gate trips are the expected
+fallback for adversarial inputs, not asserts; internal invariants (BFS
+disagreement, odd kept fans, unpaired halfedges) keep their DEBUG_ASSERTs and
+fail closed in release.
+
+## Determinism constraints (pinned)
+
+- Chord enumeration: `newEdges` order (map keyed by sorted tri pair; serial
+  collider traversal). Trace pairs processed in ascending (faceA, faceB).
+- Pair iteration: sorted within each face; faces ascending. Union-find unites
+  in sorted order; centroids sum ascending.
+- Candidate resolution: nearest, tie smallest id. Rings: (vert, smallest
+  kept polygon). Cells: smallest member key. Seed targets: descending area,
+  tie ascending id.
+- `kSeedCastDir`: a fixed generic unit vector (no axis alignment) so casts
+  into typical axis-aligned inputs avoid grazes on the first try.
+- No `std::` trig in any decision path (none needed - bucket + cross sign).
 
 ## Validation
 
-`test/manifold_test.cpp` (filter `Manifold.RemoveSelfIntersections*`) covers:
-the API smoke and clean-input passthrough; genuinely self-intersecting fixtures
-(hull-body minus hull-mask ~31 pierces -> 0; the self_intersect ovoids at 661
-pierces, the dense-sliver fallback class) asserted via the white-box
-`CheckSelfIntersection`; empty input; idempotence; determinism (repeated runs
-produce identical output); and far-from-origin scaling. Each monotonicity test
-carries an `ASSERT_GT(InteriorPierces(input), 0)` premise so it fails loudly if
-its input ever stops piercing.
+`test/manifold_test.cpp`:
+- 39 `OverlapRemoval.*` unit tests: step-9 kernel/merge/resolution/threading
+  (18); partition including the X-crossing, dangling-spur, coincident-dedup,
+  zero-length, and boundary-riding cases; step-12 canonicalization and
+  cancellation; cell complex (tetra, bipyramid-with-internal-face); winding
+  classification (cube with a reversed-representation quad, nested cubes,
+  membrane-across-the-cast); emit topology (the 4-kept-at-an-edge book
+  fixture pinning twin pairing + ring splitting); step 6.5 (pancake quad with
+  different diagonals, coplanar neighbors emit nothing, on-edge additions);
+  step 9.5 (unification, t recompute + re-sort).
+- `Manifold.RemoveSelfIntersections*` feature tests: API smoke; clean-input
+  passthrough; Boolean-result passthrough; the hull fixture (31 pierces ->
+  3, see Known limitations - the bar assertion is the open decision); the
+  ovoid dense-sliver fixture (falls back via the BFS-disagreement guard,
+  monotonic); empty input; idempotence; determinism (5 identical reruns);
+  far-from-origin at 1e4 (strict reduction, 38 -> 19); glued boxes
+  (equal-face early-exit bit-identical; smaller-on-larger welds,
+  winding-faithfully, to one component).
+- Full `manifold_test`: 494/495 (the hull bar is the one red).
 
-## Known Limitations
+## Known limitations
 
-Two input classes fall back by design; both are limitations of the underlying
-Boolean engine, not of this pass:
+1. **The conditioned-twin micro-facet residue.** A shallow-incidence edge
+   piercing two eps-SEPARATED coplanar sheets produces twin step-7 events
+   that are geometrically REAL distinct points ~eps/sin(incidence) apart
+   (observed 44x eps), beside an original corner. The exact arrangement has a
+   micro-triangle facet there that per-face FP partitions cannot consistently
+   produce. Every snap policy beyond ~10 eps (16/128-eps anchors, conditioned
+   isotropic and anisotropic-capsule step-7 snaps) traded the twin-rim holes
+   for MORE eps-overlap pierces and was reverted: moving geometry tens of eps
+   deforms kept triangles whose neighbors did not move with them. Measured on
+   the hull fixture: input pierces reach 1.46e-6 deep (~4100x eps); the 3
+   residual sit at 1.10e-8 (~31x eps) - above the 10x-eps output tolerance,
+   inside the conditioned band of that corner. At 1e4 the far-from-origin
+   residual (6.5e-8) is ~2.9x its eps - INSIDE its working band. Closing the
+   class soundly needs exact/extended-precision local predicates (the family
+   Emmett deferred), or the hull bar becomes a measured
+   EXPECT_LE(residual <= conditioned band) - decision pending.
+2. **Dense slivers** (the ovoid class): the arrangement is not a closed
+   surface after FP partitioning; the BFS disagreement guard detects it and
+   the pipeline falls back to the input, monotonic by construction.
+3. **Collinear-overlapping chords**: the partition's per-face dedup absorbs
+   exact-id duplicates; eps-distinct near-collinear duplicates remain (the
+   doubled-cut class; measure-zero for generic inputs).
+4. **tolerance > 9 eps**: the step-9 fresh-id hole above.
+5. **Welding**: coincident interior walls separating w = 1|1 drop (see step
+   6.5's semantics note) - winding-faithful, documented, pinned by fixture.
+6. **Properties**: non-position properties are not preserved (numProp = 3).
+7. Output tolerance is max(input tolerance, 10 eps); see the eps contract.
 
-1. **Inflated tolerance.** An input whose `tolerance_` was inherited from an
-   extreme-scale Boolean operand makes every geometric predicate treat all
-   positions as coincident. The pass resets an obviously-polluted tolerance to a
-   per-bbox value, but the worst cases still fall back.
-2. **Dense slivers.** Near-coincident face boundaries produce many sliver
-   triangles in the chord region (Boolean3's SoS emits these by construction).
-   The cap walker absorbs a few but not hundreds, so these fall back unchanged.
+## Relationship to #289 and design history
 
-A third limitation is internal rather than an input class. The per-triangle
-halfedge graph does not fully resolve every chord: a chord with both endpoints
-interior to one parent triangle leaves an isolated halfedge pair that stalls the
-polygon walk, so that triangle emits a single polygon and is auto-kept whole;
-and two intersections that snap to one shared vertex record no chord at all.
-These cases are common, not rare - on the hull-mask fixture 26 of the 86
-chord-bearing triangles auto-keep and 56 carry stalled halfedges - but the
-downstream cap walker and pierce reducers close the residual boundaries the
-incomplete arrangement leaves, so the fixture still cleans to zero. The cost
-surfaces under precision stress: translated to 1e4 more chords fall into the
-both-endpoints-interior path (42 of 55 auto-keep) and recovery is only partial
-(5 residual pierces, down from ~31), still strictly monotonic. Gating on stalled
-halfedges and splitting interior-only chords (a complete arrangement) is the
-principled fix, tracked under #289; the monotonicity gate bounds the worst case
-until then.
+Steps 1-13 map onto Emmett Lalish's 13-step sketch (the 2024-05-14 comment;
+NOT the abandoned 2023 serial-seam sketch). The winding classification is
+step 13; the in-plane crossing kernel is boolean2's `IntersectSegments`
+(production since #1722/#1751); the angular ordering, the canonical merge,
+and the winding filter are the boolean2 patterns lifted to 3D.
 
-The surface-cap walker that does this recovery triangulates non-planar boundary
-cycles by combinatorial fan/ear-clip without a planarity check, which can
-over-inflate or leave slivers on pathological inputs; the volume-drift gate
-catches the gross case (a best-fit-plane fill is the principled fix, tracked
-under #289).
+The design went through staged adversarial review: step 9 over five rounds
+(architecture; kernel contract; the split-identity resolve-then-allocate
+rule; t-recompute ordering; two post-implementation code bugs fixed
+red-first). Steps 10-13 over three rounds (the trim pre-pass replaced by the
+U-turn + split-at-repeated-vert production pattern; per-(edge,pair) vert
+duplication replaced by twin assignment + ring extraction; the volume
+tripwire dropped with worked math). Step 6.5 over three rounds (driver
+wiring, two-frame id divergence, snap-rule attribution, early-exit and
+welding semantics, grazing inflation; a round-2 max-endpoint-margin
+counterproposal was declined on the concavity argument - it would reject
+full-through cuts). A whole-branch post-implementation review found six more
+findings (stale ts after remap; the cast counting membrane crossings; the
+cross-pair conditioned gap; the retry cap; release-mode classification
+failure; an inverted sign statement in this doc's ancestor), all fixed, the
+HIGHs red-first. An eps-propagation audit then plumbed the driver's eps into
+the cast and made the output tolerance claim honest.
+
+The empirical record behind the residue analysis (every snap-radius
+experiment and its pierce count) is in the git history of
+`docs/Steps10to13Design.md`, consolidated here.
