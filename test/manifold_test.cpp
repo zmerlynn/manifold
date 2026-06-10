@@ -1165,6 +1165,122 @@ TEST(OverlapRemoval, Step9EndpointOnChordRequiresSharedFace) {
                   .empty());
 }
 
+namespace {
+const manifold::vec3 kStep9FaceNormal{0.0, 0.0, 1.0};
+}  // namespace
+
+TEST(OverlapRemoval, Step9SimpleCrossing) {
+  // Two chords forming an X in face 0's plane (normal z): one raw
+  // crossing at (0.5, 0, 0), t = 0.5 on both; resolution finds no
+  // existing vert within tolerance + eps, so a fresh id is allocated
+  // and threaded onto both chords.
+  const double eps = 1e-9;
+  const double tolerance = 1e-9;
+  Manifold::Impl impl;
+  std::vector<overlap_removal::NewEdgeWithExtras> chords = {
+      MakeChord(0, 1, 0, 9), MakeChord(2, 3, 0, 11)};
+  std::vector<manifold::vec3> pos = {
+      {0.0, 0.0, 0.0}, {1.0, 0.0, 0.0}, {0.5, -0.5, 0.0}, {0.5, 0.5, 0.0}};
+  const std::vector<std::vector<int>> byFace = {{0, 1}};
+  const std::vector<overlap_removal::ChordChordCrossing> raw =
+      overlap_removal::FindChordChordCrossings(
+          impl, chords, pos, byFace,
+          manifold::VecView<const manifold::vec3>(&kStep9FaceNormal, 1), eps);
+  ASSERT_EQ(raw.size(), 1u);
+  EXPECT_EQ(raw[0].chordA, 0);
+  EXPECT_EQ(raw[0].chordB, 1);
+  EXPECT_NEAR(raw[0].tA, 0.5, 1e-12);
+  EXPECT_NEAR(raw[0].tB, 0.5, 1e-12);
+  EXPECT_NEAR(raw[0].pos.x, 0.5, 1e-12);
+  EXPECT_NEAR(raw[0].pos.y, 0.0, 1e-12);
+  const overlap_removal::Step9Threading threaded =
+      overlap_removal::ResolveAndThreadCrossings(
+          impl, std::move(chords), std::move(pos), raw, {}, tolerance, eps);
+  ASSERT_EQ(threaded.crossings.size(), 1u);
+  EXPECT_EQ(threaded.crossings[0].id, 4);  // fresh: baseId 0 + 4 existing
+  ASSERT_EQ(threaded.newVertPositions.size(), 5u);
+  ASSERT_EQ(threaded.chords[0].extraVerts.size(), 1u);
+  EXPECT_EQ(threaded.chords[0].extraVerts[0], 4);
+  EXPECT_NEAR(threaded.chords[0].extraTs[0], 0.5, 1e-12);
+  ASSERT_EQ(threaded.chords[1].extraVerts.size(), 1u);
+  EXPECT_EQ(threaded.chords[1].extraVerts[0], 4);
+  EXPECT_NEAR(threaded.chords[1].extraTs[0], 0.5, 1e-12);
+}
+
+TEST(OverlapRemoval, Step9CrossingResolvesToEndpointBand) {
+  // The split-identity regression (design round 3): a crossing in the
+  // (eps, tolerance+eps] band of chord 0's endpoint id 1. The kernel
+  // accepts it (> eps from endpoints), but resolution must give the
+  // ENDPOINT id to the crossing on BOTH chords - never a fresh id on
+  // one and the endpoint on the other. On chord 0 itself the
+  // recomputed t for id 1 is 1.0, outside the endpoint-zone guard, so
+  // chord 0 threads nothing.
+  const double eps = 1e-9;
+  const double tolerance = 1e-9;
+  const double x0 = 1.0 - 1.5e-9;  // in (eps, tolerance+eps] of id 1
+  Manifold::Impl impl;
+  std::vector<overlap_removal::NewEdgeWithExtras> chords = {
+      MakeChord(0, 1, 0, 9), MakeChord(2, 3, 0, 11)};
+  std::vector<manifold::vec3> pos = {
+      {0.0, 0.0, 0.0}, {1.0, 0.0, 0.0}, {x0, -0.5, 0.0}, {x0, 0.5, 0.0}};
+  const std::vector<std::vector<int>> byFace = {{0, 1}};
+  const std::vector<overlap_removal::ChordChordCrossing> raw =
+      overlap_removal::FindChordChordCrossings(
+          impl, chords, pos, byFace,
+          manifold::VecView<const manifold::vec3>(&kStep9FaceNormal, 1), eps);
+  ASSERT_EQ(raw.size(), 1u);
+  const overlap_removal::Step9Threading threaded =
+      overlap_removal::ResolveAndThreadCrossings(
+          impl, std::move(chords), std::move(pos), raw, {}, tolerance, eps);
+  ASSERT_EQ(threaded.crossings.size(), 1u);
+  EXPECT_EQ(threaded.crossings[0].id, 1);           // snapped, not allocated
+  EXPECT_EQ(threaded.newVertPositions.size(), 4u);  // no fresh vert
+  EXPECT_TRUE(threaded.chords[0].extraVerts.empty());
+  ASSERT_EQ(threaded.chords[1].extraVerts.size(), 1u);
+  EXPECT_EQ(threaded.chords[1].extraVerts[0], 1);
+  EXPECT_NEAR(threaded.chords[1].extraTs[0], 0.5, 1e-6);
+}
+
+TEST(OverlapRemoval, Step9CrossingSeesPassZeroContacts) {
+  // A third chord's endpoint (id 4) rests on both crossing chords
+  // within tolerance + eps; pass 0 records it onto both. The c-x-d
+  // crossing lands within tolerance + eps of id 4, so resolution must
+  // pick id 4 (consulting the pass-0 accumulator - design round 4),
+  // allocate nothing, and the unified id-dedup must leave exactly one
+  // entry per chord.
+  const double eps = 1e-9;
+  const double tolerance = 1e-9;
+  Manifold::Impl impl;
+  std::vector<overlap_removal::NewEdgeWithExtras> chords = {
+      MakeChord(0, 1, 0, 9),    // d: (0,0,0)-(1,0,0)
+      MakeChord(2, 3, 0, 11),   // c: diagonal through (0.5, 0, 0)
+      MakeChord(4, 5, 0, 13)};  // e: endpoint 4 hovers 1e-9 above (0.5,0,0)
+  std::vector<manifold::vec3> pos = {{0.0, 0.0, 0.0},  {1.0, 0.0, 0.0},
+                                     {0.0, -0.5, 0.0}, {1.0, 0.5, 0.0},
+                                     {0.5, 1e-9, 0.0}, {0.9, 1.0, 0.0}};
+  const std::vector<std::vector<int>> byFace = {{0, 1, 2}};
+  const std::vector<overlap_removal::OnChordContact> contacts =
+      overlap_removal::FindOnChordEndpointContacts(impl, chords, pos, byFace,
+                                                   tolerance, eps);
+  ASSERT_FALSE(contacts.empty());  // id 4 rests on d (and on c)
+  const std::vector<overlap_removal::ChordChordCrossing> raw =
+      overlap_removal::FindChordChordCrossings(
+          impl, chords, pos, byFace,
+          manifold::VecView<const manifold::vec3>(&kStep9FaceNormal, 1), eps);
+  ASSERT_EQ(raw.size(), 1u);  // only c x d properly cross
+  const overlap_removal::Step9Threading threaded =
+      overlap_removal::ResolveAndThreadCrossings(impl, std::move(chords),
+                                                 std::move(pos), raw, contacts,
+                                                 tolerance, eps);
+  ASSERT_EQ(threaded.crossings.size(), 1u);
+  EXPECT_EQ(threaded.crossings[0].id, 4);           // pass-0 vert, not fresh
+  EXPECT_EQ(threaded.newVertPositions.size(), 6u);  // no allocation
+  ASSERT_EQ(threaded.chords[0].extraVerts.size(), 1u);  // d: one entry
+  EXPECT_EQ(threaded.chords[0].extraVerts[0], 4);
+  ASSERT_EQ(threaded.chords[1].extraVerts.size(), 1u);  // c: one entry
+  EXPECT_EQ(threaded.chords[1].extraVerts[0], 4);
+}
+
 // White-box interior-pierce count via the internal checker (external
 // linkage in the linked manifold library), used to assert the
 // pierce-monotonicity contract that the public API does not expose.

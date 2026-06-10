@@ -311,6 +311,49 @@ std::vector<OnChordContact> FindOnChordEndpointContacts(
     const std::vector<std::vector<int>>& chordsByFace, double tolerance,
     double eps);
 
+// Step 9 passes 2-3: one raw chord-chord crossing found in a face's
+// plane (boolean2::IntersectSegments on the chords re-projected onto
+// that plane), before the nearby-crossing merge and canonical-id
+// resolution. A pair sharing two faces is recorded once (lowest face
+// wins); chordA < chordB.
+struct ChordChordCrossing {
+  vec3 pos;            // crossing position, lifted back to 3D
+  int chordA, chordB;  // indices into the chord vector
+  double tA, tB;       // parameter along each chord
+  int face;            // face whose plane hosted the kernel call
+};
+std::vector<ChordChordCrossing> FindChordChordCrossings(
+    const Manifold::Impl& impl, const std::vector<NewEdgeWithExtras>& chords,
+    const std::vector<vec3>& newVertPositions,
+    const std::vector<std::vector<int>>& chordsByFace,
+    VecView<const vec3> faceNormals, double eps);
+
+// Step 9 passes 5-7 (increment (ii): single crossings, no merge yet).
+// Canonical-id resolution is resolve-then-allocate: snap to any
+// existing endpoint / on-chord vert / pass-0 contact within
+// tolerance + eps BEFORE allocating, symmetric across both chords -
+// a crossing must never thread as an endpoint id on one chord and a
+// fresh id on the other. Threading recomputes every t from the
+// resolved position, re-applies the pass-0 endpoint-zone guard,
+// id-dedups over the unified pass-0 + crossing list, then t-sorts
+// with an eps/len dedup backstop.
+struct ChordCrossing {
+  vec3 pos;                 // crossing position (face plane)
+  int id;                   // canonical vert id (existing or fresh)
+  std::vector<int> chords;  // incident chords
+  std::vector<double> ts;   // parallel to chords (pre-recompute)
+};
+struct Step9Threading {
+  std::vector<NewEdgeWithExtras> chords;
+  std::vector<vec3> newVertPositions;
+  std::vector<ChordCrossing> crossings;
+};
+Step9Threading ResolveAndThreadCrossings(
+    const Manifold::Impl& impl, std::vector<NewEdgeWithExtras> chords,
+    std::vector<vec3> newVertPositions,
+    const std::vector<ChordChordCrossing>& raw,
+    const std::vector<OnChordContact>& contacts, double tolerance, double eps);
+
 // Step 10 of the pipeline: propagate etIsect resolved verts onto
 // their piercing edges' on-edge lists, so the polygon walker
 // subdivides those halfedges at the new pierce points. Skips verts

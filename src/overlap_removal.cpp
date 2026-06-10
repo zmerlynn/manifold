@@ -18,6 +18,7 @@
 #include <numeric>
 
 #include "collider.h"
+#include "cross_section/boolean2/predicates.h"  // IntersectSegments (step 9)
 #include "disjoint_sets.h"
 #include "impl.h"
 #include "manifold/polygon.h"  // for Triangulate
@@ -732,6 +733,183 @@ std::vector<OnChordContact> FindOnChordEndpointContacts(
               return x.t < y.t;
             });
   return out;
+}
+
+std::vector<ChordChordCrossing> FindChordChordCrossings(
+    const Manifold::Impl& impl, const std::vector<NewEdgeWithExtras>& chords,
+    const std::vector<vec3>& newVertPositions,
+    const std::vector<std::vector<int>>& chordsByFace,
+    VecView<const vec3> faceNormals, double eps) {
+  using la::cross;
+  using la::dot;
+  std::vector<ChordChordCrossing> out;
+  const int baseId = static_cast<int>(impl.NumVert());
+  // A chord pair shares up to two faces; its crossing is recorded once
+  // (lowest face wins by iteration order).
+  std::set<std::pair<int, int>> seenPairs;
+  for (size_t face = 0; face < chordsByFace.size(); ++face) {
+    const std::vector<int>& faceChords = chordsByFace[face];
+    if (faceChords.size() < 2) continue;
+    DEBUG_ASSERT(face < faceNormals.size(), logicErr,
+                 "FindChordChordCrossings: face normal missing");
+    if (face >= faceNormals.size()) continue;
+    const vec3 nRaw = faceNormals[face];
+    const double nLen2 = dot(nRaw, nRaw);
+    if (nLen2 == 0) continue;
+    const vec3 n = nRaw / std::sqrt(nLen2);
+    // Deterministic orthonormal in-plane basis - a true isometry, so
+    // the kernel's 2D eps equals the pipeline's 3D eps (the axis-drop
+    // projection used elsewhere is not an isometry and would contract
+    // distances).
+    const double ax = std::fabs(n.x);
+    const double ay = std::fabs(n.y);
+    const double az = std::fabs(n.z);
+    const vec3 ref = (ax <= ay && ax <= az) ? vec3(1.0, 0.0, 0.0)
+                     : (ay <= az)           ? vec3(0.0, 1.0, 0.0)
+                                            : vec3(0.0, 0.0, 1.0);
+    vec3 u = cross(n, ref);
+    u = u / std::sqrt(dot(u, u));
+    const vec3 v = cross(n, u);
+    for (size_t i = 0; i < faceChords.size(); ++i) {
+      for (size_t j = i + 1; j < faceChords.size(); ++j) {
+        const int ci = faceChords[i];
+        const int cj = faceChords[j];
+        if (!seenPairs.insert({std::min(ci, cj), std::max(ci, cj)}).second) {
+          continue;
+        }
+        const PiercedNewEdge& ea = chords[ci].edge;
+        const PiercedNewEdge& eb = chords[cj].edge;
+        // Re-project endpoints onto the face plane (through ea.v0)
+        // before the 2D mapping, so out-of-plane drift from prior
+        // merges is zero by construction.
+        const vec3 planePt = GetPos3(ea.v0, baseId, impl, newVertPositions);
+        auto to2d = [&](int id) -> vec2 {
+          const vec3 p = GetPos3(id, baseId, impl, newVertPositions);
+          const vec3 inPlane = p - dot(p - planePt, n) * n;
+          return vec2(dot(inPlane - planePt, u), dot(inPlane - planePt, v));
+        };
+        const vec2 a0 = to2d(ea.v0);
+        const vec2 a1 = to2d(ea.v1);
+        const vec2 b0 = to2d(eb.v0);
+        const vec2 b1 = to2d(eb.v1);
+        // stableEdgeId: the chord's index - deterministic (newEdges
+        // order comes from GenerateChordEdges' sorted-pair map walk),
+        // NOT broad-phase pair order.
+        const boolean2::GraphSegment2D segA{a0, a1, ci};
+        const boolean2::GraphSegment2D segB{b0, b1, cj};
+        vec2 p2;
+        if (!boolean2::IntersectSegments(segA, segB, eps, &p2)) continue;
+        const vec2 da = a1 - a0;
+        const vec2 db = b1 - b0;
+        const double tA = dot(p2 - a0, da) / dot(da, da);
+        const double tB = dot(p2 - b0, db) / dot(db, db);
+        const vec3 pos = planePt + p2.x * u + p2.y * v;
+        out.push_back({pos, ci, cj, tA, tB, static_cast<int>(face)});
+      }
+    }
+  }
+  return out;
+}
+
+Step9Threading ResolveAndThreadCrossings(
+    const Manifold::Impl& impl, std::vector<NewEdgeWithExtras> chords,
+    std::vector<vec3> newVertPositions,
+    const std::vector<ChordChordCrossing>& raw,
+    const std::vector<OnChordContact>& contacts, double tolerance, double eps) {
+  using la::dot;
+  const int baseId = static_cast<int>(impl.NumVert());
+  const double snap = tolerance + eps;
+  const double snap2 = snap * snap;
+  // Canonical-id resolution: resolve-then-allocate, per crossing,
+  // symmetric across both chords. Candidates are every existing vert
+  // the crossing could BE - chord endpoints, already-threaded on-chord
+  // verts, and the pass-0 contacts (not yet threaded at this point) -
+  // within tolerance + eps. Nearest wins; ties take the smallest id.
+  // Only when no candidate exists is a fresh vert allocated. This is
+  // what prevents a crossing threading as an endpoint id on one chord
+  // and a fresh id on the other (the split-identity bug).
+  std::vector<ChordCrossing> crossings;
+  crossings.reserve(raw.size());
+  for (const ChordChordCrossing& rc : raw) {
+    int best = -1;
+    double bestD2 = 0.0;
+    auto consider = [&](int id) {
+      const vec3 p = GetPos3(id, baseId, impl, newVertPositions);
+      const vec3 dv = rc.pos - p;
+      const double d2 = dot(dv, dv);
+      if (d2 > snap2) return;
+      if (best < 0 || d2 < bestD2 || (d2 == bestD2 && id < best)) {
+        best = id;
+        bestD2 = d2;
+      }
+    };
+    for (const int side : {rc.chordA, rc.chordB}) {
+      const PiercedNewEdge& e = chords[side].edge;
+      consider(e.v0);
+      consider(e.v1);
+      for (const int v : chords[side].extraVerts) consider(v);
+    }
+    for (const OnChordContact& c : contacts) {
+      if (c.chord == rc.chordA || c.chord == rc.chordB) consider(c.vertId);
+    }
+    int id = best;
+    if (id < 0) {
+      id = baseId + static_cast<int>(newVertPositions.size());
+      newVertPositions.push_back(rc.pos);
+    }
+    crossings.push_back({rc.pos, id, {rc.chordA, rc.chordB}, {rc.tA, rc.tB}});
+  }
+  // Threading: per chord, the unified record list (existing extras +
+  // pass-0 contacts + resolved crossings), with every t RECOMPUTED
+  // from the resolved position (a snap can move the vertex by up to
+  // tolerance + eps - enough to reorder a stale t-sort), the pass-0
+  // endpoint-zone guard re-applied, id-dedup over the unified list,
+  // then t-sort with an eps/len dedup backstop.
+  std::vector<std::vector<int>> pending(chords.size());
+  for (const OnChordContact& c : contacts) {
+    pending[c.chord].push_back(c.vertId);
+  }
+  for (const ChordCrossing& cc : crossings) {
+    for (const int ch : cc.chords) pending[ch].push_back(cc.id);
+  }
+  for (size_t ci = 0; ci < chords.size(); ++ci) {
+    if (pending[ci].empty()) continue;
+    NewEdgeWithExtras& nwe = chords[ci];
+    std::vector<int> ids = nwe.extraVerts;
+    ids.insert(ids.end(), pending[ci].begin(), pending[ci].end());
+    const vec3 a = GetPos3(nwe.edge.v0, baseId, impl, newVertPositions);
+    const vec3 b = GetPos3(nwe.edge.v1, baseId, impl, newVertPositions);
+    const vec3 ab = b - a;
+    const double abLen2 = dot(ab, ab);
+    if (abLen2 == 0) continue;
+    const double len = std::sqrt(abLen2);
+    const double tGuard = snap / len;
+    const double tDedup = eps / len;
+    std::vector<std::pair<double, int>> recs;
+    recs.reserve(ids.size());
+    std::set<int> seenIds;
+    for (const int id : ids) {
+      if (id == nwe.edge.v0 || id == nwe.edge.v1) continue;
+      if (!seenIds.insert(id).second) continue;
+      const vec3 p = GetPos3(id, baseId, impl, newVertPositions);
+      const double t = dot(p - a, ab) / abLen2;
+      if (t <= tGuard || t >= 1.0 - tGuard) continue;
+      recs.push_back({t, id});
+    }
+    std::sort(recs.begin(), recs.end());
+    std::vector<int> outV;
+    std::vector<double> outT;
+    outV.reserve(recs.size());
+    outT.reserve(recs.size());
+    for (const auto& [t, id] : recs) {
+      if (!outT.empty() && t - outT.back() <= tDedup) continue;
+      outT.push_back(t);
+      outV.push_back(id);
+    }
+    nwe.extraVerts = std::move(outV);
+    nwe.extraTs = std::move(outT);
+  }
+  return {std::move(chords), std::move(newVertPositions), std::move(crossings)};
 }
 
 void PropagateNewVertsToOnEdgeLists(
