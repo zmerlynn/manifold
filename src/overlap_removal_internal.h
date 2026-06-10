@@ -19,7 +19,6 @@
 // and by no production caller - kept out of src/overlap_removal.h so
 // the public-to-src interface is just RunOverlapRemoval.
 
-#include <functional>  // for PolygonClassifierFn
 #include <map>
 #include <set>
 #include <vector>
@@ -32,21 +31,12 @@
 namespace manifold {
 namespace overlap_removal {
 
-// Iteration-cap defaults for parametric pipeline functions. Each
-// loop has an early-exit on convergence; these caps are tripwires
-// against pathological inputs. Companion caps for non-parametric
-// loops live in overlap_removal.cpp's anonymous namespace.
-//
-// kMergeVertsMaxIter: eps-merge passes. Each pass moves merged verts
-//   to centroid, iterates if any pair moved or unioned. Converges
-//   in 1-3 passes for working fixtures.
-// kPierceReducerMaxIter, kDropExcessOuterMax, kTrimOrphansMaxRounds:
-//   each iter strictly drops / changes something or breaks; bounded
-//   by underlying element count. 32 is conservative headroom.
+// Iteration-cap default for MergeVertsEps (a parameter default, so it
+// lives here rather than in overlap_removal.cpp's anonymous
+// namespace). Each pass moves merged verts to centroid and iterates
+// if any pair moved or unioned; converges in 1-3 passes for working
+// fixtures. The cap is a tripwire against pathological inputs.
 constexpr int kMergeVertsMaxIter = 8;
-constexpr int kPierceReducerMaxIter = 32;
-constexpr int kDropExcessOuterMax = 32;
-constexpr int kTrimOrphansMaxRounds = 32;
 
 // Canonical edge of an input mesh: an unordered pair of vert indices
 // (v0 < v1 by convention) with the two halfedge ids that span it
@@ -60,7 +50,7 @@ struct Edge {
 
 // Verts that lie within eps of an Edge (strictly between its endpoints).
 // Built by BuildOnEdgeVertLists in step 4. Sorted by parametric `t`
-// along the edge, t in (0, 1). Used by the polygon walker to subdivide
+// along the edge, t in (0, 1). Used by PartitionFace to subdivide
 // the edge's halfedges into sub-edges.
 struct EdgeVertList {
   std::vector<int> verts;  // sorted by t along the edge
@@ -105,86 +95,37 @@ struct PiercedNewEdge {
 
 // Output of GenerateChordEdges: the new vertex positions, chord
 // edges, per-event resolved vert ids, and counters used by
-// downstream stages (polygon walker, classifier, triangulator).
+// downstream stages (partition, classifier, emit).
 struct ChordEdges {
   std::vector<vec3> newVertPositions;
   std::vector<PiercedNewEdge> newEdges;
   // Parallel to the EdgeTriIntersection input passed to
-  // GenerateChordEdges. resolvedIds[i] is the vert id that
+  // GenerateChordEdges. etIsect2Vert[i] is the vert id that
   // event i became - `snapTo` if >=0 in the input, otherwise a
   // freshly allocated id (>= NumVert) post-dedup. Used by
   // PropagateNewVertsToOnEdgeLists to add the new verts to the
   // on-edge lists of their piercing edges.
-  std::vector<int> resolvedIds;
+  std::vector<int> etIsect2Vert;
   int droppedTriTriPairsWithBadEndpointCount = 0;
 };
 
 // Step 8 (AddInteriorVertsToNewEdges) augments each PiercedNewEdge
 // with the verts that lie on its interior (= snap-merged on-tri
 // verts of either triA or triB that fall on the chord segment).
-// Used by the polygon walker to subdivide the chord into sub-edges.
+// Used by PartitionFace to subdivide the chord into sub-edges.
 struct NewEdgeWithExtras {
   PiercedNewEdge edge;
   std::vector<int> extraVerts;  // sorted along the edge
   std::vector<double> extraTs;
 };
 
-// One half-edge in a per-triangle graph. Step 11 phase 1
-// (BuildPerTriHalfedgeGraphs) emits these for the three input edges
-// (subdivided by onEdgeLists) plus all new-chord edges (both
-// directions, each subdivided by extraVerts).
-struct PerTriHalfedge {
-  int startVert, endVert;  // vert ids (>= NumVert means new vert)
-  bool isFromNewEdge;      // false = original edge, true = new edge
-};
-
-// The per-triangle halfedge graph that the polygon walker traverses.
-// `nextHalfedge` is filled by step 11 phase 2 (AddNextPointers) via
-// 2D angle-sorted next-around-face rotation.
-struct PerTriHalfedgeGraph {
-  int triId;
-  std::vector<PerTriHalfedge> halfedges;
-  std::set<int> verts;
-  // Filled by AddNextPointers (step 11 phase 2). Parallel to
-  // halfedges[]: nextHalfedge[i] is the index of the halfedge
-  // that follows halfedges[i] in a polygon walk on the left side.
-  // -1 = unset (no pairing computed).
-  std::vector<int> nextHalfedge;
-};
-
-// Output of the polygon walker (step 11 phase 3, WalkPolygons): the
-// sub-polygons of one tri after splitting by chord edges. Degenerate
-// 2-vert "sub-polygons" (= chord pairs with both endpoints interior
-// to the parent triangle) are kept separate so the classifier and
-// triangulator only see >= 3-vert polygons; pair-sym Phase 1 still
-// consults degenerates to enforce chord-pair constraints when one
-// corner is degenerate.
-struct PolygonWalkResult {
-  std::vector<std::vector<int>> polygons;  // each = sequence of vert ids
-  std::vector<std::vector<int>> degeneratePolygons;
-  int stalledHalfedges = 0;  // hit an unset next pointer
-};
-
-// Result of TriangulateAndEmit: the final Manifold output plus
-// per-stage counters useful for tests + diagnostics.
-struct TriangulationResult {
-  Manifold output;
-  int polygonsTriangulated;
-  int trianglesEmitted;
-  int trisDroppedTooSmall;
-  int polygonsKept = 0;
-  int polygonsDropped = 0;
-  int polygonsAutoKept = 0;  // skipped classifier (1-poly tris)
-};
-
 // Morton-sorted BVH builder shared across pipeline stages. Each
 // stage that does broad-phase BVH overlap (MergeVertsEps,
 // BuildOnEdgeVertLists, BuildOnTriVertLists, FindEdgeTriIntersections,
-// CheckSelfIntersection, ScanForPiercingPairs, DoCapPass's
-// rebuildCapBVH) used to inline the same 15-line ritual:
+// CheckSelfIntersection) used to inline the same 15-line ritual:
 //   1. compute bbox = Union of leaf boxes
 //   2. compute Morton codes for each leaf
-//   3. build perm + stable_sort by Morton code
+//   3. build leaf2Orig + stable_sort by Morton code
 //   4. permute boxes / morton codes into sorted order
 //   5. construct Collider from sorted views
 // Hoisted here so all callers share one convention. Returns a
@@ -193,9 +134,9 @@ struct TriangulationResult {
 // valid after move/copy of the wrapper.
 struct SortedBVH {
   Collider collider;
-  std::vector<Box> boxes;        // boxes in Morton-sorted order
-  std::vector<uint32_t> morton;  // sorted Morton codes (parallel to boxes)
-  std::vector<size_t> perm;      // perm[sortedIdx] = origIdx
+  std::vector<Box> boxes;         // boxes in Morton-sorted order
+  std::vector<uint32_t> morton;   // sorted Morton codes (parallel to boxes)
+  std::vector<size_t> leaf2Orig;  // [sorted leaf idx] -> input idx
 
   // Sequential broad phase: recorder.record(queryIdx, leafIdx) for
   // each query box overlapping a leaf box. Collider cannot represent
@@ -310,7 +251,7 @@ std::vector<NewEdgeWithExtras> AddInteriorVertsToNewEdges(
     const std::vector<PiercedNewEdge>& newEdges,
     const std::vector<TriVertList>& onTriLists, double eps);
 
-// ---- Step 6.5: coplanar trace chords (docs/Steps10to13Design.md v6) ----
+// ---- Step 6.5: coplanar trace chords (docs/OverlapRemoval.md) ----
 
 // In-plane conformance for coplanar overlapping face pairs. Step 1's
 // eps-merge flattens Boolean SoS slivers into zero-volume pancakes -
@@ -356,7 +297,7 @@ struct TraceChordResult {
 };
 TraceChordResult CoplanarTraceChords(const Manifold::Impl& impl,
                                      const std::vector<Edge>& edges,
-                                     const std::vector<int>& edgeOfHalfedge,
+                                     const std::vector<int>& halfedge2Edge,
                                      std::vector<vec3> newVertPositions,
                                      double tolerance, double eps);
 
@@ -368,7 +309,7 @@ void AddVertsToOnEdgeLists(const std::vector<OnEdgeAddition>& additions,
                            std::vector<EdgeVertList>& onEdgeLists);
 
 // ---- Step 9: chord-chord crossings within each triangle ----
-// (docs/Step9Design.md; implemented incrementally.)
+// (docs/OverlapRemoval.md.)
 
 // Step 9 grouping: chord indices incident to each face. A chord lies
 // on both its triA and triB, so it appears under both faces.
@@ -376,7 +317,7 @@ std::vector<std::vector<int>> GroupChordsByFace(
     const std::vector<PiercedNewEdge>& newEdges, int numTri);
 
 // Step 9 pass 0: endpoint-on-chord contacts - the on-chord analog of
-// the step-3 on-edge vert lists. A chord endpoint lying on another
+// the step-4 on-edge vert lists. A chord endpoint lying on another
 // same-face chord's interior, within tolerance + eps and outside the
 // endpoint-proximity zone in t-space (t in (snap/len, 1 - snap/len)),
 // is recorded for threading. These records are consulted by the
@@ -391,7 +332,7 @@ struct OnChordContact {
 std::vector<OnChordContact> FindOnChordEndpointContacts(
     const Manifold::Impl& impl, const std::vector<NewEdgeWithExtras>& chords,
     const std::vector<vec3>& newVertPositions,
-    const std::vector<std::vector<int>>& chordsByFace, double tolerance,
+    const std::vector<std::vector<int>>& face2Chords, double tolerance,
     double eps);
 
 // Step 9 passes 2-3: one raw chord-chord crossing found in a face's
@@ -414,7 +355,7 @@ struct ChordChordCrossing {
 std::vector<ChordChordCrossing> FindChordChordCrossings(
     const Manifold::Impl& impl, const std::vector<NewEdgeWithExtras>& chords,
     const std::vector<vec3>& newVertPositions,
-    const std::vector<std::vector<int>>& chordsByFace,
+    const std::vector<std::vector<int>>& face2Chords,
     VecView<const vec3> faceNormals, double eps);
 
 // Step 9 passes 5-7 (increment (ii): single crossings, no merge yet).
@@ -465,7 +406,7 @@ std::vector<ChordCrossing> MergeAndPropagateCrossings(
     const Manifold::Impl& impl, const std::vector<NewEdgeWithExtras>& chords,
     const std::vector<vec3>& newVertPositions,
     const std::vector<ChordChordCrossing>& raw,
-    const std::vector<std::vector<int>>& chordsByFace,
+    const std::vector<std::vector<int>>& face2Chords,
     VecView<const vec3> faceNormals, double tolerance, double eps);
 
 // Cluster form of ResolveAndThreadCrossings: resolution + threading
@@ -511,7 +452,7 @@ UnifyResult UnifyArrangementVerts(const Manifold::Impl& impl,
                                   double eps,
                                   const std::vector<double>& perVertSnapR = {});
 
-// ---- Steps 10-11: per-face partition (docs/Steps10to13Design.md) ----
+// ---- Steps 10-11: per-face partition (docs/OverlapRemoval.md) ----
 
 // Halfedge-id -> index into edges[] (both directions of an edge map
 // to the same index; -1 where no canonical edge covers a halfedge).
@@ -555,13 +496,13 @@ struct FacePartition {
 // into a boundary-hugging walk).
 FacePartition PartitionFace(const Manifold::Impl& impl, int face,
                             const std::vector<Edge>& edges,
-                            const std::vector<int>& edgeOfHalfedge,
+                            const std::vector<int>& halfedge2Edge,
                             const std::vector<EdgeVertList>& onEdgeLists,
                             const std::vector<NewEdgeWithExtras>& chords,
                             const std::vector<int>& faceChords,
                             const std::vector<vec3>& newVertPositions);
 
-// ---- Step 12: canonical polygon merge (docs/Steps10to13Design.md) ----
+// ---- Step 12: canonical polygon merge (docs/OverlapRemoval.md) ----
 
 // Merge equivalent sub-polygons with signed multiplicity. The
 // canonical key of a cycle is the lexicographically-smallest rotation
@@ -581,7 +522,7 @@ struct MergedPolygon {
 std::vector<MergedPolygon> MergePolygons(
     const std::vector<std::pair<int, std::vector<int>>>& facePolygons);
 
-// ---- Step 13.2-13.3: radial fans + cells (docs/Steps10to13Design.md) ----
+// ---- Step 13.2-13.3: radial fans + cells (docs/OverlapRemoval.md) ----
 
 // The radial fan of one arrangement edge: incident polygons sorted
 // CCW about the a -> b axis by their in-face direction, with each
@@ -603,8 +544,8 @@ struct EdgeFan {
 // single incident polygon (an open sheet's rim) unites its own front
 // and back, as the ambient space does.
 struct CellComplex {
-  std::vector<EdgeFan> fans;  // ordered by (a, b)
-  std::vector<int> cellOf;    // [2 * polygon + side] -> cell id
+  std::vector<EdgeFan> fans;       // ordered by (a, b)
+  std::vector<int> polySide2Cell;  // [2 * polygon + side] -> cell id
   int numCells = 0;
 };
 CellComplex BuildCellComplex(const Manifold::Impl& impl,
@@ -625,7 +566,7 @@ CellComplex BuildCellComplex(const Manifold::Impl& impl,
 // multiplicity). A cast within eps of any degenerate contact
 // (endpoint on a surface, edge/vert graze, near-parallel plane) is
 // invalid in FULL - never skip one polygon and keep counting - and is
-// retried on the component's next polygon (up to 3 targets); a
+// retried on the component's next polygon (kSeedCastMaxTargets); a
 // component exhausting its targets fails the classification
 // (ok = false, the driver falls back to the input). A polygon whose
 // two sides landed in one cell (an open sheet united through its rim)
@@ -675,7 +616,7 @@ CellWinding ClassifyCells(const Manifold::Impl& impl,
 struct EmitTopology {
   std::vector<int> keptPolygons;            // ascending polygon ids
   std::vector<std::vector<int>> outCycles;  // [kept idx] -> ring-id cycle
-  std::vector<int> ringVert;                // [ring id] -> arrangement vert
+  std::vector<int> ring2Vert;               // [ring id] -> arrangement vert
   bool ok = false;  // closed + exactly-2-halfedges checks passed
 };
 EmitTopology BuildEmitTopology(const std::vector<MergedPolygon>& polygons,
@@ -683,12 +624,12 @@ EmitTopology BuildEmitTopology(const std::vector<MergedPolygon>& polygons,
                                const CellWinding& winding);
 
 // Step 10 of the pipeline: propagate etIsect resolved verts onto
-// their piercing edges' on-edge lists, so the polygon walker
+// their piercing edges' on-edge lists, so the partition
 // subdivides those halfedges at the new pierce points. Skips verts
 // that are already edge endpoints or already in the list.
 void PropagateNewVertsToOnEdgeLists(
     const std::vector<EdgeTriIntersection>& etIsects,
-    const std::vector<int>& resolvedIds, const std::vector<Edge>& edges,
+    const std::vector<int>& etIsect2Vert, const std::vector<Edge>& edges,
     std::vector<EdgeVertList>& onEdgeLists);
 
 // Position lookup helper that handles both original-mesh verts (id
@@ -696,51 +637,6 @@ void PropagateNewVertsToOnEdgeLists(
 // baseId, into newVertPositions). Used in many pipeline functions.
 vec3 GetPos3(int id, int baseId, const Manifold::Impl& impl,
              const std::vector<vec3>& newVertPositions);
-
-// Step 11 phase 1 of the pipeline: build per-tri halfedge graphs.
-// For each tri T, emits one halfedge per sub-edge (along T's CCW
-// direction) for each of T's 3 input edges (subdivided by
-// onEdgeLists), plus BOTH directions of every new chord edge that
-// touches T (subdivided by NewEdgeWithExtras::extraVerts).
-std::vector<PerTriHalfedgeGraph> BuildPerTriHalfedgeGraphs(
-    const Manifold::Impl& impl, const std::vector<Edge>& edges,
-    const std::vector<EdgeVertList>& onEdgeLists,
-    const std::vector<NewEdgeWithExtras>& newEdgesWithExtras);
-
-// Step 11 phase 2 of the pipeline: compute next-around-face pointers
-// for each per-tri graph. 2D project (drop dominant normal axis),
-// atan2-sort outgoing halfedges per vert, find the next-clockwise
-// outgoing as the "face on the left" walk's next pointer.
-//
-// Per-graph and batch overloads.
-void AddNextPointers(const Manifold::Impl& impl,
-                     const std::vector<vec3>& newVertPositions,
-                     PerTriHalfedgeGraph& g);
-void AddNextPointers(const Manifold::Impl& impl,
-                     const std::vector<vec3>& newVertPositions,
-                     std::vector<PerTriHalfedgeGraph>& graphs);
-
-// Step 11 phase 3 of the pipeline: walk the polygon cycles in each
-// per-tri graph using nextHalfedge. Each cycle = one sub-polygon
-// (with >= 3 verts) or a degenerate 2-vert cycle (= chord pair with
-// both endpoints interior to the parent triangle).
-//
-// Per-graph and batch overloads.
-PolygonWalkResult WalkPolygons(const PerTriHalfedgeGraph& g);
-std::vector<PolygonWalkResult> WalkPolygons(
-    const std::vector<PerTriHalfedgeGraph>& graphs);
-
-// Chord-partner lookup: for each (sorted-vert-pair, owning triId)
-// of a chord edge, the partner triId on the other side. Built once
-// from step 7's newEdges and consulted during pair-sym Phase 1 +
-// the polygon classifier.
-struct ChordPartnerMap {
-  // key: (sorted v0, v1, owning triId), value: partner triId
-  std::map<std::tuple<int, int, int>, int> partnerOf;
-};
-
-ChordPartnerMap BuildChordPartnerMap(
-    const std::vector<PiercedNewEdge>& newEdges);
 
 // Conversion helper: Manifold -> Impl via the public GetMeshGL64() API,
 // to access internal halfedge / face-normal data.
@@ -754,8 +650,8 @@ Manifold::Impl ImplFromManifold(const Manifold& m);
 // "Strict" excludes:
 //   - Endpoint exactly on the plane (within FP tolerance).
 //   - Intersection at a triangle edge or vertex.
-// Used by both the in-pipeline pierce-aware cap walker and the
-// post-pipeline CheckSelfIntersection diagnostic.
+// Used by the CheckSelfIntersection diagnostic (the driver's
+// pierce-monotonicity gate and the test-side pierce counter).
 //
 // `relTol` is the FP-noise threshold below which an endpoint is
 // considered "on the plane" (returns 0). It is NOT a tolerance for
@@ -782,135 +678,6 @@ struct SelfIntersectionResult {
 
 SelfIntersectionResult CheckSelfIntersection(const Manifold& m,
                                              double relTol = 1e-12);
-
-// Per-polygon classifier helper: decides whether to KEEP a polygon
-// based on chord-bounded outward-side test. For each chord on the
-// polygon's perimeter, find its partner triangle (= the tri on the
-// other side of the chord) via chordPartners; if ALL non-chord
-// polygon verts are on the OUTWARD side of that partner, drop the
-// polygon (= it's in the carved-out region). Otherwise keep.
-//
-// "Outward" = dot(testPt - vertB, faceNormal_B) > threshold (where
-// threshold is scale-relative to ignore borderline cases).
-//
-// Used as a fallback inside the production classifier when the
-// per-vert sma-based classification (= AnalyzeSelfMesh) doesn't
-// give a clear answer for an all-chord-vert polygon.
-bool AnalyticalKeep(int triId, const std::vector<int>& polyVerts,
-                    const ChordPartnerMap& chordPartners,
-                    const std::vector<vec3>& positions3D, int baseId,
-                    const Manifold::Impl& impl);
-
-// Surface-cap walker: closes k=1 cycles in the current `out` mesh
-// by fan-triangulation (with conflict-aware fan-apex selection) +
-// greedy ear-clip fallback. Pierce-aware: refuses fan/ear tris
-// that would pierce existing geometry (Moller-Trumbore against a
-// BVH built per call). Forbidden-triple-aware: refuses tris whose
-// vert triplet is in `forbiddenTriples` (= dropped by the post-cap
-// pierce reducer; prevents drop+re-cap loops).
-//
-// Mutates `out.triVerts` (appends fan/ear tris). Returns
-// (closed cycles, total tris added).
-//
-// Known limitation: k=1 cycles are non-planar space polygons, filled by
-// pure combinatorial fan/ear-clip selected on edge-incidence and
-// pierce-vs-existing-geometry only - there is no triangle orientation,
-// planarity, or area check, so a badly-shaped cycle can over-inflate the
-// surface (the documented cray volume blowup) or leave slivers. The
-// post-pipeline volume-drift gate catches the gross case and falls back;
-// sub-threshold inflation is the residual. A best-fit-plane projection +
-// projected-simplicity check is the principled fix (tracked under #289).
-std::pair<int, int> DoCapPass(
-    MeshGL64& out, const std::set<std::array<int, 3>>& forbiddenTriples);
-
-// Pierce-aware reducer (PRE-cap): drops classifier-output tris that
-// pierce each other. Catches "overlapping kept polygons" pierces
-// the pierce-aware cap doesn't see (cap only checks NEW cap tris
-// vs existing geometry).
-//
-// Algorithm: build BVH, find piercing pairs via Moller-Trumbore,
-// drop one tri per pair (heuristic: higher pierce-count wins =
-// more "load-bearing" to remove; ties -> lower triId). Iterate up
-// to maxIters or until no pierces. Mutates out.triVerts in place.
-// Returns total tris dropped.
-int PierceAwareReducer(MeshGL64& out, int maxIters = kPierceReducerMaxIter);
-
-// Pierce-aware reducer (POST-cap, with re-cap loop): same algorithm
-// as PierceAwareReducer but alternates pierce-drop and cap-close.
-// After dropping piercing tris, calls DoCapPass to close the
-// resulting k=1 cycles. Iterate until fixed point. When the same
-// pair set persists across iters (= drop+re-cap stuck), starts
-// adding dropped tris to forbiddenTriples to break the cycle.
-//
-// Mutates out.triVerts AND forbiddenTriples (output param). Returns
-// total tris dropped.
-int PostCapPierceReducer(MeshGL64& out,
-                         std::set<std::array<int, 3>>& forbiddenTriples);
-
-// Directional k>2 reducer: for each edge with > 2 incidences, count
-// contributions per direction. To make manifold (= 1 halfedge per
-// direction), drop excess halfedges per direction; drop the entire
-// tri containing the chosen halfedge. Then re-cap any new k=1
-// cycles created by the drop. Iterate up to outerMax rounds.
-//
-// Drop heuristic: score-based. For each candidate tri, compute
-// "drop cost" = number of its OTHER 2 edges currently at k=2 (=
-// each becomes k=1 if dropped). Keep the candidate with HIGHEST
-// cost (= most "load-bearing"); drop the rest.
-//
-// Mutates out.triVerts (drops + re-cap append). Returns
-// (totalDropped, totalCapped, totalCapTris).
-struct EdgeReducerResult {
-  int totalDropped = 0;
-  int totalCapped = 0;
-  int totalCapTris = 0;
-};
-EdgeReducerResult DropExcessHalfedgeContributors(
-    MeshGL64& out, const std::set<std::array<int, 3>>& forbiddenTriples,
-    int outerMax = kDropExcessOuterMax);
-
-// Trim-orphans pass: drops tris with >= 2 k=1 edges (round 0) or
-// >= 1 k=1 edges (subsequent rounds). Iterates with re-cap until
-// no k=1 left or convergence. Effective on dangling chains the
-// cap walker can't close.
-//
-// Mutates out.triVerts. Returns (totalDropped, totalCapped, totalCapTris).
-EdgeReducerResult TrimOrphans(
-    MeshGL64& out, const std::set<std::array<int, 3>>& forbiddenTriples,
-    int maxRounds = kTrimOrphansMaxRounds);
-
-// Per-polygon classifier function type. Returns a keep flag plus
-// optional winding numbers (used in some classifier variants).
-// Called by TriangulateAndEmit for polygons of multi-
-// poly tris (single-poly tris are auto-kept).
-struct PolygonClassification {
-  bool keep;
-  int windingUp;
-  int windingDown;
-};
-using PolygonClassifierFn = std::function<PolygonClassification(
-    const std::vector<int>&, const vec3&, int triId)>;
-
-// Triangulate the kept polygons from each tri's PolygonWalkResult
-// and emit them into a Manifold via MeshGL64. Composes:
-//   1. Phase 1: tentative classification (= invoke classifier, or
-//      auto-keep for single-poly tris).
-//   2. Phase 2: cascade-drop forward (= drop auto-kept tris whose
-//      sub-edges are entirely on the k=1 boundary).
-//   3. Emit loop: for each kept polygon, fan-triangulate from on-
-//      edge collinear apex if applicable, else manifold::Triangulate.
-//   4. PierceAwareReducer (drops post-classifier overlapping tris).
-//   5. DoCapPass (close k=1 cycles).
-//   6. DropExcessHalfedgeContributors (drop excess directional contributors).
-//   7. TrimOrphans (default-on; drop tris orphaned by the reducers).
-//   8. PostCapPierceReducer (with re-cap loop, forbidden tracking).
-//   9. Construct Manifold from out MeshGL64.
-//
-// classifier: optional. If null, all polygons are kept.
-TriangulationResult TriangulateAndEmit(
-    const Manifold::Impl& impl, const std::vector<vec3>& newVertPositions,
-    const std::vector<PolygonWalkResult>& walks,
-    PolygonClassifierFn classifier = nullptr);
 
 }  // namespace overlap_removal
 }  // namespace manifold

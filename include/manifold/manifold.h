@@ -221,40 +221,35 @@ class Manifold {
    * Boolean operations produce topology-manifold output (= every
    * edge is shared by exactly two triangles) but the result may
    * still contain geometric self-intersections - pairs of triangles
-   * whose interiors cross. This method attempts to remove those
-   * pierces while preserving topology manifold-ness.
+   * whose interiors cross. This method resolves the surface
+   * arrangement and keeps the boundary between winding <= 0 and
+   * winding > 0.
    *
    * Guarantees:
+   *   - A clean input (no transversal or coplanar intersection events)
+   *     is returned bit-identically.
    *   - Pierce-monotonicity: the returned manifold's self-intersection
-   *     count never exceeds the input's. The count may stay equal while
-   *     the geometry is re-triangulated; a clean (pierce-free) input is
-   *     returned as an equivalent re-meshed manifold, not bit-identical.
-   *   - On an in-band gate reject (pipeline output non-manifold, output
-   *     volume drift > 50%, sign flip, or more pierces than the input), the
-   *     input is returned - either unchanged or in its epsilon-merged form,
-   *     whichever has no more self-intersections. A sign-flipped output is
-   *     first reverse-wound and re-checked before this fallback.
-   *   - On an internal exception (a debug assertion, allocation failure, or
-   *     a throwing constructor), the original input is returned unchanged;
-   *     no epsilon-merge is attempted on the throw path.
+   *     count never exceeds the input's.
+   *   - Fail-closed: on any internal failure or gate trip (construction
+   *     error, non-positive volume, more pierces than the input, or a
+   *     degenerate arrangement that would silently drop a closed shell),
+   *     the original input is returned unchanged. There is no
+   *     volume-ratio gate, sign-flip recovery, or repair pass.
    *
-   * Coverage: clean Boolean results, offset compositions, and single-
-   * Subtract carve-outs are typically reduced to few or no pierces. Two
-   * classes of input fall back by design:
-   *   1. Inputs whose `tolerance_` was inflated by an upstream Boolean op
-   *      on extreme-scale geometry (the Boolean engine inherits the larger
-   *      operand's tolerance instead of re-inferring from the result bbox;
-   *      a separate Boolean-engine issue).
-   *   2. Inputs with dense near-coincident face boundaries that produce
-   *      many sliver triangles in the chord region (a separate Boolean-
-   *      engine sliver issue).
-   * See `docs/OverlapRemoval.md` for the algorithm and known limitations.
+   * A successful rebuild stores positions only (`numProp == 3`);
+   * non-position properties and mesh metadata are not preserved.
+   * Near-coincident verts may be welded at the pipeline epsilon, and
+   * coincident interior walls between positive-winding regions are
+   * removed, so face-glued solids weld into one winding-faithful
+   * solid. The reported tolerance covers the movements the pipeline
+   * applied (at least 10x its working epsilon).
    *
-   * Algorithm: implements Emmett Lalish's #289 13-step sketch with
-   * a per-vert two-sided winding classifier (`AnalyzeSelfMesh`) +
-   * pair-symmetric chord enforcement + pierce-aware cap walker +
-   * pre/post-cap pierce reducers + pierce/drift gate with sign-flip
-   * recovery. Internal pipeline lives in `src/overlap_removal.{h,cpp}`.
+   * Algorithm: Emmett Lalish's #289 13-step sketch - surface
+   * arrangement (intersection chords, per-face partition), volume
+   * cell complex, winding classification by seed cast + BFS, emit.
+   * Implementation in `src/overlap_removal.cpp`; algorithm notes and
+   * known limitations (e.g. tangent-degenerate contacts that fall
+   * back) in `docs/OverlapRemoval.md`.
    */
   Manifold RemoveSelfIntersections() const;
   ///@}

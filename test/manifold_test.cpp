@@ -1064,7 +1064,7 @@ TEST(Manifold, Simplify) {
   if (options.exportModels) WriteTestOBJ("torus.obj", simplified);
 }
 
-// ---- Step 9 arrangement tests (docs/Step9Design.md) ----
+// ---- Step 9 arrangement tests (docs/OverlapRemoval.md) ----
 // Characterization tests on synthetic literal chords: they prove the
 // step-9 bookkeeping/geometry, not reachability from a real mesh
 // (open until steps 10-13 exist). All ids >= baseId == 0 against an
@@ -1747,7 +1747,7 @@ TEST(OverlapRemoval, Step9EndToEndComposition) {
   EXPECT_TRUE(threaded.chords[2].extraVerts.empty());  // e: id 4 is its own
 }
 
-// ---- Steps 10-11 partition tests (docs/Steps10to13Design.md) ----
+// ---- Steps 10-11 partition tests (docs/OverlapRemoval.md) ----
 // Fixtures run on a real tetrahedron Impl. Manifold::Impl(MeshGL64)
 // runs SortGeometry, which permutes vert and face ids, so the fixture
 // recovers the z = 0 face A(0,0,0), B(1,0,0), C(0,1,0) and its corner
@@ -2014,7 +2014,7 @@ TEST(OverlapRemoval, Step10ZeroLengthChordSkippedAndCleanFace) {
   EXPECT_EQ(clean.polygons[0].size(), 3u);
 }
 
-// ---- Step 12 canonical merge tests (docs/Steps10to13Design.md) ----
+// ---- Step 12 canonical merge tests (docs/OverlapRemoval.md) ----
 
 TEST(OverlapRemoval, Step12RotationsMergeAndSum) {
   // The same cycle in two rotations (coplanar same-orientation
@@ -2079,14 +2079,14 @@ TEST(OverlapRemoval, Step12DeterministicKeyOrder) {
   EXPECT_EQ(outA[0].cycle, (std::vector<int>{1, 2, 3}));
 }
 
-// ---- Step 13.2-13.3 cell-complex tests (docs/Steps10to13Design.md) ----
+// ---- Step 13.2-13.3 cell-complex tests (docs/OverlapRemoval.md) ----
 // Closed synthetic complexes with all ids in newVertPositions (empty
 // Impl, baseId == 0). Side key: 2 * polygon + side, side 0 = front.
 
 namespace {
 bool Step13SameCell(const overlap_removal::CellComplex& cc, int sideA,
                     int sideB) {
-  return cc.cellOf[sideA] == cc.cellOf[sideB];
+  return cc.polySide2Cell[sideA] == cc.polySide2Cell[sideB];
 }
 
 // Appends the 12 outward-wound triangles of an axis-aligned box over
@@ -2134,7 +2134,7 @@ TEST(OverlapRemoval, Step13TetraSurfaceHasTwoCells) {
       {{2, 0, 3}, 1, 0}};  // outward -x
   const overlap_removal::CellComplex cc =
       overlap_removal::BuildCellComplex(impl, polys, pos);
-  ASSERT_EQ(cc.cellOf.size(), 8u);
+  ASSERT_EQ(cc.polySide2Cell.size(), 8u);
   EXPECT_EQ(cc.numCells, 2);
   ASSERT_EQ(cc.fans.size(), 6u);
   for (const overlap_removal::EdgeFan& fan : cc.fans) {
@@ -2170,7 +2170,7 @@ TEST(OverlapRemoval, Step13BipyramidWithInternalFaceHasThreeCells) {
       {{0, 1, 2}, 1, 0}};  // 6: base, front toward U
   const overlap_removal::CellComplex cc =
       overlap_removal::BuildCellComplex(impl, polys, pos);
-  ASSERT_EQ(cc.cellOf.size(), 14u);
+  ASSERT_EQ(cc.polySide2Cell.size(), 14u);
   EXPECT_EQ(cc.numCells, 3);
   // Base edges (A,B), (B,C), (A,C) have three incident polygons.
   int k3Fans = 0;
@@ -2224,8 +2224,8 @@ TEST(OverlapRemoval, Step13CubeClassifyKeepsAllFaces) {
   ASSERT_EQ(cw.flip.size(), 11u);
   for (int p = 0; p < 11; ++p) {
     EXPECT_TRUE(cw.keep[p]) << "polygon " << p;
-    const int wFront = cw.winding[cc.cellOf[2 * p]];
-    const int wBack = cw.winding[cc.cellOf[2 * p + 1]];
+    const int wFront = cw.winding[cc.polySide2Cell[2 * p]];
+    const int wBack = cw.winding[cc.polySide2Cell[2 * p + 1]];
     if (p == 0) {
       // Reversed representation: front (+canonical normal) is inside.
       EXPECT_EQ(wFront, 1);
@@ -2263,14 +2263,14 @@ TEST(OverlapRemoval, Step13NestedCubesInnerFacesNotKept) {
   for (int p = 0; p < 12; ++p) {
     EXPECT_TRUE(cw.keep[p]) << "outer " << p;
     EXPECT_FALSE(cw.flip[p]) << "outer " << p;
-    EXPECT_EQ(cw.winding[cc.cellOf[2 * p]], 0) << "outer front " << p;
-    EXPECT_EQ(cw.winding[cc.cellOf[2 * p + 1]], 1) << "outer back " << p;
+    EXPECT_EQ(cw.winding[cc.polySide2Cell[2 * p]], 0) << "outer front " << p;
+    EXPECT_EQ(cw.winding[cc.polySide2Cell[2 * p + 1]], 1) << "outer back " << p;
   }
   for (int p = 12; p < 24; ++p) {
     EXPECT_FALSE(cw.keep[p]) << "inner " << p;
     EXPECT_FALSE(cw.flip[p]) << "inner " << p;
-    EXPECT_EQ(cw.winding[cc.cellOf[2 * p]], 1) << "inner front " << p;
-    EXPECT_EQ(cw.winding[cc.cellOf[2 * p + 1]], 2) << "inner back " << p;
+    EXPECT_EQ(cw.winding[cc.polySide2Cell[2 * p]], 1) << "inner front " << p;
+    EXPECT_EQ(cw.winding[cc.polySide2Cell[2 * p + 1]], 2) << "inner back " << p;
   }
 }
 
@@ -2293,7 +2293,7 @@ TEST(OverlapRemoval, Step13SeedCastSkipsMembranes) {
   const overlap_removal::CellComplex cc =
       overlap_removal::BuildCellComplex(impl, polys, pos);
   ASSERT_EQ(cc.numCells, 3);  // outside, inside, membrane (united)
-  ASSERT_EQ(cc.cellOf[2 * 12], cc.cellOf[2 * 12 + 1]);  // premise
+  ASSERT_EQ(cc.polySide2Cell[2 * 12], cc.polySide2Cell[2 * 12 + 1]);  // premise
   const overlap_removal::CellWinding cw =
       overlap_removal::ClassifyCells(impl, polys, pos, cc);
   ASSERT_TRUE(cw.ok);
@@ -2346,10 +2346,10 @@ TEST(OverlapRemoval, Step13BookTwinPairingSplitsSharedEdge) {
   ASSERT_EQ(et.outCycles.size(), 24u);
   // Rings: one per vert except the shared-edge verts, which carry one
   // ring per solid.
-  ASSERT_EQ(et.ringVert.size(), 16u);
+  ASSERT_EQ(et.ring2Vert.size(), 16u);
   int rings3 = 0;
   int rings7 = 0;
-  for (const int v : et.ringVert) {
+  for (const int v : et.ring2Vert) {
     rings3 += v == 3;
     rings7 += v == 7;
   }
@@ -2376,9 +2376,9 @@ TEST(OverlapRemoval, Step13BookTwinPairingSplitsSharedEdge) {
                                       ? manifold::vec3(0.5, 0.5, 0.5)
                                       : manifold::vec3(1.5, 1.5, 0.5);
     const std::vector<int>& cyc = et.outCycles[k];
-    const manifold::vec3 a = pos[et.ringVert[cyc[0]]];
-    const manifold::vec3 b = pos[et.ringVert[cyc[1]]];
-    const manifold::vec3 c = pos[et.ringVert[cyc[2]]];
+    const manifold::vec3 a = pos[et.ring2Vert[cyc[0]]];
+    const manifold::vec3 b = pos[et.ring2Vert[cyc[1]]];
+    const manifold::vec3 c = pos[et.ring2Vert[cyc[2]]];
     const manifold::vec3 n = la::cross(b - a, c - a);
     EXPECT_GT(la::dot(n, (a + b + c) / 3.0 - center), 0.0)
         << "kept polygon " << et.keptPolygons[k];
@@ -2449,8 +2449,8 @@ TEST(OverlapRemoval, Step13ConcaveSeedTargetUsesRealTriangulationEar) {
   EXPECT_EQ(cw.seedCasts, 1);  // the first (largest) target cast cleanly
   for (size_t p = 0; p < polys.size(); ++p) {
     EXPECT_TRUE(cw.keep[p]) << "polygon " << p;
-    const int wF = cw.winding[cc.cellOf[2 * p]];
-    const int wB = cw.winding[cc.cellOf[2 * p + 1]];
+    const int wF = cw.winding[cc.polySide2Cell[2 * p]];
+    const int wB = cw.winding[cc.polySide2Cell[2 * p + 1]];
     EXPECT_EQ(std::min(wF, wB), 0) << "polygon " << p;
     EXPECT_EQ(std::max(wF, wB), 1) << "polygon " << p;
   }
@@ -2632,7 +2632,7 @@ TEST(OverlapRemoval, Step1MergeReportsMaxMove) {
   EXPECT_NEAR(r.maxMove, h / 2, 1e-15);
 }
 
-// ---- Step 6.5 coplanar trace chords (docs/Steps10to13Design.md v6) ----
+// ---- Step 6.5 coplanar trace chords (docs/OverlapRemoval.md) ----
 
 // Hand-built Impl holding two disjoint open triangles (halfedges
 // unpaired; EnumerateEdges keeps only forward halfedges, and the

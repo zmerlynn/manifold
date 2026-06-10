@@ -412,17 +412,12 @@ Manifold Manifold::Simplify(double tolerance) const {
 /**
  * Removes geometric self-intersection pierces from this Manifold.
  *
- * Routes to overlap_removal::RunOverlapRemoval, which composes the full
- * pipeline (Emmett #289 steps 1-13 + pair-symmetric chord enforcement +
- * pierce-aware cap walker + a pierce/drift gate). Pierce-monotonicity is
- * guaranteed: the returned manifold's self-intersection count never
- * exceeds the input's. On an in-band gate reject (output non-manifold,
- * volume drift > 50%, sign flip, or more pierces than the input) the input
- * is returned - unchanged or in its epsilon-merged form, whichever has no
- * more pierces, with a sign-flipped output reverse-wound and re-checked
- * first. On an internal exception the original input is returned unchanged
- * with no merge attempted. See the manifold.h declaration for the full
- * contract and known fallback classes.
+ * Routes to overlap_removal::RunOverlapRemoval (the Emmett #289
+ * arrangement -> cell complex -> winding classification pipeline).
+ * Pierce-monotonicity is guaranteed: the returned manifold's
+ * self-intersection count never exceeds the input's. Every fallback
+ * path returns the original input unchanged. See the manifold.h
+ * declaration for the full contract.
  */
 Manifold Manifold::RemoveSelfIntersections() const {
   auto leafImpl = GetCsgLeafNode().GetImpl();

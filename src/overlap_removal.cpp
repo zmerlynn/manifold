@@ -25,14 +25,15 @@
 #include "impl.h"
 #include "manifold/polygon.h"  // for Triangulate
 #include "overlap_removal_internal.h"
-#include "self_mesh_analysis.h"  // AnalyzeSelfMesh + WindingAt
-#include "shared.h"              // for AlphaBudgetEpsilon
+#include "shared.h"  // for AlphaBudgetEpsilon
 
 // Internal pipeline implementation for Manifold::RemoveSelfIntersections().
-// Implements Emmett Lalish's #289 13-step sketch with a per-vert two-sided
-// winding classifier (AnalyzeSelfMesh) + pair-symmetric chord enforcement
-// (Phases 1, 2, 2.5, 3, 3.5) + pierce-aware cap walker + pre/post-cap pierce
-// reducers + pierce/drift gate with sign-flip recovery.
+// Implements Emmett Lalish's #289 13-step sketch: resolve the surface
+// arrangement (chords, crossings, per-face partition, canonical merge),
+// build the volume cell complex, classify cells by winding (seed cast +
+// BFS), and keep the boundary between winding <= 0 and winding > 0.
+// Fail-closed: any internal failure or gate trip returns the input
+// unchanged. Design + known limitations: docs/OverlapRemoval.md.
 
 namespace manifold {
 namespace overlap_removal {
@@ -45,54 +46,13 @@ namespace {
 //   boundary-graze gate. 1e-12 lets eps-perturbed verts on tri edges
 //   (within FP noise) NOT count as pierces, while keeping real
 //   intersections detectable.
-// kVolumeFloor: divide-by-zero floor when computing relative drift of
-//   a tiny-volume mesh. 1e-12 = near machine precision for doubles.
-// kDriftCutoff: relative volume change above which the post-pipeline
-//   gate falls back to input. 50% is conservative - geometry-altering
-//   pipelines (= the cap walker fills holes / drops slivers) typically
-//   change volume by < 5%; > 50% means something pathological happened.
-// kPostCapIters: how many iterations of PostCapPierceReducer to run.
-//   8 was empirically enough for working fixtures; pierce reductions
-//   plateau within 3-4 iters, the extra 4 are headroom.
 // kBarycentricFloor: minimum allowed barycentric coordinate when
 //   classifying a point as strictly inside a triangle. 1e-12 rejects
 //   points "on the boundary" (= one barycentric coord ~= 0) without
 //   bumping into FP noise. Used by BuildOnTriVertLists and
 //   FindEdgeTriIntersections.
 constexpr double kPipelineRelTol = 1e-12;
-constexpr double kVolumeFloor = 1e-12;
-constexpr double kDriftCutoff = 0.50;
-constexpr int kPostCapIters = 8;
 constexpr double kBarycentricFloor = 1e-12;
-
-// Iteration caps. All loops below have an early-exit on convergence;
-// these caps are tripwires that catch pathological inputs without
-// allowing infinite work. DEBUG_ASSERTs check that we hit the
-// convergence condition, not the cap, so a cap-hit in DEBUG builds
-// surfaces as a logic error.
-//
-// kPairSymPhase3MaxIter / kPairSymPhase35MaxIter: monotonic
-//   drop / re-key passes in pair-sym Phase 3 / 3.5. Strict upper
-//   bound is the polygon count (each pass changes >=1 polygon or
-//   exits). For typical mesh sizes (tens of thousands of polygons)
-//   we converge in < 16 iters; cap at 64 catches a 4x slowdown
-//   pathology without allowing 30k-poly meshes to grind for minutes.
-// kCascadeDropMaxPass: forward-cascade drop in TriangulateAndEmit's
-//   classifier post-pass. Same monotonicity argument; 16 covers all
-//   working fixtures.
-// kCycleWalkerGuard / kEarClipGuard: per-polygon walk guards. Max
-//   work is the polygon size; 4096 covers any realistic single-tri
-//   subdivision (typical: tens of verts; pathological: hundreds).
-//
-// (kMergeVertsMaxIter / kPierceReducerMaxIter / kDropExcessOuterMax
-// / kTrimOrphansMaxRounds live in overlap_removal_internal.h as
-// header constants because they're used as parameter defaults in
-// the corresponding function declarations.)
-constexpr int kPairSymPhase3MaxIter = 64;
-constexpr int kPairSymPhase35MaxIter = 64;
-constexpr int kCascadeDropMaxPass = 16;
-constexpr int kCycleWalkerGuard = 4096;
-constexpr int kEarClipGuard = 4096;
 
 // kSeedCastDir: direction from the arrangement bbox center to the
 //   seed cast's source point P0 (step 13.4), at 2x the bbox diagonal.
@@ -128,8 +88,8 @@ constexpr double kFoldedVolumePerAreaEps = 100.0;
 
 // Deterministic orthonormal in-plane basis for a unit face normal - a
 // true isometry, so a kernel's 2D eps equals the pipeline's 3D eps
-// (the axis-drop projection used by the old walker is not an isometry
-// and would contract distances). cross(u, v) == n, so CCW in (u, v)
+// (an axis-drop projection would not be an isometry and would
+// contract distances). cross(u, v) == n, so CCW in (u, v)
 // is CCW about the normal. Shared by step 6.5's clip frame, step 9's
 // projection, and the step 10-11 angular ordering.
 struct InPlaneBasis {
@@ -169,6 +129,62 @@ void SortVertsByT(std::vector<int>& verts, std::vector<double>& ts) {
   verts = std::move(sortedV);
   ts = std::move(sortedT);
 }
+
+// Seed-cast segment-vs-ear-triangle kernel (step 13.4). Transversal
+// crossings only: anything within eps (a length) of a degenerate
+// contact - a segment endpoint on the triangle's plane near the
+// triangle, a crossing within eps of an ear edge (polygon boundary
+// or interior diagonal alike), a near-in-plane segment - reports
+// kGraze, which invalidates the WHOLE cast. The retry-on-next-target
+// loop replaces SoS here; a per-polygon skip would corrupt the seed
+// by a silent +-mult, so there is none.
+enum class CastHit { kMiss, kHit, kGraze };
+struct CastResult {
+  CastHit kind;
+  int step;  // on kHit: the winding increment per unit multiplicity,
+             // -sign(dot(p1 - p0, ear normal))
+};
+CastResult CastSegmentAtEar(const vec3& p0, const vec3& p1, const vec3& a,
+                            const vec3& b, const vec3& c, double eps) {
+  using la::cross;
+  using la::dot;
+  const vec3 nRaw = cross(b - a, c - a);
+  const double nLen = std::sqrt(dot(nRaw, nRaw));
+  if (nLen == 0) return {CastHit::kGraze, 0};  // degenerate ear
+  const vec3 n = nRaw / nLen;
+  const double s0 = dot(p0 - a, n);
+  const double s1 = dot(p1 - a, n);
+  // Signed distance of an in-plane point from the ear's boundary:
+  // the min over edges of the inward edge-line distance, positive
+  // strictly interior. n perp each edge, so cross(n, dir) is unit.
+  auto edgeMargin = [&](const vec3& x) {
+    double dMin = std::numeric_limits<double>::infinity();
+    const vec3 tri[3] = {a, b, c};
+    for (int e = 0; e < 3; ++e) {
+      const vec3 from = tri[e];
+      vec3 dir = tri[(e + 1) % 3] - from;
+      dir = dir / std::sqrt(dot(dir, dir));
+      dMin = std::min(dMin, dot(cross(n, dir), x - from));
+    }
+    return dMin;
+  };
+  const bool near0 = std::fabs(s0) <= eps;
+  const bool near1 = std::fabs(s1) <= eps;
+  if (near0 && near1) return {CastHit::kGraze, 0};  // nearly in-plane
+  if (near0 || near1) {
+    // One endpoint within eps of the plane: degenerate only if its
+    // plane contact is at/near the triangle itself - a coplanar
+    // polygon far from the contact is a clean miss.
+    const vec3 xNear = near0 ? p0 - n * s0 : p1 - n * s1;
+    return {edgeMargin(xNear) <= -eps ? CastHit::kMiss : CastHit::kGraze, 0};
+  }
+  if ((s0 > 0) == (s1 > 0)) return {CastHit::kMiss, 0};
+  const vec3 x = p0 + (p1 - p0) * (s0 / (s0 - s1));
+  const double margin = edgeMargin(x);
+  if (std::fabs(margin) <= eps) return {CastHit::kGraze, 0};
+  if (margin < 0) return {CastHit::kMiss, 0};
+  return {CastHit::kHit, s1 > s0 ? -1 : 1};
+}
 }  // namespace
 
 SortedBVH BuildSortedBVH(VecView<const Box> leafBoxes) {
@@ -186,16 +202,16 @@ SortedBVH BuildSortedBVH(VecView<const Box> leafBoxes) {
   std::vector<uint32_t> rawMorton(n);
   for (size_t i = 0; i < n; ++i)
     rawMorton[i] = Collider::MortonCode(leafBoxes[i].Center(), bbox);
-  out.perm.resize(n);
-  std::iota(out.perm.begin(), out.perm.end(), size_t{0});
-  std::stable_sort(out.perm.begin(), out.perm.end(), [&](size_t a, size_t b) {
-    return rawMorton[a] < rawMorton[b];
-  });
+  out.leaf2Orig.resize(n);
+  std::iota(out.leaf2Orig.begin(), out.leaf2Orig.end(), size_t{0});
+  std::stable_sort(
+      out.leaf2Orig.begin(), out.leaf2Orig.end(),
+      [&](size_t a, size_t b) { return rawMorton[a] < rawMorton[b]; });
   out.boxes.resize(n);
   out.morton.resize(n);
   for (size_t i = 0; i < n; ++i) {
-    out.boxes[i] = leafBoxes[out.perm[i]];
-    out.morton[i] = rawMorton[out.perm[i]];
+    out.boxes[i] = leafBoxes[out.leaf2Orig[i]];
+    out.morton[i] = rawMorton[out.leaf2Orig[i]];
   }
   // Collider's constructor throws on a single leaf (no internal
   // nodes, so NumLeaves() == 0 and UpdateBoxes rejects the box
@@ -254,8 +270,8 @@ MergeVertsResult MergeVertsEps(const Manifold& in, double eps, int maxIter) {
     const double eps2 = eps * eps;
     auto checkPair = [&](size_t qi, size_t li) {
       if (qi >= li) return;
-      const size_t va = bvh.perm[qi];
-      const size_t vb = bvh.perm[li];
+      const size_t va = bvh.leaf2Orig[qi];
+      const size_t vb = bvh.leaf2Orig[li];
       const vec3 d = verts[va] - verts[vb];
       const double d2 = la::dot(d, d);
       if (d2 > eps2) return;
@@ -399,7 +415,7 @@ std::vector<EdgeVertList> BuildOnEdgeVertLists(const Manifold::Impl& impl,
   std::vector<std::vector<std::pair<double, int>>> hitsByEdge(nE);
   auto onCollision = [&](size_t vertIdxQ, size_t edgeIdxL) {
     const size_t vertIdx = vertIdxQ;
-    const size_t edgeIdx = bvh.perm[edgeIdxL];
+    const size_t edgeIdx = bvh.leaf2Orig[edgeIdxL];
     const auto& edge = edges[edgeIdx];
     if (static_cast<int>(vertIdx) == edge.v0 ||
         static_cast<int>(vertIdx) == edge.v1)
@@ -466,7 +482,7 @@ std::vector<TriVertList> BuildOnTriVertLists(const Manifold::Impl& impl,
       BuildSortedBVH(VecView<const Box>(triBoxes.data(), triBoxes.size()));
 
   auto onCollision = [&](size_t vertIdx, size_t triIdxL) {
-    const size_t triIdx = bvh.perm[triIdxL];
+    const size_t triIdx = bvh.leaf2Orig[triIdxL];
     const int t0 = impl.halfedge_.Start(3 * triIdx + 0);
     const int t1 = impl.halfedge_.Start(3 * triIdx + 1);
     const int t2 = impl.halfedge_.Start(3 * triIdx + 2);
@@ -549,7 +565,7 @@ std::vector<EdgeTriIntersection> FindEdgeTriIntersections(
 
   auto onCollision = [&](size_t triIdxQ, size_t edgeIdxL) {
     const size_t triIdx = triIdxQ;
-    const size_t edgeIdx = bvh.perm[edgeIdxL];
+    const size_t edgeIdx = bvh.leaf2Orig[edgeIdxL];
     const Edge& edge = edges[edgeIdx];
     if (static_cast<int>(triIdx) == edge.halfedgeForward / 3 ||
         (edge.halfedgePaired >= 0 &&
@@ -642,12 +658,12 @@ ChordEdges GenerateChordEdges(const Manifold::Impl& impl,
 
   // Resolve each etIsect to a vert id, deduping new positions
   // against each other within eps.
-  r.resolvedIds.assign(etIsects.size(), -1);
-  std::vector<int>& resolvedId = r.resolvedIds;
+  r.etIsect2Vert.assign(etIsects.size(), -1);
+  std::vector<int>& etIsect2Vert = r.etIsect2Vert;
   for (size_t i = 0; i < etIsects.size(); ++i) {
     const auto& x = etIsects[i];
     if (x.snapTo >= 0) {
-      resolvedId[i] = x.snapTo;
+      etIsect2Vert[i] = x.snapTo;
       continue;
     }
     int found = -1;
@@ -659,9 +675,9 @@ ChordEdges GenerateChordEdges(const Manifold::Impl& impl,
       }
     }
     if (found >= 0) {
-      resolvedId[i] = found;
+      etIsect2Vert[i] = found;
     } else {
-      resolvedId[i] = baseId + static_cast<int>(r.newVertPositions.size());
+      etIsect2Vert[i] = baseId + static_cast<int>(r.newVertPositions.size());
       r.newVertPositions.push_back(x.position);
     }
   }
@@ -675,7 +691,7 @@ ChordEdges GenerateChordEdges(const Manifold::Impl& impl,
     const int triA2 = e.halfedgePaired >= 0 ? e.halfedgePaired / 3 : -1;
     auto add = [&](int t1, int t2) {
       auto key = (t1 < t2) ? std::make_pair(t1, t2) : std::make_pair(t2, t1);
-      pairEndpoints[key].insert(resolvedId[i]);
+      pairEndpoints[key].insert(etIsect2Vert[i]);
     };
     add(triA1, x.triIdx);
     if (triA2 >= 0) add(triA2, x.triIdx);
@@ -785,7 +801,7 @@ std::vector<std::vector<int>> GroupChordsByFace(
 
 TraceChordResult CoplanarTraceChords(const Manifold::Impl& impl,
                                      const std::vector<Edge>& edges,
-                                     const std::vector<int>& edgeOfHalfedge,
+                                     const std::vector<int>& halfedge2Edge,
                                      std::vector<vec3> newVertPositions,
                                      double tolerance, double eps) {
   using la::cross;
@@ -817,8 +833,8 @@ TraceChordResult CoplanarTraceChords(const Manifold::Impl& impl,
   std::vector<std::pair<int, int>> pairs;
   auto recordPair = [&](size_t qi, size_t li) {
     if (qi >= li) return;
-    const int ta = static_cast<int>(bvh.perm[qi]);
-    const int tb = static_cast<int>(bvh.perm[li]);
+    const int ta = static_cast<int>(bvh.leaf2Orig[qi]);
+    const int tb = static_cast<int>(bvh.leaf2Orig[li]);
     pairs.push_back({std::min(ta, tb), std::max(ta, tb)});
   };
   auto recorder = MakeSimpleRecorder(recordPair);
@@ -1090,7 +1106,7 @@ TraceChordResult CoplanarTraceChords(const Manifold::Impl& impl,
           if (!isNew[e]) continue;
           auto addOn = [&](int face, int kk, const vec3& s0, const vec3& s1) {
             if (kk < 0) return;
-            const int edgeIdx = edgeOfHalfedge[3 * face + kk];
+            const int edgeIdx = halfedge2Edge[3 * face + kk];
             if (edgeIdx < 0) return;
             if (!additionSeen.insert({edgeIdx, ids[e]}).second) return;
             const vec3 d = s1 - s0;
@@ -1180,8 +1196,8 @@ UnifyResult UnifyArrangementVerts(const Manifold::Impl& impl,
   DisjointSets uf(static_cast<uint32_t>(nNew));
   auto unitePair = [&](size_t qi, size_t li) {
     if (qi >= li) return;
-    const int a = static_cast<int>(bvh.perm[qi]);
-    const int b = static_cast<int>(bvh.perm[li]);
+    const int a = static_cast<int>(bvh.leaf2Orig[qi]);
+    const int b = static_cast<int>(bvh.leaf2Orig[li]);
     const vec3 d = newVertPositions[a] - newVertPositions[b];
     if (dot(d, d) <= radius2) {
       uf.unite(static_cast<uint32_t>(a), static_cast<uint32_t>(b));
@@ -1209,7 +1225,7 @@ UnifyResult UnifyArrangementVerts(const Manifold::Impl& impl,
     }
     auto hit = [&](size_t qi, size_t li) {
       const int v = static_cast<int>(qi);
-      const int j = static_cast<int>(bvh.perm[li]);
+      const int j = static_cast<int>(bvh.leaf2Orig[li]);
       const vec3 d = newVertPositions[j] - impl.vertPos_[v];
       const double r = vertSnapR(j);
       const double d2 = dot(d, d);
@@ -1311,7 +1327,7 @@ UnifyResult UnifyArrangementVerts(const Manifold::Impl& impl,
 std::vector<OnChordContact> FindOnChordEndpointContacts(
     const Manifold::Impl& impl, const std::vector<NewEdgeWithExtras>& chords,
     const std::vector<vec3>& newVertPositions,
-    const std::vector<std::vector<int>>& chordsByFace, double tolerance,
+    const std::vector<std::vector<int>>& face2Chords, double tolerance,
     double eps) {
   using la::dot;
   std::vector<OnChordContact> out;
@@ -1323,7 +1339,7 @@ std::vector<OnChordContact> FindOnChordEndpointContacts(
   // A chord pair shares up to two faces; record each (chord, vert)
   // contact once.
   std::set<std::pair<int, int>> seen;
-  for (const std::vector<int>& faceChords : chordsByFace) {
+  for (const std::vector<int>& faceChords : face2Chords) {
     for (int ci : faceChords) {
       const PiercedNewEdge& c = chords[ci].edge;
       for (int di : faceChords) {
@@ -1366,7 +1382,7 @@ std::vector<OnChordContact> FindOnChordEndpointContacts(
 std::vector<ChordChordCrossing> FindChordChordCrossings(
     const Manifold::Impl& impl, const std::vector<NewEdgeWithExtras>& chords,
     const std::vector<vec3>& newVertPositions,
-    const std::vector<std::vector<int>>& chordsByFace,
+    const std::vector<std::vector<int>>& face2Chords,
     VecView<const vec3> faceNormals, double eps) {
   using la::dot;
   std::vector<ChordChordCrossing> out;
@@ -1374,8 +1390,8 @@ std::vector<ChordChordCrossing> FindChordChordCrossings(
   // A chord pair shares up to two faces; its crossing is recorded once
   // (lowest face wins by iteration order).
   std::set<std::pair<int, int>> seenPairs;
-  for (size_t face = 0; face < chordsByFace.size(); ++face) {
-    const std::vector<int>& faceChords = chordsByFace[face];
+  for (size_t face = 0; face < face2Chords.size(); ++face) {
+    const std::vector<int>& faceChords = face2Chords[face];
     if (faceChords.size() < 2) continue;
     DEBUG_ASSERT(face < faceNormals.size(), logicErr,
                  "FindChordChordCrossings: face normal missing");
@@ -1588,7 +1604,7 @@ std::vector<ChordCrossing> MergeAndPropagateCrossings(
     const Manifold::Impl& impl, const std::vector<NewEdgeWithExtras>& chords,
     const std::vector<vec3>& newVertPositions,
     const std::vector<ChordChordCrossing>& raw,
-    const std::vector<std::vector<int>>& chordsByFace,
+    const std::vector<std::vector<int>>& face2Chords,
     VecView<const vec3> faceNormals, double tolerance, double eps) {
   using la::dot;
   std::vector<ChordCrossing> out;
@@ -1705,8 +1721,8 @@ std::vector<ChordCrossing> MergeAndPropagateCrossings(
     }
     const double eps2 = eps * eps;
     for (const int f : faces) {
-      if (f < 0 || static_cast<size_t>(f) >= chordsByFace.size()) continue;
-      for (const int ch : chordsByFace[f]) {
+      if (f < 0 || static_cast<size_t>(f) >= face2Chords.size()) continue;
+      for (const int ch : face2Chords[f]) {
         if (seenChords.count(ch) > 0) continue;
         const PiercedNewEdge& e = chords[ch].edge;
         const vec3 a = GetPos3(e.v0, baseId, impl, newVertPositions);
@@ -1744,7 +1760,7 @@ std::vector<int> BuildHalfedgeToEdgeIndex(const Manifold::Impl& impl,
 
 FacePartition PartitionFace(const Manifold::Impl& impl, int face,
                             const std::vector<Edge>& edges,
-                            const std::vector<int>& edgeOfHalfedge,
+                            const std::vector<int>& halfedge2Edge,
                             const std::vector<EdgeVertList>& onEdgeLists,
                             const std::vector<NewEdgeWithExtras>& chords,
                             const std::vector<int>& faceChords,
@@ -1798,7 +1814,7 @@ FacePartition PartitionFace(const Manifold::Impl& impl, int face,
     const Halfedge he = impl.halfedge_.Get(3 * face + k);
     const int a = he.startVert;
     const int b = he.endVert;
-    const int ei = edgeOfHalfedge[3 * face + k];
+    const int ei = halfedge2Edge[3 * face + k];
     DEBUG_ASSERT(ei >= 0, logicErr,
                  "PartitionFace: face edge missing from EnumerateEdges");
     if (ei < 0) continue;
@@ -2130,7 +2146,7 @@ CellComplex BuildCellComplex(const Manifold::Impl& impl,
   }
 
   // Renumber cells by smallest member key; emit fans ordered by edge.
-  out.cellOf.assign(2 * nP, -1);
+  out.polySide2Cell.assign(2 * nP, -1);
   std::map<uint32_t, int> cellIdOf;
   for (int s = 0; s < 2 * nP; ++s) {
     const uint32_t r = uf.find(static_cast<uint32_t>(s));
@@ -2138,7 +2154,7 @@ CellComplex BuildCellComplex(const Manifold::Impl& impl,
     if (it == cellIdOf.end()) {
       it = cellIdOf.insert({r, out.numCells++}).first;
     }
-    out.cellOf[s] = it->second;
+    out.polySide2Cell[s] = it->second;
   }
   out.fans.reserve(fans.size());
   for (const auto& [key, entries] : fans) {
@@ -2155,64 +2171,6 @@ CellComplex BuildCellComplex(const Manifold::Impl& impl,
   }
   return out;
 }
-
-namespace {
-// Seed-cast segment-vs-ear-triangle kernel (step 13.4). Transversal
-// crossings only: anything within eps (a length) of a degenerate
-// contact - a segment endpoint on the triangle's plane near the
-// triangle, a crossing within eps of an ear edge (polygon boundary
-// or interior diagonal alike), a near-in-plane segment - reports
-// kGraze, which invalidates the WHOLE cast. The retry-on-next-target
-// loop replaces SoS here; a per-polygon skip would corrupt the seed
-// by a silent +-mult, so there is none.
-enum class CastHit { kMiss, kHit, kGraze };
-struct CastResult {
-  CastHit kind;
-  int step;  // on kHit: the winding increment per unit multiplicity,
-             // -sign(dot(p1 - p0, ear normal))
-};
-CastResult CastSegmentAtEar(const vec3& p0, const vec3& p1, const vec3& a,
-                            const vec3& b, const vec3& c, double eps) {
-  using la::cross;
-  using la::dot;
-  const vec3 nRaw = cross(b - a, c - a);
-  const double nLen = std::sqrt(dot(nRaw, nRaw));
-  if (nLen == 0) return {CastHit::kGraze, 0};  // degenerate ear
-  const vec3 n = nRaw / nLen;
-  const double s0 = dot(p0 - a, n);
-  const double s1 = dot(p1 - a, n);
-  // Signed distance of an in-plane point from the ear's boundary:
-  // the min over edges of the inward edge-line distance, positive
-  // strictly interior. n perp each edge, so cross(n, dir) is unit.
-  auto edgeMargin = [&](const vec3& x) {
-    double dMin = std::numeric_limits<double>::infinity();
-    const vec3 tri[3] = {a, b, c};
-    for (int e = 0; e < 3; ++e) {
-      const vec3 from = tri[e];
-      vec3 dir = tri[(e + 1) % 3] - from;
-      dir = dir / std::sqrt(dot(dir, dir));
-      dMin = std::min(dMin, dot(cross(n, dir), x - from));
-    }
-    return dMin;
-  };
-  const bool near0 = std::fabs(s0) <= eps;
-  const bool near1 = std::fabs(s1) <= eps;
-  if (near0 && near1) return {CastHit::kGraze, 0};  // nearly in-plane
-  if (near0 || near1) {
-    // One endpoint within eps of the plane: degenerate only if its
-    // plane contact is at/near the triangle itself - a coplanar
-    // polygon far from the contact is a clean miss.
-    const vec3 xNear = near0 ? p0 - n * s0 : p1 - n * s1;
-    return {edgeMargin(xNear) <= -eps ? CastHit::kMiss : CastHit::kGraze, 0};
-  }
-  if ((s0 > 0) == (s1 > 0)) return {CastHit::kMiss, 0};
-  const vec3 x = p0 + (p1 - p0) * (s0 / (s0 - s1));
-  const double margin = edgeMargin(x);
-  if (std::fabs(margin) <= eps) return {CastHit::kGraze, 0};
-  if (margin < 0) return {CastHit::kMiss, 0};
-  return {CastHit::kHit, s1 > s0 ? -1 : 1};
-}
-}  // namespace
 
 CellWinding ClassifyCells(const Manifold::Impl& impl,
                           const std::vector<MergedPolygon>& polygons,
@@ -2296,8 +2254,8 @@ CellWinding ClassifyCells(const Manifold::Impl& impl,
   // propagates nothing; the keep rule below never keeps it.
   std::vector<std::vector<std::pair<int, int>>> adj(cells.numCells);
   for (int p = 0; p < nP; ++p) {
-    const int cF = cells.cellOf[2 * p];
-    const int cB = cells.cellOf[2 * p + 1];
+    const int cF = cells.polySide2Cell[2 * p];
+    const int cB = cells.polySide2Cell[2 * p + 1];
     if (cF == cB) continue;
     adj[cF].push_back({cB, polygons[p].mult});
     adj[cB].push_back({cF, -polygons[p].mult});
@@ -2331,8 +2289,8 @@ CellWinding ClassifyCells(const Manifold::Impl& impl,
     // no seed: its polygons are dropped whatever the winding.
     std::vector<int> candidates;
     for (int p = 0; p < nP; ++p) {
-      if (compOf[cells.cellOf[2 * p]] == comp &&
-          cells.cellOf[2 * p] != cells.cellOf[2 * p + 1]) {
+      if (compOf[cells.polySide2Cell[2 * p]] == comp &&
+          cells.polySide2Cell[2 * p] != cells.polySide2Cell[2 * p + 1]) {
         candidates.push_back(p);
       }
     }
@@ -2407,7 +2365,8 @@ CellWinding ClassifyCells(const Manifold::Impl& impl,
         // excluded from the BFS - the cast must skip it too, or the
         // seeded winding disagrees with what propagates from it
         // (review finding).
-        if (cells.cellOf[2 * p] == cells.cellOf[2 * p + 1]) continue;
+        if (cells.polySide2Cell[2 * p] == cells.polySide2Cell[2 * p + 1])
+          continue;
         // SIGNED sum over the fan ears: where a concavity makes fan
         // ears overlap, the opposite-orientation hits cancel exactly
         // (the winding-decomposition argument behind the fan choice).
@@ -2429,7 +2388,7 @@ CellWinding ClassifyCells(const Manifold::Impl& impl,
       // Seed the side the segment arrives through: the front iff the
       // canonical normal points back along the arrival direction.
       const int side = dot(target - p0, normal[q]) < 0 ? 0 : 1;
-      const int seedCell = cells.cellOf[2 * q + side];
+      const int seedCell = cells.polySide2Cell[2 * q + side];
       out.winding[seedCell] = wArr;
       seen[seedCell] = true;
       std::vector<int> frontier{seedCell};
@@ -2469,8 +2428,8 @@ CellWinding ClassifyCells(const Manifold::Impl& impl,
   // orient kept polygons with the normal toward the outside cell, so
   // flip exactly those whose front is the inside.
   for (int p = 0; p < nP; ++p) {
-    const bool inFront = out.winding[cells.cellOf[2 * p]] > 0;
-    const bool inBack = out.winding[cells.cellOf[2 * p + 1]] > 0;
+    const bool inFront = out.winding[cells.polySide2Cell[2 * p]] > 0;
+    const bool inBack = out.winding[cells.polySide2Cell[2 * p + 1]] > 0;
     out.keep[p] = inFront != inBack;
     out.flip[p] = out.keep[p] && inFront;
   }
@@ -2553,7 +2512,7 @@ EmitTopology BuildEmitTopology(const std::vector<MergedPolygon>& polygons,
       const int x = keptPos[i];
       const int y = keptPos[(i + 1) % kc];
       const int wedgeCell =
-          cells.cellOf[2 * fan.polygons[x] + (fan.frontCcw[x] ? 0 : 1)];
+          cells.polySide2Cell[2 * fan.polygons[x] + (fan.frontCcw[x] ? 0 : 1)];
       if (winding.winding[wedgeCell] <= 0) continue;  // outside wedge
       const int ka = keptIdxOf[fan.polygons[x]];
       const int kb = keptIdxOf[fan.polygons[y]];
@@ -2625,13 +2584,13 @@ EmitTopology BuildEmitTopology(const std::vector<MergedPolygon>& polygons,
     return orbits[a].minPoly < orbits[b].minPoly;
   });
   std::vector<int> ringOfOrbit(orbits.size());
-  out.ringVert.resize(orbits.size());
+  out.ring2Vert.resize(orbits.size());
   for (size_t r = 0; r < order.size(); ++r) {
     DEBUG_ASSERT(r == 0 || orbits[order[r - 1]].vert != orbits[order[r]].vert ||
                      orbits[order[r - 1]].minPoly != orbits[order[r]].minPoly,
                  logicErr, "BuildEmitTopology: duplicate ring key");
     ringOfOrbit[order[r]] = static_cast<int>(r);
-    out.ringVert[r] = orbits[order[r]].vert;
+    out.ring2Vert[r] = orbits[order[r]].vert;
   }
   for (int k = 0; k < nK; ++k) {
     std::vector<int>& cyc = out.outCycles[k];
@@ -2664,7 +2623,7 @@ EmitTopology BuildEmitTopology(const std::vector<MergedPolygon>& polygons,
 
 void PropagateNewVertsToOnEdgeLists(
     const std::vector<EdgeTriIntersection>& etIsects,
-    const std::vector<int>& resolvedIds, const std::vector<Edge>& edges,
+    const std::vector<int>& etIsect2Vert, const std::vector<Edge>& edges,
     std::vector<EdgeVertList>& onEdgeLists) {
   // For each etIsect, add the resolved vert id to the on-edge list of the
   // piercing edge with parameter t = x.s. Skip if the vert is the edge's
@@ -2673,7 +2632,7 @@ void PropagateNewVertsToOnEdgeLists(
   for (size_t i = 0; i < etIsects.size(); ++i) {
     const auto& x = etIsects[i];
     auto& list = onEdgeLists[x.edgeIdx];
-    const int v = resolvedIds[i];
+    const int v = etIsect2Vert[i];
     if (v == edges[x.edgeIdx].v0 || v == edges[x.edgeIdx].v1) continue;
     if (std::find(list.verts.begin(), list.verts.end(), v) != list.verts.end())
       continue;
@@ -2757,8 +2716,8 @@ SelfIntersectionResult CheckSelfIntersection(const Manifold& m, double relTol) {
 
   auto checkPair = [&](size_t qi, size_t li) {
     if (qi >= li) return;
-    const size_t ta = bvh.perm[qi];
-    const size_t tb = bvh.perm[li];
+    const size_t ta = bvh.leaf2Orig[qi];
+    const size_t tb = bvh.leaf2Orig[li];
     int shared = 0;
     for (int a = 0; a < 3; ++a)
       for (int b = 0; b < 3; ++b)
@@ -2795,34 +2754,6 @@ SelfIntersectionResult CheckSelfIntersection(const Manifold& m, double relTol) {
 }
 
 namespace {
-// Pipeline body - separated from RunOverlapRemoval so the entry
-// point can wrap it in a try/catch and fall back to input on any
-// internal exception (= e.g. Triangulate's CCW-check assertion
-// when the polygon walker emits a degenerate sub-polygon under
-// MANIFOLD_DEBUG builds).
-Manifold RunOverlapRemovalImpl(const Manifold& input, double eps);
-}  // namespace
-
-Manifold RunOverlapRemoval(const Manifold& input, double eps) {
-  // Outer try/catch: if any internal stage throws (= a MANIFOLD_DEBUG
-  // assertion in Triangulate, the Manifold(out) constructor, or
-  // std::bad_alloc), return the input unchanged. The input is already a
-  // valid manifold with no more self-intersections than itself, so this
-  // preserves pierce-monotonicity without running any further allocating
-  // or possibly-throwing work (MergeVertsEps both asserts and can produce
-  // a non-manifold result, so it must not run on the failure path).
-  try {
-    return RunOverlapRemovalImpl(input, eps);
-  } catch (const std::exception& e) {                        // TEMP DEBUG
-    fprintf(stderr, "RSI-TEMP: exception: %s\n", e.what());  // TEMP DEBUG
-    return input;
-  } catch (...) {
-    fprintf(stderr, "RSI-TEMP: exception: <unknown>\n");  // TEMP DEBUG
-    return input;
-  }
-}
-
-namespace {
 // Final-gate helper: does any folded cell enclose real volume?
 // Polygons whose two sides united (front cell == back cell, e.g.
 // across a k = 1 rim) are dropped by the keep rule. That is correct
@@ -2838,8 +2769,7 @@ namespace {
 bool FoldedCellsEncloseVolume(const Manifold::Impl& impl,
                               const std::vector<MergedPolygon>& polys,
                               const std::vector<vec3>& newVertPositions,
-                              const CellComplex& cells, double eps,
-                              double& worstVolume) {
+                              const CellComplex& cells, double eps) {
   const int baseId = static_cast<int>(impl.NumVert());
   auto posOf = [&](int id) {
     return GetPos3(id, baseId, impl, newVertPositions);
@@ -2847,8 +2777,8 @@ bool FoldedCellsEncloseVolume(const Manifold::Impl& impl,
   std::vector<vec3> centroid(cells.numCells, vec3(0.0, 0.0, 0.0));
   std::vector<int> centroidVerts(cells.numCells, 0);
   for (size_t p = 0; p < polys.size(); ++p) {
-    const int c = cells.cellOf[2 * p];
-    if (c != cells.cellOf[2 * p + 1]) continue;
+    const int c = cells.polySide2Cell[2 * p];
+    if (c != cells.polySide2Cell[2 * p + 1]) continue;
     for (const int v : polys[p].cycle) {
       centroid[c] = centroid[c] + posOf(v);
       ++centroidVerts[c];
@@ -2860,8 +2790,8 @@ bool FoldedCellsEncloseVolume(const Manifold::Impl& impl,
   std::vector<double> volume(cells.numCells, 0.0);
   std::vector<double> area(cells.numCells, 0.0);
   for (size_t p = 0; p < polys.size(); ++p) {
-    const int c = cells.cellOf[2 * p];
-    if (c != cells.cellOf[2 * p + 1]) continue;
+    const int c = cells.polySide2Cell[2 * p];
+    if (c != cells.polySide2Cell[2 * p + 1]) continue;
     const std::vector<int>& cyc = polys[p].cycle;
     const vec3 a0 = posOf(cyc[0]);
     vec3 nsum(0.0, 0.0, 0.0);
@@ -2876,16 +2806,13 @@ bool FoldedCellsEncloseVolume(const Manifold::Impl& impl,
     volume[c] += polys[p].mult * vol;
     area[c] += 0.5 * std::sqrt(la::dot(nsum, nsum));
   }
-  worstVolume = 0.0;
-  bool exceeds = false;
   for (int c = 0; c < cells.numCells; ++c) {
     if (centroidVerts[c] == 0) continue;
-    worstVolume = std::max(worstVolume, std::fabs(volume[c]));
     if (std::fabs(volume[c]) > area[c] * kFoldedVolumePerAreaEps * eps) {
-      exceeds = true;
+      return true;
     }
   }
-  return exceeds;
+  return false;
 }
 
 Manifold RunOverlapRemovalImpl(const Manifold& input, double eps) {
@@ -2925,40 +2852,24 @@ Manifold RunOverlapRemovalImpl(const Manifold& input, double eps) {
   // eps-merge-flattened pancake class. Appended to the chord list
   // BEFORE the early-exit, the per-face grouping, and step 8, so the
   // whole arrangement machinery consumes them unchanged.
-  const std::vector<int> edgeOfHalfedge = BuildHalfedgeToEdgeIndex(impl, edges);
-  fprintf(stderr, "RSI-TEMP: pool after 7 = %zu\n",  // TEMP DEBUG
-          chordEdges.newVertPositions.size());
+  const std::vector<int> halfedge2Edge = BuildHalfedgeToEdgeIndex(impl, edges);
   TraceChordResult trace = CoplanarTraceChords(
-      impl, edges, edgeOfHalfedge, std::move(chordEdges.newVertPositions),
+      impl, edges, halfedge2Edge, std::move(chordEdges.newVertPositions),
       tolerance, eps);
   chordEdges.newVertPositions = std::move(trace.newVertPositions);
   chordEdges.newEdges.insert(chordEdges.newEdges.end(), trace.chords.begin(),
                              trace.chords.end());
-  fprintf(stderr, "RSI-TEMP: pool after 6.5 = %zu (baseId %d)\n",  // TEMP
-          chordEdges.newVertPositions.size(), baseId);
-  {  // TEMP DEBUG: trace chords incident to the hull tie faces.
-    for (const PiercedNewEdge& ch : trace.chords) {
-      if (ch.triA == 13843 || ch.triB == 13843 || ch.triA == 12273 ||
-          ch.triB == 12273 || ch.triA == 12275 || ch.triB == 12275) {
-        fprintf(stderr, "RSI-TEMP: trace chord {%d,%d} on (f%d,f%d)\n", ch.v0,
-                ch.v1, ch.triA, ch.triB);
-      }
-    }
-  }
 
   // EARLY-EXIT when the COMBINED chord list is empty: covers the
   // clean-input case (bit-identical return), the all-pairs-dropped
   // case, and pancake-free coplanar contact.
-  if (chordEdges.newEdges.empty()) {
-    fprintf(stderr, "RSI-TEMP: early-exit (no chords)\n");  // TEMP DEBUG
-    return input;
-  }
+  if (chordEdges.newEdges.empty()) return input;
 
   // Boundary conformance for the trace crossings, then pierce verts
   // onto their piercing edges' on-edge lists, so the partition
   // subdivides those halfedges at the new verts.
   AddVertsToOnEdgeLists(trace.onEdgeAdditions, onEdgeLists);
-  PropagateNewVertsToOnEdgeLists(etIsects, chordEdges.resolvedIds, edges,
+  PropagateNewVertsToOnEdgeLists(etIsects, chordEdges.etIsect2Vert, edges,
                                  onEdgeLists);
 
   // Step 8: on-tri verts onto chord interiors.
@@ -2968,15 +2879,15 @@ Manifold RunOverlapRemovalImpl(const Manifold& input, double eps) {
   // Step 9: chord-chord crossings within each face - contacts,
   // pairwise crossings, nearby-crossing merge + propagation,
   // resolve-then-allocate threading.
-  const std::vector<std::vector<int>> chordsByFace =
+  const std::vector<std::vector<int>> face2Chords =
       GroupChordsByFace(chordEdges.newEdges, numTri);
   const std::vector<OnChordContact> contacts = FindOnChordEndpointContacts(
-      impl, chords, chordEdges.newVertPositions, chordsByFace, tolerance, eps);
+      impl, chords, chordEdges.newVertPositions, face2Chords, tolerance, eps);
   const std::vector<ChordChordCrossing> rawCrossings =
       FindChordChordCrossings(impl, chords, chordEdges.newVertPositions,
-                              chordsByFace, impl.faceNormal_, eps);
+                              face2Chords, impl.faceNormal_, eps);
   const std::vector<ChordCrossing> clusters = MergeAndPropagateCrossings(
-      impl, chords, chordEdges.newVertPositions, rawCrossings, chordsByFace,
+      impl, chords, chordEdges.newVertPositions, rawCrossings, face2Chords,
       impl.faceNormal_, tolerance, eps);
   Step9Threading threaded = ResolveAndThreadClusters(
       impl, std::move(chords), std::move(chordEdges.newVertPositions),
@@ -2990,9 +2901,6 @@ Manifold RunOverlapRemovalImpl(const Manifold& input, double eps) {
   const UnifyResult unified =
       UnifyArrangementVerts(impl, threaded.newVertPositions, edges, onEdgeLists,
                             threaded.chords, eps, threaded.newVertSnapR);
-  fprintf(stderr,
-          "RSI-TEMP: unified %d new verts (baseId=%d pool=%zu)\n",  // TEMP
-          unified.changed, baseId, threaded.newVertPositions.size());
 
   // Steps 10-11: partition every face (chordless faces still pick up
   // on-edge subdivision, so the arrangement conforms across shared
@@ -3000,46 +2908,8 @@ Manifold RunOverlapRemovalImpl(const Manifold& input, double eps) {
   std::vector<std::pair<int, std::vector<int>>> facePolygons;
   for (int f = 0; f < numTri; ++f) {
     FacePartition part = PartitionFace(
-        impl, f, edges, edgeOfHalfedge, onEdgeLists, threaded.chords,
-        chordsByFace[f], threaded.newVertPositions);
-    if (f == 13843) {  // TEMP DEBUG
-      const vec3 p0 = impl.vertPos_[impl.halfedge_.Start(3 * f)];
-      const vec3 p1 = impl.vertPos_[impl.halfedge_.Start(3 * f + 1)];
-      const vec3 p2 = impl.vertPos_[impl.halfedge_.Start(3 * f + 2)];
-      const vec3 wn = la::cross(p1 - p0, p2 - p0);
-      fprintf(stderr,
-              "RSI-TEMP: face %d cycle %d->%d->%d windingN=(%g,%g,%g) "
-              "storedN=(%g,%g,%g)\n",
-              f, impl.halfedge_.Start(3 * f), impl.halfedge_.Start(3 * f + 1),
-              impl.halfedge_.Start(3 * f + 2), wn.x, wn.y, wn.z,
-              impl.faceNormal_[f].x, impl.faceNormal_[f].y,
-              impl.faceNormal_[f].z);
-      fprintf(stderr, "RSI-TEMP: face %d boundary:", f);
-      for (int k = 0; k < 3; ++k) {
-        const int ei = edgeOfHalfedge[3 * f + k];
-        fprintf(stderr, " e(%d,%d)[", edges[ei].v0, edges[ei].v1);
-        for (size_t j = 0; j < onEdgeLists[ei].verts.size(); ++j) {
-          fprintf(stderr, "%d@%.4f ", onEdgeLists[ei].verts[j],
-                  onEdgeLists[ei].ts[j]);
-        }
-        fprintf(stderr, "]");
-      }
-      fprintf(stderr, "\nRSI-TEMP: face %d chords:", f);
-      for (const int ci : chordsByFace[f]) {
-        const NewEdgeWithExtras& ne = threaded.chords[ci];
-        fprintf(stderr, " {%d,%d x", ne.edge.v0, ne.edge.v1);
-        for (const int ev : ne.extraVerts) fprintf(stderr, "%d ", ev);
-        fprintf(stderr, "}");
-      }
-      fprintf(stderr, "\nRSI-TEMP: face %d -> %zu polys (riders %d):", f,
-              part.polygons.size(), part.boundaryRidingSubEdgesSkipped);
-      for (const std::vector<int>& cyc : part.polygons) {
-        fprintf(stderr, " [");
-        for (const int v : cyc) fprintf(stderr, "%d ", v);
-        fprintf(stderr, "]");
-      }
-      fprintf(stderr, "\n");
-    }
+        impl, f, edges, halfedge2Edge, onEdgeLists, threaded.chords,
+        face2Chords[f], threaded.newVertPositions);
     for (std::vector<int>& cyc : part.polygons) {
       facePolygons.push_back({f, std::move(cyc)});
     }
@@ -3047,10 +2917,7 @@ Manifold RunOverlapRemovalImpl(const Manifold& input, double eps) {
 
   // Step 12: canonical merge with signed multiplicity.
   const std::vector<MergedPolygon> polys = MergePolygons(facePolygons);
-  if (polys.empty()) {
-    fprintf(stderr, "RSI-TEMP: fallback (no merged polys)\n");  // TEMP DEBUG
-    return input;
-  }
+  if (polys.empty()) return input;
 
   // Step 13: cells, winding, keep, emit topology. Classification or
   // topology failures (seed retries exhausted, unpaired halfedges,
@@ -3059,158 +2926,27 @@ Manifold RunOverlapRemovalImpl(const Manifold& input, double eps) {
       BuildCellComplex(impl, polys, threaded.newVertPositions);
   const CellWinding winding =
       ClassifyCells(impl, polys, threaded.newVertPositions, cellCx, eps);
-  {  // TEMP DEBUG: classification shape
-    int separating = 0, kept = 0, k1fans = 0;
-    for (size_t p = 0; p < polys.size(); ++p) {
-      if (cellCx.cellOf[2 * p] != cellCx.cellOf[2 * p + 1]) ++separating;
-      if (winding.ok && winding.keep[p]) ++kept;
-    }
-    for (const EdgeFan& fan : cellCx.fans) {
-      if (fan.polygons.size() == 1) {
-        ++k1fans;
-        if (k1fans <= 8) {
-          const int bId = static_cast<int>(impl.NumVert());
-          const vec3 pa = GetPos3(fan.a, bId, impl, threaded.newVertPositions);
-          const vec3 pb = GetPos3(fan.b, bId, impl, threaded.newVertPositions);
-          fprintf(stderr,
-                  "RSI-TEMP: k1 rim (%d,%d) a=(%.17g,%.17g,%.17g) "
-                  "b=(%.17g,%.17g,%.17g) poly=%d face=%d\n",
-                  fan.a, fan.b, pa.x, pa.y, pa.z, pb.x, pb.y, pb.z,
-                  fan.polygons[0], polys[fan.polygons[0]].face);
-        }
-      }
-    }
-    std::map<int, int> whist;
-    for (const int w : winding.winding) ++whist[w];
-    fprintf(stderr,
-            "RSI-TEMP: classify polys=%zu cells=%d fans=%zu k1fans=%d "
-            "separating=%d kept=%d casts=%d ok=%d windings:",
-            polys.size(), cellCx.numCells, cellCx.fans.size(), k1fans,
-            separating, kept, winding.seedCasts, (int)winding.ok);
-    for (const auto& [w, c] : whist) fprintf(stderr, " %d:x%d", w, c);
-    fprintf(stderr, "\n");
-    {  // TEMP DEBUG: per-cell story - sep/fold counts + a sample pos
-      const int bId = static_cast<int>(impl.NumVert());
-      std::vector<int> sepCount(cellCx.numCells, 0);
-      std::vector<int> foldCount(cellCx.numCells, 0);
-      std::vector<vec3> sample(cellCx.numCells, vec3(0, 0, 0));
-      std::vector<bool> haveSample(cellCx.numCells, false);
-      for (size_t p = 0; p < polys.size(); ++p) {
-        const int cF = cellCx.cellOf[2 * p];
-        const int cB = cellCx.cellOf[2 * p + 1];
-        const vec3 pos =
-            GetPos3(polys[p].cycle[0], bId, impl, threaded.newVertPositions);
-        if (cF == cB) {
-          ++foldCount[cF];
-          if (!haveSample[cF]) {
-            sample[cF] = pos;
-            haveSample[cF] = true;
-          }
-        } else {
-          ++sepCount[cF];
-          ++sepCount[cB];
-          if (!haveSample[cF]) {
-            sample[cF] = pos;
-            haveSample[cF] = true;
-          }
-        }
-      }
-      std::vector<double> foldVol(cellCx.numCells, 0.0);
-      std::vector<double> foldArea(cellCx.numCells, 0.0);
-      std::vector<vec3> foldCentroid(cellCx.numCells, vec3(0, 0, 0));
-      std::vector<int> foldVerts(cellCx.numCells, 0);
-      for (size_t p = 0; p < polys.size(); ++p) {
-        const int cF = cellCx.cellOf[2 * p];
-        if (cF != cellCx.cellOf[2 * p + 1]) continue;
-        for (const int v : polys[p].cycle) {
-          foldCentroid[cF] = foldCentroid[cF] +
-                             GetPos3(v, bId, impl, threaded.newVertPositions);
-          ++foldVerts[cF];
-        }
-      }
-      for (int c = 0; c < cellCx.numCells; ++c) {
-        if (foldVerts[c] > 0) foldCentroid[c] = foldCentroid[c] / foldVerts[c];
-      }
-      for (size_t p = 0; p < polys.size(); ++p) {
-        const int cF = cellCx.cellOf[2 * p];
-        if (cF != cellCx.cellOf[2 * p + 1]) continue;
-        const std::vector<int>& cyc = polys[p].cycle;
-        const vec3 o = foldCentroid[cF];
-        const vec3 a0 = GetPos3(cyc[0], bId, impl, threaded.newVertPositions);
-        vec3 nsum(0, 0, 0);
-        double vol = 0;
-        for (size_t i = 1; i + 1 < cyc.size(); ++i) {
-          const vec3 a = GetPos3(cyc[i], bId, impl, threaded.newVertPositions);
-          const vec3 b =
-              GetPos3(cyc[i + 1], bId, impl, threaded.newVertPositions);
-          const vec3 cr = la::cross(a - a0, b - a0);
-          nsum = nsum + cr;
-          vol += la::dot(a0 - o, cr) / 6.0;
-        }
-        foldVol[cF] += polys[p].mult * vol;
-        foldArea[cF] += 0.5 * std::sqrt(la::dot(nsum, nsum));
-      }
-      for (int c = 0; c < cellCx.numCells; ++c) {
-        fprintf(stderr,
-                "RSI-TEMP:   cell %d w=%d sep=%d fold=%d foldVol=%g "
-                "foldArea=%g sample=(%g,%g,%g)\n",
-                c, winding.winding[c], sepCount[c], foldCount[c], foldVol[c],
-                foldArea[c], sample[c].x, sample[c].y, sample[c].z);
-      }
-      std::map<size_t, int> khist;
-      int oddShown = 0;
-      for (const EdgeFan& fan : cellCx.fans) {
-        ++khist[fan.polygons.size()];
-        if (fan.polygons.size() != 2 && fan.polygons.size() != 1 &&
-            oddShown < 12) {
-          ++oddShown;
-          const vec3 pa = GetPos3(fan.a, bId, impl, threaded.newVertPositions);
-          fprintf(stderr, "RSI-TEMP:   k=%zu fan (%d,%d) at (%g,%g,%g) polys:",
-                  fan.polygons.size(), fan.a, fan.b, pa.x, pa.y, pa.z);
-          for (const int p : fan.polygons)
-            fprintf(stderr, " %d(f%d)", p, polys[p].face);
-          fprintf(stderr, "\n");
-        }
-      }
-      fprintf(stderr, "RSI-TEMP:   fan k hist:");
-      for (const auto& [k, c] : khist) fprintf(stderr, " %zu:x%d", k, c);
-      fprintf(stderr, "\n");
-    }
-  }
-  if (!winding.ok) {
-    fprintf(stderr, "RSI-TEMP: fallback (classify !ok, casts=%d)\n",
-            winding.seedCasts);  // TEMP DEBUG
-    return input;
-  }
+  if (!winding.ok) return input;
   // GATE (fail closed): a folded cell that encloses real volume means
   // a tangent-degenerate contact folded a closed shell's two sides
   // into one cell (its polygons all read front == back and the keep
   // rule drops them) - emitting would silently delete that shell.
   // Membranes legitimately fold flat and pass the area-relative
   // threshold; see FoldedCellsEncloseVolume.
-  {
-    double worstFoldVolume = 0.0;
-    if (FoldedCellsEncloseVolume(impl, polys, threaded.newVertPositions, cellCx,
-                                 eps, worstFoldVolume)) {
-      fprintf(stderr, "RSI-TEMP: fallback (folded shell vol=%g)\n",
-              worstFoldVolume);  // TEMP DEBUG
-      return input;
-    }
-  }
-  const EmitTopology topo = BuildEmitTopology(polys, cellCx, winding);
-  if (!topo.ok || topo.keptPolygons.empty()) {
-    fprintf(stderr, "RSI-TEMP: fallback (topo ok=%d kept=%zu)\n", (int)topo.ok,
-            topo.keptPolygons.size());  // TEMP DEBUG
+  if (FoldedCellsEncloseVolume(impl, polys, threaded.newVertPositions, cellCx,
+                               eps)) {
     return input;
   }
+  const EmitTopology topo = BuildEmitTopology(polys, cellCx, winding);
+  if (!topo.ok || topo.keptPolygons.empty()) return input;
 
   // Emit: one output vert per ring; triangulate each kept cycle in
   // its outward frame (Triangulate's CCW triangles project back
   // winding-consistent because the basis is right-handed).
-  std::vector<vec3> ringPos(topo.ringVert.size());
-  for (size_t r = 0; r < topo.ringVert.size(); ++r) {
+  std::vector<vec3> ringPos(topo.ring2Vert.size());
+  for (size_t r = 0; r < topo.ring2Vert.size(); ++r) {
     ringPos[r] =
-        GetPos3(topo.ringVert[r], baseId, impl, threaded.newVertPositions);
+        GetPos3(topo.ring2Vert[r], baseId, impl, threaded.newVertPositions);
   }
   std::vector<ivec3> outTris;
   for (const std::vector<int>& cyc : topo.outCycles) {
@@ -3228,11 +2964,7 @@ Manifold RunOverlapRemovalImpl(const Manifold& input, double eps) {
     const double len2 = dot(nsum, nsum);
     DEBUG_ASSERT(len2 > 0, logicErr,
                  "RunOverlapRemoval: degenerate kept cycle");
-    if (len2 <= 0) {
-      fprintf(stderr,
-              "RSI-TEMP: fallback (degenerate kept cycle)\n");  // TEMP DEBUG
-      return input;
-    }
+    if (len2 <= 0) return input;
     const InPlaneBasis basis = FaceBasisFromNormal(nsum / std::sqrt(len2));
     SimplePolygon poly2;
     poly2.reserve(cyc.size());
@@ -3306,33 +3038,29 @@ Manifold RunOverlapRemovalImpl(const Manifold& input, double eps) {
   // winding-WEIGHTED integral, so heavy overlap legitimately shrinks
   // the measured volume (a full overlap reads 1/3). Gate failures
   // are an expected fallback for adversarial inputs, not asserts.
-  if (out.Status() != Manifold::Error::NoError) {
-    fprintf(stderr, "RSI-TEMP: gate (status=%d)\n",
-            (int)out.Status());  // TEMP DEBUG
-    return input;
-  }
-  if (!(out.Volume() > 0)) {
-    fprintf(stderr, "RSI-TEMP: gate (volume=%g)\n",
-            out.Volume());  // TEMP DEBUG
-    return input;
-  }
-  {
-    const SelfIntersectionResult outR = CheckSelfIntersection(out);
-    const SelfIntersectionResult inR = CheckSelfIntersection(input);  // TEMP
-    if (outR.interiorPierces > inputPierces) {
-      fprintf(stderr, "RSI-TEMP: gate (pierces %d > %d)\n",
-              outR.interiorPierces, inputPierces);  // TEMP DEBUG
-      return input;
-    }
-    fprintf(stderr,
-            "RSI-TEMP: SUCCESS pierces %d -> %d; maxDepth %g -> %g "
-            "(eps %g, 10eps %g, tol %g) vol %g -> %g\n",  // TEMP DEBUG
-            inputPierces, outR.interiorPierces, inR.maxPierceMagnitude,
-            outR.maxPierceMagnitude, eps, 10.0 * eps, tolerance, input.Volume(),
-            out.Volume());
-  }
+  if (out.Status() != Manifold::Error::NoError) return input;
+  if (!(out.Volume() > 0)) return input;
+  if (CheckSelfIntersection(out).interiorPierces > inputPierces) return input;
   return out;
 }
 }  // namespace
+
+Manifold RunOverlapRemoval(const Manifold& input, double eps) {
+  // Outer try/catch: if any internal stage throws (= a MANIFOLD_DEBUG
+  // assertion in Triangulate, the Manifold(out) constructor, or
+  // std::bad_alloc), return the input unchanged. The input is already a
+  // valid manifold with no more self-intersections than itself, so this
+  // preserves pierce-monotonicity without running any further allocating
+  // or possibly-throwing work (MergeVertsEps both asserts and can produce
+  // a non-manifold result, so it must not run on the failure path).
+  // RunOverlapRemovalImpl is the pipeline body, separated so this entry
+  // point stays a thin fail-closed wrapper.
+  try {
+    return RunOverlapRemovalImpl(input, eps);
+  } catch (...) {
+    return input;
+  }
+}
+
 }  // namespace overlap_removal
 }  // namespace manifold

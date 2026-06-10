@@ -27,7 +27,7 @@ assumptions hold in doubles, and add no new algorithmic ideas.
 | 2 | `EnumerateEdges` | canonical undirected edges with halfedge pairs |
 | 4 | `BuildOnEdgeVertLists` | verts within eps of an edge's interior, sorted by t |
 | 5 | `BuildOnTriVertLists` | verts within eps of a tri's interior (strict barycentric) |
-| 6 | `FindEdgeTriIntersections` | transversal edge-pierces-tri events (BVH + Moller-Trumbore), snapped to existing verts within eps |
+| 6 | `FindEdgeTriIntersections` | transversal edge-pierces-tri events (BVH + Moller-Trumbore), snapped to the nearest existing vert within tolerance + eps |
 | 7 | `GenerateChordEdges` | one chord per tri-tri pair with exactly 2 pierce endpoints; event-vert resolution |
 | 6.5 | `CoplanarTraceChords` | in-plane conformance cuts between coplanar overlapping faces (below) |
 | - | `AddVertsToOnEdgeLists`, `PropagateNewVertsToOnEdgeLists` | pierce + trace verts subdivide the edges they lie on |
@@ -78,8 +78,9 @@ One absolute pipeline epsilon `eps` (from `InferEps` =
   by step 9.5's sweep.
 - eps / sin(angle), capped at `kCondSnapCapEps` (128) x eps: the CONDITIONED
   radius of a computed crossing whose defining lines are near-parallel (the
-  lever arm). Used by step 6.5's corner snap and new-to-new dedup, and carried
-  per-vert into step 9.5's original-vert snap. Conditioned radii apply only
+  lever arm). Used by step 6.5's corner snap and new-to-new dedup and by
+  step 9's crossing records, and carried per-vert into step 9.5's
+  original-vert snap. Conditioned radii apply only
   where the conditioning is computable at the source; blanket widening was
   tried and rejected (it moves real geometry and re-pierces - see
   Known limitations).
@@ -88,8 +89,10 @@ One absolute pipeline epsilon `eps` (from `InferEps` =
   max(hint, impl.epsilon_, machine eps at the arrangement scale) - without
   the hint it would probe at `impl.epsilon_`, which can be tighter than the
   epsilon the arrangement was built with.
-- OUTPUT tolerance: `max(tolerance, 10 * eps)` - the pipeline deliberately
-  moves verts by up to the merge radius, and claiming the input tolerance
+- OUTPUT tolerance: `max(tolerance, 10 * eps, measured step-1 merge
+  displacement, measured step-9.5 remap displacement)` - the pipeline
+  deliberately moves verts by up to the merge radius, an eps-pair CHAIN or a
+  conditioned snap can move one further, and claiming the input tolerance
   would overstate the output's precision. Ill-conditioned shallow-incidence
   corners can carry residual error beyond this, up to the conditioned band -
   a documented limitation, not part of the tolerance claim.
@@ -107,7 +110,8 @@ cutting the sketch implicitly assumes:
 1. **Detect.** BVH tri-tri broad phase; plane gate: all six verts within eps
    of the LARGER face's plane (a near-zero-area sliver's own plane is noise).
 2. **Single-frame clip.** ALL geometry for a pair is computed in ONE frame
-   (the lower face id's `FaceBasisFromNormal`); each face's 3 edges clip
+   (the gate face's `FaceBasisFromNormal` - the larger face, whose plane the
+   gate already trusts; ties to the lower face id); each face's 3 edges clip
    against the other's projected triangle (convex clip, one interval per
    edge). The same geometric crossing is computed once and shares its id
    across both clip directions by construction.
@@ -126,9 +130,12 @@ cutting the sketch implicitly assumes:
    Crossing endpoints snap to the nearest of the pair's six corners within
    the CONDITIONED radius (max(tolerance + eps, eps/sin(angle)) capped -
    nearest, ties to smallest id, the step-9 convention), else allocate,
-   deduping new-to-new at the conditioned radius over the whole pool (the
-   step-7 convention, conditioned). The allocation's conditioned radius is
-   recorded per vert (`TraceChordResult::newVertSnapR`) for step 9.5. A
+   deduping new-to-new over the whole pool at the SOURCE-GATED radius
+   min(this crossing's conditioned radius, the pool entry's recorded radius),
+   eps-floored - an ill-conditioned crossing must not claim an unrelated
+   well-conditioned vert. The allocation's conditioned radius is recorded
+   per vert (`TraceChordResult::newVertSnapR`, widened when a dedup hit
+   claims more) for step 9.5. A
    lifted endpoint farther than eps from either original 3D edge rejects its
    interval (the near-grazing guard - conformance we provably cannot compute
    is skipped, not corrupted).
@@ -186,7 +193,12 @@ classification.
    every incident chord endpoint, their existing extras, and the pass-0
    accumulator; nearest wins (ties to smallest id); else allocate. A crossing
    can therefore never thread as an endpoint id on one chord and a fresh id
-   on another (the split-identity class).
+   on another (the split-identity class). Each raw crossing records its
+   conditioned radius (eps / sin(angle of the two chord lines), capped);
+   clusters take the max over members; an allocation carries it - and a snap
+   onto an existing new vert widens it - in
+   `Step9Threading::newVertSnapR`, so step 9.5's original-vert snap covers
+   ill-conditioned step-9 crossings exactly as it covers step 6.5's.
 6. **Threading**: per chord, unify pass-0 records and resolved clusters;
    RECOMPUTE every t from the resolved position; drop step-9-added records
    whose recomputed t leaves the guarded range (pre-existing step-8 extras
@@ -210,7 +222,9 @@ collapses the cell complex (observed: 21 rims merged 14k polygons' cells into
 
 - new-new pairs unite within 10 * eps (the merge-radius philosophy);
 - new verts snap onto ORIGINAL verts within max(10 * eps, the vert's recorded
-  conditioned radius) - smallest id wins, originals before new;
+  conditioned radius from step 6.5 or 9) - NEAREST wins, ties to the smallest
+  id, originals before new (an id-priority pick could jump past the adjacent
+  corner under a wide conditioned radius);
 - consumers remap in place: chord endpoints, extras, and on-edge lists, with
   ids deduped, endpoint entries dropped, and ts RECOMPUTED from the remapped
   positions then re-sorted (a remap moves the consumed position; a stale
@@ -471,4 +485,13 @@ the cast and made the output tolerance claim honest.
 
 The empirical record behind the residue analysis (every snap-radius
 experiment and its pierce count) is in the git history of
-`docs/Steps10to13Design.md`, consolidated here.
+`docs/Steps10to13Design.md` - a working doc deleted when its content was
+consolidated here; the history remains reachable at the deleting commit.
+
+A whole-branch review round after consolidation (Claude + Codex dual-track,
+8 lanes: correctness, numerical robustness, tests/docs/API, style and
+refactoring) produced one more round of fixes: the conditioned-radius carry
+through step 9, source-gated trace dedup, nearest-original unification, the
+measured-displacement tolerance claim, the single-leaf BVH guard, and -
+found while chasing the hull fixture's volume red - the folded-shell volume
+gate above.

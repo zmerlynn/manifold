@@ -19,25 +19,23 @@
 // include/manifold/manifold.h, implemented in src/manifold.cpp via
 // RunOverlapRemoval below).
 //
-// Internal types + helpers - the per-stage data structures, the BVH
-// query helpers, the chord-pair-sym phases, the cap walker, etc. -
-// live in src/overlap_removal_internal.h. That header is for
-// overlap_removal.cpp's own use and is not part of any installed
-// public API.
+// Internal types + helpers - the per-stage data structures and the
+// BVH query helpers - live in src/overlap_removal_internal.h. That
+// header is for overlap_removal.cpp's own use and is not part of any
+// installed public API.
 
 #include "manifold/manifold.h"  // for Manifold
 
 namespace manifold {
 namespace overlap_removal {
 
-// Top-level entry point composing all 13 #289 pipeline stages plus
-// pair-symmetric chord enforcement, pierce-aware cap walker,
-// pre/post-cap pierce reducers, and a pierce/drift gate with
-// sign-flip recovery.
+// Top-level entry point composing the 13 #289 pipeline stages
+// (arrangement -> cell complex -> winding classification -> emit)
+// behind a fail-closed gate.
 //
 // Backs Manifold::RemoveSelfIntersections() (= one and only caller in
-// production source). Returns the cleaned manifold, or the input
-// (unchanged or eps-merged) on the fallback paths.
+// production source). Returns the rebuilt manifold, or the input
+// BIT-IDENTICALLY on the early-exit and every fallback path.
 //
 // `eps` is optional: defaults to AlphaBudgetEpsilon(input.bbox_scale)
 // when 0 (= the production pipeline's choice). Callers that already
