@@ -43,12 +43,7 @@
 #include <utility>
 #include <vector>
 
-#include "../src/cross_section/boolean2/boolean2.h"
-#include "../src/cross_section/boolean2/bvh.h"
-#include "../src/cross_section/boolean2/canonicalize.h"
-#include "../src/cross_section/boolean2/driver.h"
-#include "../src/cross_section/boolean2/predicates.h"
-#include "../src/cross_section/boolean2/vertex_merge.h"
+#include "../src/boolean2.h"
 #include "fuzztest/fuzztest.h"
 
 #if defined(MANIFOLD_PAR) && MANIFOLD_PAR == 1
@@ -1224,7 +1219,7 @@ void WindingFilterStarburstStress(int numStrips, double angleSpread,
       << " spread=" << angleSpread << " width=" << stripWidth;
 }
 
-// Structural-coverage dim targeting boolean2/canonicalize.h. Property:
+// Structural-coverage dim targeting the Canonicalize pass. Property:
 // CanonicalSubEdges::Finalize() is idempotent. After one Finalize, the
 // edges are sorted by (vMin, vMax), consecutive duplicates are merged
 // by summing mults, and zero-sum entries are dropped. A second
@@ -1257,7 +1252,7 @@ void CanonicalSubEdgeIdempotence(const std::vector<int>& v0s,
   }
 }
 
-// Structural-coverage dim targeting boolean2/bvh.h. Property:
+// Structural-coverage dim targeting the 2D BVH. Property:
 // the BVH's pair enumeration matches a brute-force O(N^2) reference,
 // exactly. Builds a BVH from N box centers (eps-padded points), runs
 // `CollidePairs` (the production broad-phase entry point) against the
@@ -1306,7 +1301,7 @@ void BVHPairEnumerationMatchesBruteForce(const std::vector<double>& xs,
       << ")";
 }
 
-// Structural-coverage dim targeting boolean2/vertex_merge.h. Property:
+// Structural-coverage dim targeting the vertex-merge pass. Property:
 // MergeVerts is idempotent. Once a set of vertices has been merged at
 // eps, re-merging the centroids should produce no further clustering
 // (centroid placement keeps clusters > eps apart). A non-idempotent
@@ -1339,7 +1334,7 @@ void VertexMergeIdempotence(const std::vector<double>& xs,
       << ", eps=" << eps << ")";
 }
 
-// Structural-coverage dim targeting boolean2/predicates.h (the
+// Structural-coverage dim targeting boolean2_predicates.cpp (the
 // low-level geometric primitives: SignedArea, CCW, IntersectSegments,
 // EpsilonFromScale). These primitives have zero direct test coverage
 // today; bugs here propagate silently into every higher-level
@@ -1472,12 +1467,12 @@ void InputLoopOrderInvariance(const std::vector<double>& radiiA,
 }
 
 // Coverage-targeted dim: exercise the parallel-BVH-walk branch of
-// CollectIntersectionPairs in boolean2/intersections.cpp. That branch
-// is gated by `nE >= kEdgeBvhThreshold` (=256), but the existing
-// fuzz domain (StarRadiiDomain bounded at 48 vertices, i.e. 48 edges)
-// never reaches it. Found via llvm-cov audit 2026-05-19: lines
-// 205-222 of intersections.cpp showed 0 hits across all 41 prior
-// dims' corpora.
+// CollectIntersectionPairs in the intersections pass (boolean2.cpp). That
+// branch is gated by `nE >= kEdgeBvhThreshold` (=256), but the existing fuzz
+// domain (StarRadiiDomain bounded at 48 vertices, i.e. 48 edges) never reaches
+// it. Found via llvm-cov audit 2026-05-19: lines 205-222 of the
+// then-intersections.cpp (now the CollectIntersectionPairs section of
+// boolean2.cpp) showed 0 hits across all 41 prior dims' corpora.
 //
 // Property: self-union is area-preserving (X + X == X). Cheap to check, holds
 // for any well-formed input, and forces both CollectIntersectionPairs and the
