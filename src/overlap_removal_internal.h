@@ -595,10 +595,15 @@ struct CellWinding {
   int seedCasts = 0;         // casts attempted, retries included
   bool ok = false;
 };
+// `epsHint`: the pipeline's working epsilon (the driver's eps); the
+// effective graze margin is max(epsHint, impl.epsilon_, machine eps
+// at the arrangement scale) - without the hint the cast would run at
+// impl.epsilon_, which can be tighter than the epsilon the
+// arrangement itself was built with.
 CellWinding ClassifyCells(const Manifold::Impl& impl,
                           const std::vector<MergedPolygon>& polygons,
                           const std::vector<vec3>& newVertPositions,
-                          const CellComplex& cells);
+                          const CellComplex& cells, double epsHint = -1.0);
 
 // ---- Step 13 emit topology: inside-wedge twins + vertex rings ----
 

@@ -2141,7 +2141,7 @@ CastResult CastSegmentAtEar(const vec3& p0, const vec3& p1, const vec3& a,
 CellWinding ClassifyCells(const Manifold::Impl& impl,
                           const std::vector<MergedPolygon>& polygons,
                           const std::vector<vec3>& newVertPositions,
-                          const CellComplex& cells) {
+                          const CellComplex& cells, double epsHint) {
   using la::cross;
   using la::dot;
   CellWinding out;
@@ -2184,8 +2184,8 @@ CellWinding ClassifyCells(const Manifold::Impl& impl,
     polyArea2[p] = len2;
   }
   const double scale = la::length(bbMax - bbMin);
-  const double eps =
-      std::max(impl.epsilon_, std::numeric_limits<double>::epsilon() * scale);
+  const double eps = std::max(
+      {epsHint, impl.epsilon_, std::numeric_limits<double>::epsilon() * scale});
   const vec3 p0 = 0.5 * (bbMin + bbMax) + kSeedCastDir * (2.0 * scale);
 
   // Ear decomposition for the cast's crossing tests: a FAN from each
@@ -2927,7 +2927,7 @@ Manifold RunOverlapRemovalImpl(const Manifold& input, double eps) {
   const CellComplex cellCx =
       BuildCellComplex(impl, polys, threaded.newVertPositions);
   const CellWinding winding =
-      ClassifyCells(impl, polys, threaded.newVertPositions, cellCx);
+      ClassifyCells(impl, polys, threaded.newVertPositions, cellCx, eps);
   {  // TEMP DEBUG: classification shape
     int separating = 0, kept = 0, k1fans = 0;
     for (size_t p = 0; p < polys.size(); ++p) {
@@ -3037,10 +3037,18 @@ Manifold RunOverlapRemovalImpl(const Manifold& input, double eps) {
   }
 
   // Output mesh: positions only (numProp = 3) - non-position
-  // properties are not preserved (documented).
+  // properties are not preserved (documented). The tolerance claim
+  // propagates the pipeline's applied movements: verts were
+  // deliberately moved by up to the nearby-crossing merge radius
+  // (10 * eps; step-1 clusters, step-9 crossing merges, step 9.5) -
+  // claiming the input tolerance would overstate the output's
+  // precision. Ill-conditioned shallow-incidence corners can carry
+  // residual error beyond this, up to the conditioned band
+  // (eps / sin(incidence), capped at kCondSnapCapEps * eps) - a
+  // documented limitation, not part of the tolerance claim.
   MeshGL64 outMesh;
   outMesh.numProp = 3;
-  outMesh.tolerance = tolerance;
+  outMesh.tolerance = std::max(tolerance, 10.0 * eps);
   outMesh.vertProperties.reserve(ringPos.size() * 3);
   for (const vec3& p : ringPos) {
     outMesh.vertProperties.push_back(p.x);
@@ -3072,14 +3080,18 @@ Manifold RunOverlapRemovalImpl(const Manifold& input, double eps) {
     return input;
   }
   {
-    const int outP = CheckSelfIntersection(out).interiorPierces;  // TEMP DEBUG
-    if (outP > inputPierces) {
-      fprintf(stderr, "RSI-TEMP: gate (pierces %d > %d)\n", outP,
-              inputPierces);  // TEMP DEBUG
+    const SelfIntersectionResult outR = CheckSelfIntersection(out);
+    const SelfIntersectionResult inR = CheckSelfIntersection(input);  // TEMP
+    if (outR.interiorPierces > inputPierces) {
+      fprintf(stderr, "RSI-TEMP: gate (pierces %d > %d)\n",
+              outR.interiorPierces, inputPierces);  // TEMP DEBUG
       return input;
     }
-    fprintf(stderr, "RSI-TEMP: SUCCESS pierces %d -> %d\n", inputPierces,
-            outP);  // TEMP DEBUG
+    fprintf(stderr,
+            "RSI-TEMP: SUCCESS pierces %d -> %d; maxDepth %g -> %g "
+            "(eps %g, 10eps %g, tol %g)\n",  // TEMP DEBUG
+            inputPierces, outR.interiorPierces, inR.maxPierceMagnitude,
+            outR.maxPierceMagnitude, eps, 10.0 * eps, tolerance);
   }
   return out;
 }
