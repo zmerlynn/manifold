@@ -201,16 +201,6 @@ struct EdgePos {
   }
 };
 
-// Eager-propagation phase: for each edge*face intersection vert,
-// add the vert to all THREE relevant halfedge-list bins (the source
-// edge, plus the two new face*face edges adjacent to it). This is
-// the 3D analog of step 4's eager-propagation pass. The
-// propagation is what makes the
-// pair-by-pair BVH approach correct for k>=3 edges concurrent at one
-// true point - without it, the third edge would never see the
-// intersection vert and step 5's canonicalization would emit it as
-// a single un-split sub-edge with the wrong incidence at the
-// concurrence point.
 void AddNewEdgeVerts(
     // we need concurrent_map because we will be adding things concurrently
     concurrent_map<int, std::vector<EdgePos>>& edgesP,

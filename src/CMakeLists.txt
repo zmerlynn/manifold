@@ -48,7 +48,6 @@ set(
   properties.cpp
   quickhull.cpp
   sdf.cpp
-  self_mesh_analysis.cpp
   smoothing.cpp
   sort.cpp
   subdivision.cpp
@@ -82,7 +81,6 @@ set(
   parallel.h
   polygon_internal.h
   quickhull.h
-  self_mesh_analysis.h
   shared.h
   svd.h
   tree2d.h

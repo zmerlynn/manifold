@@ -2934,7 +2934,8 @@ TEST(OverlapRemoval, Step1MergeReportsMaxMove) {
 }
 
 TEST(OverlapRemoval, Step1MergeConvergesWhenHigherIdSortsFirst) {
-  // Termination-pass finding: convergence used a per-pass union COUNT.
+  // Convergence regression premise: a per-pass union COUNT is the
+  // wrong convergence test.
   // A coincident (already-merged) cluster re-unites in every pass's
   // fresh union-find, and DisjointSets attaches the LARGER id under
   // the smaller - so whenever the cluster's higher-id vert
@@ -3146,7 +3147,7 @@ TEST(OverlapRemoval, Step65FullThroughCutQualifies) {
 }
 
 TEST(OverlapRemoval, Step65SnappedEndpointStillSubdividesSourceEdge) {
-  // Termination-pass finding: on-edge additions were emitted only for
+  // Regression premise: on-edge additions were emitted only for
   // ALLOCATED crossing endpoints. A crossing on a source edge that
   // SNAPS to a corner of the OTHER face (within the tolerance + eps /
   // conditioned corner radius, but farther than eps from the edge -
@@ -3330,6 +3331,39 @@ TEST(OverlapRemoval, Step65AddVertsToOnEdgeLists) {
   EXPECT_EQ(lists[1].verts[0], 9);
 }
 
+TEST(OverlapRemoval, Step7PropagateDropsOutOfRangeSnappedT) {
+  // The (0, 1) guard on the recomputed propagate t: a pierce event
+  // whose resolved vert SNAPPED far enough that its projection lands
+  // outside the piercing edge's interior must not subdivide that edge
+  // (the vert is still the chord's endpoint; only the subdivision is
+  // skipped). Edge (0, 1) is short; the resolved vert sits past its
+  // far end (t ~ 1.3).
+  Manifold::Impl impl;
+  const manifold::vec3 verts[4] = {
+      {0.0, 0.0, 0.0}, {0.1, 0.0, 0.0}, {0.0, 1.0, 0.0}, {0.13, 0.0, 0.0}};
+  for (const auto& v : verts) impl.vertPos_.push_back(v);
+  impl.halfedge_.push_back(0, -1, -1);
+  impl.halfedge_.push_back(1, -1, -1);
+  impl.halfedge_.push_back(2, -1, -1);
+  const std::vector<overlap_removal::Edge> edges =
+      overlap_removal::EnumerateEdges(impl);
+  int e01 = -1;
+  for (size_t e = 0; e < edges.size(); ++e) {
+    if (edges[e].v0 == 0 && edges[e].v1 == 1) e01 = static_cast<int>(e);
+  }
+  ASSERT_GE(e01, 0);
+  // One event on edge (0,1) at s = 0.5, resolved (snapped) to vert 3,
+  // which projects to t = 1.3 on that edge.
+  const std::vector<overlap_removal::EdgeTriIntersection> ets = {
+      {e01, 0, {0.05, 0.0, 0.0}, 0.5, {0.3, 0.3, 0.4}, 3}};
+  const std::vector<int> et2v = {3};
+  std::vector<overlap_removal::EdgeVertList> onEdgeLists(edges.size());
+  overlap_removal::PropagateNewVertsToOnEdgeLists(impl, {}, ets, et2v, edges,
+                                                  onEdgeLists);
+  EXPECT_TRUE(onEdgeLists[e01].verts.empty())
+      << "out-of-range snapped t subdivided the edge";
+}
+
 // White-box interior-pierce count via the internal checker (external
 // linkage in the linked manifold library), used to assert the
 // pierce-monotonicity contract that the public API does not expose.
@@ -3387,17 +3421,23 @@ TEST(Manifold, RemoveSelfIntersectionsApi) {
 }
 
 TEST(Manifold, RemoveSelfIntersectionsPropagatesErrorStatus) {
-  // An input whose status is already an error short-circuits to
-  // status propagation (like every other member function) - the
-  // pipeline never runs.
+  // An errored input comes back with its status and contents intact.
+  // This pins the OBSERVABLE contract only: manifold's invariant is
+  // errored => empty, so the dedicated status short-circuit in
+  // RemoveSelfIntersections is observationally equivalent to the
+  // pipeline's own empty-input early-exit - no public fixture can
+  // discriminate the arm (the guard's value is consistency with
+  // every other member function).
   MeshGL64 open;  // a single triangle: not a closed manifold
   open.numProp = 3;
   open.vertProperties = {0, 0, 0, 1, 0, 0, 0, 1, 0};
   open.triVerts = {0, 1, 2};
   Manifold invalid((MeshGL64(open)));
   ASSERT_NE(invalid.Status(), Manifold::Error::NoError);
+  ASSERT_TRUE(invalid.IsEmpty());  // the errored => empty invariant
   Manifold cleaned = invalid.RemoveSelfIntersections();
   EXPECT_EQ(cleaned.Status(), invalid.Status());
+  ExpectMeshGL64Identical(cleaned, invalid);
 }
 
 TEST(Manifold, RemoveSelfIntersectionsCleanInputUnchanged) {
@@ -3664,7 +3704,7 @@ TEST(Manifold, RemoveSelfIntersectionsDeterministic) {
   // The pipeline is deterministic: repeated runs on the same input
   // produce identical output. The origin-scale hull exercises the
   // fallback path; the far-from-origin variant exercises the FULL
-  // rebuild (review finding: the fallback runs alone would pin only
+  // rebuild (the fallback runs alone would pin only
   // trivial identity, not pipeline-ordering determinism).
   Manifold body = Manifold(ReadTestMeshGL64OBJ("hull-body.obj"));
   Manifold mask = Manifold(ReadTestMeshGL64OBJ("hull-mask.obj"));

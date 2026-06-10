@@ -70,8 +70,8 @@ constexpr double kBarycentricFloor = 1e-12;
 // kCondSnapCapEps: cap, in eps units, on the condition-aware
 //   corner-snap radius for trace-chord crossings (step 6.5). A
 //   crossing's position error scales as eps / sin(angle) between the
-//   two edge lines; 128 covers the observed near-parallel corner
-//   class with headroom while keeping the snap local.
+//   two edge lines; 128 covers the near-parallel corner class with
+//   headroom while keeping the snap local.
 // kFoldedVolumePerAreaEps: final-gate threshold, in eps units, on a
 //   folded cell's enclosed volume PER unit folded area. A fold set
 //   (polygons whose front and back cells united, e.g. across a k = 1
@@ -2377,6 +2377,11 @@ FacePartition PartitionFace(const Manifold::Impl& impl, int face,
     for (const int e : it->second) {
       if (visited[e]) continue;
       if (hes[e].end == hes[h].start) {
+        // At most one reverse exists: seenSub dedups undirected chord
+        // pairs and the boundary contributes one direction per
+        // sub-edge - keep that invariant locally visible.
+        DEBUG_ASSERT(reverseHe < 0, logicErr,
+                     "PartitionFace: duplicate reverse halfedge");
         reverseHe = e;
         continue;
       }

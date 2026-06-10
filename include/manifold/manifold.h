@@ -226,6 +226,9 @@ class Manifold {
    * winding > 0.
    *
    * Guarantees:
+   *   - An input whose Status() is already an error is not processed;
+   *     the returned manifold propagates that status (like every other
+   *     member function).
    *   - A clean input (no transversal or coplanar intersection events)
    *     is returned bit-identically.
    *   - Pierce-monotonicity: the returned manifold's self-intersection

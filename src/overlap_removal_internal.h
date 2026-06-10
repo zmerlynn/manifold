@@ -486,9 +486,9 @@ FacePartition PartitionFace(const Manifold::Impl& impl, int face,
 // canonical key of a cycle is the lexicographically-smallest rotation
 // among all rotations of the cycle AND of its reversal; the sign is
 // +1 when the canonical form is a rotation of the cycle as walked
-// (CCW w.r.t. its face normal), -1 when it is a rotation of the
-// reversal. A simple cycle with distinct verts is never
-// rotation-equivalent to its own reversal, so the sign is always
+// (CCW w.r.t. its face's halfedge winding - the partition's frame),
+// -1 when it is a rotation of the reversal. A simple cycle with distinct verts
+// is never rotation-equivalent to its own reversal, so the sign is always
 // well-defined. Entries summing to zero drop (coincident
 // opposite-facing surfaces cancel). `face` is the first contributor's
 // (the plane/normal source); output is ordered by canonical key.
@@ -609,8 +609,10 @@ EmitTopology BuildEmitTopology(const std::vector<MergedPolygon>& polygons,
 // etIsect resolved verts onto their piercing edges' on-edge lists, so
 // the partition subdivides those halfedges at the pierce points. t is
 // recomputed from the RESOLVED vert's position (a snapped event's
-// raw parameter can order against the geometry). Skips verts that
-// are already edge endpoints or already in the list.
+// raw parameter can order against the geometry) and must land in
+// (0, 1) - a snapped vert projecting outside a short edge's interior
+// subdivides nothing. Skips verts that are already edge endpoints or
+// already in the list.
 void PropagateNewVertsToOnEdgeLists(
     const Manifold::Impl& impl, const std::vector<vec3>& newVertPositions,
     const std::vector<EdgeTriIntersection>& etIsects,
