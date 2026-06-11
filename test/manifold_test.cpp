@@ -3011,7 +3011,7 @@ TEST(OverlapRemoval, Step1MergeLargeClusterConverges) {
   ballImpl.CalculateBBox();
   ballImpl.SetEpsilon();
   const overlap_removal::MergeVertsResult r =
-      overlap_removal::MergeVertsEps(ballImpl, 1e-3);  // must not throw
+      overlap_removal::MergeVertsEps(ballImpl, 1e-3, nullptr);  // no throw
   EXPECT_EQ(r.mergedCount, static_cast<int>(n) - 1);
   EXPECT_LT(r.maxMove, 1e-6);  // members moved at most ~the sphere size
 }
@@ -3064,7 +3064,7 @@ TEST(OverlapRemoval, Step1MergeReportsMaxMove) {
   Manifold tet((MeshGL64(m)));
   ASSERT_EQ(tet.Status(), Manifold::Error::NoError);
   const overlap_removal::MergeVertsResult r =
-      overlap_removal::MergeVertsEps(MakeImpl(tet), 1e-3);
+      overlap_removal::MergeVertsEps(MakeImpl(tet), 1e-3, nullptr);
   EXPECT_EQ(r.mergedCount, 1);
   EXPECT_NEAR(r.maxMove, h / 2, 1e-15);
 }
@@ -3091,7 +3091,8 @@ TEST(OverlapRemoval, Step1MergeConvergesWhenHigherIdSortsFirst) {
   Manifold tet((MeshGL64(m)));
   ASSERT_EQ(tet.Status(), Manifold::Error::NoError);
   const overlap_removal::MergeVertsResult r =
-      overlap_removal::MergeVertsEps(MakeImpl(tet), 1e-3);  // must not throw
+      overlap_removal::MergeVertsEps(MakeImpl(tet), 1e-3,
+                                     nullptr);  // must not throw
   EXPECT_EQ(r.mergedCount, 1);
   EXPECT_NEAR(r.maxMove, h / 2, 1e-15);
 }

@@ -150,7 +150,11 @@ struct MergeVertsResult {
 // merged?" - `NumVert()` may not reflect the merge if the merged
 // verts didn't cause any tri collapse (RemoveUnreferencedVerts sets
 // unreferenced positions to NaN without compacting vertPos_).
+// `ctx` (nullable) threads into the rebuild's finalize sweep
+// (SortGeometry); a mid-sweep cancel comes back as an Impl with
+// Error::Cancelled, which the driver propagates as observable status.
 MergeVertsResult MergeVertsEps(const Manifold::Impl& in, double eps,
+                               ExecutionContext::Impl* ctx,
                                int maxIter = kMergeVertsMaxIter);
 
 // Step 2 of the pipeline (the sketch's step 3 is subsumed by the

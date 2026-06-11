@@ -27,8 +27,11 @@ How manifold features actually integrate, from the tree:
   public-API re-entry.
 - **Heavy algorithms are Impl-to-Impl.** `Boolean3(const Impl&, const
   Impl&, OpType, ExecutionContext::Impl* ctx)` -> `Result()` -> `Impl`;
-  `csg_tree` wraps results with `ImplToLeaf(Impl&&)`. Internal code never
-  holds a `Manifold`.
+  `csg_tree` wraps results with `ImplToLeaf(Impl&&)`. Not a categorical
+  house ban on internal `Manifold` use (Minkowski composes through
+  public wrappers internally) - the reason RSI is Impl-to-Impl is that
+  it rewrites geometry directly and needs STRUCTURAL fallback identity,
+  which a wrapper-typed seam cannot give.
 - **Cancellation is threaded, and marks status.** ctx-aware members load
   the context with `std::atomic_load(&ctx_)` and pass it to both
   `GetCsgLeafNode(ctx.get())` (which initializes progress counters and
@@ -81,7 +84,11 @@ Manifold RemoveSelfIntersections() const;
 - No other public surface. The diagnostic (pierce count/depth) could later
   become public alongside `Status()`-style introspection, but that is a
   separate decision; v1 keeps it internal.
-- Bindings expose the same zero-parameter form.
+- Bindings expose the same zero-parameter form across every hand-wired
+  surface this tree maintains: C (manifoldc.h/.cpp), Python
+  (manifold3d.cpp), WASM embind + JS wrapper + TS types, plus the CMake
+  source list. No install/export change beyond the existing library
+  target; the seam headers stay private.
 
 ### 1.3 The member and the internal seam
 
@@ -145,10 +152,15 @@ copy -
 
 ```cpp
 // Cluster verts within eps (BVH + union-find, centroid positions),
-// rewrite halfedge_ start/end ids, then run the invariant sweep the
-// MeshGL ctor would otherwise provide: CleanupTopology() (pinched
-// verts), SetNormalsAndCoplanar(), RemoveDegenerates(),
-// RemoveUnreferencedVerts(). Returns the max applied displacement
+// rewrite tri verts to cluster representatives, then run the FULL
+// invariant sweep the MeshGL ctor would otherwise provide:
+// CleanupTopology() (pinched verts), SetNormalsAndCoplanar(),
+// RemoveDegenerates(), RemoveUnreferencedVerts() (which only MARKS
+// unreferenced positions NaN), and SortGeometry() (which rebuilds
+// collider_ and bBox_ and compacts) - dropping a stage silently
+// violates invariants downstream consumers assume. Positions-only
+// intermediate: prop policy is an explicit drop (DedupePropVerts
+// no-ops at NumProp()==0). Returns the max applied displacement
 // (the tolerance-claim term).
 double MergeVertsEps(Manifold::Impl& impl, double eps);
 ```
@@ -186,10 +198,12 @@ SelfIntersectionInfo Impl::SelfIntersections(double relTol) const;
 // side-by-side, divergence explained at the definitions.
 ```
 
-- Both share `GetFaceBoxMorton` + the stored `collider_` for the broad
-  phase - no parallel BVH construction for the diagnostic path, no
-  `GetMeshGL64` read, no per-call re-sort of boxes the Impl already
-  indexes.
+- Both reuse the stored `collider_` as the broad-phase INDEX while
+  computing fresh `GetFaceBoxMorton` query boxes per call (the house
+  diagnostic's exact shape) - no parallel BVH construction, no
+  `GetMeshGL64` read. Valid only on finalized geometry: `collider_` is
+  built by `SortGeometry`, so the diagnostic runs after the sweep, never
+  mid-rebuild.
 - The white-box test helper calls it through an Impl, not a Manifold.
 
 ### 1.6 Output construction
@@ -204,6 +218,18 @@ out.vertPos_ = ...;              // ring positions
 out.CreateHalfedges(tris);       // triangulated kept cycles
 if (!out.IsManifold()) return std::nullopt;  // fail closed, as the
                                  // ctor's NotManifold arm does today
+// Metadata FIRST, before any sweep stage: SetNormalsAndCoplanar and
+// RemoveDegenerates read/write triRef, and SortGeometry permutes it -
+// the MeshGL ctor likewise builds triRef before its sweep. The
+// DERIVED posture: one fresh reserved meshID on every triRef
+// (identity transform), meshRelation_.originalID = -1 - exactly what
+// Manifold(MeshGL64) produces. InitializeOriginal() is the rejected
+// alternative: it would flip OriginalID() from -1 to a fresh id, a
+// public behavior change with no driver; callers who want a
+// provenance root call AsOriginal() themselves.
+const int meshID = Impl::ReserveIDs(1);
+<triRef = {meshID, meshID, -1, tri}; meshIDtransform[meshID];
+ originalID = -1>
 out.CalculateBBox();
 out.tolerance_ = <the measured formula>;  // BEFORE SetEpsilon: it
 out.SetEpsilon();                // floors tolerance_ at the derived
@@ -212,14 +238,9 @@ out.CleanupTopology();           // pinched verts, pre-normals
 out.SetNormalsAndCoplanar();
 out.RemoveDegenerates();
 out.RemoveUnreferencedVerts();
-out.SortGeometry();
+out.SortGeometry(ctx);           // ctx-aware, like Hull/LevelSet
+if (IsCancelled(ctx)) { out.MakeEmpty(Error::Cancelled); return out; }
 if (!out.IsFinite()) return std::nullopt;
-// Metadata policy, explicit: the DERIVED posture - one fresh reserved
-// meshID on every triRef (identity transform), originalID_ = -1 -
-// exactly what Manifold(MeshGL64) produces. InitializeOriginal() is
-// the rejected alternative: it would flip OriginalID() from -1 to a
-// fresh id, a public behavior change with no driver; callers who want
-// a provenance root call AsOriginal() themselves.
 ```
 
 - No `Manifold(MeshGL64)` in the loop: construction-time degenerate
@@ -238,11 +259,19 @@ if (!out.IsFinite()) return std::nullopt;
 ### 1.7 Cancellation and parallelism posture
 
 - `RemoveOverlaps` takes `ctx` and polls `IsCancelled(ctx)` at stage
-  boundaries (after merge, after step 6/7, after 9.5, per-face-batch in
-  the partition loop, after classification). Cancelled -> an Impl made
-  empty with `Error::Cancelled` (section 1.3) - observable, sticky,
-  matching the house idiom; NOT a silent input-return, which would make
+  boundaries (entry, after the input pierce count, after merge, after
+  step 6/7, after 9.5, per-face-batch in the partition loop, after the
+  cell complex and classification). Cancelled -> an Impl made empty
+  with `Error::Cancelled` (section 1.3) - observable, sticky, matching
+  the house idiom; NOT a silent input-return, which would make
   cancellation indistinguishable from "nothing to do".
+- The finalize sweep is ctx-aware too: `SortGeometry(ctx)` can return
+  early on cancel with partial state, so the sweep checks
+  `IsCancelled` immediately after and converts to
+  `MakeEmpty(Error::Cancelled)` - the Hull/LevelSet pattern. v1 does
+  NOT do phase/progress accounting (no `ADVANCE_PHASE_OR_RETURN`
+  budget): RSI observes cancellation only, and the public WithContext
+  doc says exactly that rather than overclaiming progress reporting.
 - The per-face partition loop and the per-face chord passes are
   embarrassingly parallel in their READS (each face touches only its
   own edge/chord/on-edge lists plus read-only shared state); the
@@ -311,7 +340,9 @@ house-faithful).
 Sections 2.1-2.4 are the mapping lane's findings AGAINST THE
 PRE-MIGRATION BRANCH, kept as the review record (past tense where the
 finding has since been resolved); the EXECUTION STATUS block below is
-the current state of the tree.
+the current state of the tree. Section 2.7 records the Codex mirror
+lanes, which reviewed the POST-migration tree independently (Part 2
+stripped from their copy).
 
 EXECUTION STATUS (user decisions, then landed): D1+D2 executed (the
 Impl-to-Impl seam, ctx threading, direct-Impl merge/emit, explicit
@@ -470,3 +501,43 @@ landed before any upstream PR; the seam is exactly what maintainers
 will review, and shipping the friend/lambda + serialization
 round-trips would have invited a mandatory rework round. D3/D5/V1 are
 honest post-landing items with this document as the record.
+
+### 2.7 Codex mirror lanes (post-migration, independent)
+
+Both lanes reviewed the migrated tree at af3bae84 with this Part 2
+stripped from their copy.
+
+The design-critique mirror (verdict: needs revision) found Part 1's
+PROSE trailing the implementation in places where the code was already
+right - the 1.6 snippet showed metadata after the sweep stages that
+read/write triRef (BuildImplFromTris sets it first; snippet fixed),
+1.4 understated the finalize chain (SortGeometry/RemoveUnreferencedVerts
+semantics; fixed), 1.5 overstated collider sharing (stored collider is
+the INDEX, query boxes are fresh per call, post-sort validity; fixed),
+and 1.1's "internal code never holds a Manifold" was false as a house
+claim (Minkowski; softened to the real rationale - structural fallback
+identity). Two findings drove CODE: the finalize sweep now passes ctx
+into SortGeometry and converts a mid-sort cancel to
+MakeEmpty(Error::Cancelled) (the Hull/LevelSet pattern), and the
+WithContext doc no longer overclaims progress reporting for RSI
+(cancellation-only in v1 - the progress-budget work is recorded
+below).
+
+The branch-vs-design mirror (verdict: divergent) independently
+re-derived exactly the recorded remaining-debt set - D3 (diagnostic
+stays RSI-local), V1 (push_back accumulation), D5 (file split) - and
+confirmed FINE on the member seam, the three-outcome optional, the
+emit sweep, AlphaBudgetEpsilon placement, the Collider fix, and the
+zero-parameter bindings. Its one NEW item is the progress-accounting
+gap above (now D6). It argues D3/V1/D5 belong BEFORE the upstream PR,
+against this document's post-landing recommendation - recorded as
+dissent for the user's PR-scoping call. It also flagged that only the
+C binding has a smoke test (Python/WASM exposure unpinned) -
+post-landing test debt.
+
+- **D6: ctx integration is cancellation-only.** No phase/progress
+  accounting (no ADVANCE_PHASE_OR_RETURN budget); a caller watching
+  Progress() during RSI sees no contribution. v1 posture: the public
+  WithContext doc states cancellation-only for RSI instead of
+  overclaiming. Implementing a phase budget is M, post-landing,
+  after the stage list stabilizes.

@@ -148,11 +148,12 @@ class Manifold {
   /// Returns a copy of this Manifold with the given ExecutionContext attached.
   /// The attachment is consumed only by `Status()` (for deferred CSG trees)
   /// and the eager ops (`Refine` / `RefineToLength` / `RefineToTolerance`,
-  /// `Hull`, `MinkowskiSum` / `MinkowskiDifference`,
-  /// `RemoveSelfIntersections`); those snapshot the ctx and report progress /
-  /// observe cancellation through it. Other queries that force evaluation
-  /// (`Volume`, `GetMeshGL`, `BoundingBox`, etc.) do not currently observe
-  /// attached ctx.
+  /// `Hull`, `MinkowskiSum` / `MinkowskiDifference`); those snapshot the ctx
+  /// and report progress / observe cancellation through it.
+  /// `RemoveSelfIntersections` also honors an attached ctx, but for
+  /// CANCELLATION only - it does not contribute to `Progress()`. Other
+  /// queries that force evaluation (`Volume`, `GetMeshGL`, `BoundingBox`,
+  /// etc.) do not currently observe attached ctx.
   ///
   /// Deferred ops (Boolean operators, Translate / Rotate / Scale / Transform
   /// / Mirror / Warp / SetTolerance / Simplify, BatchBoolean, the

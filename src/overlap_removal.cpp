@@ -360,10 +360,15 @@ double SegmentPiercesTriInterior(vec3 a, vec3 b, vec3 v0, vec3 v1, vec3 v2,
 // in tolerance_ BEFORE SetEpsilon, which floors it at the
 // bbox-derived epsilon_ and never lowers it - the working eps never
 // overwrites epsilon_. Invariant failures come back as an error
-// status (MakeEmpty), exactly as the ctor reports them.
+// status (MakeEmpty), exactly as the ctor reports them. The sweep is
+// ctx-aware at its heaviest stage: SortGeometry(ctx) can return early
+// on cancel with partial state, so it is followed by an IsCancelled
+// conversion to MakeEmpty(Error::Cancelled) - the Hull/LevelSet
+// pattern.
 Manifold::Impl BuildImplFromTris(std::vector<vec3>&& positions,
                                  const std::vector<ivec3>& tris,
-                                 double toleranceSeed) {
+                                 double toleranceSeed,
+                                 ExecutionContext::Impl* ctx) {
   Manifold::Impl out;
   out.vertPos_.resize_nofill(positions.size());
   for (size_t i = 0; i < positions.size(); ++i) out.vertPos_[i] = positions[i];
@@ -391,7 +396,11 @@ Manifold::Impl BuildImplFromTris(std::vector<vec3>&& positions,
   out.SetNormalsAndCoplanar();
   out.RemoveDegenerates();
   out.RemoveUnreferencedVerts();
-  out.SortGeometry();
+  out.SortGeometry(ctx);
+  if (IsCancelled(ctx)) {
+    out.MakeEmpty(Manifold::Error::Cancelled);
+    return out;
+  }
   if (!out.IsFinite()) out.MakeEmpty(Manifold::Error::NonFiniteVertex);
   return out;
 }
@@ -430,8 +439,11 @@ std::optional<Manifold::Impl> RemoveOverlapsImpl(const Manifold::Impl& input,
 
   // Step 1: merge verts within eps. Zero merges leaves the input
   // untouched (nothing rebuilt, nothing can drift).
-  const MergeVertsResult merged = MergeVertsEps(input, eps);
+  const MergeVertsResult merged = MergeVertsEps(input, eps, ctx);
   const Manifold::Impl& impl = merged.mergedCount > 0 ? merged.impl : input;
+  // A cancel inside the merge rebuild's finalize sweep is observable
+  // status, NOT a fallback - distinguish it before the generic arm.
+  if (impl.status_ == Manifold::Error::Cancelled) return CancelledImpl();
   if (impl.IsEmpty() || impl.status_ != Manifold::Error::NoError) {
     return std::nullopt;
   }
@@ -647,7 +659,7 @@ std::optional<Manifold::Impl> RemoveOverlapsImpl(const Manifold::Impl& input,
   // tolerance claim.
   Manifold::Impl out = BuildImplFromTris(
       std::move(ringPos), outTris,
-      std::max({tolerance, 10.0 * eps, merged.maxMove, unified.maxMove}));
+      std::max({tolerance, 10.0 * eps, merged.maxMove, unified.maxMove}), ctx);
 
   // GATE (thin, final): construction status, positive volume for a
   // non-empty input (NaN fails the comparison too), and pierce-
@@ -655,6 +667,9 @@ std::optional<Manifold::Impl> RemoveOverlapsImpl(const Manifold::Impl& input,
   // winding-WEIGHTED integral, so heavy overlap legitimately shrinks
   // the measured volume (a full overlap reads 1/3). Gate failures
   // are an expected fallback for adversarial inputs, not asserts.
+  // A cancel inside the emit's finalize sweep is observable status,
+  // NOT a fallback - distinguish it before the generic arm.
+  if (out.status_ == Manifold::Error::Cancelled) return out;
   if (out.status_ != Manifold::Error::NoError) return std::nullopt;
   if (!(out.GetProperty(Manifold::Impl::Property::Volume) > 0)) {
     return std::nullopt;
@@ -671,7 +686,7 @@ double InferEps(const Manifold::Impl& m) {
 }
 
 MergeVertsResult MergeVertsEps(const Manifold::Impl& in, double eps,
-                               int maxIter) {
+                               ExecutionContext::Impl* ctx, int maxIter) {
   if (in.IsEmpty()) return {};
 
   // Cluster on a copy of the positions; `in.vertPos_` stays intact as
@@ -808,8 +823,8 @@ MergeVertsResult MergeVertsEps(const Manifold::Impl& in, double eps,
       tris.push_back(tv);
     }
   }
-  return {BuildImplFromTris(std::move(verts), tris, in.tolerance_), mergedCount,
-          maxMove};
+  return {BuildImplFromTris(std::move(verts), tris, in.tolerance_, ctx),
+          mergedCount, maxMove};
 }
 
 std::vector<Edge> EnumerateEdges(const Manifold::Impl& impl) {
