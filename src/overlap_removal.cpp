@@ -686,6 +686,19 @@ std::optional<Manifold::Impl> RemoveOverlapsImpl(const Manifold::Impl& input,
   }
   return out;
 }
+
+// Point-on-segment predicate (exact, zero tolerance): does P lie on
+// segment AB, including both endpoints? Used by isLoopSimple2D and
+// strictPIP (both call sites need identical semantics; the two former
+// lambda copies are consolidated here).
+bool PointOnSeg2D(const vec2& P, const vec2& A, const vec2& B) {
+  const vec2 ab = {B.x - A.x, B.y - A.y};
+  const vec2 ap = {P.x - A.x, P.y - A.y};
+  if (ab.x * ap.y - ab.y * ap.x != 0.0) return false;
+  const double dot = ab.x * ap.x + ab.y * ap.y;
+  const double len2 = ab.x * ab.x + ab.y * ab.y;
+  return dot >= 0.0 && dot <= len2;
+}
 }  // namespace
 
 double InferEps(const Manifold::Impl& m) {
@@ -2636,19 +2649,6 @@ FacePartition PartitionFace(const Manifold::Impl& impl, int face,
       auto cross2 = [](const vec2& a, const vec2& b) {
         return a.x * b.y - a.y * b.x;
       };
-      // pointOnSeg: does P lie on segment AB (including endpoints)?
-      // Uses exact arithmetic (no tolerance) since these are 2D projected
-      // positions that will be exact at this level.
-      auto pointOnSeg = [&](const vec2& P, const vec2& A, const vec2& B) {
-        const vec2 ab = {B.x - A.x, B.y - A.y};
-        const vec2 ap = {P.x - A.x, P.y - A.y};
-        // Must be collinear.
-        if (cross2(ab, ap) != 0.0) return false;
-        // Must be in [0,1] parametrically: dot in [0, len2].
-        const double dot = ab.x * ap.x + ab.y * ap.y;
-        const double len2 = ab.x * ab.x + ab.y * ab.y;
-        return dot >= 0.0 && dot <= len2;
-      };
       for (int i = 0; i < nL; ++i) {
         const vec2& a = pts[i];
         const vec2& b = pts[(i + 1) % nL];
@@ -2663,10 +2663,10 @@ FacePartition PartitionFace(const Manifold::Impl& impl, int face,
           const bool adjacent = isNext || isWrap;
           if (!adjacent) {
             // Non-adjacent: any contact is a simplicity violation.
-            if (pointOnSeg(a, c, d)) return false;  // endpoint a on cd
-            if (pointOnSeg(b, c, d)) return false;  // endpoint b on cd
-            if (pointOnSeg(c, a, b)) return false;  // endpoint c on ab
-            if (pointOnSeg(d, a, b)) return false;  // endpoint d on ab
+            if (PointOnSeg2D(a, c, d)) return false;  // endpoint a on cd
+            if (PointOnSeg2D(b, c, d)) return false;  // endpoint b on cd
+            if (PointOnSeg2D(c, a, b)) return false;  // endpoint c on ab
+            if (PointOnSeg2D(d, a, b)) return false;  // endpoint d on ab
             // Strict crossing (both pairs of opposite signs).
             const vec2 ab = {b.x - a.x, b.y - a.y};
             const vec2 ac = {c.x - a.x, c.y - a.y};
@@ -2689,12 +2689,12 @@ FacePartition PartitionFace(const Manifold::Impl& impl, int face,
             // point (which the non-shared endpoint checks subsume).
             if (isNext) {
               // Shared vertex: b == c. Non-shared: a (of ab) and d (of cd).
-              if (pointOnSeg(a, c, d)) return false;  // a on cd (beyond b)
-              if (pointOnSeg(d, a, b)) return false;  // d on ab (beyond b)
+              if (PointOnSeg2D(a, c, d)) return false;  // a on cd (beyond b)
+              if (PointOnSeg2D(d, a, b)) return false;  // d on ab (beyond b)
             } else {
               // isWrap: shared vertex a == d (index 0). Non-shared: b and c.
-              if (pointOnSeg(b, c, d)) return false;  // b on cd (beyond a)
-              if (pointOnSeg(c, a, b)) return false;  // c on ab (beyond a)
+              if (PointOnSeg2D(b, c, d)) return false;  // b on cd (beyond a)
+              if (PointOnSeg2D(c, a, b)) return false;  // c on ab (beyond a)
             }
           }
         }
@@ -2944,21 +2944,13 @@ FacePartition PartitionFace(const Manifold::Impl& impl, int face,
     // at vertices). Explicit point-on-segment rejection runs first, before
     // the ray-crossing count, so horizontal edges and vertex-at-exact-y
     // cases do not yield false positives.
-    auto pointOnSeg2D = [](const vec2& P, const vec2& A, const vec2& B) {
-      const vec2 ab = {B.x - A.x, B.y - A.y};
-      const vec2 ap = {P.x - A.x, P.y - A.y};
-      if (ab.x * ap.y - ab.y * ap.x != 0.0) return false;
-      const double dot = ab.x * ap.x + ab.y * ap.y;
-      const double len2 = ab.x * ab.x + ab.y * ab.y;
-      return dot >= 0.0 && dot <= len2;
-    };
     auto strictPIP = [&](const vec2& P, const std::vector<int>& Q) -> bool {
       const int nQ = static_cast<int>(Q.size());
       // First: reject if P lies on any boundary edge (incl. at vertices).
       for (int i = 0; i < nQ; ++i) {
         const vec2 a = p2(Q[i]);
         const vec2 b = p2(Q[(i + 1) % nQ]);
-        if (pointOnSeg2D(P, a, b)) return false;
+        if (PointOnSeg2D(P, a, b)) return false;
       }
       // Ray-casting count: ray from P in +x direction.
       int crossings = 0;
@@ -3129,13 +3121,12 @@ FacePartition PartitionFace(const Manifold::Impl& impl, int face,
         return out;
       }
 
-      // VALIDATION (every build config, as required by the plan):
-      // 1. Per-triangle: 3 distinct ids, strictly positive area.
+      // VALIDATION: trusted-triangulator triad (linear; runs in every
+      // build config):
+      // 1. Per-triangle: 3 distinct ids, strictly positive area,
+      //    not canonical-equal to any 3-vert hole contour.
       // 2. Signed-area preservation.
-      // 3. Boundary coverage.
-      // 4. Full PSLG embedding (no strict crossings, no
-      //    vertex-on-nonincident-edge, no collinear overlaps, no
-      //    duplicate edges) - quadratic but bounded by edge-count cap.
+      // 3. Boundary coverage (undirected).
 
       // Build expected boundary edges from outer + holes.
       struct EdgeDir {
@@ -3148,15 +3139,7 @@ FacePartition PartitionFace(const Manifold::Impl& impl, int face,
           boundaryEdges.push_back({cont[i].idx, cont[(i + 1) % nc].idx});
         }
       }
-      const int totalBoundaryEdges = static_cast<int>(boundaryEdges.size());
-      // Edge-count cap: regions exceeding this gate (fail closed) rather than
-      // skipping validation. In practice the boss class is a triangle outer
-      // + a handful of hole verts, so this cap is never hit on valid input.
-      const int kMaxEdgesForValidation = 2000;
-      const bool exceedsCap =
-          totalBoundaryEdges + 3 * static_cast<int>(tris.size()) >
-          kMaxEdgesForValidation;
-      bool validFail = exceedsCap;  // gate if over cap
+      bool validFail = false;
 
       // Build the set of canonical hole cycle keys for the 3-vert hole check:
       // a triangle whose vert set matches a hole contour would be filling in
@@ -3298,187 +3281,6 @@ FacePartition PartitionFace(const Manifold::Impl& impl, int face,
             // Its reverse must also appear exactly once.
             auto revIt = edgeCount.find({ep.second, ep.first});
             if (revIt == edgeCount.end() || revIt->second != 1) {
-              validFail = true;
-              break;
-            }
-          }
-        }
-      }
-
-      // Full PSLG embedding checks (all four, in the face frame).
-      // Regions exceeding the cap already gated above; this block only runs
-      // when validFail is false and the cap was not exceeded.
-      if (!validFail) {
-        // Collect undirected triangle edges (use canonical {min,max} ordering
-        // so each undirected edge is represented once for the duplicate check).
-        struct Seg2D {
-          vec2 a, b;
-          int va, vb;
-        };
-        // Directed edges for crossing/point-on-edge checks (all 3*|T| of them).
-        std::vector<Seg2D> allEdgesDir;
-        allEdgesDir.reserve(3 * tris.size());
-        for (const ivec3& t : tris) {
-          for (int k = 0; k < 3; ++k) {
-            allEdgesDir.push_back(
-                {p2(t[k]), p2(t[(k + 1) % 3]), t[k], t[(k + 1) % 3]});
-          }
-        }
-        // Undirected edge set for checks (c) no collinear overlap and
-        // (d) no duplicate undirected edges beyond coverage.
-        // Key: {min(va,vb), max(va,vb)}.
-        std::map<std::pair<int, int>, int> undirEdgeCount;
-        for (const Seg2D& s : allEdgesDir) {
-          const auto key =
-              std::make_pair(std::min(s.va, s.vb), std::max(s.va, s.vb));
-          auto it = undirEdgeCount.find(key);
-          if (it == undirEdgeCount.end())
-            undirEdgeCount.insert({key, 1});
-          else
-            ++it->second;
-        }
-
-        auto cross2d = [](const vec2& u, const vec2& v) {
-          return u.x * v.y - u.y * v.x;
-        };
-        // pointOnSegExact: does P lie on segment AB (incl. endpoints)?
-        // Exact (zero-tolerance) cross product, parametric range check.
-        auto pointOnSegExact = [&](const vec2& P, const vec2& A,
-                                   const vec2& B) {
-          const vec2 ab = {B.x - A.x, B.y - A.y};
-          const vec2 ap = {P.x - A.x, P.y - A.y};
-          if (cross2d(ab, ap) != 0.0) return false;
-          const double dot = ab.x * ap.x + ab.y * ap.y;
-          const double len2 = ab.x * ab.x + ab.y * ab.y;
-          return dot >= 0.0 && dot <= len2;
-        };
-        // collinearOverlap: do two collinear segments [A,B] and [C,D]
-        // overlap (share more than a single point)?
-        // Assumes segments are already known to be collinear.
-        auto collinearOverlap = [&](const vec2& A, const vec2& B, const vec2& C,
-                                    const vec2& D) {
-          const vec2 ab = {B.x - A.x, B.y - A.y};
-          const double len2 = ab.x * ab.x + ab.y * ab.y;
-          if (len2 == 0.0) return false;
-          // Project C and D onto AB; overlap iff intervals [0,1] and
-          // [tC,tD] share an interior point (tC != tD to exclude
-          // single-point touch at an endpoint).
-          const double tC = (ab.x * (C.x - A.x) + ab.y * (C.y - A.y)) / len2;
-          const double tD = (ab.x * (D.x - A.x) + ab.y * (D.y - A.y)) / len2;
-          const double lo = std::min(tC, tD);
-          const double hi = std::max(tC, tD);
-          // Overlap of [0,1] and [lo,hi] has nonzero length iff lo < 1 && hi >
-          // 0 AND the overlap interval has positive measure (hi - lo > 0 or the
-          // overlap [max(0,lo), min(1,hi)] has length > 0).
-          return lo < 1.0 && hi > 0.0 && std::max(0.0, lo) < std::min(1.0, hi);
-        };
-
-        const int nSeg = static_cast<int>(allEdgesDir.size());
-        for (int i = 0; i < nSeg && !validFail; ++i) {
-          const Seg2D& si = allEdgesDir[i];
-          for (int j = i + 1; j < nSeg && !validFail; ++j) {
-            const Seg2D& sj = allEdgesDir[j];
-            // Shared-vertex flags for adjacency detection.
-            const bool shareAA = (si.va == sj.va);
-            const bool shareAB = (si.va == sj.vb);
-            const bool shareBA = (si.vb == sj.va);
-            const bool shareBB = (si.vb == sj.vb);
-            const bool adjacent = shareAA || shareAB || shareBA || shareBB;
-            if (!adjacent) {
-              // Non-adjacent: any contact is a PSLG violation.
-              if (pointOnSegExact(si.a, sj.a, sj.b)) {
-                validFail = true;  // (b) endpoint si.a on sj
-                break;
-              }
-              if (pointOnSegExact(si.b, sj.a, sj.b)) {
-                validFail = true;  // (b) endpoint si.b on sj
-                break;
-              }
-              if (pointOnSegExact(sj.a, si.a, si.b)) {
-                validFail = true;  // (b) endpoint sj.a on si
-                break;
-              }
-              if (pointOnSegExact(sj.b, si.a, si.b)) {
-                validFail = true;  // (b) endpoint sj.b on si
-                break;
-              }
-              // (a) strict crossing.
-              const vec2 ab = {si.b.x - si.a.x, si.b.y - si.a.y};
-              const vec2 ac = {sj.a.x - si.a.x, sj.a.y - si.a.y};
-              const vec2 ad = {sj.b.x - si.a.x, sj.b.y - si.a.y};
-              const double t1 = cross2d(ab, ac);
-              const double t2 = cross2d(ab, ad);
-              if (t1 * t2 < 0) {
-                const vec2 cd = {sj.b.x - sj.a.x, sj.b.y - sj.a.y};
-                const vec2 ca = {si.a.x - sj.a.x, si.a.y - sj.a.y};
-                const vec2 cb = {si.b.x - sj.a.x, si.b.y - sj.a.y};
-                const double t3 = cross2d(cd, ca);
-                const double t4 = cross2d(cd, cb);
-                if (t3 * t4 < 0) {
-                  validFail = true;  // (a) strict crossing
-                  break;
-                }
-              }
-              // (c) collinear overlap: both cross products zero.
-              if (t1 == 0.0 && t2 == 0.0 &&
-                  collinearOverlap(si.a, si.b, sj.a, sj.b)) {
-                validFail = true;
-                break;
-              }
-            } else {
-              // Adjacent (share >= 1 vertex). The shared-endpoint contact
-              // is legitimate. Reject only if a NON-shared endpoint of
-              // either segment lies on the other segment. This detects
-              // vertex-on-nonincident-edge violations that are hidden
-              // behind a shared vertex (e.g., A-B-C collinear with C on
-              // A->B, or A lying strictly on B->C).
-              //
-              // For nShared == 2 (same undirected edge, opposite directions),
-              // all four endpoints are shared; we skip all endpoint checks.
-              // Boundary coverage Check 3 catches true duplicates (same
-              // directed edge appearing twice with cnt != 1), and the
-              // collinear check is NOT applied here: two opposite-direction
-              // copies of an interior edge are valid in a triangulation.
-              if (!shareAA && !shareAB) {
-                // si.a is not a shared vertex; check si.a on sj.
-                if (pointOnSegExact(si.a, sj.a, sj.b)) {
-                  validFail = true;
-                  break;
-                }
-              }
-              if (!shareBA && !shareBB) {
-                // si.b is not a shared vertex; check si.b on sj.
-                if (pointOnSegExact(si.b, sj.a, sj.b)) {
-                  validFail = true;
-                  break;
-                }
-              }
-              if (!shareAA && !shareBA) {
-                // sj.a is not a shared vertex; check sj.a on si.
-                if (pointOnSegExact(sj.a, si.a, si.b)) {
-                  validFail = true;
-                  break;
-                }
-              }
-              if (!shareAB && !shareBB) {
-                // sj.b is not a shared vertex; check sj.b on si.
-                if (pointOnSegExact(sj.b, si.a, si.b)) {
-                  validFail = true;
-                  break;
-                }
-              }
-            }
-          }
-        }
-        // (d) no duplicate undirected edges beyond the coverage rule:
-        // boundary edges appear once (one directed copy) => undirected
-        // count = 2 at most (one for each direction), but a boundary edge
-        // has exactly one direction in the triangulation, so its undirected
-        // count is 1. Interior edges have both directions, count = 2.
-        // Any undirected edge with count > 2 is a duplicate.
-        if (!validFail) {
-          for (const auto& [key, cnt] : undirEdgeCount) {
-            if (cnt > 2) {
               validFail = true;
               break;
             }

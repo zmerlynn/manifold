@@ -2406,6 +2406,38 @@ TEST(OverlapRemoval, Step10ZeroLengthChordSkippedAndCleanFace) {
   EXPECT_EQ(clean.polygons[0].size(), 3u);
 }
 
+TEST(OverlapRemoval, Step10SubResolutionIslandGates) {
+  // A clean degree-2 island loop whose 2D projected area is nonzero but
+  // below the sub-resolution fast-fail threshold (|signedArea2| <
+  // triEps * holeBboxMax) must gate rather than decompose. Pins the
+  // subResGate arm, which is the only deterministic fast-fail path not
+  // covered by the existing island tests.
+  //
+  // The face is A(0,0,0), B(1,0,0), C(0,1,0) (z=0). The island is a
+  // tiny equilateral-like right triangle strictly inside the face at
+  // (0.2, 0.2, 0), with leg length 5e-12 - well below triEps (~1e-10)
+  // so the sub-resolution condition fires deterministically.
+  // signedArea2 ~ (5e-12)^2 = 25e-24; holeBboxMax = 5e-12;
+  // triEps * holeBboxMax ~ 1e-10 * 5e-12 = 5e-22 >> 25e-24: gates.
+  const Step10Fixture fx = MakeStep10Fixture();
+  ASSERT_GE(fx.face, 0);
+  const std::vector<overlap_removal::EdgeVertList> onEdgeLists(fx.edges.size());
+  // Island verts 4,5,6 at eps-scale near (0.2,0.2,0).
+  const double leg = 5e-12;
+  const std::vector<overlap_removal::NewEdgeWithExtras> chords = {
+      {{4, 5, fx.face, 99}, {}, {}},
+      {{5, 6, fx.face, 99}, {}, {}},
+      {{4, 6, fx.face, 99}, {}, {}}};
+  const std::vector<manifold::vec3> newPos = {
+      {0.2, 0.2, 0.0}, {0.2 + leg, 0.2, 0.0}, {0.2, 0.2 + leg, 0.0}};
+  const overlap_removal::FacePartition part = overlap_removal::PartitionFace(
+      fx.impl, fx.face, fx.edges, fx.he2e, onEdgeLists, chords, {0, 1, 2},
+      newPos, 1e-10, false);
+  // Must gate: sub-resolution island cannot be triangulated reliably.
+  EXPECT_GT(part.interiorIslandVerts, 0);
+  EXPECT_TRUE(part.polygons.empty());
+}
+
 // ---- Step 12 canonical merge tests (docs/OverlapRemoval.md) ----
 
 TEST(OverlapRemoval, Step12RotationsMergeAndSum) {

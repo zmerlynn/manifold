@@ -514,9 +514,11 @@ numbers go stale instantly; the suite is the source of truth.)
    branching, nonzero area, no cross-component vert sharing, no skipped
    boundary riders), classifies the negative-area walk cycle as a hole,
    assigns it to the enclosing positive-area region, calls `TriangulateIdx`,
-   validates the output (per-triangle area, boundary coverage, PSLG
-   embedding), and appends the resulting triangles as ordinary partition
-   polygons. The common boss-through-plate class falls in this resolved arm.
+   and appends the resulting triangles as ordinary partition polygons.
+   `TriangulateIdx` is extended the same unchecked trust the rest of the
+   library gives it; a triad of lightweight checks (degenerate triangle,
+   signed-area mismatch, boundary mis-coverage) guards the realistic failure
+   modes. The common boss-through-plate class falls in this resolved arm.
 
    **Still gated** (fail-closed, bit-identical):
    - PINCHED loops (1-attachment): the loop endpoint snaps to a boundary
@@ -530,8 +532,8 @@ numbers go stale instantly; the suite is the source of truth.)
      would defeat step 12's cancellation. Canonical winding- and
      mirror-independent triangulation is out of scope.
    - VALIDATION failures: a `TriangulateIdx` output that fails any of the
-     post-triangulation invariants (degenerate triangle, area mismatch,
-     boundary mis-coverage, PSLG violation) gates the face exactly as today.
+     triad checks (degenerate triangle, area mismatch, boundary mis-coverage)
+     gates the face exactly as today.
    - UNCLEAN detached components: branchy graphs, zero-area loops,
      vert-sharing island clusters gate.
 9. **Fold-gate residual**: two opposite-orientation folded shells that share

@@ -269,3 +269,19 @@ arms).
 
 Pinched (1-attachment) loops; properties; the fold-gate class; any
 global arrangement change. No new verts, no new eps, no new gates.
+
+## Simplification addendum
+
+After landing, a proportionality pass over the validation weight was
+approved (docs/SimplificationPlan.md). The PSLG output-validation suite
+(strict crossings, vertex-on-nonincident-edge, collinear overlap,
+duplicate-edge analysis) and the edge-count cap were removed. The
+surviving triad (degenerate triangle, signed-area preservation, boundary
+coverage) remains. The rationale: manifold extends `TriangulateIdx`
+unchecked trust at every other call site on weaker input guarantees;
+the island call site's input is fully proven before the call, making
+the PSLG suite disproportionate. The edge-count cap was deleted with the
+suite it bounded; large valid holed regions now decompose instead of
+gating. A sub-resolution island pin (Step10SubResolutionIslandGates)
+was added to cover the one deterministically forceable fast-fail path
+previously unpinned.
