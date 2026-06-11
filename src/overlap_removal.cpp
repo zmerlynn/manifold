@@ -3064,28 +3064,14 @@ FacePartition PartitionFace(const Manifold::Impl& impl, int face,
         rMaxV = std::max(rMaxV, pv.y);
       }
       const double bboxMax = std::max(rMaxU - rMinU, rMaxV - rMinV);
-      bool subResGate = false;
+      // No sub-resolution precheck: the deleted fast-fail computed the
+      // triangulator's own per-contour hole threshold, so it was a
+      // redundant short-circuit - a sub-resolution hole is classified
+      // non-hole by FindStart (or throws under MANIFOLD_DEBUG) and the
+      // validation triad gates it (pinned by
+      // Step10SubResolutionIslandGates).
       for (const size_t hi : itH->second) {
         const CycleInfo& hci = holes[hi];
-        // Sub-resolution fast-fail: conservative check using the hole
-        // contour's own 2D bbox (FindStart uses the contour's own extent,
-        // so per-hole bbox is the correct scale for this fast-fail).
-        double hMinU = std::numeric_limits<double>::infinity();
-        double hMaxU = -std::numeric_limits<double>::infinity();
-        double hMinV = std::numeric_limits<double>::infinity();
-        double hMaxV = -std::numeric_limits<double>::infinity();
-        for (const int v : hci.cyc) {
-          const vec2 pv = p2(v);
-          hMinU = std::min(hMinU, pv.x);
-          hMaxU = std::max(hMaxU, pv.x);
-          hMinV = std::min(hMinV, pv.y);
-          hMaxV = std::max(hMaxV, pv.y);
-        }
-        const double holeBboxMax = std::max(hMaxU - hMinU, hMaxV - hMinV);
-        if (std::fabs(hci.signedArea2) < triEps * holeBboxMax) {
-          subResGate = true;
-          break;
-        }
         // Hole cycle: appended AS WALKED - the negative-area
         // orientation is what the walk already produced for the
         // island's hole twin; reversing here would double-flip it
@@ -3096,11 +3082,6 @@ FacePartition PartitionFace(const Manifold::Impl& impl, int face,
           hole.push_back({p2(v), v});
         }
         polysIdx.push_back(std::move(hole));
-      }
-      if (subResGate) {
-        out.interiorIslandVerts = 1;
-        out.polygons.clear();
-        return out;
       }
 
       // TriangulateIdx call with local debug try/catch.

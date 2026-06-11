@@ -125,6 +125,15 @@ architecture. No eps/contract changes anywhere.
 - Determinism untouched (no container or iteration-order changes in
   decision paths).
 
+## Postscript (executed follow-up)
+
+The sub-resolution fast-fail, listed above among the keeps, was
+deleted in a user-approved follow-up after the closing review proved
+it redundant by identity: it computed the triangulator's own
+per-contour hole threshold, so every input it gated is classified
+non-hole by FindStart and rejected by the kept triad. The
+Step10SubResolutionIslandGates pin held green across the deletion.
+
 ## Stop conditions
 
 A "dead" helper turns out to have a live caller outside the deleted

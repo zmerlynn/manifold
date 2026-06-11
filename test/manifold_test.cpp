@@ -2407,15 +2407,16 @@ TEST(OverlapRemoval, Step10ZeroLengthChordSkippedAndCleanFace) {
 }
 
 TEST(OverlapRemoval, Step10SubResolutionIslandGates) {
-  // A clean degree-2 island loop whose 2D projected area is nonzero but
-  // below the sub-resolution fast-fail threshold (|signedArea2| <
-  // triEps * holeBboxMax) must gate rather than decompose. Pins the
-  // CLASS OUTCOME, not the fast-fail arm itself: the arm matches the
-  // triangulator's own PER-CONTOUR hole-classification threshold
-  // (FindStart's triEps * max of the contour's own bbox sides), so
-  // anything it gates would otherwise be classified non-hole and
-  // rejected by the validation triad - a redundant short-circuit,
-  // not independently observable from the outcome.
+  // A clean degree-2 island loop whose 2D projected area is nonzero
+  // but sub-resolution (|signedArea2| below the triangulator's
+  // per-contour hole threshold, triEps * the contour's own bbox max)
+  // must GATE rather than decompose: FindStart classifies the tiny
+  // contour as a non-hole (or the debug build throws), and the
+  // validation triad rejects the result. The once-present fast-fail
+  // precheck computed this same threshold and was deleted as a
+  // redundant short-circuit (user-approved follow-up to the
+  // simplification pass); this pin holds the class outcome across
+  // that deletion.
   //
   // The face is A(0,0,0), B(1,0,0), C(0,1,0) (z=0). The island is a
   // tiny equilateral-like right triangle strictly inside the face at
