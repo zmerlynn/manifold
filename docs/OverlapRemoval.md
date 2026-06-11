@@ -264,7 +264,7 @@ sub-polygon cycles, CCW with respect to the face's OWN HALFEDGE WINDING:
   (coincident chords otherwise create exact angular ties) AND against the
   face's own boundary sub-edges (a trace chord rides its source edge by
   construction; on its host the doubled directed edge made the walk's
-  exact-tie handling hes-order-sensitive - skipped, counted).
+  exact-tie handling order-sensitive - skipped, counted).
 - Next-pointer rule: the smallest left turn among unvisited outgoing
   halfedges, skipping the immediate reverse UNLESS it is the sole candidate
   (the U-turn that traverses dangling-chord spurs instead of stalling).
