@@ -2410,8 +2410,12 @@ TEST(OverlapRemoval, Step10SubResolutionIslandGates) {
   // A clean degree-2 island loop whose 2D projected area is nonzero but
   // below the sub-resolution fast-fail threshold (|signedArea2| <
   // triEps * holeBboxMax) must gate rather than decompose. Pins the
-  // subResGate arm, which is the only deterministic fast-fail path not
-  // covered by the existing island tests.
+  // CLASS OUTCOME, not the fast-fail arm itself: the arm is redundant
+  // by construction (its hole-own-bbox threshold is always <= the
+  // triangulator's contour-set threshold, so anything it gates would
+  // otherwise be classified non-hole and rejected by the validation
+  // triad) - it is a short-circuit, not independently observable from
+  // the outcome.
   //
   // The face is A(0,0,0), B(1,0,0), C(0,1,0) (z=0). The island is a
   // tiny equilateral-like right triangle strictly inside the face at
