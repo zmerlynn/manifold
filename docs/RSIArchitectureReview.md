@@ -307,6 +307,19 @@ pending. Classification: ARCHITECTURE-DEBT (design right, branch
 diverges, migration warranted), DELIBERATE-V1 (defensible documented
 reduction), FINE (conformant or equally house-faithful).
 
+EXECUTION STATUS (user decisions, then landed): D1+D2 executed (the
+Impl-to-Impl seam, ctx threading, direct-Impl merge/emit, explicit
+derived metadata, friend/lambda removal); D4 resolved by fixing
+`Collider` single-leaf trees in collider.h itself (user call: reuse
+over reimplementation) with a dedicated collider_test.cpp, retiring
+SortedBVH's wrapper-side guard; the `OriginalID() == -1` and
+cancellation pins exist and are mutation-witnessed; the V2 hook
+comment is in place. V3 is superseded by D1's Impl-level merge.
+Remaining: D3 (diagnostic family in properties.cpp sharing the stored
+collider_), D5 (file split), V1 (write-shape restructure, then
+optional parallel policy) - post-landing items per the
+recommendation, with this document as the record.
+
 ### 2.1 Architecture debt
 
 - **D1 (keystone): the internal seam is Manifold-typed.**

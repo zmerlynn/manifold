@@ -23,7 +23,7 @@ assumptions hold in doubles, and add no new algorithmic ideas.
 
 | step | function | role |
 |---|---|---|
-| 1 | `MergeVertsEps` | eps-merge near-coincident verts (cluster centroids, MeshGL64 merge hints) |
+| 1 | `MergeVertsEps` | eps-merge near-coincident verts (cluster centroids, direct Impl rebuild) |
 | 2 | `EnumerateEdges` | canonical undirected edges with halfedge pairs |
 | 4 | `BuildOnEdgeVertLists` | verts within eps of an edge's interior, sorted by t |
 | 5 | `BuildOnTriVertLists` | verts within eps of a tri's interior (strict barycentric) |
@@ -37,10 +37,10 @@ assumptions hold in doubles, and add no new algorithmic ideas.
 | 10-11 | `PartitionFace` | per-face simple-cycle partition by angular walk |
 | 12 | `MergePolygons` | canonical-cycle merge with signed multiplicity; coincident opposite pairs cancel |
 | 13 | `BuildCellComplex`, `ClassifyCells` | radial fans -> volume cells -> seed cast -> winding BFS -> keep |
-| emit | `BuildEmitTopology` + driver | inside-wedge twins, vertex rings, triangulation, MeshGL64 |
+| emit | `BuildEmitTopology` + driver | inside-wedge twins, vertex rings, triangulation, direct Impl construction |
 | gate | driver | folded-shell volume (pre-emit) + status / volume / pierce-monotonicity, else return input |
 
-The driver (`RunOverlapRemovalImpl`) composes these serially (per-face
+The driver (`RemoveOverlapsImpl`) composes these serially (per-face
 parallelization is an open follow-up; nothing is parallel yet). Exceptions
 exist only in MANIFOLD_DEBUG builds (optional_assert.h defines the error
 types there; release manifold is exception-free and all RSI failure arms
@@ -368,8 +368,8 @@ topology explicitly:
    be simplified - widening epsilon moves the tail into the triangulator's
    own degenerate class, and the zero-area output tris collapse at Manifold
    construction; far beyond 64x the CCW check would pass CW triangles over
-   real geometry). Output MeshGL64: numProp = 3 - non-position properties
-   are NOT preserved.
+   real geometry). Output: positions only (exports as numProp = 3) -
+   non-position properties are NOT preserved.
 
 ## Driver gate
 

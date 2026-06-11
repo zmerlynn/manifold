@@ -3721,10 +3721,15 @@ TEST(Manifold, RemoveSelfIntersectionsInteriorIslandFallsBack) {
   ASSERT_GT(InteriorPierces(input), 0);  // premise: genuinely pierces
   // The fallback is STRUCTURAL at the seam: nullopt means the member
   // returns *this - there is no almost-identical rebuilt mesh to
-  // compare. Without the island gate this input does not fall back -
-  // the pipeline EMITS a valid-but-wrong cube-only mesh (the cut
-  // cancels at step 12 and the stamping shell drops as nested), so
-  // has_value() discriminates gate removal.
+  // compare. This pins the CLASS outcome (interior-island stamps fall
+  // back, never emit). The island gate fires first for this fixture
+  // (verified by arm instrumentation); with that arm removed, the
+  // folded-shell volume gate currently catches the damaged emit as a
+  // second line of defense, so has_value() alone no longer
+  // discriminates island-gate removal at feature level - the
+  // detector's own discrimination lives in the
+  // Step10InteriorIslandDetectedAndFailsClosed unit pins
+  // (mutation-checked there).
   const std::optional<Manifold::Impl> out =
       overlap_removal::RemoveOverlaps(MakeImpl(input), 1e-3, nullptr);
   EXPECT_FALSE(out.has_value());
