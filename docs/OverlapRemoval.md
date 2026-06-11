@@ -446,9 +446,11 @@ numbers go stale instantly; the suite is the source of truth.)
   trimaran fold class - pins the folded-shell gate's bit-identical
   fallback, see Known limitations); the ovoid dense-sliver fixture (falls
   back bit-identically - the outcome is pinned, not which internal
-  guard fires); the interior-island stamp (bit-identical fallback; the
-  identity assert discriminates gate removal, which would emit a
-  wrong-but-valid mesh); the merge-displacement tolerance fixture (the
+  guard fires); the interior-island stamp (seam-level fallback pin:
+  the island arm fires first, but with it removed the folded-shell gate
+  catches this fixture as a second line, so the feature pin covers the
+  fallback OUTCOME - detector discrimination lives in the
+  interior-island unit pins); the merge-displacement tolerance fixture (the
   eps-chain-strip weld; mutation-checked against the formula); empty
   input; idempotence (fallback fixed point + success-path monotonicity);
   determinism; far-from-origin (the same trimaran at scale: strict pierce

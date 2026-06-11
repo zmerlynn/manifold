@@ -481,6 +481,12 @@ std::optional<Manifold::Impl> RemoveOverlapsImpl(const Manifold::Impl& input,
   // EARLY-EXIT when the COMBINED chord list is empty: covers the
   // clean-input case (bit-identical return at the caller), the
   // all-pairs-dropped case, and pancake-free coplanar contact.
+  // PRECEDENCE: a cancel RACING in since the last poll loses to this
+  // exit - deliberately. The operation is effectively complete ("no
+  // work to do"), and returning Cancelled here would make a clean
+  // input's result depend on cancel timing; the FromMeshGL contract
+  // sets the same precedent (validation outcomes win over a racing
+  // cancel). Pre-cancelled callers were already caught at entry.
   if (chordEdges.newEdges.empty()) return std::nullopt;
   if (IsCancelled(ctx)) return CancelledImpl();
 
@@ -687,7 +693,10 @@ double InferEps(const Manifold::Impl& m) {
 
 MergeVertsResult MergeVertsEps(const Manifold::Impl& in, double eps,
                                ExecutionContext::Impl* ctx, int maxIter) {
-  if (in.IsEmpty()) return {};
+  // A nonpositive iteration cap is a degenerate INPUT, not the logic
+  // regression the convergence tripwire below guards: fail closed
+  // here, in every build config.
+  if (in.IsEmpty() || maxIter <= 0) return {};
 
   // Cluster on a copy of the positions; `in.vertPos_` stays intact as
   // the displacement baseline. NaN positions cannot occur here:
@@ -783,6 +792,11 @@ MergeVertsResult MergeVertsEps(const Manifold::Impl& in, double eps,
   }
   DEBUG_ASSERT(converged, logicErr,
                "MergeVertsEps: hit kMergeVertsMaxIter without converging");
+  // Convergence is structural (the bit-idempotence skip above), so a
+  // non-converged exit means a logic regression or a nonpositive
+  // maxIter: fail CLOSED in release rather than merging with the last
+  // pass's labels - zero merges hands the driver its input unchanged.
+  if (!converged) return {};
 
   // Total applied displacement (final centroid vs the INPUT position,
   // still intact in in.vertPos_) - exact, not a per-pass bound. The

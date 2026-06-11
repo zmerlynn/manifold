@@ -3130,6 +3130,165 @@ Manifold::Impl MakeTwoTriImpl(const manifold::vec3 t1[3],
   return impl;
 }
 
+TEST(OverlapRemoval, Step1MergeNonPositiveMaxIterFailsClosed) {
+  // A nonpositive iteration cap is handled as a degenerate input at
+  // entry: zero merges in EVERY build config (previously an
+  // assert-enabled build threw the convergence tripwire and release
+  // would have merged with uninitialized labels). Genuine
+  // non-convergence keeps the debug tripwire plus a release
+  // fail-closed arm.
+  const double h = 0.00048828125;  // 2^-11, below eps = 1e-3
+  MeshGL64 m;
+  m.numProp = 3;
+  m.vertProperties = {0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, h};
+  m.triVerts = {0, 2, 1, 0, 1, 3, 1, 2, 3, 2, 0, 3};
+  Manifold tet((MeshGL64(m)));
+  ASSERT_EQ(tet.Status(), Manifold::Error::NoError);
+  const overlap_removal::MergeVertsResult r = overlap_removal::MergeVertsEps(
+      MakeImpl(tet), 1e-3, nullptr, /*maxIter=*/0);
+  EXPECT_EQ(r.mergedCount, 0);
+  EXPECT_EQ(r.maxMove, 0.0);
+}
+
+TEST(OverlapRemoval, Step6SharedVertPairStillPierces) {
+  // PAIR inclusion: an edge-tri pair sharing a vert is NOT skipped
+  // (the post-Boolean-merge shared-vert pierce case classic #289
+  // step 6 would miss) - only the edge's own two faces skip. T2
+  // shares vert 0 with T1 while its opposite edge pierces T1's
+  // interior; a reintroduced shared-vert pair skip loses the event.
+  Manifold::Impl impl;
+  impl.vertPos_.push_back({0, 0, 0});       // v0, shared corner
+  impl.vertPos_.push_back({1, 0, 0});       // v1 (T1)
+  impl.vertPos_.push_back({0, 1, 0});       // v2 (T1)
+  impl.vertPos_.push_back({0.3, 0.3, -1});  // v3 (T2)
+  impl.vertPos_.push_back({0.3, 0.3, 1});   // v4 (T2)
+  const int tris[2][3] = {{0, 1, 2}, {0, 3, 4}};
+  for (const auto& t : tris) {
+    for (int k = 0; k < 3; ++k) impl.halfedge_.push_back(t[k], -1, -1);
+  }
+  const double eps = 1e-6;
+  const std::vector<overlap_removal::Edge> edges =
+      overlap_removal::EnumerateEdges(impl);
+  const std::vector<overlap_removal::EdgeVertList> onEdgeLists(edges.size());
+  const std::vector<overlap_removal::TriVertList> onTriLists(impl.NumTri());
+  const std::vector<overlap_removal::EdgeTriIntersection> events =
+      overlap_removal::FindEdgeTriIntersections(impl, edges, onEdgeLists,
+                                                onTriLists, eps);
+  // Exactly the v3-v4 edge pierces T1's interior at (0.3, 0.3, 0).
+  ASSERT_EQ(events.size(), 1u);
+  EXPECT_EQ(events[0].triIdx, 0);
+  const overlap_removal::Edge& e = edges[events[0].edgeIdx];
+  EXPECT_EQ(e.v0, 3);
+  EXPECT_EQ(e.v1, 4);
+  EXPECT_NEAR(events[0].position.x, 0.3, 1e-12);
+  EXPECT_NEAR(events[0].position.y, 0.3, 1e-12);
+  EXPECT_NEAR(events[0].position.z, 0.0, 1e-12);
+}
+
+TEST(OverlapRemoval, Step4OnEdgeListStrictInteriorSortedApexSkipped) {
+  // BuildOnEdgeVertLists' three contracted behaviors on one edge:
+  // verts within eps of the OPEN segment list (sorted by t), verts
+  // beyond eps do not, and a vert that neighbors BOTH endpoints (the
+  // thin-tri apex) is skipped even when within eps.
+  const double eps = 1e-3;
+  Manifold::Impl impl;
+  impl.vertPos_.push_back({0, 0, 0});            // v0 - edge start
+  impl.vertPos_.push_back({1, 0, 0});            // v1 - edge end
+  impl.vertPos_.push_back({0.5, 0.4 * eps, 0});  // v2 - APEX of (v0,v1,v2)
+  // A second, distant triangle contributes the probe verts.
+  impl.vertPos_.push_back({0.7, 0.5 * eps, 0});  // v3 - within eps, t=0.7
+  impl.vertPos_.push_back({0.3, 0.5 * eps, 0});  // v4 - within eps, t=0.3
+  impl.vertPos_.push_back({0.5, 2.0 * eps, 0});  // v5 - OUTSIDE the band
+  const int tris[2][3] = {{0, 1, 2}, {3, 4, 5}};
+  for (const auto& t : tris) {
+    for (int k = 0; k < 3; ++k) impl.halfedge_.push_back(t[k], -1, -1);
+  }
+  const std::vector<overlap_removal::Edge> edges =
+      overlap_removal::EnumerateEdges(impl);
+  int e01 = -1;
+  for (size_t e = 0; e < edges.size(); ++e) {
+    if (edges[e].v0 == 0 && edges[e].v1 == 1) e01 = static_cast<int>(e);
+  }
+  ASSERT_GE(e01, 0);
+  const std::vector<overlap_removal::EdgeVertList> lists =
+      overlap_removal::BuildOnEdgeVertLists(impl, edges, eps);
+  // v4 (t=0.3) then v3 (t=0.7), sorted ascending; apex v2 skipped
+  // despite sitting closer to the edge than either probe; v5 excluded.
+  ASSERT_EQ(lists[e01].verts.size(), 2u);
+  EXPECT_EQ(lists[e01].verts[0], 4);
+  EXPECT_EQ(lists[e01].verts[1], 3);
+  EXPECT_NEAR(lists[e01].ts[0], 0.3, 1e-9);
+  EXPECT_NEAR(lists[e01].ts[1], 0.7, 1e-9);
+}
+
+TEST(OverlapRemoval, Step5OnTriListStrictInterior) {
+  // BuildOnTriVertLists: a vert within eps of the plane and strictly
+  // inside the barycentric simplex lists (all-positive bary); a vert
+  // past the eps band does not; a vert over an EDGE of the triangle
+  // (one barycentric pinned at zero) does not - strict interior only.
+  const double eps = 1e-3;
+  Manifold::Impl impl;
+  impl.vertPos_.push_back({0, 0, 0});                // T1
+  impl.vertPos_.push_back({1, 0, 0});                // T1
+  impl.vertPos_.push_back({0, 1, 0});                // T1
+  impl.vertPos_.push_back({0.3, 0.3, 0.5 * eps});    // v3 - interior, near
+  impl.vertPos_.push_back({0.25, 0.25, 2.0 * eps});  // v4 - too far
+  impl.vertPos_.push_back({0.5, 0.0, 0.5 * eps});    // v5 - over the edge
+  const int tris[2][3] = {{0, 1, 2}, {3, 4, 5}};
+  for (const auto& t : tris) {
+    for (int k = 0; k < 3; ++k) impl.halfedge_.push_back(t[k], -1, -1);
+  }
+  const std::vector<overlap_removal::TriVertList> lists =
+      overlap_removal::BuildOnTriVertLists(impl, eps);
+  ASSERT_EQ(lists.size(), 2u);
+  ASSERT_EQ(lists[0].verts.size(), 1u);
+  EXPECT_EQ(lists[0].verts[0], 3);
+  EXPECT_GT(lists[0].bary[0].x, 0.0);
+  EXPECT_GT(lists[0].bary[0].y, 0.0);
+  EXPECT_GT(lists[0].bary[0].z, 0.0);
+}
+
+TEST(OverlapRemoval, Step8ExtrasThreadedSortedAlongChord) {
+  // AddInteriorVertsToNewEdges: on-tri verts lying on a chord's
+  // interior thread onto it as extras, sorted by t along the chord
+  // regardless of their order in the on-tri list; off-chord verts do
+  // not thread.
+  const double eps = 1e-3;
+  Manifold::Impl impl;
+  impl.vertPos_.push_back({0, 0, 0});      // T1
+  impl.vertPos_.push_back({2, 0, 0});      // T1
+  impl.vertPos_.push_back({0, 2, 0});      // T1
+  impl.vertPos_.push_back({1.2, 0.1, 0});  // v3 - ON the chord, t~0.69
+  impl.vertPos_.push_back({0.5, 0.1, 0});  // v4 - ON the chord, t~0.25
+  impl.vertPos_.push_back({0.8, 0.4, 0});  // v5 - off the chord
+  const int tris[2][3] = {{0, 1, 2}, {3, 4, 5}};
+  for (const auto& t : tris) {
+    for (int k = 0; k < 3; ++k) impl.halfedge_.push_back(t[k], -1, -1);
+  }
+  const int baseId = static_cast<int>(impl.NumVert());
+  // A chord across T1 between two NEW verts at y = 0.1.
+  const std::vector<manifold::vec3> newVertPositions = {{0.1, 0.1, 0},
+                                                        {1.7, 0.1, 0}};
+  std::vector<overlap_removal::PiercedNewEdge> chords(1);
+  chords[0].v0 = baseId + 0;
+  chords[0].v1 = baseId + 1;
+  chords[0].triA = 0;
+  chords[0].triB = 1;
+  // On-tri list for T1 deliberately ordered far-then-near (v3 before
+  // v4) to discriminate the sort.
+  std::vector<overlap_removal::TriVertList> onTriLists(impl.NumTri());
+  onTriLists[0].verts = {3, 4, 5};
+  onTriLists[0].bary = {{0.35, 0.6, 0.05}, {0.7, 0.25, 0.05}, {0.4, 0.4, 0.2}};
+  const std::vector<overlap_removal::NewEdgeWithExtras> out =
+      overlap_removal::AddInteriorVertsToNewEdges(impl, newVertPositions,
+                                                  chords, onTriLists, eps);
+  ASSERT_EQ(out.size(), 1u);
+  ASSERT_EQ(out[0].extraVerts.size(), 2u);
+  EXPECT_EQ(out[0].extraVerts[0], 4);  // t ~ 0.25 first
+  EXPECT_EQ(out[0].extraVerts[1], 3);  // t ~ 0.69 second
+  EXPECT_LT(out[0].extraTs[0], out[0].extraTs[1]);
+}
+
 TEST(OverlapRemoval, Step65OppositeCornerSnapDoesNotSubdivideEdge) {
   // The opposite-corner exclusion: a crossing on T1's bottom edge that
   // corner-snaps to T1's own APEX (the obtuse face's third vert, 0.45

@@ -190,8 +190,9 @@ struct RayHit {
  * invoked on the result (Status, Refine / RefineToLength / RefineToTolerance,
  * Hull, MinkowskiSum / MinkowskiDifference) snapshots the ctx and reports
  * progress and observes cancellation through it. RemoveSelfIntersections
- * also snapshots the ctx but observes CANCELLATION only - it contributes
- * nothing to Progress(). Safe to read/write from any thread.
+ * also snapshots the ctx but its PIPELINE observes cancellation only and
+ * contributes nothing to Progress() (a lazy input's CSG evaluation still
+ * reports progress as usual). Safe to read/write from any thread.
  *
  * Copyable and movable: copies share the same underlying state via a
  * shared_ptr, so one thread can evaluate while another holds a copy and

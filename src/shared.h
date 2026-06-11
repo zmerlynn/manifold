@@ -31,7 +31,7 @@ inline double MaxEpsilon(double minEpsilon, const Box& bBox) {
 }
 
 /**
- * Smith's alpha-budget epsilon formula (UCAM-CL-TR-766 §8):
+ * Smith's alpha-budget epsilon formula (UCAM-CL-TR-766 section 8):
  *
  *     eps = (kBudget + 1) * sqrt(153) * u * lPow2
  *
