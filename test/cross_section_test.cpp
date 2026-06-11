@@ -2147,3 +2147,44 @@ TEST(CrossSection, NegativeOffset) {
       plusSign.Offset(-10, CrossSection::JoinType::Round, 2.0, 1024);
   EXPECT_NEAR(dilated.Area(), 30 * 30 - 10 * 10 * kPi, 0.01);
 }
+
+// Union/intersection annihilation regression: a tiny feature anchored just
+// past eps of a host vertex, edges parallel to a host edge; the displacement
+// sits between the vertex-on-edge band and the nearby-merge reach.
+TEST(CrossSection, TinyFeatureNearVertexUnion) {
+  const SimplePolygon host = StarRing({0., 0.14864156234381307, 0., 0.});
+  SimplePolygon feature = StarRing({0., 0., 0., 0.});
+  for (auto& v : feature) v *= 1e-3;
+
+  const double dirX = 0.11230272954875442;
+  const double dirY = 0.72082846036740955;
+  const double dlen = std::sqrt(dirX * dirX + dirY * dirY);
+  const double eps = 1e-12;
+  const vec2 anchor{host[0].x + eps * dirX / dlen,
+                    host[0].y + eps * dirY / dlen};
+  const vec2 shift = anchor - feature[0];
+  for (auto& v : feature) v += shift;
+
+  for (const double offset : {0.0, 1024.0, 4096.0}) {
+    SimplePolygon shiftedHost = host;
+    SimplePolygon shiftedFeature = feature;
+    for (auto& v : shiftedHost) v += offset;
+    for (auto& v : shiftedFeature) v += offset;
+
+    const CrossSection ca(shiftedHost);
+    const CrossSection cb(shiftedFeature);
+    if (ca.IsEmpty() || cb.IsEmpty()) continue;
+
+    const auto unionAB = ca + cb;
+    const auto intersectAB = ca.Boolean(cb, OpType::Intersect);
+    const CrossSection combined(Polygons{shiftedHost, shiftedFeature});
+
+    const double sum = ca.Area() + cb.Area() - intersectAB.Area();
+    EXPECT_NEAR(unionAB.Area(), sum, AreaTol(ca, cb))
+        << "inclusion-exclusion violated (offset=" << offset << ")";
+    EXPECT_NEAR(combined.Area(), unionAB.Area(),
+                1e-5 * (1.0 + std::fabs(ca.Area()) + std::fabs(cb.Area())))
+        << "multi-contour constructor disagrees with binary union (offset="
+        << offset << ")";
+  }
+}
