@@ -38,10 +38,10 @@ inline double MaxEpsilon(double minEpsilon, const Box& bBox) {
  * where u = 2^-53 (double-precision unit roundoff), sqrt(153) ~= 12.37
  * is Smith's per-intersection coefficient bound, kBudget is the
  * caller's expected upper bound on how many times any one edge may be
- * adjusted (default 1000), and lPow2 is the smallest power of 2 with
- * lPow2 >= L per frexp binning - an L that is itself an exact power of
- * 2 lands on the NEXT power (a conservative 2x; Smith's analysis only
- * needs lPow2 >= L).
+ * adjusted (default 1000), and lPow2 = ldexp(1.0, expBits) with
+ * expBits from frexp(L): for L in (2^(n-1), 2^n], lPow2 = 2^n - so an
+ * L that is itself an exact power of 2 lands on the NEXT power, a
+ * conservative 2x (Smith's analysis only needs lPow2 >= L).
  *
  * Distinct from `MaxEpsilon` / `kPrecision * scale` above:
  * - `MaxEpsilon` returns kPrecision (1e-12, an empirical constant well

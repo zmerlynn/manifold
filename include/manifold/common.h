@@ -213,7 +213,9 @@ struct RayHit {
  * sub-boolean (so a single very large boolean may run to completion
  * before the next check); Hull checks at the boundaries of its main
  * phases (post-buildMesh and post-SortGeometry); Minkowski checks per
- * face of the first input and per internal BatchBoolean batch.
+ * face of the first input and per internal BatchBoolean batch;
+ * RemoveSelfIntersections checks at its pipeline stage boundaries
+ * (and periodically inside its per-face partition loop).
  *
  * Example: cancel a long-running BatchBoolean from an observer thread.
  * @code

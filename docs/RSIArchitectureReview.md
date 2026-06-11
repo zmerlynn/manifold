@@ -453,7 +453,7 @@ recommendation, with this document as the record.
   its face's inputs plus read-only shared state) - the parallel-ready
   half of 1.7 that is already true; only the write side (V1) lags.
 
-### 2.4 Unpinned behaviors a migration could silently regress
+### 2.4 Migration-sensitive behaviors: what got pinned, what stays unpinned
 
 - `OriginalID() == -1` on a rebuilt output (the derived posture). If a
   D1 emit accidentally called `InitializeOriginal()`, OriginalID() would

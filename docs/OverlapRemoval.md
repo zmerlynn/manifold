@@ -525,6 +525,15 @@ numbers go stale instantly; the suite is the source of truth.)
    BOTH fold into one cell - adversarial-construction territory, documented
    rather than guarded.
 
+10. **Vertex-on-face through-pierces**: an edge ENDPOINT lying exactly on
+    another triangle's plane generates no step-6 event (events are
+    strict-interior in s by design), so a pair whose intersection segment
+    starts at that vertex carries one event and drops as a tip touch - the
+    cut is missing from the arrangement. Exact incidence is
+    measure-zero-adjacent (within-eps endpoints snap via the on-tri lists);
+    the residue is the usual incompleteness posture: fail-closed gates and
+    pierce-monotonicity.
+
 ## Relationship to #289 and design history
 
 Steps 1-13 map onto Emmett Lalish's 13-step sketch (the 2024-05-14 comment;
