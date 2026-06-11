@@ -613,11 +613,17 @@ void ProcessEdgePair(const std::vector<EdgeM>& edges,
   const int j = pr.second;
   const auto& ei = edges[i];
   const auto& ej = edges[j];
-  const double eps2 = eps * eps;
-  RecordEdgeVertHit(edges, verts, edgeG, eps2, ei.v0, j, hits);
-  RecordEdgeVertHit(edges, verts, edgeG, eps2, ei.v1, j, hits);
-  RecordEdgeVertHit(edges, verts, edgeG, eps2, ej.v0, i, hits);
-  RecordEdgeVertHit(edges, verts, edgeG, eps2, ej.v1, i, hits);
+  // The vertex-on-edge band must cover any coincidence the nearby-
+  // intersection merge can later weld (kIntersectionMergeEpsFactor * eps);
+  // a vertex past 1x eps but inside that reach otherwise neither snaps nor
+  // crosses, and the weld then leaves collinear overlapping sub-edges that
+  // corrupt the winding faces.
+  const double vertBand = kIntersectionMergeEpsFactor * eps;
+  const double vertBand2 = vertBand * vertBand;
+  RecordEdgeVertHit(edges, verts, edgeG, vertBand2, ei.v0, j, hits);
+  RecordEdgeVertHit(edges, verts, edgeG, vertBand2, ei.v1, j, hits);
+  RecordEdgeVertHit(edges, verts, edgeG, vertBand2, ej.v0, i, hits);
+  RecordEdgeVertHit(edges, verts, edgeG, vertBand2, ej.v1, i, hits);
   if (SharesEndpoint(ei, ej)) return;
   vec2 p;
   if (IntersectSegments({verts[ei.v0], verts[ei.v1], i},
