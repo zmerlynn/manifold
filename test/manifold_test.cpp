@@ -4228,6 +4228,28 @@ TEST(Manifold, RemoveSelfIntersectionsBooleanResult) {
   ExpectMeshGL64Identical(cleaned, result);
 }
 
+TEST(Manifold, DISABLED_RemoveSelfIntersectionsHullResolvesAtOriginScale) {
+  // TDD ANCHOR (red until the eps-retry ladder lands; the DISABLED_
+  // seed-queue convention): the origin-scale hull fixture should
+  // resolve the way the SAME geometry already does at 1e4 scale -
+  // probing showed 100x the inferred eps absorbs the degenerate
+  // clusters (strict pierce reduction, all three hulls kept, volume
+  // preserved); 40x and below still fall back. Today the
+  // single-attempt driver falls back bit-identically via the
+  // folded-shell gate, so the resolution asserts below fail - the
+  // stated red reason.
+  Manifold body = Manifold(ReadTestMeshGL64OBJ("hull-body.obj"));
+  Manifold mask = Manifold(ReadTestMeshGL64OBJ("hull-mask.obj"));
+  Manifold result = body - mask;
+  ASSERT_EQ(result.Status(), Manifold::Error::NoError);
+  ASSERT_GT(InteriorPierces(result), 0);  // premise: input pierces
+  Manifold cleaned = result.RemoveSelfIntersections();
+  EXPECT_EQ(cleaned.Status(), Manifold::Error::NoError);
+  EXPECT_LT(InteriorPierces(cleaned), InteriorPierces(result));
+  EXPECT_EQ(cleaned.Decompose().size(), 3u);
+  EXPECT_NEAR(cleaned.Volume(), result.Volume(), result.Volume() * 1e-3);
+}
+
 TEST(Manifold, RemoveSelfIntersectionsHullMaskFixture) {
   // Real-world adversarial fixture: hull-body Subtract hull-mask. The
   // body is THREE disjoint hulls (a trimaran); the mask grazes all of
