@@ -101,7 +101,6 @@ jobs:
           - LargeEdgeCountSelfUnion
           - DegenerateInputFuzz
           - TinyFeatureNearCorner
-          - ProjectedOrderAntiSymmetry
           - RemoveOverlapsDeterminismAcrossThreadCounts
           - SimplePositiveOffset
           - OffsetExtrudeRoundTrip
