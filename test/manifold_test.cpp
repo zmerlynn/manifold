@@ -2266,6 +2266,121 @@ TEST(OverlapRemoval, Step10TwoDisjointIslandsInOneFace) {
   }
 }
 
+TEST(OverlapRemoval, Step10NestedFreeIslandSeamPin) {
+  // Nested free-island seam pin: an inner island loop (7,8,9) strictly
+  // inside the disk region of an outer island loop (4,5,6), both free
+  // (no boundary attachment).
+  //
+  // Face: A(0,0,0), B(1,0,0), C(0,1,0).
+  // Outer island: 4(0.2,0.2), 5(0.5,0.2), 6(0.2,0.5) - "outer stamp".
+  // Inner island: 7(0.25,0.25), 8(0.35,0.25), 9(0.25,0.35) - strictly
+  //   inside the outer island triangle.
+  //
+  // Expected:
+  //   - interiorIslandVerts == 0 (both islands processed cleanly).
+  //   - The outer face annulus triangulates (triangles containing face
+  //     boundary verts and outer island verts).
+  //   - The OUTER ISLAND DISK region (4,5,6) is also triangulated (NOT
+  //     passed through as a plain polygon) because it carries the inner
+  //     island as a hole. The inner annulus produces triangles mixing
+  //     outer island verts {4,5,6} and inner island verts {7,8,9}.
+  //   - The inner island disk (7,8,9) passes through as a polygon.
+  //   - No standalone negative cycle in the output.
+  //   - Total signed area is preserved.
+  //
+  // This pin goes RED if process-ALL-regions is reverted to emit-then-skip:
+  // in that case the outer disk (4,5,6) is emitted uncut and no polygon
+  // bridges {4,5,6} and {7,8,9}.
+  const Step10Fixture fx = MakeStep10Fixture();
+  ASSERT_GE(fx.face, 0);
+  const std::vector<overlap_removal::EdgeVertList> onEdgeLists(fx.edges.size());
+  // Outer island chords.
+  const std::vector<overlap_removal::NewEdgeWithExtras> chords = {
+      {{4, 5, fx.face, 99}, {}, {}}, {{5, 6, fx.face, 99}, {}, {}},
+      {{4, 6, fx.face, 99}, {}, {}}, {{7, 8, fx.face, 99}, {}, {}},
+      {{8, 9, fx.face, 99}, {}, {}}, {{7, 9, fx.face, 99}, {}, {}}};
+  // newPos[0..2] = outer island verts 4,5,6; [3..5] = inner island verts 7,8,9.
+  const std::vector<manifold::vec3> newPos = {
+      {0.2, 0.2, 0.0},   {0.5, 0.2, 0.0},
+      {0.2, 0.5, 0.0},  // outer (4,5,6)
+      {0.25, 0.25, 0.0}, {0.35, 0.25, 0.0},
+      {0.25, 0.35, 0.0}};  // inner (7,8,9)
+  const overlap_removal::FacePartition part = overlap_removal::PartitionFace(
+      fx.impl, fx.face, fx.edges, fx.he2e, onEdgeLists, chords,
+      {0, 1, 2, 3, 4, 5}, newPos, 1e-10, false);
+
+  EXPECT_EQ(part.interiorIslandVerts, 0);
+  EXPECT_FALSE(part.polygons.empty());
+
+  // Build position table for area computation.
+  const int baseId = static_cast<int>(fx.impl.NumVert());
+  auto posOf2D = [&](int id) -> manifold::vec2 {
+    const manifold::vec3 p = id < baseId
+                                 ? fx.impl.vertPos_[id]
+                                 : newPos[static_cast<size_t>(id - baseId)];
+    return {p.x, p.y};
+  };
+  auto signedArea2D = [&](const std::vector<int>& poly) {
+    double a = 0.0;
+    const int n = static_cast<int>(poly.size());
+    for (int i = 0; i < n; ++i) {
+      const manifold::vec2 pi = posOf2D(poly[i]);
+      const manifold::vec2 pj = posOf2D(poly[(i + 1) % n]);
+      a += pi.x * pj.y - pi.y * pj.x;
+    }
+    return a * 0.5;
+  };
+
+  // All output polygons are simple and at least triangles.
+  for (const std::vector<int>& poly : part.polygons) {
+    EXPECT_GE(poly.size(), 3u);
+    EXPECT_TRUE(Step10CycleIsSimple(poly));
+  }
+
+  // No standalone negative cycle: face winding is CW in global xy (normal
+  // -z), so every output polygon must have negative global-xy signed area.
+  for (const std::vector<int>& poly : part.polygons) {
+    EXPECT_LE(signedArea2D(poly), 0.0);
+  }
+
+  // Total signed area preserved: face outer area (signed, includes the two
+  // island disks minus the two holes = net face area).
+  // The face outer cycle {A,C,B} in global xy is CW (negative).
+  const double faceOuterArea = signedArea2D({fx.A, fx.C, fx.B});
+  ASSERT_LT(faceOuterArea, 0.0);
+  double totalArea = 0.0;
+  for (const std::vector<int>& poly : part.polygons) {
+    totalArea += signedArea2D(poly);
+  }
+  EXPECT_NEAR(totalArea, faceOuterArea, 1e-10);
+
+  // Discriminating assertion: the outer island disk (verts 4,5,6) must NOT
+  // appear as an uncut plain polygon. The disk region carries the inner
+  // island as a hole, so it must be triangulated. In the correctly processed
+  // output, some triangle has verts from both the outer island set {4,5,6}
+  // and the inner island set {7,8,9} (the inner-annulus triangulation
+  // bridges the two boundaries). In the emit-then-skip bug, the outer disk
+  // emits as {4,5,6} with no cross-boundary triangles.
+  const std::set<int> outerIslandVerts = {4, 5, 6};
+  const std::set<int> innerIslandVerts = {7, 8, 9};
+  bool foundCrossTri = false;
+  for (const std::vector<int>& poly : part.polygons) {
+    bool hasOuter = false, hasInner = false;
+    for (int v : poly) {
+      if (outerIslandVerts.count(v)) hasOuter = true;
+      if (innerIslandVerts.count(v)) hasInner = true;
+    }
+    if (hasOuter && hasInner) {
+      foundCrossTri = true;
+      break;
+    }
+  }
+  // Must find at least one polygon bridging outer and inner island boundaries.
+  EXPECT_TRUE(foundCrossTri)
+      << "no polygon bridges outer-island {4,5,6} and inner-island {7,8,9}; "
+         "the outer disk was not triangulated (emit-then-skip regression)";
+}
+
 TEST(OverlapRemoval, Step10ZeroLengthChordSkippedAndCleanFace) {
   // A zero-length chord (step-9 snapping collapsed it) is skipped and
   // counted; with no effective cuts the face partitions into its own

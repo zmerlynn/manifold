@@ -2652,31 +2652,50 @@ FacePartition PartitionFace(const Manifold::Impl& impl, int face,
       for (int i = 0; i < nL; ++i) {
         const vec2& a = pts[i];
         const vec2& b = pts[(i + 1) % nL];
-        for (int j = i + 2; j < nL; ++j) {
-          // Skip the pair (last, first) that shares vert at index 0.
-          if (i == 0 && j == nL - 1) continue;
+        for (int j = i + 1; j < nL; ++j) {
           const vec2& c = pts[j];
           const vec2& d = pts[(j + 1) % nL];
-          // Any contact between non-incident segments is a simplicity
-          // violation: check if any endpoint lies on the other segment,
-          // OR a strict crossing occurs.
-          if (pointOnSeg(a, c, d)) return false;  // endpoint a on cd
-          if (pointOnSeg(b, c, d)) return false;  // endpoint b on cd
-          if (pointOnSeg(c, a, b)) return false;  // endpoint c on ab
-          if (pointOnSeg(d, a, b)) return false;  // endpoint d on ab
-          // Strict crossing (both pairs of opposite signs).
-          const vec2 ab = {b.x - a.x, b.y - a.y};
-          const vec2 ac = {c.x - a.x, c.y - a.y};
-          const vec2 ad = {d.x - a.x, d.y - a.y};
-          const double t1 = cross2(ab, ac);
-          const double t2 = cross2(ab, ad);
-          if (t1 * t2 < 0) {
-            const vec2 cd = {d.x - c.x, d.y - c.y};
-            const vec2 ca = {a.x - c.x, a.y - c.y};
-            const vec2 cb = {b.x - c.x, b.y - c.y};
-            const double t3 = cross2(cd, ca);
-            const double t4 = cross2(cd, cb);
-            if (t3 * t4 < 0) return false;  // strict crossing
+          // Determine adjacency: adjacent pairs share exactly one vertex
+          // (consecutive segments in the loop). The wrap-around pair
+          // (i==0, j==nL-1) shares vertex a==d (index 0).
+          const bool isNext = (j == i + 1);             // shares b == c
+          const bool isWrap = (i == 0 && j == nL - 1);  // shares a == d
+          const bool adjacent = isNext || isWrap;
+          if (!adjacent) {
+            // Non-adjacent: any contact is a simplicity violation.
+            if (pointOnSeg(a, c, d)) return false;  // endpoint a on cd
+            if (pointOnSeg(b, c, d)) return false;  // endpoint b on cd
+            if (pointOnSeg(c, a, b)) return false;  // endpoint c on ab
+            if (pointOnSeg(d, a, b)) return false;  // endpoint d on ab
+            // Strict crossing (both pairs of opposite signs).
+            const vec2 ab = {b.x - a.x, b.y - a.y};
+            const vec2 ac = {c.x - a.x, c.y - a.y};
+            const vec2 ad_v = {d.x - a.x, d.y - a.y};
+            const double t1 = cross2(ab, ac);
+            const double t2 = cross2(ab, ad_v);
+            if (t1 * t2 < 0) {
+              const vec2 cd = {d.x - c.x, d.y - c.y};
+              const vec2 ca = {a.x - c.x, a.y - c.y};
+              const vec2 cb = {b.x - c.x, b.y - c.y};
+              const double t3 = cross2(cd, ca);
+              const double t4 = cross2(cd, cb);
+              if (t3 * t4 < 0) return false;  // strict crossing
+            }
+          } else {
+            // Adjacent: one vertex is legitimately shared. Reject only if
+            // the NON-shared endpoint of either segment lies on the other
+            // segment (point-on-seg incl. endpoints), or if the segments
+            // overlap collinearly with positive length beyond the shared
+            // point (which the non-shared endpoint checks subsume).
+            if (isNext) {
+              // Shared vertex: b == c. Non-shared: a (of ab) and d (of cd).
+              if (pointOnSeg(a, c, d)) return false;  // a on cd (beyond b)
+              if (pointOnSeg(d, a, b)) return false;  // d on ab (beyond b)
+            } else {
+              // isWrap: shared vertex a == d (index 0). Non-shared: b and c.
+              if (pointOnSeg(b, c, d)) return false;  // b on cd (beyond a)
+              if (pointOnSeg(c, a, b)) return false;  // c on ab (beyond a)
+            }
           }
         }
       }
@@ -3244,13 +3263,30 @@ FacePartition PartitionFace(const Manifold::Impl& impl, int face,
             }
           }
         }
+        // Build undirected boundary edge set for reverse-occurrence check.
+        // A boundary edge {v0,v1} appearing in the REQUIRED direction is
+        // already checked in Check 1. Its reverse {v1,v0} must not appear
+        // in the triangle fan at all (it would mean the boundary was
+        // traversed in the wrong orientation by some triangle).
+        std::set<std::pair<int, int>> boundaryReverseSet;
+        for (const EdgeDir& be : boundaryEdges) {
+          boundaryReverseSet.insert({be.v1, be.v0});
+        }
         // Check 3: every directed edge in the triangle fan that is NOT a
-        // required-direction boundary edge must have count exactly 1, and
-        // its reverse must also have count exactly 1 (the two directions of
-        // an interior undirected edge).
+        // required-direction boundary edge must:
+        //   (a) not be the reverse of any boundary edge, and
+        //   (b) have count exactly 1, and
+        //   (c) its reverse must also have count exactly 1
+        //       (the two directions of an interior undirected edge).
         if (!validFail) {
           for (const auto& [ep, cnt] : edgeCount) {
             if (boundaryEdgeSet.count(ep)) continue;
+            // ep is not in the required-direction boundary set.
+            // Reject if it is the reverse of a boundary edge.
+            if (boundaryReverseSet.count(ep)) {
+              validFail = true;
+              break;
+            }
             // ep is an interior directed edge; must appear exactly once.
             if (cnt != 1) {
               validFail = true;
@@ -3339,15 +3375,14 @@ FacePartition PartitionFace(const Manifold::Impl& impl, int face,
           const Seg2D& si = allEdgesDir[i];
           for (int j = i + 1; j < nSeg && !validFail; ++j) {
             const Seg2D& sj = allEdgesDir[j];
-            // (a) strict crossing + (b) point-on-segment + (c) collinear
-            //     overlap: only between non-adjacent pairs.
-            const bool adjacent = (si.va == sj.va || si.va == sj.vb ||
-                                   si.vb == sj.va || si.vb == sj.vb);
+            // Shared-vertex flags for adjacency detection.
+            const bool shareAA = (si.va == sj.va);
+            const bool shareAB = (si.va == sj.vb);
+            const bool shareBA = (si.vb == sj.va);
+            const bool shareBB = (si.vb == sj.vb);
+            const bool adjacent = shareAA || shareAB || shareBA || shareBB;
             if (!adjacent) {
-              // Check if any endpoint of one segment lies on the other.
-              // This covers: endpoint-on-interior, endpoint-on-endpoint
-              // between non-adjacent segments, and (combined with the
-              // collinear check) collinear overlap detection.
+              // Non-adjacent: any contact is a PSLG violation.
               if (pointOnSegExact(si.a, sj.a, sj.b)) {
                 validFail = true;  // (b) endpoint si.a on sj
                 break;
@@ -3386,6 +3421,48 @@ FacePartition PartitionFace(const Manifold::Impl& impl, int face,
                   collinearOverlap(si.a, si.b, sj.a, sj.b)) {
                 validFail = true;
                 break;
+              }
+            } else {
+              // Adjacent (share >= 1 vertex). The shared-endpoint contact
+              // is legitimate. Reject only if a NON-shared endpoint of
+              // either segment lies on the other segment. This detects
+              // vertex-on-nonincident-edge violations that are hidden
+              // behind a shared vertex (e.g., A-B-C collinear with C on
+              // A->B, or A lying strictly on B->C).
+              //
+              // For nShared == 2 (same undirected edge, opposite directions),
+              // all four endpoints are shared; we skip all endpoint checks.
+              // Boundary coverage Check 3 catches true duplicates (same
+              // directed edge appearing twice with cnt != 1), and the
+              // collinear check is NOT applied here: two opposite-direction
+              // copies of an interior edge are valid in a triangulation.
+              if (!shareAA && !shareAB) {
+                // si.a is not a shared vertex; check si.a on sj.
+                if (pointOnSegExact(si.a, sj.a, sj.b)) {
+                  validFail = true;
+                  break;
+                }
+              }
+              if (!shareBA && !shareBB) {
+                // si.b is not a shared vertex; check si.b on sj.
+                if (pointOnSegExact(si.b, sj.a, sj.b)) {
+                  validFail = true;
+                  break;
+                }
+              }
+              if (!shareAA && !shareBA) {
+                // sj.a is not a shared vertex; check sj.a on si.
+                if (pointOnSegExact(sj.a, si.a, si.b)) {
+                  validFail = true;
+                  break;
+                }
+              }
+              if (!shareAB && !shareBB) {
+                // sj.b is not a shared vertex; check sj.b on si.
+                if (pointOnSegExact(sj.b, si.a, si.b)) {
+                  validFail = true;
+                  break;
+                }
               }
             }
           }
