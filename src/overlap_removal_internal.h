@@ -189,9 +189,11 @@ std::vector<TriVertList> BuildOnTriVertLists(const Manifold::Impl& impl,
 // arrangement-wide identification happens at step 9.5), ties to
 // smallest id.
 //
-// PAIR inclusion: an edge-tri pair is NOT skipped for sharing a vert
-// (the post-Boolean-merge shared-vert pierce case the classic Emmett
-// #289 step 6 would miss) - only the edge's own two faces are skipped.
+// PAIR inclusion: only the edge's own two faces are skipped. In
+// particular, a pair whose TRIANGLES share a vert (the post-Boolean-
+// merge adjacency a naive #289 step 6 would skip) still yields events
+// from the non-shared edges - an edge with an ENDPOINT on the tri
+// cannot event anyway (a segment crosses the plane once, at s == 0).
 // EVENTS stay strict-interior on both parameters regardless: an edge
 // ENDPOINT lying on the tri plane (s == 0/1) generates no event by
 // design - a pair left with one event drops as a tip touch (see
