@@ -2052,6 +2052,60 @@ TEST(OverlapRemoval, Step10FreeIslandDecomposesToAnnulusTriangles) {
     EXPECT_GE(poly.size(), 3u);
     EXPECT_TRUE(Step10CycleIsSimple(poly));
   }
+
+  // Build a full position table (impl verts + new verts) for area checks.
+  // Vert ids 0..NumVert()-1 come from impl; ids >= NumVert() are newPos.
+  const int baseId = static_cast<int>(fx.impl.NumVert());
+  auto posOf2D = [&](int id) -> manifold::vec2 {
+    // Project onto xy-plane (the face is z=0).
+    const manifold::vec3 p = id < baseId
+                                 ? fx.impl.vertPos_[id]
+                                 : newPos[static_cast<size_t>(id - baseId)];
+    return {p.x, p.y};
+  };
+  auto signedArea2D = [&](const std::vector<int>& poly) {
+    double a = 0.0;
+    const int n = static_cast<int>(poly.size());
+    for (int i = 0; i < n; ++i) {
+      const manifold::vec2 pi = posOf2D(poly[i]);
+      const manifold::vec2 pj = posOf2D(poly[(i + 1) % n]);
+      a += pi.x * pj.y - pi.y * pj.x;
+    }
+    return a * 0.5;
+  };
+
+  // The face is stored as triVerts {0,2,1} = {A,C,B}, which in xy is CW
+  // (normal points -z). The walk emits all cycles in face-winding orientation
+  // (CCW about face normal = CW in +z view), so every output polygon has
+  // negative signed area in global xy projection.
+  // Face outer cycle signed area using halfedge vertex order {A,C,B}:
+  const double faceOuterArea = signedArea2D({fx.A, fx.C, fx.B});
+  // Sanity: face is CW in global xy (normal -z).
+  ASSERT_LT(faceOuterArea, 0.0);
+
+  // No standalone positive-area cycle in the output: every polygon must
+  // share the face winding (negative in global xy). A positive cycle would
+  // be a hole that escaped the decomposition uncut.
+  for (const std::vector<int>& poly : part.polygons) {
+    EXPECT_LE(signedArea2D(poly), 0.0);
+  }
+
+  // Total signed area of all output polygons equals the face outer area
+  // (disk + annulus triangles together tile the face exactly once).
+  double totalArea = 0.0;
+  for (const std::vector<int>& poly : part.polygons) {
+    totalArea += signedArea2D(poly);
+  }
+  EXPECT_NEAR(totalArea, faceOuterArea, 1e-10);
+
+  // At least one triangle (3-vert polygon) is present beyond the disk
+  // polygon (which is itself 3 verts; the annulus triangles are additional).
+  int triCount = 0;
+  for (const std::vector<int>& poly : part.polygons) {
+    if (poly.size() == 3) ++triCount;
+  }
+  // The disk is one triangle; the annulus triangulation adds more.
+  EXPECT_GT(triCount, 1);
 }
 
 TEST(OverlapRemoval, Step10PinchedIslandGatesFail) {
@@ -4096,6 +4150,26 @@ TEST(Manifold, RemoveSelfIntersectionsInteriorIslandResolves) {
     EXPECT_NEAR(cleaned2.Volume(), 1.012, 1e-4);
   }
   // No pierces in either case.
+}
+
+TEST(Manifold, RemoveSelfIntersectionsInteriorIslandPublicAPI) {
+  // Public-API arm for the interior island fixture:
+  // input.RemoveSelfIntersections() uses inferred eps
+  // (AlphaBudgetEpsilon(bbox_scale, 1000) ~2.75e-12 for a unit-scale mesh). The
+  // chord intersection points for this fixture land at machine-precision
+  // coordinates, which the pipeline can detect at any positive eps, so the
+  // inferred eps is sufficient.
+  MeshGL64 m;
+  m.numProp = 3;
+  AppendBoxToMesh(m, {0, 0, 0}, {1, 1, 1});
+  AppendBoxToMesh(m, {0.15, 0.55, -0.3}, {0.35, 0.75, 0.3});
+  Manifold input((MeshGL64(m)));
+  ASSERT_EQ(input.Status(), Manifold::Error::NoError);
+  ASSERT_GT(InteriorPierces(input), 0);  // premise: genuinely pierces
+  Manifold cleaned = input.RemoveSelfIntersections();
+  ASSERT_EQ(cleaned.Status(), Manifold::Error::NoError);
+  EXPECT_EQ(InteriorPierces(cleaned), 0);
+  EXPECT_NEAR(cleaned.Volume(), 1.012, 1e-4);
 }
 
 TEST(Manifold, RemoveSelfIntersectionsToleranceCoversMergeDisplacement) {

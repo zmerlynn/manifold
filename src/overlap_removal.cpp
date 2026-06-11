@@ -2628,54 +2628,56 @@ FacePartition PartitionFace(const Manifold::Impl& impl, int face,
       for (int i = 0; i < nL; ++i) pts[i] = p2(loopV[i]);
       // Pairwise non-adjacent segment test.
       // Segments: i -> (i+1)%nL. Non-adjacent means they share no vert.
+      // Rejects ALL non-incident contact: strict crossings,
+      // endpoint-on-interior of the other segment, endpoint-on-endpoint between
+      // non-adjacent segments, and collinear overlap. Zero-determinant cases
+      // (degenerate/touching) are NOT skipped - any contact between
+      // non-incident segments is a violation.
       auto cross2 = [](const vec2& a, const vec2& b) {
         return a.x * b.y - a.y * b.x;
+      };
+      // pointOnSeg: does P lie on segment AB (including endpoints)?
+      // Uses exact arithmetic (no tolerance) since these are 2D projected
+      // positions that will be exact at this level.
+      auto pointOnSeg = [&](const vec2& P, const vec2& A, const vec2& B) {
+        const vec2 ab = {B.x - A.x, B.y - A.y};
+        const vec2 ap = {P.x - A.x, P.y - A.y};
+        // Must be collinear.
+        if (cross2(ab, ap) != 0.0) return false;
+        // Must be in [0,1] parametrically: dot in [0, len2].
+        const double dot = ab.x * ap.x + ab.y * ap.y;
+        const double len2 = ab.x * ab.x + ab.y * ab.y;
+        return dot >= 0.0 && dot <= len2;
       };
       for (int i = 0; i < nL; ++i) {
         const vec2& a = pts[i];
         const vec2& b = pts[(i + 1) % nL];
         for (int j = i + 2; j < nL; ++j) {
-          // Skip the pair (last, first) that shares vert.
+          // Skip the pair (last, first) that shares vert at index 0.
           if (i == 0 && j == nL - 1) continue;
           const vec2& c = pts[j];
           const vec2& d = pts[(j + 1) % nL];
-          // Strict crossing test (excludes shared endpoints).
+          // Any contact between non-incident segments is a simplicity
+          // violation: check if any endpoint lies on the other segment,
+          // OR a strict crossing occurs.
+          if (pointOnSeg(a, c, d)) return false;  // endpoint a on cd
+          if (pointOnSeg(b, c, d)) return false;  // endpoint b on cd
+          if (pointOnSeg(c, a, b)) return false;  // endpoint c on ab
+          if (pointOnSeg(d, a, b)) return false;  // endpoint d on ab
+          // Strict crossing (both pairs of opposite signs).
           const vec2 ab = {b.x - a.x, b.y - a.y};
           const vec2 ac = {c.x - a.x, c.y - a.y};
           const vec2 ad = {d.x - a.x, d.y - a.y};
           const double t1 = cross2(ab, ac);
           const double t2 = cross2(ab, ad);
-          if (t1 * t2 >= 0) continue;  // same side or one zero: no strict cross
-          const vec2 cd = {d.x - c.x, d.y - c.y};
-          const vec2 ca = {a.x - c.x, a.y - c.y};
-          const vec2 cb = {b.x - c.x, b.y - c.y};
-          const double t3 = cross2(cd, ca);
-          const double t4 = cross2(cd, cb);
-          if (t3 * t4 >= 0) continue;
-          return false;  // strict crossing found
-        }
-      }
-      // Vertex-on-nonincident-edge check: for each vert, check if it lies
-      // on any non-incident edge. A point P lies on segment AB if the
-      // cross product (B-A)x(P-A) == 0 and P is between A and B.
-      // With floating point we use a tight tolerance (eps scale).
-      for (int i = 0; i < nL; ++i) {
-        const vec2& p = pts[i];
-        for (int j = 0; j < nL; ++j) {
-          // Edge j -> (j+1)%nL. Skip edges incident to vert i.
-          if (j == i || (j + 1) % nL == i) continue;
-          if (i == 0 && j == nL - 1) continue;
-          const vec2& a = pts[j];
-          const vec2& b = pts[(j + 1) % nL];
-          const vec2 ab = {b.x - a.x, b.y - a.y};
-          const vec2 ap = {p.x - a.x, p.y - a.y};
-          const double c = ab.x * ap.y - ab.y * ap.x;
-          if (std::fabs(c) > eps * std::sqrt(ab.x * ab.x + ab.y * ab.y))
-            continue;
-          // Collinear - check if P is strictly between A and B.
-          const double dot = ab.x * ap.x + ab.y * ap.y;
-          const double len2 = ab.x * ab.x + ab.y * ab.y;
-          if (dot > 0 && dot < len2) return false;
+          if (t1 * t2 < 0) {
+            const vec2 cd = {d.x - c.x, d.y - c.y};
+            const vec2 ca = {a.x - c.x, a.y - c.y};
+            const vec2 cb = {b.x - c.x, b.y - c.y};
+            const double t3 = cross2(cd, ca);
+            const double t4 = cross2(cd, cb);
+            if (t3 * t4 < 0) return false;  // strict crossing
+          }
         }
       }
       return true;
@@ -2919,18 +2921,33 @@ FacePartition PartitionFace(const Manifold::Impl& impl, int face,
     }
 
     // Strict point-in-polygon test (2D): is test point P strictly inside
-    // polygon Q? Uses ray casting; returns false on boundary.
+    // polygon Q? Returns false if P lies on any boundary edge (including
+    // at vertices). Explicit point-on-segment rejection runs first, before
+    // the ray-crossing count, so horizontal edges and vertex-at-exact-y
+    // cases do not yield false positives.
+    auto pointOnSeg2D = [](const vec2& P, const vec2& A, const vec2& B) {
+      const vec2 ab = {B.x - A.x, B.y - A.y};
+      const vec2 ap = {P.x - A.x, P.y - A.y};
+      if (ab.x * ap.y - ab.y * ap.x != 0.0) return false;
+      const double dot = ab.x * ap.x + ab.y * ap.y;
+      const double len2 = ab.x * ab.x + ab.y * ab.y;
+      return dot >= 0.0 && dot <= len2;
+    };
     auto strictPIP = [&](const vec2& P, const std::vector<int>& Q) -> bool {
-      int crossings = 0;
       const int nQ = static_cast<int>(Q.size());
+      // First: reject if P lies on any boundary edge (incl. at vertices).
       for (int i = 0; i < nQ; ++i) {
         const vec2 a = p2(Q[i]);
         const vec2 b = p2(Q[(i + 1) % nQ]);
-        // Ray from P in +x direction.
+        if (pointOnSeg2D(P, a, b)) return false;
+      }
+      // Ray-casting count: ray from P in +x direction.
+      int crossings = 0;
+      for (int i = 0; i < nQ; ++i) {
+        const vec2 a = p2(Q[i]);
+        const vec2 b = p2(Q[(i + 1) % nQ]);
         if ((a.y <= P.y) == (b.y <= P.y)) continue;  // same side
-        // Compute x-intercept.
         const double x = a.x + (P.y - a.y) * (b.x - a.x) / (b.y - a.y);
-        if (x == P.x) return false;  // on boundary: not strictly inside
         if (x > P.x) ++crossings;
       }
       return (crossings & 1) == 1;
@@ -2992,24 +3009,18 @@ FacePartition PartitionFace(const Manifold::Impl& impl, int face,
 
     // Rebuild out.polygons with decompositions for holed regions.
     std::vector<std::vector<int>> newPolygons;
-    // Add all regions' island-twin positive cycles (disk polygons) as
-    // ordinary polygons - they are valid regions in their own right.
-    // These are positive cycles whose vert key matches an island.
-    for (const CycleInfo& ci : regions) {
-      if (islandVertKeys.count(ci.vertKey)) {
-        newPolygons.push_back(ci.cyc);  // disk polygon: passes through
-      }
-    }
 
-    // Process regions: holed ones get triangulated, others pass through.
+    // Process ALL regions: any region with no assigned holes passes through
+    // as a plain polygon (including island-disk cycles). An island-disk WITH
+    // assigned holes (nested island: B inside A's disk) must be triangulated
+    // to cut the nested hole out of the disk - passing it through uncut would
+    // leave the nested island's negative cycle unconsumed.
     for (size_t ri = 0; ri < regions.size(); ++ri) {
       const CycleInfo& reg = regions[ri];
-      // Island-twin disk polygons already added above.
-      if (islandVertKeys.count(reg.vertKey)) continue;
 
       auto itH = regionHoles.find(ri);
       if (itH == regionHoles.end()) {
-        // No holes: pass through.
+        // No holes: pass through (island-disk or ordinary region).
         newPolygons.push_back(reg.cyc);
         continue;
       }
@@ -3017,19 +3028,6 @@ FacePartition PartitionFace(const Manifold::Impl& impl, int face,
       // Holed region: triangulate.
       // Sub-resolution hole fast-fail: doubled area < triEps * maxBbox.
       // Compute 2D bbox of the region.
-      double rMinU = std::numeric_limits<double>::infinity();
-      double rMaxU = -std::numeric_limits<double>::infinity();
-      double rMinV = std::numeric_limits<double>::infinity();
-      double rMaxV = -std::numeric_limits<double>::infinity();
-      for (const int v : reg.cyc) {
-        const vec2 pv = p2(v);
-        rMinU = std::min(rMinU, pv.x);
-        rMaxU = std::max(rMaxU, pv.x);
-        rMinV = std::min(rMinV, pv.y);
-        rMaxV = std::max(rMaxV, pv.y);
-      }
-      const double bboxMax = std::max(rMaxU - rMinU, rMaxV - rMinV);
-
       // Build PolygonsIdx: outer (positive-area) first, then holes
       // (negative-area - the triangulator's convention).
       PolygonsIdx polysIdx;
@@ -3042,11 +3040,38 @@ FacePartition PartitionFace(const Manifold::Impl& impl, int face,
         }
         polysIdx.push_back(std::move(outer));
       }
+      // Compute the outer bbox once for the area-preservation tolerance.
+      double rMinU = std::numeric_limits<double>::infinity();
+      double rMaxU = -std::numeric_limits<double>::infinity();
+      double rMinV = std::numeric_limits<double>::infinity();
+      double rMaxV = -std::numeric_limits<double>::infinity();
+      for (const int v : reg.cyc) {
+        const vec2 pv = p2(v);
+        rMinU = std::min(rMinU, pv.x);
+        rMaxU = std::max(rMaxU, pv.x);
+        rMinV = std::min(rMinV, pv.y);
+        rMaxV = std::max(rMaxV, pv.y);
+      }
+      const double bboxMax = std::max(rMaxU - rMinU, rMaxV - rMinV);
       bool subResGate = false;
       for (const size_t hi : itH->second) {
         const CycleInfo& hci = holes[hi];
-        // Sub-resolution fast-fail: |doubled area| < triEps * bboxMax.
-        if (std::fabs(hci.signedArea2) < triEps * bboxMax) {
+        // Sub-resolution fast-fail: conservative check using the hole
+        // contour's own 2D bbox (FindStart uses the contour's own extent,
+        // so per-hole bbox is the correct scale for this fast-fail).
+        double hMinU = std::numeric_limits<double>::infinity();
+        double hMaxU = -std::numeric_limits<double>::infinity();
+        double hMinV = std::numeric_limits<double>::infinity();
+        double hMaxV = -std::numeric_limits<double>::infinity();
+        for (const int v : hci.cyc) {
+          const vec2 pv = p2(v);
+          hMinU = std::min(hMinU, pv.x);
+          hMaxU = std::max(hMaxU, pv.x);
+          hMinV = std::min(hMinV, pv.y);
+          hMaxV = std::max(hMaxV, pv.y);
+        }
+        const double holeBboxMax = std::max(hMaxU - hMinU, hMaxV - hMinV);
+        if (std::fabs(hci.signedArea2) < triEps * holeBboxMax) {
           subResGate = true;
           break;
         }
@@ -3102,32 +3127,55 @@ FacePartition PartitionFace(const Manifold::Impl& impl, int face,
         }
       }
       const int totalBoundaryEdges = static_cast<int>(boundaryEdges.size());
-      // Generous edge-count cap.
+      // Edge-count cap: regions exceeding this gate (fail closed) rather than
+      // skipping validation. In practice the boss class is a triangle outer
+      // + a handful of hole verts, so this cap is never hit on valid input.
       const int kMaxEdgesForValidation = 2000;
-      if (totalBoundaryEdges + 3 * static_cast<int>(tris.size()) >
-          kMaxEdgesForValidation) {
-        // Skip PSLG validation only; area + coverage still apply.
-      }
-      bool validFail = false;
+      const bool exceedsCap =
+          totalBoundaryEdges + 3 * static_cast<int>(tris.size()) >
+          kMaxEdgesForValidation;
+      bool validFail = exceedsCap;  // gate if over cap
 
-      // Per-triangle checks.
-      // Collect all vert ids from polysIdx for the "not a hole" check.
+      // Build the set of canonical hole cycle keys for the 3-vert hole check:
+      // a triangle whose vert set matches a hole contour would be filling in
+      // the hole rather than cutting it, which is wrong.
+      std::set<std::vector<int>> holeCycleKeys;
+      for (size_t hIdx = 1; hIdx < polysIdx.size(); ++hIdx) {
+        const SimplePolygonIdx& hcont = polysIdx[hIdx];
+        if (hcont.size() == 3) {
+          std::vector<int> hkey = {hcont[0].idx, hcont[1].idx, hcont[2].idx};
+          std::sort(hkey.begin(), hkey.end());
+          holeCycleKeys.insert(std::move(hkey));
+        }
+      }
+
       auto area2OfTri = [&](const ivec3& t) -> double {
-        // Get positions from the polysIdx (PolyVert.idx -> p2 lookup).
-        // The idx IS the vert id; use p2(idx).
         const vec2 pa = p2(t[0]);
         const vec2 pb = p2(t[1]);
         const vec2 pc = p2(t[2]);
         return (pb.x - pa.x) * (pc.y - pa.y) - (pb.y - pa.y) * (pc.x - pa.x);
       };
-      for (const ivec3& t : tris) {
-        if (t[0] == t[1] || t[1] == t[2] || t[0] == t[2]) {
-          validFail = true;
-          break;
-        }
-        if (area2OfTri(t) <= 0.0) {
-          validFail = true;
-          break;
+
+      // Per-triangle checks.
+      if (!validFail) {
+        for (const ivec3& t : tris) {
+          if (t[0] == t[1] || t[1] == t[2] || t[0] == t[2]) {
+            validFail = true;
+            break;
+          }
+          if (area2OfTri(t) <= 0.0) {
+            validFail = true;
+            break;
+          }
+          // Check not canonical-equal to any 3-vert hole contour.
+          if (!holeCycleKeys.empty()) {
+            std::vector<int> tkey = {t[0], t[1], t[2]};
+            std::sort(tkey.begin(), tkey.end());
+            if (holeCycleKeys.count(tkey)) {
+              validFail = true;
+              break;
+            }
+          }
         }
       }
 
@@ -3152,34 +3200,65 @@ FacePartition PartitionFace(const Manifold::Impl& impl, int face,
         if (std::fabs(triArea2 - expectedArea2) > areaAbsTol) validFail = true;
       }
 
-      // Boundary coverage: each boundary edge must appear exactly once
-      // correctly oriented among triangle edges; interior edges exactly twice.
+      // Boundary coverage (undirected semantics):
+      // - Each boundary edge {v0,v1} appears exactly once in the required
+      //   direction in the triangle fan.
+      // - The reverse {v1,v0} of a boundary edge must NOT appear as a
+      //   boundary-role edge (i.e., must not be in the boundary set itself).
+      // - Each interior (non-boundary) undirected edge appears exactly twice
+      //   in opposite directions: {u,v} with count 1 and {v,u} with count 1.
+      // Uses .find()/.count() throughout - no operator[] phantom entries.
       if (!validFail) {
         std::map<std::pair<int, int>, int> edgeCount;
         for (const ivec3& t : tris) {
           for (int k = 0; k < 3; ++k) {
-            ++edgeCount[{t[k], t[(k + 1) % 3]}];
+            const auto key = std::make_pair(t[k], t[(k + 1) % 3]);
+            auto it = edgeCount.find(key);
+            if (it == edgeCount.end())
+              edgeCount.insert({key, 1});
+            else
+              ++it->second;
           }
         }
-        // Build forward-boundary set for O(1) lookup (avoids operator[]
-        // phantom-entry creation and is correct for hole edges whose reverse
-        // can appear as interior diagonals).
+        // Build boundary set (required-direction directed edges).
         std::set<std::pair<int, int>> boundaryEdgeSet;
         for (const EdgeDir& be : boundaryEdges) {
           boundaryEdgeSet.insert({be.v0, be.v1});
+        }
+        // Check 1: each boundary edge appears exactly once in its direction.
+        for (const EdgeDir& be : boundaryEdges) {
           auto it = edgeCount.find({be.v0, be.v1});
           if (it == edgeCount.end() || it->second != 1) {
             validFail = true;
             break;
           }
         }
+        // Check 2: reverse of any boundary edge must not be a boundary edge
+        // (directedness: {v1,v0} appearing in boundaryEdgeSet means a
+        // boundary edge is present in the wrong orientation somewhere).
         if (!validFail) {
-          // Interior edges: each directed edge not in the forward-boundary set
-          // must appear exactly once (its reverse appears once too, checked
-          // implicitly by symmetry of the triangle fan).
+          for (const EdgeDir& be : boundaryEdges) {
+            if (boundaryEdgeSet.count({be.v1, be.v0})) {
+              validFail = true;
+              break;
+            }
+          }
+        }
+        // Check 3: every directed edge in the triangle fan that is NOT a
+        // required-direction boundary edge must have count exactly 1, and
+        // its reverse must also have count exactly 1 (the two directions of
+        // an interior undirected edge).
+        if (!validFail) {
           for (const auto& [ep, cnt] : edgeCount) {
             if (boundaryEdgeSet.count(ep)) continue;
+            // ep is an interior directed edge; must appear exactly once.
             if (cnt != 1) {
+              validFail = true;
+              break;
+            }
+            // Its reverse must also appear exactly once.
+            auto revIt = edgeCount.find({ep.second, ep.first});
+            if (revIt == edgeCount.end() || revIt->second != 1) {
               validFail = true;
               break;
             }
@@ -3187,48 +3266,142 @@ FacePartition PartitionFace(const Manifold::Impl& impl, int face,
         }
       }
 
-      // PSLG embedding (bounded by edge count cap).
-      if (!validFail &&
-          totalBoundaryEdges + 3 * static_cast<int>(tris.size()) <=
-              kMaxEdgesForValidation) {
-        // Collect all triangle edges (directed) and check for strict
-        // crossings and vertex-on-nonincident-edge.
+      // Full PSLG embedding checks (all four, in the face frame).
+      // Regions exceeding the cap already gated above; this block only runs
+      // when validFail is false and the cap was not exceeded.
+      if (!validFail) {
+        // Collect undirected triangle edges (use canonical {min,max} ordering
+        // so each undirected edge is represented once for the duplicate check).
         struct Seg2D {
           vec2 a, b;
           int va, vb;
         };
-        std::vector<Seg2D> allEdges;
+        // Directed edges for crossing/point-on-edge checks (all 3*|T| of them).
+        std::vector<Seg2D> allEdgesDir;
+        allEdgesDir.reserve(3 * tris.size());
         for (const ivec3& t : tris) {
           for (int k = 0; k < 3; ++k) {
-            allEdges.push_back(
+            allEdgesDir.push_back(
                 {p2(t[k]), p2(t[(k + 1) % 3]), t[k], t[(k + 1) % 3]});
           }
         }
+        // Undirected edge set for checks (c) no collinear overlap and
+        // (d) no duplicate undirected edges beyond coverage.
+        // Key: {min(va,vb), max(va,vb)}.
+        std::map<std::pair<int, int>, int> undirEdgeCount;
+        for (const Seg2D& s : allEdgesDir) {
+          const auto key =
+              std::make_pair(std::min(s.va, s.vb), std::max(s.va, s.vb));
+          auto it = undirEdgeCount.find(key);
+          if (it == undirEdgeCount.end())
+            undirEdgeCount.insert({key, 1});
+          else
+            ++it->second;
+        }
+
         auto cross2d = [](const vec2& u, const vec2& v) {
           return u.x * v.y - u.y * v.x;
         };
-        // Strict crossing test between two non-adjacent edges.
-        const int nSeg = static_cast<int>(allEdges.size());
+        // pointOnSegExact: does P lie on segment AB (incl. endpoints)?
+        // Exact (zero-tolerance) cross product, parametric range check.
+        auto pointOnSegExact = [&](const vec2& P, const vec2& A,
+                                   const vec2& B) {
+          const vec2 ab = {B.x - A.x, B.y - A.y};
+          const vec2 ap = {P.x - A.x, P.y - A.y};
+          if (cross2d(ab, ap) != 0.0) return false;
+          const double dot = ab.x * ap.x + ab.y * ap.y;
+          const double len2 = ab.x * ab.x + ab.y * ab.y;
+          return dot >= 0.0 && dot <= len2;
+        };
+        // collinearOverlap: do two collinear segments [A,B] and [C,D]
+        // overlap (share more than a single point)?
+        // Assumes segments are already known to be collinear.
+        auto collinearOverlap = [&](const vec2& A, const vec2& B, const vec2& C,
+                                    const vec2& D) {
+          const vec2 ab = {B.x - A.x, B.y - A.y};
+          const double len2 = ab.x * ab.x + ab.y * ab.y;
+          if (len2 == 0.0) return false;
+          // Project C and D onto AB; overlap iff intervals [0,1] and
+          // [tC,tD] share an interior point (tC != tD to exclude
+          // single-point touch at an endpoint).
+          const double tC = (ab.x * (C.x - A.x) + ab.y * (C.y - A.y)) / len2;
+          const double tD = (ab.x * (D.x - A.x) + ab.y * (D.y - A.y)) / len2;
+          const double lo = std::min(tC, tD);
+          const double hi = std::max(tC, tD);
+          // Overlap of [0,1] and [lo,hi] has nonzero length iff lo < 1 && hi >
+          // 0 AND the overlap interval has positive measure (hi - lo > 0 or the
+          // overlap [max(0,lo), min(1,hi)] has length > 0).
+          return lo < 1.0 && hi > 0.0 && std::max(0.0, lo) < std::min(1.0, hi);
+        };
+
+        const int nSeg = static_cast<int>(allEdgesDir.size());
         for (int i = 0; i < nSeg && !validFail; ++i) {
-          const Seg2D& si = allEdges[i];
+          const Seg2D& si = allEdgesDir[i];
           for (int j = i + 1; j < nSeg && !validFail; ++j) {
-            const Seg2D& sj = allEdges[j];
-            // Adjacent = share a vert.
-            if (si.va == sj.va || si.va == sj.vb || si.vb == sj.va ||
-                si.vb == sj.vb)
-              continue;
-            const vec2 ab = {si.b.x - si.a.x, si.b.y - si.a.y};
-            const vec2 ac = {sj.a.x - si.a.x, sj.a.y - si.a.y};
-            const vec2 ad = {sj.b.x - si.a.x, sj.b.y - si.a.y};
-            const double t1 = cross2d(ab, ac);
-            const double t2 = cross2d(ab, ad);
-            if (t1 * t2 >= 0) continue;
-            const vec2 cd = {sj.b.x - sj.a.x, sj.b.y - sj.a.y};
-            const vec2 ca = {si.a.x - sj.a.x, si.a.y - sj.a.y};
-            const vec2 cb = {si.b.x - sj.a.x, si.b.y - sj.a.y};
-            const double t3 = cross2d(cd, ca);
-            const double t4 = cross2d(cd, cb);
-            if (t3 * t4 < 0) validFail = true;  // strict crossing
+            const Seg2D& sj = allEdgesDir[j];
+            // (a) strict crossing + (b) point-on-segment + (c) collinear
+            //     overlap: only between non-adjacent pairs.
+            const bool adjacent = (si.va == sj.va || si.va == sj.vb ||
+                                   si.vb == sj.va || si.vb == sj.vb);
+            if (!adjacent) {
+              // Check if any endpoint of one segment lies on the other.
+              // This covers: endpoint-on-interior, endpoint-on-endpoint
+              // between non-adjacent segments, and (combined with the
+              // collinear check) collinear overlap detection.
+              if (pointOnSegExact(si.a, sj.a, sj.b)) {
+                validFail = true;  // (b) endpoint si.a on sj
+                break;
+              }
+              if (pointOnSegExact(si.b, sj.a, sj.b)) {
+                validFail = true;  // (b) endpoint si.b on sj
+                break;
+              }
+              if (pointOnSegExact(sj.a, si.a, si.b)) {
+                validFail = true;  // (b) endpoint sj.a on si
+                break;
+              }
+              if (pointOnSegExact(sj.b, si.a, si.b)) {
+                validFail = true;  // (b) endpoint sj.b on si
+                break;
+              }
+              // (a) strict crossing.
+              const vec2 ab = {si.b.x - si.a.x, si.b.y - si.a.y};
+              const vec2 ac = {sj.a.x - si.a.x, sj.a.y - si.a.y};
+              const vec2 ad = {sj.b.x - si.a.x, sj.b.y - si.a.y};
+              const double t1 = cross2d(ab, ac);
+              const double t2 = cross2d(ab, ad);
+              if (t1 * t2 < 0) {
+                const vec2 cd = {sj.b.x - sj.a.x, sj.b.y - sj.a.y};
+                const vec2 ca = {si.a.x - sj.a.x, si.a.y - sj.a.y};
+                const vec2 cb = {si.b.x - sj.a.x, si.b.y - sj.a.y};
+                const double t3 = cross2d(cd, ca);
+                const double t4 = cross2d(cd, cb);
+                if (t3 * t4 < 0) {
+                  validFail = true;  // (a) strict crossing
+                  break;
+                }
+              }
+              // (c) collinear overlap: both cross products zero.
+              if (t1 == 0.0 && t2 == 0.0 &&
+                  collinearOverlap(si.a, si.b, sj.a, sj.b)) {
+                validFail = true;
+                break;
+              }
+            }
+          }
+        }
+        // (d) no duplicate undirected edges beyond the coverage rule:
+        // boundary edges appear once (one directed copy) => undirected
+        // count = 2 at most (one for each direction), but a boundary edge
+        // has exactly one direction in the triangulation, so its undirected
+        // count is 1. Interior edges have both directions, count = 2.
+        // Any undirected edge with count > 2 is a duplicate.
+        if (!validFail) {
+          for (const auto& [key, cnt] : undirEdgeCount) {
+            if (cnt > 2) {
+              validFail = true;
+              break;
+            }
           }
         }
       }
