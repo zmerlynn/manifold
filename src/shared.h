@@ -42,17 +42,18 @@ inline double MaxEpsilon(double minEpsilon, const Box& bBox) {
  * nearest power of 2 (Smith's analysis assumes this).
  *
  * Distinct from `MaxEpsilon` / `kPrecision * scale` above:
- * - `MaxEpsilon` returns the minimum representable position spacing
- *   at this scale (~ulp-floor), used for "are these two verts the
- *   same point?" decisions.
+ * - `MaxEpsilon` returns kPrecision (1e-12, an empirical constant well
+ *   above the ~2e-16 ulp) times the scale - the house floor for "are
+ *   these two verts the same point?" decisions.
  * - `AlphaBudgetEpsilon` returns the maximum cumulative position drift
  *   bound over kBudget operations, used for "is this geometric
  *   feature still resolved after k operations?" decisions.
  *
- * For a single boolean operation on inputs at scale L, both sit in the
- * same order of magnitude (L * 1e-12 vs. L * 1e-9). Smith's bound is
- * larger by ~kBudget * sqrt(153) ~= 12000x because it budgets
- * iterated operations.
+ * At the default budget the two land in the SAME order of magnitude
+ * (kBudget * sqrt(153) * u is ~1.4e-12 against kPrecision's 1e-12);
+ * they differ in DERIVATION - an empirical constant vs Smith's
+ * analyzed iterated-operation bound, which scales linearly with the
+ * caller's budget - not in default size.
  *
  * Used by the overlap-removal pipeline (Smith's framework is the
  * correctness story; see docs/OverlapRemoval.md) and by boolean2, whose

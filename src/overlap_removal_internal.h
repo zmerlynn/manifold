@@ -147,9 +147,9 @@ struct MergeVertsResult {
 // into the rebuild (SetEpsilon floors, never lowers it).
 //
 // `mergedCount` is the authoritative answer to "did anything get
-// merged?" - `NumVert()` may not reflect the merge if the merged
-// verts didn't cause any tri collapse (RemoveUnreferencedVerts sets
-// unreferenced positions to NaN without compacting vertPos_).
+// merged?" - counted directly from the union-find, not inferred from
+// vert counts (the rebuild's sweep compacts merged-away verts, but
+// counting by construction beats reverse-engineering the sweep).
 // `ctx` (nullable) threads into the rebuild's finalize sweep
 // (SortGeometry); a mid-sweep cancel comes back as an Impl with
 // Error::Cancelled, which the driver propagates as observable status.

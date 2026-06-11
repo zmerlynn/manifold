@@ -146,8 +146,9 @@ Consequences, each removing a whole class of today's residue:
 
 ### 1.4 Step 1 (eps-merge) as an Impl operation
 
-Today's design merges by writing MeshGL64 merge hints and reconstructing a
-`Manifold`. From scratch: a private pipeline pass over a mutable `Impl`
+The pre-migration branch merged by writing MeshGL64 merge hints and
+reconstructing a `Manifold` (superseded by D1's landed Impl-level
+merge). From scratch: a private pipeline pass over a mutable `Impl`
 copy -
 
 ```cpp
@@ -384,14 +385,16 @@ recommendation, with this document as the record.
   and every 256 partition faces, cancellation as the Cancelled-status
   Impl of Part 1, pinned by cancellation tests witnessed red against
   poll removal.
-- **D3: the diagnostic duplicates the broad phase.**
-  `CheckSelfIntersection` rebuilds a `SortedBVH` from serialized tris
-  per call; `Impl::IsSelfIntersecting` queries the stored `collider_`
+- **D3 (narrowed by D1): the diagnostic duplicates the broad phase.**
+  Pre-migration, `CheckSelfIntersection` ALSO read `GetMeshGL64()`;
+  D1 removed the serialization (it reads vertPos_/halfedge_ directly
+  now). The REMAINING debt is the RSI-local `SortedBVH` rebuilt per
+  call where `Impl::IsSelfIntersecting` queries the stored `collider_`
   with fresh `GetFaceBoxMorton` boxes. The PREDICATE difference is
   load-bearing and stays (strict Moller-Trumbore pierce count/depth vs
-  conservative distance); the BVH construction and `GetMeshGL64` read
-  are pure overhead. Migration: M, after D1 - `SelfIntersections` on
-  Impl in properties.cpp as the documented sibling.
+  conservative distance). Migration: M - `SelfIntersections` on Impl
+  in properties.cpp as the documented sibling, sharing the stored
+  collider.
 - **D4 (LANDED, beyond the asked fix): SortedBVH's 1-leaf branch
   wrapped a host defect silently.** The finding asked for an upstream
   pointer; the user chose reuse over reimplementation and the defect
@@ -459,6 +462,18 @@ recommendation, with this document as the record.
 - Cancellation semantics: nothing existed to pin until D2; D2 brought
   its own tests (pre-cancelled ctx -> Cancelled status, witnessed red
   against poll removal; uncancelled-ctx passthrough).
+- The output-tolerance formula's `unified.maxMove` term has no
+  end-to-end discriminating fixture (dropping it passes the suite;
+  the `merged.maxMove` term IS pinned by the eps-chain weld). A
+  discriminating fixture needs a controlled conditioned-snap remap
+  moving a vert past the 10 eps floor - recorded TEST DEBT; note the
+  conditioned band is also a documented known limitation whose
+  residual sits outside the claim.
+- D6 (no Progress() contribution) is only weakly pinnable through the
+  public API: Progress() reads 1.0 both for zero scheduled phases and
+  for completed accounting, and the phase counters are not reachable
+  from tests. The uncancelled-ctx test asserts the 1.0 convention;
+  full discrimination is accepted as unpinned.
 
 ### 2.5 What the design critique changed in Part 1
 

@@ -21,6 +21,7 @@
 #include <fstream>
 #include <thread>
 
+#include "../src/cross_section/boolean2/predicates.h"  // EpsilonFromScale
 #include "../src/execution_impl.h"
 #include "../src/impl.h"
 #include "../src/overlap_removal.h"  // for RemoveOverlaps (explicit eps)
@@ -2956,6 +2957,19 @@ TEST(OverlapRemoval, Step13FoldedOppositeShellsDoNotCancel) {
   }
 }
 
+TEST(OverlapRemoval, EpsilonFromScaleDelegatesToAlphaBudget) {
+  // The tree's ONE Smith-formula copy: boolean2's EpsilonFromScale
+  // must be bit-identical to shared.h's AlphaBudgetEpsilon at every
+  // scale class (zero, sub-unit, exact power of two, non-power, large)
+  // and budget. A reintroduced local formula or a changed default
+  // budget breaks exact equality here.
+  for (const double L : {0.0, 0.37, 1.0, 1.5, 1024.0, 7.3e15}) {
+    EXPECT_EQ(boolean2::EpsilonFromScale(L), AlphaBudgetEpsilon(L));
+    EXPECT_EQ(boolean2::EpsilonFromScale(L, 0), AlphaBudgetEpsilon(L, 0));
+    EXPECT_EQ(boolean2::EpsilonFromScale(L, 7), AlphaBudgetEpsilon(L, 7));
+  }
+}
+
 // Impl-typed view of a fixture Manifold for the Impl-to-Impl pipeline
 // seams (RemoveOverlaps, MergeVertsEps, CheckSelfIntersection). Goes
 // through the public MeshGL64 boundary + the Impl ctor - for an
@@ -3606,6 +3620,26 @@ TEST(Manifold, RemoveSelfIntersectionsUncancelledContextRuns) {
   Manifold cleaned = cube.WithContext(ctx).RemoveSelfIntersections();
   EXPECT_EQ(cleaned.Status(), Manifold::Error::NoError);
   ExpectMeshGL64Identical(cleaned, cube);
+  // The D6 contract's public face: RSI schedules no phases, so the
+  // ctx reads as trivially complete. (Progress() also reads 1.0 for
+  // COMPLETED accounting, so this pins the convention, not full D6
+  // discrimination - recorded in the architecture review.)
+  EXPECT_EQ(ctx.Progress(), 1.0);
+}
+
+TEST(Manifold, RemoveSelfIntersectionsCancelBeforeLazyEval) {
+  // A pre-cancelled ctx on a LAZY CSG input: GetCsgLeafNode(ctx)
+  // evaluates the boolean under the cancelled ctx, so the member's
+  // status-propagation arm surfaces Cancelled before the pipeline
+  // ever runs. Pins the member's ctx handoff into CSG evaluation
+  // end-to-end (removing all ctx plumbing makes this a NoError weld).
+  Manifold lazy = Manifold::Cube({1, 1, 1}) +
+                  Manifold::Cube({1, 1, 1}).Translate({0.5, 0.5, 0.5});
+  ExecutionContext ctx;
+  ctx.Cancel();
+  Manifold cleaned = lazy.WithContext(ctx).RemoveSelfIntersections();
+  EXPECT_EQ(cleaned.Status(), Manifold::Error::Cancelled);
+  EXPECT_TRUE(cleaned.IsEmpty());
 }
 
 TEST(Manifold, RemoveSelfIntersectionsCleanInputUnchanged) {

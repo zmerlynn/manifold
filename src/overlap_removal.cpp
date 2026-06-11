@@ -24,7 +24,6 @@
 
 #include "collider.h"
 #include "cross_section/boolean2/predicates.h"  // IntersectSegments (step 9)
-#include "csg_tree.h"  // CsgLeafNode (direct leaf-Impl access)
 #include "disjoint_sets.h"
 #include "impl.h"
 #include "manifold/polygon.h"  // for Triangulate
@@ -426,11 +425,12 @@ std::optional<Manifold::Impl> RemoveOverlapsImpl(const Manifold::Impl& input,
                                                  ExecutionContext::Impl* ctx) {
   using la::cross;
   using la::dot;
-  if (input.IsEmpty()) return std::nullopt;
-  // Entry poll BEFORE any real work: the input pierce count below is
-  // the most expensive pre-step, and a pre-cancelled caller should not
-  // pay it.
+  // Entry poll FIRST - before even the empty-input exit: a
+  // pre-cancelled run is observable as Cancelled for every input
+  // class, and the input pierce count below is the most expensive
+  // pre-step, which a pre-cancelled caller should not pay.
   if (IsCancelled(ctx)) return CancelledImpl();
+  if (input.IsEmpty()) return std::nullopt;
   if (eps <= 0) eps = InferEps(input);
   // The input's pierce count, computed once for the gate's
   // monotonicity arm.
@@ -690,9 +690,13 @@ MergeVertsResult MergeVertsEps(const Manifold::Impl& in, double eps,
   if (in.IsEmpty()) return {};
 
   // Cluster on a copy of the positions; `in.vertPos_` stays intact as
-  // the displacement baseline. Unreferenced verts (NaN positions, see
-  // RemoveUnreferencedVerts) ride along as inert singletons: NaN
-  // boxes overlap nothing, and no tri references them.
+  // the displacement baseline. NaN positions cannot occur here:
+  // RemoveUnreferencedVerts only MARKS unreferenced verts NaN, but
+  // SortGeometry (the last stage of every construction sweep,
+  // including BuildImplFromTris below) compacts them away, and this
+  // pass only ever receives post-sweep impls. A NaN vert would NOT be
+  // inert - it would poison the broad-phase bbox union and trip the
+  // degenerate-axis pad assert in BuildSortedBVH.
   const size_t n = in.NumVert();
   std::vector<vec3> verts(n);
   for (size_t i = 0; i < n; ++i) verts[i] = in.vertPos_[i];
@@ -783,8 +787,7 @@ MergeVertsResult MergeVertsEps(const Manifold::Impl& in, double eps,
   // Total applied displacement (final centroid vs the INPUT position,
   // still intact in in.vertPos_) - exact, not a per-pass bound. The
   // driver folds it into the output tolerance claim. Singleton
-  // clusters never moved (the centroid of one vert is itself), so NaN
-  // riders contribute nothing here.
+  // clusters never moved (the centroid of one vert is itself).
   double maxMove = 0.0;
   for (size_t i = 0; i < n; ++i) {
     const vec3 d = verts[i] - in.vertPos_[i];
