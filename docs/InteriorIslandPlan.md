@@ -283,5 +283,8 @@ the island call site's input is fully proven before the call, making
 the PSLG suite disproportionate. The edge-count cap was deleted with the
 suite it bounded; large valid holed regions now decompose instead of
 gating. A sub-resolution island pin (Step10SubResolutionIslandGates)
-was added to cover the one deterministically forceable fast-fail path
-previously unpinned.
+was added; it pins the sub-resolution CLASS OUTCOME (such islands
+gate), not the fast-fail arm itself - the arm matches the
+triangulator's own per-contour hole threshold and is therefore a
+redundant short-circuit, not independently observable from the
+outcome.
