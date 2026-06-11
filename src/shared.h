@@ -55,7 +55,9 @@ inline double MaxEpsilon(double minEpsilon, const Box& bBox) {
  * iterated operations.
  *
  * Used by the overlap-removal pipeline (Smith's framework is the
- * correctness story). See docs/OverlapRemoval.md.
+ * correctness story; see docs/OverlapRemoval.md) and by boolean2, whose
+ * EpsilonFromScale delegates here - this is the tree's ONE copy of the
+ * formula.
  */
 inline double AlphaBudgetEpsilon(double L, int kBudget = 1000) {
   // u = 2^-53 for double-precision IEEE 754.

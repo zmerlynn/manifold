@@ -21,9 +21,6 @@
 namespace manifold {
 namespace boolean2 {
 
-constexpr double kU = 1.110223024625156540423631668e-16;
-constexpr double kAlphaCoeff = 12.37;
-
 struct EdgeM {
   int v0, v1;
   int mult = 1;

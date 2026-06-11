@@ -114,12 +114,11 @@ double TotalSignedArea(const Polygons& polys) {
 }
 
 // Choose epsilon from the operation scale using Smith's rounded power-of-two
-// length bound and the caller's adjustment budget.
+// length bound and the caller's adjustment budget. Delegates to the shared
+// core helper (one Smith formula in the tree); the boolean2-local name stays
+// for this module's callers.
 double EpsilonFromScale(double L, int k_budget) {
-  if (L <= 0) return 0;
-  int expBits;
-  std::frexp(L, &expBits);
-  return std::ldexp((k_budget + 1) * kAlphaCoeff * kU, expBits);
+  return AlphaBudgetEpsilon(L, k_budget);
 }
 
 double Coord(vec2 p, int axis) { return axis == 0 ? p.x : p.y; }
