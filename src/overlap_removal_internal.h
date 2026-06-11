@@ -19,6 +19,7 @@
 // and by no production caller - kept out of src/overlap_removal.h so
 // the src-internal seam is just RemoveOverlaps.
 
+#include <set>
 #include <utility>  // for std::pair
 #include <vector>
 
@@ -274,6 +275,17 @@ struct TraceChordResult {
   // pair allocates - leaving twins (10 eps, condR] apart.
   std::vector<double> newVertSnapR;
   int intervalsRejected = 0;  // boundary-riding / grazing / sub-eps
+  // Faces that are CANCELLATION-HAZARD: among plane-gated pairs (taken
+  // BEFORE interval filtering, so equal-boundary coincidences whose
+  // boundary-riding intervals are rejected still count), faces whose
+  // winding normals - normalized cross(v1-v0, v2-v0), never the stored
+  // faceNormal_ - are ANTI-ALIGNED and whose in-plane bounding boxes
+  // overlap. Same-oriented coplanar neighbors (every flat face's own
+  // triangulation) are NOT flagged: they cannot form a step-12
+  // cancellation pair, and flagging them would re-gate the
+  // boss-through-plate fixture. A flagged face with a detected island
+  // gates as today; an unflagged island face uses the decomposition.
+  std::set<int> coplanarHazardFaces;
 };
 TraceChordResult CoplanarTraceChords(const Manifold::Impl& impl,
                                      const std::vector<Edge>& edges,
@@ -492,13 +504,21 @@ struct FacePartition {
 // the stored faceNormal_, which can oppose the winding on folded
 // self-intersecting sheets - that mirror turns the face-on-left walk
 // into a boundary-hugging walk).
+// `eps`: pipeline epsilon for hole-decomposition triangulation and
+//   sub-resolution hole fast-fail. No default: the severance-proofing
+//   convention requires callers to pass it explicitly.
+// `coplanarHazard`: this face has an anti-aligned coplanar partner whose
+//   in-plane bbox overlaps - triangulating its islands independently
+//   could break step-12 cancellation (unmatched diagonals). A flagged
+//   face with a detected clean island gates exactly as today.
 FacePartition PartitionFace(const Manifold::Impl& impl, int face,
                             const std::vector<Edge>& edges,
                             const std::vector<int>& halfedge2Edge,
                             const std::vector<EdgeVertList>& onEdgeLists,
                             const std::vector<NewEdgeWithExtras>& chords,
                             const std::vector<int>& faceChords,
-                            const std::vector<vec3>& newVertPositions);
+                            const std::vector<vec3>& newVertPositions,
+                            double eps, bool coplanarHazard);
 
 // ---- Step 12: canonical polygon merge (docs/OverlapRemoval.md) ----
 

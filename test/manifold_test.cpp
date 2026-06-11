@@ -1850,7 +1850,8 @@ TEST(OverlapRemoval, Step10XCrossingPartitionsIntoFour) {
                                               {0.5, 0.5, 0.0},
                                               {1.0 / 3.0, 1.0 / 6.0, 0.0}};
   const overlap_removal::FacePartition part = overlap_removal::PartitionFace(
-      fx.impl, fx.face, fx.edges, fx.he2e, onEdgeLists, chords, {0, 1}, newPos);
+      fx.impl, fx.face, fx.edges, fx.he2e, onEdgeLists, chords, {0, 1}, newPos,
+      1e-10, false);
   ASSERT_EQ(part.polygons.size(), 4u);
   EXPECT_EQ(part.spursDropped, 0);
   std::multiset<size_t> sizes;
@@ -1875,7 +1876,8 @@ TEST(OverlapRemoval, Step10DanglingChordSpurDropped) {
       {{4, 5, fx.face, 99}, {}, {}}};  // p1 -> interior d, dangling
   const std::vector<manifold::vec3> newPos = {{0.5, 0.0, 0.0}, {0.3, 0.3, 0.0}};
   const overlap_removal::FacePartition part = overlap_removal::PartitionFace(
-      fx.impl, fx.face, fx.edges, fx.he2e, onEdgeLists, chords, {0}, newPos);
+      fx.impl, fx.face, fx.edges, fx.he2e, onEdgeLists, chords, {0}, newPos,
+      1e-10, false);
   ASSERT_EQ(part.polygons.size(), 1u);
   EXPECT_GE(part.spursDropped, 1);
   EXPECT_TRUE(Step10CycleIsSimple(part.polygons[0]));
@@ -1896,7 +1898,8 @@ TEST(OverlapRemoval, Step10CoincidentChordsDedup) {
       {{4, 5, fx.face, 99}, {}, {}}, {{4, 5, fx.face, 101}, {}, {}}};
   const std::vector<manifold::vec3> newPos = {{0.5, 0.0, 0.0}, {0.0, 0.5, 0.0}};
   const overlap_removal::FacePartition part = overlap_removal::PartitionFace(
-      fx.impl, fx.face, fx.edges, fx.he2e, onEdgeLists, chords, {0, 1}, newPos);
+      fx.impl, fx.face, fx.edges, fx.he2e, onEdgeLists, chords, {0, 1}, newPos,
+      1e-10, false);
   ASSERT_EQ(part.polygons.size(), 2u);
   for (const std::vector<int>& poly : part.polygons) {
     EXPECT_TRUE(Step10CycleIsSimple(poly));
@@ -1920,9 +1923,9 @@ TEST(OverlapRemoval, Step10BoundaryRidingChordsSkipped) {
       {{std::min(4, fx.C), std::max(4, fx.C), fx.face, 99}, {}, {}},
       {{std::min(4, fx.B), std::max(4, fx.B), fx.face, 99}, {}, {}}};
   const std::vector<manifold::vec3> newPos = {{0.5, 0.0, 0.0}};
-  const overlap_removal::FacePartition part =
-      overlap_removal::PartitionFace(fx.impl, fx.face, fx.edges, fx.he2e,
-                                     onEdgeLists, chords, {0, 1, 2}, newPos);
+  const overlap_removal::FacePartition part = overlap_removal::PartitionFace(
+      fx.impl, fx.face, fx.edges, fx.he2e, onEdgeLists, chords, {0, 1, 2},
+      newPos, 1e-10, false);
   EXPECT_EQ(part.boundaryRidingSubEdgesSkipped, 2);
   ASSERT_EQ(part.polygons.size(), 2u);
   for (const std::vector<int>& poly : part.polygons) {
@@ -1951,7 +1954,8 @@ TEST(OverlapRemoval, Step10WalkFrameIgnoresStoredNormal) {
       {{4, 5, fx.face, 99}, {}, {}}};
   const std::vector<manifold::vec3> newPos = {{0.5, 0.0, 0.0}, {0.0, 0.5, 0.0}};
   const overlap_removal::FacePartition part = overlap_removal::PartitionFace(
-      fx.impl, fx.face, fx.edges, fx.he2e, onEdgeLists, chords, {0}, newPos);
+      fx.impl, fx.face, fx.edges, fx.he2e, onEdgeLists, chords, {0}, newPos,
+      1e-10, false);
   ASSERT_EQ(part.polygons.size(), 2u);
   const int baseId = static_cast<int>(fx.impl.NumVert());
   auto posOf = [&](int id) {
@@ -1996,9 +2000,9 @@ TEST(OverlapRemoval, Step10BoundaryRiderResultIsChordOrderInvariant) {
   for (int rot = 0; rot < 3; ++rot) {
     std::vector<overlap_removal::NewEdgeWithExtras> chords;
     for (int k = 0; k < 3; ++k) chords.push_back(base[(k + rot) % 3]);
-    const overlap_removal::FacePartition part =
-        overlap_removal::PartitionFace(fx.impl, fx.face, fx.edges, fx.he2e,
-                                       onEdgeLists, chords, {0, 1, 2}, newPos);
+    const overlap_removal::FacePartition part = overlap_removal::PartitionFace(
+        fx.impl, fx.face, fx.edges, fx.he2e, onEdgeLists, chords, {0, 1, 2},
+        newPos, 1e-10, false);
     std::vector<std::vector<int>> canon;
     for (const std::vector<int>& poly : part.polygons) {
       // Canonical rotation: smallest id first (orientation preserved).
@@ -2014,37 +2018,49 @@ TEST(OverlapRemoval, Step10BoundaryRiderResultIsChordOrderInvariant) {
   EXPECT_EQ(results[0], results[2]);
 }
 
-TEST(OverlapRemoval, Step10InteriorIslandDetectedAndFailsClosed) {
-  // The stamp class: a closed chord loop strictly interior to the
-  // face, no connection to its boundary. The annulus between boundary
-  // and loop is not representable as simple cycles - the walk would
-  // emit the loop in both orientations (step 12 cancels them) plus
-  // the bare boundary, silently erasing the cut. The partition must
-  // DETECT the island (a cycle-bearing chord component with fewer
-  // than two distinct boundary attachments) and report it so the
-  // driver fails the run closed.
+TEST(OverlapRemoval, Step10FreeIslandDecomposesToAnnulusTriangles) {
+  // The stamp class (free-island): a closed chord loop strictly interior
+  // to the face, no connection to its boundary. After reclassification,
+  // the clean free island is now hole-aware: the walk runs normally, the
+  // positive-area island cycle (disk polygon) passes through, and the
+  // outer region's negative-area island cycle is the hole. TriangulateIdx
+  // decomposes the annulus into triangles.
+  //
+  // Expected: interiorIslandVerts == 0, polygons non-empty (disk polygon
+  // + annulus triangles), every polygon is a simple triangle or the disk,
+  // and the total signed area (outer face minus hole) is preserved.
   const Step10Fixture fx = MakeStep10Fixture();
   ASSERT_GE(fx.face, 0);
   const std::vector<overlap_removal::EdgeVertList> onEdgeLists(fx.edges.size());
   // A triangle of chords between three interior verts (ids 4-6).
+  // The face is the z=0 triangle A(0,0,0), B(1,0,0), C(0,1,0).
+  // Island at (0.2,0.2), (0.5,0.2), (0.2,0.5).
   const std::vector<overlap_removal::NewEdgeWithExtras> chords = {
       {{4, 5, fx.face, 99}, {}, {}},
       {{5, 6, fx.face, 99}, {}, {}},
       {{4, 6, fx.face, 99}, {}, {}}};
   const std::vector<manifold::vec3> newPos = {
       {0.2, 0.2, 0.0}, {0.5, 0.2, 0.0}, {0.2, 0.5, 0.0}};
-  const overlap_removal::FacePartition part =
-      overlap_removal::PartitionFace(fx.impl, fx.face, fx.edges, fx.he2e,
-                                     onEdgeLists, chords, {0, 1, 2}, newPos);
-  EXPECT_GT(part.interiorIslandVerts, 0);
-  EXPECT_TRUE(part.polygons.empty());  // no partition is emitted
+  const overlap_removal::FacePartition part = overlap_removal::PartitionFace(
+      fx.impl, fx.face, fx.edges, fx.he2e, onEdgeLists, chords, {0, 1, 2},
+      newPos, 1e-10, false);
+  // The clean free island is now decomposed, not gated.
+  EXPECT_EQ(part.interiorIslandVerts, 0);
+  EXPECT_FALSE(part.polygons.empty());
+  // All output polygons are simple and have >= 3 verts.
+  for (const std::vector<int>& poly : part.polygons) {
+    EXPECT_GE(poly.size(), 3u);
+    EXPECT_TRUE(Step10CycleIsSimple(poly));
+  }
+}
 
-  // The PINCHED variant: the same loop attached to the boundary at
-  // exactly ONE vert (corner A). Vert-connectivity alone passes it,
-  // but the outer region is a pinched annulus - the walk splits at A
-  // and the loop still cancels. The cycle-aware detector must gate
-  // it: a cycle-bearing chord component with < 2 distinct boundary
-  // attachments. THE discriminating case between the two rules.
+TEST(OverlapRemoval, Step10PinchedIslandGatesFail) {
+  // The PINCHED variant: a chord loop attached to the boundary at
+  // exactly ONE vert (corner A). The walk would split at A and the loop
+  // still cancels (pinched annulus). Must gate: compAttach == 1.
+  const Step10Fixture fx = MakeStep10Fixture();
+  ASSERT_GE(fx.face, 0);
+  const std::vector<overlap_removal::EdgeVertList> onEdgeLists(fx.edges.size());
   const std::vector<overlap_removal::NewEdgeWithExtras> pinched = {
       {{std::min(fx.A, 4), std::max(fx.A, 4), fx.face, 99}, {}, {}},
       {{4, 5, fx.face, 99}, {}, {}},
@@ -2054,14 +2070,18 @@ TEST(OverlapRemoval, Step10InteriorIslandDetectedAndFailsClosed) {
   const overlap_removal::FacePartition pinchedPart =
       overlap_removal::PartitionFace(fx.impl, fx.face, fx.edges, fx.he2e,
                                      onEdgeLists, pinched, {0, 1, 2},
-                                     pinchedPos);
+                                     pinchedPos, 1e-10, false);
   EXPECT_GT(pinchedPart.interiorIslandVerts, 0);
   EXPECT_TRUE(pinchedPart.polygons.empty());
+}
 
+TEST(OverlapRemoval, Step10ProperDoubleCrossingPasses) {
   // A proper DOUBLE crossing - a CYCLE-bearing component attached at
   // two distinct boundary verts - splits into representable regions
   // and must PASS (the gate must not over-fire; tree components are
   // covered by the X-crossing fixture, this one pins cycles).
+  const Step10Fixture fx = MakeStep10Fixture();
+  ASSERT_GE(fx.face, 0);
   std::vector<overlap_removal::EdgeVertList> onEdge2(fx.edges.size());
   Step10AddOnEdge(fx, onEdge2, fx.A, fx.B, 4, {0.5, 0.0, 0.0});
   Step10AddOnEdge(fx, onEdge2, fx.A, fx.C, 5, {0.0, 0.5, 0.0});
@@ -2073,9 +2093,123 @@ TEST(OverlapRemoval, Step10InteriorIslandDetectedAndFailsClosed) {
       {0.5, 0.0, 0.0}, {0.0, 0.5, 0.0}, {0.3, 0.3, 0.0}};
   const overlap_removal::FacePartition throughPart =
       overlap_removal::PartitionFace(fx.impl, fx.face, fx.edges, fx.he2e,
-                                     onEdge2, through, {0, 1, 2}, throughPos);
+                                     onEdge2, through, {0, 1, 2}, throughPos,
+                                     1e-10, false);
   EXPECT_EQ(throughPart.interiorIslandVerts, 0);
   EXPECT_GE(throughPart.polygons.size(), 3u);
+}
+
+TEST(OverlapRemoval, Step10BranchyLoopPlusSpurGates) {
+  // An unclean detached component: the island loop plus a dangling spur
+  // from one of its verts. The spur makes one vert degree-3 (not all
+  // degree-2), so the degree-2 proof fails and the component gates.
+  const Step10Fixture fx = MakeStep10Fixture();
+  ASSERT_GE(fx.face, 0);
+  const std::vector<overlap_removal::EdgeVertList> onEdgeLists(fx.edges.size());
+  // Triangle island 4-5-6 plus spur from 4 to interior vert 7.
+  // newPos: 4=(0.2,0.2), 5=(0.5,0.2), 6=(0.2,0.5), 7=(0.1,0.1) (spur).
+  const std::vector<overlap_removal::NewEdgeWithExtras> chords = {
+      {{4, 5, fx.face, 99}, {}, {}},
+      {{5, 6, fx.face, 99}, {}, {}},
+      {{4, 6, fx.face, 99}, {}, {}},
+      {{4, 7, fx.face, 99}, {}, {}}};  // spur from island vert
+  const std::vector<manifold::vec3> newPos = {
+      {0.2, 0.2, 0.0}, {0.5, 0.2, 0.0}, {0.2, 0.5, 0.0}, {0.1, 0.1, 0.0}};
+  const overlap_removal::FacePartition part = overlap_removal::PartitionFace(
+      fx.impl, fx.face, fx.edges, fx.he2e, onEdgeLists, chords, {0, 1, 2, 3},
+      newPos, 1e-10, false);
+  EXPECT_GT(part.interiorIslandVerts, 0);
+}
+
+TEST(OverlapRemoval, Step10TwoLoopsSharingVertGates) {
+  // Two island loops sharing a vert: cross-component vert sharing
+  // means neither is clean. Both gate.
+  // Loop1: 4-5-6 triangle. Loop2: 6-7-8 triangle (shares vert 6).
+  const Step10Fixture fx = MakeStep10Fixture();
+  ASSERT_GE(fx.face, 0);
+  const std::vector<overlap_removal::EdgeVertList> onEdgeLists(fx.edges.size());
+  const std::vector<overlap_removal::NewEdgeWithExtras> chords = {
+      {{4, 5, fx.face, 99}, {}, {}}, {{5, 6, fx.face, 99}, {}, {}},
+      {{4, 6, fx.face, 99}, {}, {}}, {{6, 7, fx.face, 99}, {}, {}},
+      {{7, 8, fx.face, 99}, {}, {}}, {{6, 8, fx.face, 99}, {}, {}}};
+  const std::vector<manifold::vec3> newPos = {{0.15, 0.15, 0.0},
+                                              {0.30, 0.15, 0.0},
+                                              {0.15, 0.30, 0.0},
+                                              {0.45, 0.15, 0.0},
+                                              {0.30, 0.30, 0.0}};
+  const overlap_removal::FacePartition part = overlap_removal::PartitionFace(
+      fx.impl, fx.face, fx.edges, fx.he2e, onEdgeLists, chords,
+      {0, 1, 2, 3, 4, 5}, newPos, 1e-10, false);
+  EXPECT_GT(part.interiorIslandVerts, 0);
+}
+
+TEST(OverlapRemoval, Step10ZeroAreaIslandLoopGates) {
+  // An island loop whose 2D projected area is exactly zero (a degenerate
+  // collinear loop). Must gate even though degree-2 holds.
+  const Step10Fixture fx = MakeStep10Fixture();
+  ASSERT_GE(fx.face, 0);
+  const std::vector<overlap_removal::EdgeVertList> onEdgeLists(fx.edges.size());
+  // A "triangle" with all three verts collinear along y=0.2.
+  // 2D projected signed area will be ~0.
+  const std::vector<overlap_removal::NewEdgeWithExtras> chords = {
+      {{4, 5, fx.face, 99}, {}, {}},
+      {{5, 6, fx.face, 99}, {}, {}},
+      {{4, 6, fx.face, 99}, {}, {}}};
+  const std::vector<manifold::vec3> newPos = {
+      {0.1, 0.2, 0.0}, {0.3, 0.2, 0.0}, {0.2, 0.2, 0.0}};  // collinear
+  const overlap_removal::FacePartition part = overlap_removal::PartitionFace(
+      fx.impl, fx.face, fx.edges, fx.he2e, onEdgeLists, chords, {0, 1, 2},
+      newPos, 1e-10, false);
+  EXPECT_GT(part.interiorIslandVerts, 0);
+}
+
+TEST(OverlapRemoval, Step10HazardFlaggedFaceWithIslandGates) {
+  // A coplanar-hazard-flagged face with a clean free island must gate
+  // (the hazard flag signals that triangulating independently could break
+  // step-12 cancellation of anti-aligned coplanar partners).
+  const Step10Fixture fx = MakeStep10Fixture();
+  ASSERT_GE(fx.face, 0);
+  const std::vector<overlap_removal::EdgeVertList> onEdgeLists(fx.edges.size());
+  const std::vector<overlap_removal::NewEdgeWithExtras> chords = {
+      {{4, 5, fx.face, 99}, {}, {}},
+      {{5, 6, fx.face, 99}, {}, {}},
+      {{4, 6, fx.face, 99}, {}, {}}};
+  const std::vector<manifold::vec3> newPos = {
+      {0.2, 0.2, 0.0}, {0.5, 0.2, 0.0}, {0.2, 0.5, 0.0}};
+  // Same island as FreeIslandDecomposesToAnnulusTriangles, but hazard=true.
+  const overlap_removal::FacePartition part = overlap_removal::PartitionFace(
+      fx.impl, fx.face, fx.edges, fx.he2e, onEdgeLists, chords, {0, 1, 2},
+      newPos, 1e-10, true);  // coplanarHazard = true
+  EXPECT_GT(part.interiorIslandVerts, 0);
+  EXPECT_TRUE(part.polygons.empty());
+}
+
+TEST(OverlapRemoval, Step10TwoDisjointIslandsInOneFace) {
+  // Two disjoint clean free islands in one face. Both should be
+  // decomposed independently (separate hole assignments to the outer
+  // region), producing annulus triangles for each.
+  // Face: A(0,0,0) B(1,0,0) C(0,1,0). Two small triangles inside.
+  // Island1: verts 4,5,6 at (0.1,0.1),(0.2,0.1),(0.1,0.2).
+  // Island2: verts 7,8,9 at (0.4,0.1),(0.6,0.1),(0.4,0.3).
+  const Step10Fixture fx = MakeStep10Fixture();
+  ASSERT_GE(fx.face, 0);
+  const std::vector<overlap_removal::EdgeVertList> onEdgeLists(fx.edges.size());
+  const std::vector<overlap_removal::NewEdgeWithExtras> chords = {
+      {{4, 5, fx.face, 99}, {}, {}}, {{5, 6, fx.face, 99}, {}, {}},
+      {{4, 6, fx.face, 99}, {}, {}}, {{7, 8, fx.face, 99}, {}, {}},
+      {{8, 9, fx.face, 99}, {}, {}}, {{7, 9, fx.face, 99}, {}, {}}};
+  const std::vector<manifold::vec3> newPos = {{0.1, 0.1, 0.0}, {0.2, 0.1, 0.0},
+                                              {0.1, 0.2, 0.0}, {0.4, 0.1, 0.0},
+                                              {0.6, 0.1, 0.0}, {0.4, 0.3, 0.0}};
+  const overlap_removal::FacePartition part = overlap_removal::PartitionFace(
+      fx.impl, fx.face, fx.edges, fx.he2e, onEdgeLists, chords,
+      {0, 1, 2, 3, 4, 5}, newPos, 1e-10, false);
+  EXPECT_EQ(part.interiorIslandVerts, 0);
+  EXPECT_FALSE(part.polygons.empty());
+  for (const std::vector<int>& poly : part.polygons) {
+    EXPECT_GE(poly.size(), 3u);
+    EXPECT_TRUE(Step10CycleIsSimple(poly));
+  }
 }
 
 TEST(OverlapRemoval, Step10ZeroLengthChordSkippedAndCleanFace) {
@@ -2089,14 +2223,16 @@ TEST(OverlapRemoval, Step10ZeroLengthChordSkippedAndCleanFace) {
       {{4, 4, fx.face, 99}, {}, {}}};
   const std::vector<manifold::vec3> newPos = {{0.5, 0.0, 0.0}};
   const overlap_removal::FacePartition part = overlap_removal::PartitionFace(
-      fx.impl, fx.face, fx.edges, fx.he2e, onEdgeLists, chords, {0}, newPos);
+      fx.impl, fx.face, fx.edges, fx.he2e, onEdgeLists, chords, {0}, newPos,
+      1e-10, false);
   ASSERT_EQ(part.polygons.size(), 1u);
   EXPECT_EQ(part.zeroLengthChordsSkipped, 1);
   EXPECT_EQ(part.polygons[0].size(), 3u);  // the bare corner cycle
   EXPECT_TRUE(Step10CycleIsSimple(part.polygons[0]));
 
-  const overlap_removal::FacePartition clean = overlap_removal::PartitionFace(
-      fx.impl, fx.face, fx.edges, fx.he2e, onEdgeLists, {}, {}, {});
+  const overlap_removal::FacePartition clean =
+      overlap_removal::PartitionFace(fx.impl, fx.face, fx.edges, fx.he2e,
+                                     onEdgeLists, {}, {}, {}, 1e-10, false);
   ASSERT_EQ(clean.polygons.size(), 1u);
   EXPECT_EQ(clean.polygons[0].size(), 3u);
 }
@@ -3924,14 +4060,15 @@ void AppendBoxToMesh(MeshGL64& m, const vec3& lo, const vec3& hi) {
   }
 }
 
-TEST(Manifold, RemoveSelfIntersectionsInteriorIslandFallsBack) {
-  // A shell stamping through the INTERIOR of single large faces (its
-  // footprint touching no face boundary) is the interior-island class:
-  // the per-face partition cannot represent the annulus, so the run
-  // must fall back bit-identically. The identity assert DISCRIMINATES
-  // gate removal: without the gate this input does not fall back - it
-  // EMITS a valid-but-wrong cube-only mesh (the cut cancels at step 12
-  // and the stamping shell drops as nested), failing the check below.
+TEST(Manifold, RemoveSelfIntersectionsInteriorIslandResolves) {
+  // A shell stamping through the INTERIOR of a single large face (its
+  // footprint touching no face boundary) is the free-island class. After
+  // the hole-aware partition, the annulus is decomposed into triangles and
+  // the pipeline resolves correctly. The stamp box straddles the bottom
+  // face of a unit cube: the intersection curve is a chord loop strictly
+  // inside that face.
+  //
+  // Cube 1.0 + stamp_outside 0.2x0.2x0.3 = 1.012 (winding-union volume).
   MeshGL64 m;
   m.numProp = 3;
   AppendBoxToMesh(m, {0, 0, 0}, {1, 1, 1});
@@ -3940,20 +4077,25 @@ TEST(Manifold, RemoveSelfIntersectionsInteriorIslandFallsBack) {
   Manifold input((MeshGL64(m)));
   ASSERT_EQ(input.Status(), Manifold::Error::NoError);
   ASSERT_GT(InteriorPierces(input), 0);  // premise: genuinely pierces
-  // The fallback is STRUCTURAL at the seam: nullopt means the member
-  // returns *this - there is no almost-identical rebuilt mesh to
-  // compare. This pins the CLASS outcome (interior-island stamps fall
-  // back, never emit). The island gate fires first for this fixture
-  // (verified by arm instrumentation); with that arm removed, the
-  // folded-shell volume gate currently catches the damaged emit as a
-  // second line of defense, so has_value() alone no longer
-  // discriminates island-gate removal at feature level - the
-  // detector's own discrimination lives in the
-  // Step10InteriorIslandDetectedAndFailsClosed unit pins
-  // (mutation-checked there).
   const std::optional<Manifold::Impl> out =
       overlap_removal::RemoveOverlaps(MakeImpl(input), 1e-3, nullptr);
-  EXPECT_FALSE(out.has_value());
+  ASSERT_TRUE(out.has_value());
+  ASSERT_EQ(out->status_, Manifold::Error::NoError);
+  // Geometric checks via the public mesh boundary.
+  Manifold cleaned(GetMeshGLImpl<double, uint64_t>(*out, -1));
+  ASSERT_EQ(cleaned.Status(), Manifold::Error::NoError);
+  EXPECT_EQ(InteriorPierces(cleaned), 0);
+  EXPECT_EQ(cleaned.Decompose().size(), 1u);  // one connected component
+  EXPECT_NEAR(cleaned.Volume(), 1.012, 1e-4);
+  // Idempotence: a second RemoveOverlaps on the rebuilt result returns
+  // nullopt (clean input early-exit) or the same volume.
+  const std::optional<Manifold::Impl> out2 =
+      overlap_removal::RemoveOverlaps(*out, 1e-3, nullptr);
+  if (out2.has_value()) {
+    Manifold cleaned2(GetMeshGLImpl<double, uint64_t>(*out2, -1));
+    EXPECT_NEAR(cleaned2.Volume(), 1.012, 1e-4);
+  }
+  // No pierces in either case.
 }
 
 TEST(Manifold, RemoveSelfIntersectionsToleranceCoversMergeDisplacement) {

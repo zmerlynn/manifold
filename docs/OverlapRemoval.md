@@ -34,7 +34,7 @@ assumptions hold in doubles, and add no new algorithmic ideas.
 | 8 | `AddInteriorVertsToNewEdges` | on-tri verts threaded onto chord interiors |
 | 9 | `FindOnChordEndpointContacts`, `FindChordChordCrossings`, `MergeAndPropagateCrossings`, `ResolveAndThreadClusters` | chord-chord crossings within each face (below) |
 | 9.5 | `UnifyArrangementVerts` | arrangement-wide new-vert unification (below) |
-| 10-11 | `PartitionFace` | per-face simple-cycle partition by angular walk |
+| 10-11 | `PartitionFace` | per-face simple-cycle partition by angular walk; detached free-island components decomposed via hole-aware triangulation |
 | 12 | `MergePolygons` | canonical-cycle merge with signed multiplicity; coincident opposite pairs cancel |
 | 13 | `BuildCellComplex`, `ClassifyCells` | radial fans -> volume cells -> seed cast -> winding BFS -> keep |
 | emit | `BuildEmitTopology` + driver | inside-wedge twins, vertex rings, triangulation, direct Impl construction |
@@ -428,7 +428,9 @@ numbers go stale instantly; the suite is the source of truth.)
   threading (including the split-identity, face-gate, conditioned-radius,
   and re-sort pins); partition (X-crossing, dangling-spur, coincident-dedup,
   zero-length, boundary-riding, chord-order invariance, stored-normal
-  inversion); step-12 canonicalization and cancellation; cell complex
+  inversion; interior-island hole decomposition (free-island annulus
+  triangulation, pinched gate, clean vs. unclean detached loop classes,
+  coplanar-hazard gate, two disjoint islands in one face)); step-12 canonicalization and cancellation; cell complex
   (tetra, bipyramid-with-internal-face); winding classification (reversed
   representation, nested cubes, membrane-across-the-cast, concave seed
   target, seed-cast exhaustion); emit topology (the book fixture pinning
@@ -446,11 +448,10 @@ numbers go stale instantly; the suite is the source of truth.)
   trimaran fold class - pins the folded-shell gate's bit-identical
   fallback, see Known limitations); the ovoid dense-sliver fixture (falls
   back bit-identically - the outcome is pinned, not which internal
-  guard fires); the interior-island stamp (seam-level fallback pin:
-  the island arm fires first, but with it removed the folded-shell gate
-  catches this fixture as a second line, so the feature pin covers the
-  fallback OUTCOME - detector discrimination lives in the
-  interior-island unit pins); the merge-displacement tolerance fixture (the
+  guard fires); the interior-island stamp (resolve pin: free-island
+  decomposition yields a single-component, zero-pierce, correct-volume
+  result; idempotent; the pinched class is covered by the unit gate
+  pins); the merge-displacement tolerance fixture (the
   eps-chain-strip weld; mutation-checked against the formula); empty
   input; idempotence (fallback fixed point + success-path monotonicity);
   determinism; far-from-origin (the same trimaran at scale: strict pierce
@@ -503,22 +504,36 @@ numbers go stale instantly; the suite is the source of truth.)
 7. Output tolerance widens to cover the pipeline's applied movements (the
    10-eps floor plus the measured merge/unification displacements); see the
    eps contract's OUTPUT tolerance bullet for the exact formula.
-8. **Interior-island stamps** (gated fail-closed): a shell whose
-   intersection curve with a face does not properly cross its boundary - a
-   "stamp" footprint strictly interior to the face, or one PINCHED onto a
-   single boundary vert (reachable when a corner snap lands a loop endpoint
-   on a boundary vert) - creates a chord loop whose surrounding region is a
-   (possibly pinched) annulus, not representable as simple cycles. The
-   partition would emit the loop in both orientations (canceled at step 12)
-   and the bare boundary - silently erasing the cut and misclassifying the
-   stamping shell as nested. The partition gates this per chord-only
-   component: a cycle-bearing component with fewer than two distinct
-   boundary attachments (`FacePartition::interiorIslandVerts`) fails the
-   run closed, bit-identically. Deeper pinched compositions (e.g. nested
-   loops bridged through one attachment) may still pass the count and fall
-   to the downstream gates. Resolving the class needs hole-aware faces
-   (bridge edges), a known arrangement technique deliberately out of
-   scope.
+8. **Interior-island stamps** (partially resolved): a shell whose
+   intersection curve with a face does not properly cross its boundary
+   creates a chord loop whose surrounding region is an annulus.
+
+   **Resolved**: clean, detached (0-attachment) free-island loops are now
+   handled via hole-aware triangulation inside `PartitionFace`. The
+   partition proves the component is a clean degree-2 simple loop (no
+   branching, nonzero area, no cross-component vert sharing, no skipped
+   boundary riders), classifies the negative-area walk cycle as a hole,
+   assigns it to the enclosing positive-area region, calls `TriangulateIdx`,
+   validates the output (per-triangle area, boundary coverage, PSLG
+   embedding), and appends the resulting triangles as ordinary partition
+   polygons. The common boss-through-plate class falls in this resolved arm.
+
+   **Still gated** (fail-closed, bit-identical):
+   - PINCHED loops (1-attachment): the loop endpoint snaps to a boundary
+     vert, making the annulus topologically degenerate. The walk's behavior
+     at the pinch vert was the TP6-era false-negative class; resolving it is
+     out of scope.
+   - COPLANAR-HAZARD faces: when the stamped face has an anti-aligned
+     coplanar partner (detected by `CoplanarTraceChords` before interval
+     filtering), two eps-coincident opposite holed faces triangulated
+     independently cannot be guaranteed to choose matching diagonals, which
+     would defeat step 12's cancellation. Canonical winding- and
+     mirror-independent triangulation is out of scope.
+   - VALIDATION failures: a `TriangulateIdx` output that fails any of the
+     post-triangulation invariants (degenerate triangle, area mismatch,
+     boundary mis-coverage, PSLG violation) gates the face exactly as today.
+   - UNCLEAN detached components: branchy graphs, zero-area loops,
+     vert-sharing island clusters gate.
 9. **Fold-gate residual**: two opposite-orientation folded shells that share
    a REAL undirected edge (same two snapped vert ids, without the coincident
    opposite polygons step 12 would cancel) are edge-connected into one

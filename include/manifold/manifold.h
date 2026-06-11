@@ -238,9 +238,9 @@ class Manifold {
    *   - Fail-closed: on any internal failure or gate trip (construction
    *     error, non-positive volume, more pierces than the input, or a
    *     degenerate arrangement that would silently corrupt the output -
-   *     a folded shell, an interior-island chord loop), the original
-   *     input is returned unchanged. There is no volume-ratio gate,
-   *     sign-flip recovery, or repair pass.
+   *     a folded shell, a pinched or coplanar-hazard interior-island
+   *     chord loop), the original input is returned unchanged. There is
+   *     no volume-ratio gate, sign-flip recovery, or repair pass.
    *   - Cancellation: an attached ExecutionContext (see WithContext) is
    *     honored at pipeline stage boundaries; a cancelled run returns an
    *     empty Manifold with Error::Cancelled (sticky, like the eager

@@ -1,5 +1,7 @@
 # Plan: resolve interior-island stamps (faces with holes)
 
+STATUS: IMPLEMENTED (see `src/overlap_removal.cpp`, `src/overlap_removal_internal.h`, `test/manifold_test.cpp`)
+
 Working plan for the highest-ranked CAD limitation: a shell stamping
 through the INTERIOR of a single face (the boss-through-plate class,
 Known limitations item 8). Today the per-face partition cannot express

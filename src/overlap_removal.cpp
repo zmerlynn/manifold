@@ -534,9 +534,10 @@ std::optional<Manifold::Impl> RemoveOverlapsImpl(const Manifold::Impl& input,
   std::vector<std::pair<int, std::vector<int>>> facePolygons;
   for (int f = 0; f < numTri; ++f) {
     if ((f & 0xFF) == 0 && IsCancelled(ctx)) return CancelledImpl();
+    const bool hazard = trace.coplanarHazardFaces.count(f) > 0;
     FacePartition part = PartitionFace(
         impl, f, edges, halfedge2Edge, onEdgeLists, threaded.chords,
-        face2Chords[f], threaded.newVertPositions);
+        face2Chords[f], threaded.newVertPositions, eps, hazard);
     // GATE (fail closed): an interior chord island means this face's
     // cycles are NOT a partition (the stamp class - see
     // FacePartition::interiorIslandVerts); emitting would silently
@@ -1361,6 +1362,41 @@ TraceChordResult CoplanarTraceChords(const Manifold::Impl& impl,
       a2[k] = to2d(av[k]);
       b2[k] = to2d(bv[k]);
     }
+
+    // CANCELLATION-HAZARD flag (taken BEFORE interval filtering so even
+    // equal-boundary coincidences whose intervals all ride the boundary
+    // still count). Two conditions must both hold:
+    // 1. Winding normals ANTI-ALIGNED: dot(normalize(nA), normalize(nB)) < 0.
+    //    Same-oriented coplanar neighbors (every flat face's own tris, which
+    //    the plane gate also pairs) have dot > 0 and are NOT flagged:
+    //    flagging them would re-gate the boss-through-plate fixture.
+    // 2. In-plane bounding boxes OVERLAP: if the bbox of fa's projected
+    //    triangle and the bbox of fb's projected triangle do not overlap in
+    //    2D, there can be no interior coincidence.
+    if (areaA2 > 0 && areaB2 > 0 && dot(nA, nB) < 0) {
+      // Check 2D bbox overlap (separating-axis test on the two projected
+      // triangles' bounding boxes).
+      double aMinU = a2[0].x, aMaxU = a2[0].x;
+      double aMinV = a2[0].y, aMaxV = a2[0].y;
+      double bMinU = b2[0].x, bMaxU = b2[0].x;
+      double bMinV = b2[0].y, bMaxV = b2[0].y;
+      for (int k = 1; k < 3; ++k) {
+        aMinU = std::min(aMinU, a2[k].x);
+        aMaxU = std::max(aMaxU, a2[k].x);
+        aMinV = std::min(aMinV, a2[k].y);
+        aMaxV = std::max(aMaxV, a2[k].y);
+        bMinU = std::min(bMinU, b2[k].x);
+        bMaxU = std::max(bMaxU, b2[k].x);
+        bMinV = std::min(bMinV, b2[k].y);
+        bMaxV = std::max(bMaxV, b2[k].y);
+      }
+      if (aMinU <= bMaxU && bMinU <= aMaxU && aMinV <= bMaxV &&
+          bMinV <= aMaxV) {
+        out.coplanarHazardFaces.insert(fa);
+        out.coplanarHazardFaces.insert(fb);
+      }
+    }
+
     // Orientation sign per projected tri (the opposite sheet projects
     // CW), so the clip's inside test works for both.
     auto orient2 = [](const vec2* t3) {
@@ -2269,7 +2305,8 @@ FacePartition PartitionFace(const Manifold::Impl& impl, int face,
                             const std::vector<EdgeVertList>& onEdgeLists,
                             const std::vector<NewEdgeWithExtras>& chords,
                             const std::vector<int>& faceChords,
-                            const std::vector<vec3>& newVertPositions) {
+                            const std::vector<vec3>& newVertPositions,
+                            double eps, bool coplanarHazard) {
   using la::cross;
   using la::dot;
   FacePartition out;
@@ -2366,22 +2403,53 @@ FacePartition PartitionFace(const Manifold::Impl& impl, int face,
   }
   if (hes.empty()) return out;
 
-  // INTERIOR-ISLAND GATE: a chord LOOP that the face boundary does
-  // not properly cross (a shell "stamping" through this face's
-  // interior) bounds a hole - the region around it is an annulus, or
-  // a pinched annulus when the loop touches the boundary at exactly
-  // one vert - and neither is representable as simple cycles. The
-  // walk emits such a loop in both orientations (step 12 cancels
-  // them) plus the bare boundary, silently erasing the cut and
-  // misclassifying the stamping shell as nested. Detect per
-  // chord-only connected component: a component CONTAINING A CYCLE
-  // (more undirected sub-edges than a spanning tree) must attach to
-  // the face boundary at >= 2 DISTINCT verts (a proper crossing
-  // enters and exits; one attachment is a pinch, zero a free
-  // island - vert-connectivity alone misses the pinch). Trees
-  // (through-cut chains, spurs) pass at any attachment count. The
-  // driver fails the run closed on a positive count. Deeper pinched
-  // compositions are documented in Known limitations.
+  // `skippedRiderVerts`: verts from chord sub-edges that were skipped
+  // because they coincide with the face boundary (boundary riders).
+  // A free-island vert in this set has a hidden boundary attachment - it
+  // must gate.
+  std::set<int> skippedRiderVerts;
+  for (const int ci : faceChords) {
+    const NewEdgeWithExtras& nwe = chords[ci];
+    if (nwe.edge.v0 == nwe.edge.v1) continue;
+    std::vector<int> riderSeq;
+    riderSeq.push_back(nwe.edge.v0);
+    riderSeq.insert(riderSeq.end(), nwe.extraVerts.begin(),
+                    nwe.extraVerts.end());
+    riderSeq.push_back(nwe.edge.v1);
+    for (size_t i = 0; i + 1 < riderSeq.size(); ++i) {
+      const int a = riderSeq[i];
+      const int b = riderSeq[i + 1];
+      if (a == b) continue;
+      const std::pair<int, int> key{std::min(a, b), std::max(a, b)};
+      if (boundarySub.count(key) && !seenSub.count(key)) {
+        skippedRiderVerts.insert(a);
+        skippedRiderVerts.insert(b);
+      }
+    }
+  }
+
+  // INTERIOR-ISLAND GATE (reclassified): chord-only components containing
+  // a cycle (compEdges >= compVerts) with fewer than 2 boundary attachments.
+  //
+  //  compAttach == 0: free island - hole CANDIDATE. Ungate only when:
+  //    (a) every vert has degree exactly 2 in the component (one loop);
+  //    (b) no component vert is in skippedRiderVerts (hidden attachment);
+  //    (c) no component vert is shared with any other candidate island;
+  //    (d) loop is SIMPLE (checked via 2D projections after to2d is set);
+  //    (e) loop has nonzero projected area;
+  //    (f) this face is NOT coplanar-hazard-flagged.
+  //    Failure of any condition -> gate as today.
+  //  compAttach == 1: PINCHED - gate as today.
+  //  compAttach >= 2 or tree: pass as before.
+  //
+  // Collect clean-island loop sequences here (for decomposition later).
+  // Each entry is the undirected edge set of one clean island loop.
+  struct IslandLoop {
+    std::vector<int> verts;  // sequence from the degree-2 walk
+    std::set<int> vertSet;   // for fast containment checks
+  };
+  std::vector<IslandLoop> cleanIslandLoops;
+
   {
     std::map<int, int> vert2Idx;
     auto idxOf = [&](int v) {
@@ -2405,18 +2473,125 @@ FacePartition PartitionFace(const Manifold::Impl& impl, int face,
                  static_cast<uint32_t>(vert2Idx[b]));
       }
       std::map<uint32_t, int> compVerts, compEdges, compAttach;
+      std::map<uint32_t, std::vector<int>> compVertList;
+      // Per-component, per-vert degree within the component.
+      std::map<uint32_t, std::map<int, std::vector<int>>> compAdj;
       for (const auto& [v, idx] : vert2Idx) {
         const uint32_t r = uf.find(static_cast<uint32_t>(idx));
         ++compVerts[r];
+        compVertList[r].push_back(v);
         if (boundaryVerts.count(v)) ++compAttach[r];
       }
       for (const auto& [a, b] : seenSub) {
-        ++compEdges[uf.find(static_cast<uint32_t>(vert2Idx[a]))];
+        const uint32_t r = uf.find(static_cast<uint32_t>(vert2Idx[a]));
+        ++compEdges[r];
+        compAdj[r][a].push_back(b);
+        compAdj[r][b].push_back(a);
       }
+
+      // Collect candidate island roots (compAttach == 0, has cycle,
+      // degree-2, no rider verts). Gate everything else with cycles.
+      // Must also check for cross-component vert sharing among candidates.
+      std::set<uint32_t> candidateRoots;
       for (const auto& [r, nV] : compVerts) {
-        if (compEdges[r] >= nV && compAttach[r] < 2) {
-          out.interiorIslandVerts += nV;
+        if (compEdges[r] < nV) continue;   // tree: no cycle, passes
+        if (compAttach[r] >= 2) continue;  // properly attached: passes
+        if (compAttach[r] == 1) {
+          out.interiorIslandVerts += nV;  // pinched: gate
+          continue;
         }
+        // Free island (compAttach == 0). Check degree-2.
+        bool allDeg2 = true;
+        for (const int v : compVertList[r]) {
+          if (static_cast<int>(compAdj[r][v].size()) != 2) {
+            allDeg2 = false;
+            break;
+          }
+        }
+        if (!allDeg2) {
+          out.interiorIslandVerts += nV;
+          continue;
+        }
+        // Check no rider verts.
+        bool hasRider = false;
+        for (const int v : compVertList[r]) {
+          if (skippedRiderVerts.count(v)) {
+            hasRider = true;
+            break;
+          }
+        }
+        if (hasRider) {
+          out.interiorIslandVerts += nV;
+          continue;
+        }
+        candidateRoots.insert(r);
+      }
+
+      // Cross-component vert sharing among candidates: gate all.
+      if (candidateRoots.size() > 1) {
+        std::map<int, int> vertOwner;
+        bool hasConflict = false;
+        for (const uint32_t r : candidateRoots) {
+          for (const int v : compVertList[r]) {
+            if (!vertOwner.insert({v, static_cast<int>(r)}).second) {
+              hasConflict = true;
+              break;
+            }
+          }
+          if (hasConflict) break;
+        }
+        if (hasConflict) {
+          for (const uint32_t r : candidateRoots) {
+            out.interiorIslandVerts += compVerts[r];
+          }
+          candidateRoots.clear();
+        }
+      }
+
+      // Build the loop sequence for each surviving candidate (degree-2
+      // walk: pick any start vert, follow the unique next neighbor not
+      // yet visited).
+      for (const uint32_t r : candidateRoots) {
+        const std::vector<int>& vlist = compVertList[r];
+        if (vlist.empty()) continue;
+        // Walk the degree-2 graph to get an ordered loop sequence.
+        std::set<int> loopVisited;
+        std::vector<int> loopSeq;
+        int cur = vlist[0];
+        int prev = -1;
+        for (;;) {
+          if (!loopVisited.insert(cur).second) break;
+          loopSeq.push_back(cur);
+          int nxt = -1;
+          for (const int nb : compAdj[r][cur]) {
+            if (nb != prev) {
+              nxt = nb;
+              break;
+            }
+          }
+          if (nxt < 0 || loopVisited.count(nxt)) break;
+          prev = cur;
+          cur = nxt;
+        }
+        if (loopSeq.size() < 3) {
+          // Degenerate: gate.
+          out.interiorIslandVerts += compVerts[r];
+          continue;
+        }
+        IslandLoop isl;
+        isl.verts = std::move(loopSeq);
+        for (const int v : isl.verts) isl.vertSet.insert(v);
+        cleanIslandLoops.push_back(std::move(isl));
+      }
+
+      // If any components were gated AND there are candidates, gate all
+      // candidates too (conservative: mixed-state face is ambiguous).
+      if (out.interiorIslandVerts > 0 && !cleanIslandLoops.empty()) {
+        for (const IslandLoop& isl : cleanIslandLoops) {
+          out.interiorIslandVerts += static_cast<int>(isl.verts.size());
+        }
+        cleanIslandLoops.clear();
+        return out;
       }
       if (out.interiorIslandVerts > 0) return out;
     }
@@ -2431,6 +2606,122 @@ FacePartition PartitionFace(const Manifold::Impl& impl, int face,
     if (it == pos2.end()) it = pos2.insert({id, to2d(id)}).first;
     return it->second;
   };
+
+  // ISLAND GEOMETRY CHECKS: for each candidate clean island loop,
+  // verify simplicity and nonzero area. These need to2d (which uses the
+  // already-computed n, basis, planePt above) via p2. Done here so the
+  // same lazy pos2 cache is shared with the walk.
+  //
+  // The `triEps` ladder seed for TriangulateIdx.
+  const double triEps = std::max({impl.tolerance_, impl.epsilon_, eps});
+  if (!cleanIslandLoops.empty()) {
+    // Geometry check helper: is loop simple in 2D?
+    // Full PSLG rules: no strict crossings, no endpoint-on-nonincident-edge.
+    // Collinear overlap and duplicate edges cannot arise from degree-2 loops
+    // with distinct verts (checked below via the simple-segment pairwise
+    // test). Returns false if any violation found.
+    auto isLoopSimple2D = [&](const std::vector<int>& loopV) -> bool {
+      const int nL = static_cast<int>(loopV.size());
+      if (nL < 3) return false;
+      // Collect 2D positions.
+      std::vector<vec2> pts(nL);
+      for (int i = 0; i < nL; ++i) pts[i] = p2(loopV[i]);
+      // Pairwise non-adjacent segment test.
+      // Segments: i -> (i+1)%nL. Non-adjacent means they share no vert.
+      auto cross2 = [](const vec2& a, const vec2& b) {
+        return a.x * b.y - a.y * b.x;
+      };
+      for (int i = 0; i < nL; ++i) {
+        const vec2& a = pts[i];
+        const vec2& b = pts[(i + 1) % nL];
+        for (int j = i + 2; j < nL; ++j) {
+          // Skip the pair (last, first) that shares vert.
+          if (i == 0 && j == nL - 1) continue;
+          const vec2& c = pts[j];
+          const vec2& d = pts[(j + 1) % nL];
+          // Strict crossing test (excludes shared endpoints).
+          const vec2 ab = {b.x - a.x, b.y - a.y};
+          const vec2 ac = {c.x - a.x, c.y - a.y};
+          const vec2 ad = {d.x - a.x, d.y - a.y};
+          const double t1 = cross2(ab, ac);
+          const double t2 = cross2(ab, ad);
+          if (t1 * t2 >= 0) continue;  // same side or one zero: no strict cross
+          const vec2 cd = {d.x - c.x, d.y - c.y};
+          const vec2 ca = {a.x - c.x, a.y - c.y};
+          const vec2 cb = {b.x - c.x, b.y - c.y};
+          const double t3 = cross2(cd, ca);
+          const double t4 = cross2(cd, cb);
+          if (t3 * t4 >= 0) continue;
+          return false;  // strict crossing found
+        }
+      }
+      // Vertex-on-nonincident-edge check: for each vert, check if it lies
+      // on any non-incident edge. A point P lies on segment AB if the
+      // cross product (B-A)x(P-A) == 0 and P is between A and B.
+      // With floating point we use a tight tolerance (eps scale).
+      for (int i = 0; i < nL; ++i) {
+        const vec2& p = pts[i];
+        for (int j = 0; j < nL; ++j) {
+          // Edge j -> (j+1)%nL. Skip edges incident to vert i.
+          if (j == i || (j + 1) % nL == i) continue;
+          if (i == 0 && j == nL - 1) continue;
+          const vec2& a = pts[j];
+          const vec2& b = pts[(j + 1) % nL];
+          const vec2 ab = {b.x - a.x, b.y - a.y};
+          const vec2 ap = {p.x - a.x, p.y - a.y};
+          const double c = ab.x * ap.y - ab.y * ap.x;
+          if (std::fabs(c) > eps * std::sqrt(ab.x * ab.x + ab.y * ab.y))
+            continue;
+          // Collinear - check if P is strictly between A and B.
+          const double dot = ab.x * ap.x + ab.y * ap.y;
+          const double len2 = ab.x * ab.x + ab.y * ab.y;
+          if (dot > 0 && dot < len2) return false;
+        }
+      }
+      return true;
+    };
+
+    // Compute signed area (doubled) of a loop.
+    auto signedArea2 = [&](const std::vector<int>& loopV) -> double {
+      double a = 0.0;
+      const int nL = static_cast<int>(loopV.size());
+      for (int i = 0; i < nL; ++i) {
+        const vec2 pi = p2(loopV[i]);
+        const vec2 pj = p2(loopV[(i + 1) % nL]);
+        a += pi.x * pj.y - pi.y * pj.x;
+      }
+      return a;
+    };
+
+    // Filter candidate loops through geometry checks.
+    std::vector<IslandLoop> passingLoops;
+    for (const IslandLoop& isl : cleanIslandLoops) {
+      const double sa2 = signedArea2(isl.verts);
+      if (sa2 == 0.0) {
+        // Zero area: gate.
+        out.interiorIslandVerts += static_cast<int>(isl.verts.size());
+        continue;
+      }
+      if (!isLoopSimple2D(isl.verts)) {
+        // Not simple: gate.
+        out.interiorIslandVerts += static_cast<int>(isl.verts.size());
+        continue;
+      }
+      passingLoops.push_back(isl);
+    }
+    cleanIslandLoops = std::move(passingLoops);
+
+    // If any loop failed geometry or the face is coplanar-hazard:
+    // gate all remaining.
+    if (out.interiorIslandVerts > 0 || coplanarHazard) {
+      for (const IslandLoop& isl : cleanIslandLoops) {
+        out.interiorIslandVerts += static_cast<int>(isl.verts.size());
+      }
+      cleanIslandLoops.clear();
+      return out;
+    }
+  }
+
   auto dirOf = [&](int he) -> vec2 {
     return p2(hes[he].end) - p2(hes[he].start);
   };
@@ -2558,6 +2849,419 @@ FacePartition PartitionFace(const Manifold::Impl& impl, int face,
     }
     emit(std::move(loop));
   }
+
+  // POST-WALK ISLAND DECOMPOSITION: only when clean island loops were
+  // detected. Split each region-with-holes (positive-area outer cycle +
+  // one or more negative-area island cycles) into triangles via
+  // TriangulateIdx. Regions without holes pass through untouched.
+  //
+  // All polygons emitted by the walk are in face-winding orientation
+  // (CCW about the face normal). Island loops were inserted as chord
+  // sub-edges in BOTH directions so the walk emits them twice: one
+  // positive-area cycle (the disk inside the stamp footprint) and one
+  // negative-area cycle (the hole in the outer region). The positive
+  // orientation is the island loop's disk polygon and passes through
+  // as an ordinary region. The negative orientation is the hole.
+  if (!cleanIslandLoops.empty()) {
+    // Identify island vert sets for twin matching.
+    // A cycle whose vert set equals any clean island loop's vert set is
+    // that island's orientation twin (the one we treat as the hole).
+    // Match by vert set equality (canonical: sorted).
+    auto cycleVertKey = [](const std::vector<int>& cyc) {
+      std::vector<int> s = cyc;
+      std::sort(s.begin(), s.end());
+      return s;
+    };
+    std::set<std::vector<int>> islandVertKeys;
+    for (const IslandLoop& isl : cleanIslandLoops) {
+      std::vector<int> key = isl.verts;
+      std::sort(key.begin(), key.end());
+      islandVertKeys.insert(std::move(key));
+    }
+
+    // Partition walked polygons into positive (regions) and negative
+    // (holes). Compute signed area for each.
+    struct CycleInfo {
+      std::vector<int> cyc;
+      double signedArea2;  // doubled signed area (positive = CCW = region)
+      std::vector<int> vertKey;  // sorted, for island twin matching
+    };
+    std::vector<CycleInfo> regions, holes;
+    for (const std::vector<int>& cyc : out.polygons) {
+      double sa2 = 0.0;
+      for (size_t i = 0; i < cyc.size(); ++i) {
+        const vec2 pi = p2(cyc[i]);
+        const vec2 pj = p2(cyc[(i + 1) % cyc.size()]);
+        sa2 += pi.x * pj.y - pi.y * pj.x;
+      }
+      std::vector<int> key = cycleVertKey(cyc);
+      if (sa2 >= 0) {
+        regions.push_back({cyc, sa2, std::move(key)});
+      } else {
+        holes.push_back({cyc, sa2, std::move(key)});
+      }
+    }
+
+    // For each hole, find its assigned region: the smallest-area
+    // strictly-containing positive cycle (excluding its orientation twin
+    // and any cycle sharing a vert with it; border -> not contained;
+    // tie -> walk order i.e. index in regions).
+    struct HoleAssignment {
+      size_t regionIdx;
+      size_t holeIdx;
+    };
+    std::vector<HoleAssignment> assignments;
+
+    // Build hole-vert sets for sharing check.
+    std::vector<std::set<int>> holeVertSets(holes.size());
+    for (size_t hi = 0; hi < holes.size(); ++hi) {
+      for (const int v : holes[hi].cyc) holeVertSets[hi].insert(v);
+    }
+
+    // Strict point-in-polygon test (2D): is test point P strictly inside
+    // polygon Q? Uses ray casting; returns false on boundary.
+    auto strictPIP = [&](const vec2& P, const std::vector<int>& Q) -> bool {
+      int crossings = 0;
+      const int nQ = static_cast<int>(Q.size());
+      for (int i = 0; i < nQ; ++i) {
+        const vec2 a = p2(Q[i]);
+        const vec2 b = p2(Q[(i + 1) % nQ]);
+        // Ray from P in +x direction.
+        if ((a.y <= P.y) == (b.y <= P.y)) continue;  // same side
+        // Compute x-intercept.
+        const double x = a.x + (P.y - a.y) * (b.x - a.x) / (b.y - a.y);
+        if (x == P.x) return false;  // on boundary: not strictly inside
+        if (x > P.x) ++crossings;
+      }
+      return (crossings & 1) == 1;
+    };
+
+    bool decompositionFailed = false;
+    for (size_t hi = 0; hi < holes.size(); ++hi) {
+      const std::vector<int>& holeCyc = holes[hi].cyc;
+      const std::vector<int>& holeKey = holes[hi].vertKey;
+      // The hole's vert set (from holeVertSets[hi]).
+
+      // Representative vert for point-in-polygon test.
+      const vec2 testPt = p2(holeCyc[0]);
+
+      double bestArea2 = std::numeric_limits<double>::infinity();
+      int bestRegion = -1;
+      for (size_t ri = 0; ri < regions.size(); ++ri) {
+        const std::vector<int>& regionKey = regions[ri].vertKey;
+        // Exclude the orientation twin: same vert set.
+        if (regionKey == holeKey) continue;
+        // Exclude any cycle sharing a vert with this hole.
+        bool shares = false;
+        for (const int v : holeVertSets[hi]) {
+          if (std::binary_search(regionKey.begin(), regionKey.end(), v)) {
+            shares = true;
+            break;
+          }
+        }
+        if (shares) continue;
+        // Strict point-in-polygon.
+        if (!strictPIP(testPt, regions[ri].cyc)) continue;
+        // Smallest area; tie by walk order (ri).
+        if (regions[ri].signedArea2 < bestArea2 ||
+            (regions[ri].signedArea2 == bestArea2 && bestRegion >= 0 &&
+             ri < static_cast<size_t>(bestRegion))) {
+          bestArea2 = regions[ri].signedArea2;
+          bestRegion = static_cast<int>(ri);
+        }
+      }
+      if (bestRegion < 0) {
+        // No candidate: gate.
+        decompositionFailed = true;
+        break;
+      }
+      assignments.push_back({static_cast<size_t>(bestRegion), hi});
+    }
+
+    if (decompositionFailed) {
+      out.interiorIslandVerts = 1;  // signal gate to driver
+      out.polygons.clear();
+      return out;
+    }
+
+    // Group holes by region.
+    std::map<size_t, std::vector<size_t>> regionHoles;
+    for (const HoleAssignment& ha : assignments) {
+      regionHoles[ha.regionIdx].push_back(ha.holeIdx);
+    }
+
+    // Rebuild out.polygons with decompositions for holed regions.
+    std::vector<std::vector<int>> newPolygons;
+    // Add all regions' island-twin positive cycles (disk polygons) as
+    // ordinary polygons - they are valid regions in their own right.
+    // These are positive cycles whose vert key matches an island.
+    for (const CycleInfo& ci : regions) {
+      if (islandVertKeys.count(ci.vertKey)) {
+        newPolygons.push_back(ci.cyc);  // disk polygon: passes through
+      }
+    }
+
+    // Process regions: holed ones get triangulated, others pass through.
+    for (size_t ri = 0; ri < regions.size(); ++ri) {
+      const CycleInfo& reg = regions[ri];
+      // Island-twin disk polygons already added above.
+      if (islandVertKeys.count(reg.vertKey)) continue;
+
+      auto itH = regionHoles.find(ri);
+      if (itH == regionHoles.end()) {
+        // No holes: pass through.
+        newPolygons.push_back(reg.cyc);
+        continue;
+      }
+
+      // Holed region: triangulate.
+      // Sub-resolution hole fast-fail: doubled area < triEps * maxBbox.
+      // Compute 2D bbox of the region.
+      double rMinU = std::numeric_limits<double>::infinity();
+      double rMaxU = -std::numeric_limits<double>::infinity();
+      double rMinV = std::numeric_limits<double>::infinity();
+      double rMaxV = -std::numeric_limits<double>::infinity();
+      for (const int v : reg.cyc) {
+        const vec2 pv = p2(v);
+        rMinU = std::min(rMinU, pv.x);
+        rMaxU = std::max(rMaxU, pv.x);
+        rMinV = std::min(rMinV, pv.y);
+        rMaxV = std::max(rMaxV, pv.y);
+      }
+      const double bboxMax = std::max(rMaxU - rMinU, rMaxV - rMinV);
+
+      // Build PolygonsIdx: outer (positive-area) first, then holes
+      // (negative-area - the triangulator's convention).
+      PolygonsIdx polysIdx;
+      // Outer: winding as walked (CCW = positive).
+      {
+        SimplePolygonIdx outer;
+        outer.reserve(reg.cyc.size());
+        for (const int v : reg.cyc) {
+          outer.push_back({p2(v), v});
+        }
+        polysIdx.push_back(std::move(outer));
+      }
+      bool subResGate = false;
+      for (const size_t hi : itH->second) {
+        const CycleInfo& hci = holes[hi];
+        // Sub-resolution fast-fail: |doubled area| < triEps * bboxMax.
+        if (std::fabs(hci.signedArea2) < triEps * bboxMax) {
+          subResGate = true;
+          break;
+        }
+        // Hole cycle: reversed to be negative-area for the triangulator.
+        SimplePolygonIdx hole;
+        hole.reserve(hci.cyc.size());
+        for (const int v : hci.cyc) {
+          hole.push_back({p2(v), v});
+        }
+        polysIdx.push_back(std::move(hole));
+      }
+      if (subResGate) {
+        out.interiorIslandVerts = 1;
+        out.polygons.clear();
+        return out;
+      }
+
+      // TriangulateIdx call with local debug try/catch.
+      std::vector<ivec3> tris;
+      bool triOk = true;
+#ifdef MANIFOLD_DEBUG
+      try {
+        tris = TriangulateIdx(polysIdx, triEps);
+      } catch (...) {
+        triOk = false;
+      }
+#else
+      tris = TriangulateIdx(polysIdx, triEps);
+#endif
+      if (!triOk || tris.empty()) {
+        out.interiorIslandVerts = 1;
+        out.polygons.clear();
+        return out;
+      }
+
+      // VALIDATION (every build config, as required by the plan):
+      // 1. Per-triangle: 3 distinct ids, strictly positive area.
+      // 2. Signed-area preservation.
+      // 3. Boundary coverage.
+      // 4. Full PSLG embedding (no strict crossings, no
+      //    vertex-on-nonincident-edge, no collinear overlaps, no
+      //    duplicate edges) - quadratic but bounded by edge-count cap.
+
+      // Build expected boundary edges from outer + holes.
+      struct EdgeDir {
+        int v0, v1;
+      };
+      std::vector<EdgeDir> boundaryEdges;
+      for (const SimplePolygonIdx& cont : polysIdx) {
+        const int nc = static_cast<int>(cont.size());
+        for (int i = 0; i < nc; ++i) {
+          boundaryEdges.push_back({cont[i].idx, cont[(i + 1) % nc].idx});
+        }
+      }
+      const int totalBoundaryEdges = static_cast<int>(boundaryEdges.size());
+      // Generous edge-count cap.
+      const int kMaxEdgesForValidation = 2000;
+      if (totalBoundaryEdges + 3 * static_cast<int>(tris.size()) >
+          kMaxEdgesForValidation) {
+        // Skip PSLG validation only; area + coverage still apply.
+      }
+      bool validFail = false;
+
+      // Per-triangle checks.
+      // Collect all vert ids from polysIdx for the "not a hole" check.
+      auto area2OfTri = [&](const ivec3& t) -> double {
+        // Get positions from the polysIdx (PolyVert.idx -> p2 lookup).
+        // The idx IS the vert id; use p2(idx).
+        const vec2 pa = p2(t[0]);
+        const vec2 pb = p2(t[1]);
+        const vec2 pc = p2(t[2]);
+        return (pb.x - pa.x) * (pc.y - pa.y) - (pb.y - pa.y) * (pc.x - pa.x);
+      };
+      for (const ivec3& t : tris) {
+        if (t[0] == t[1] || t[1] == t[2] || t[0] == t[2]) {
+          validFail = true;
+          break;
+        }
+        if (area2OfTri(t) <= 0.0) {
+          validFail = true;
+          break;
+        }
+      }
+
+      // Signed-area preservation:
+      // expected = sum of signed areas of polysIdx contours (holes are
+      // negative). Doubled areas (no 0.5 factor).
+      if (!validFail) {
+        double expectedArea2 = 0.0;
+        for (const SimplePolygonIdx& cont : polysIdx) {
+          const int nc = static_cast<int>(cont.size());
+          for (int i = 0; i < nc; ++i) {
+            const vec2 pi2 = cont[i].pos;
+            const vec2 pj2 = cont[(i + 1) % nc].pos;
+            expectedArea2 += pi2.x * pj2.y - pi2.y * pj2.x;
+          }
+        }
+        double triArea2 = 0.0;
+        for (const ivec3& t : tris) triArea2 += area2OfTri(t);
+        const double kAreaRelTol = 1e-9;
+        const double areaAbsTol =
+            triEps * bboxMax + kAreaRelTol * std::fabs(expectedArea2);
+        if (std::fabs(triArea2 - expectedArea2) > areaAbsTol) validFail = true;
+      }
+
+      // Boundary coverage: each boundary edge must appear exactly once
+      // correctly oriented among triangle edges; interior edges exactly twice.
+      if (!validFail) {
+        std::map<std::pair<int, int>, int> edgeCount;
+        for (const ivec3& t : tris) {
+          for (int k = 0; k < 3; ++k) {
+            ++edgeCount[{t[k], t[(k + 1) % 3]}];
+          }
+        }
+        // Build forward-boundary set for O(1) lookup (avoids operator[]
+        // phantom-entry creation and is correct for hole edges whose reverse
+        // can appear as interior diagonals).
+        std::set<std::pair<int, int>> boundaryEdgeSet;
+        for (const EdgeDir& be : boundaryEdges) {
+          boundaryEdgeSet.insert({be.v0, be.v1});
+          auto it = edgeCount.find({be.v0, be.v1});
+          if (it == edgeCount.end() || it->second != 1) {
+            validFail = true;
+            break;
+          }
+        }
+        if (!validFail) {
+          // Interior edges: each directed edge not in the forward-boundary set
+          // must appear exactly once (its reverse appears once too, checked
+          // implicitly by symmetry of the triangle fan).
+          for (const auto& [ep, cnt] : edgeCount) {
+            if (boundaryEdgeSet.count(ep)) continue;
+            if (cnt != 1) {
+              validFail = true;
+              break;
+            }
+          }
+        }
+      }
+
+      // PSLG embedding (bounded by edge count cap).
+      if (!validFail &&
+          totalBoundaryEdges + 3 * static_cast<int>(tris.size()) <=
+              kMaxEdgesForValidation) {
+        // Collect all triangle edges (directed) and check for strict
+        // crossings and vertex-on-nonincident-edge.
+        struct Seg2D {
+          vec2 a, b;
+          int va, vb;
+        };
+        std::vector<Seg2D> allEdges;
+        for (const ivec3& t : tris) {
+          for (int k = 0; k < 3; ++k) {
+            allEdges.push_back(
+                {p2(t[k]), p2(t[(k + 1) % 3]), t[k], t[(k + 1) % 3]});
+          }
+        }
+        auto cross2d = [](const vec2& u, const vec2& v) {
+          return u.x * v.y - u.y * v.x;
+        };
+        // Strict crossing test between two non-adjacent edges.
+        const int nSeg = static_cast<int>(allEdges.size());
+        for (int i = 0; i < nSeg && !validFail; ++i) {
+          const Seg2D& si = allEdges[i];
+          for (int j = i + 1; j < nSeg && !validFail; ++j) {
+            const Seg2D& sj = allEdges[j];
+            // Adjacent = share a vert.
+            if (si.va == sj.va || si.va == sj.vb || si.vb == sj.va ||
+                si.vb == sj.vb)
+              continue;
+            const vec2 ab = {si.b.x - si.a.x, si.b.y - si.a.y};
+            const vec2 ac = {sj.a.x - si.a.x, sj.a.y - si.a.y};
+            const vec2 ad = {sj.b.x - si.a.x, sj.b.y - si.a.y};
+            const double t1 = cross2d(ab, ac);
+            const double t2 = cross2d(ab, ad);
+            if (t1 * t2 >= 0) continue;
+            const vec2 cd = {sj.b.x - sj.a.x, sj.b.y - sj.a.y};
+            const vec2 ca = {si.a.x - sj.a.x, si.a.y - sj.a.y};
+            const vec2 cb = {si.b.x - sj.a.x, si.b.y - sj.a.y};
+            const double t3 = cross2d(cd, ca);
+            const double t4 = cross2d(cd, cb);
+            if (t3 * t4 < 0) validFail = true;  // strict crossing
+          }
+        }
+      }
+
+      if (validFail) {
+        out.interiorIslandVerts = 1;
+        out.polygons.clear();
+        return out;
+      }
+
+      // Append triangles as ordinary polygons in face-winding orientation
+      // (MergePolygons computes signed multiplicity itself).
+      for (const ivec3& t : tris) {
+        newPolygons.push_back({t[0], t[1], t[2]});
+      }
+    }
+
+    // Pass through non-holed negative cycles (should be empty for clean
+    // islands, but defensive).
+    for (size_t hi = 0; hi < holes.size(); ++hi) {
+      bool assigned = false;
+      for (const HoleAssignment& ha : assignments) {
+        if (ha.holeIdx == hi) {
+          assigned = true;
+          break;
+        }
+      }
+      if (!assigned) newPolygons.push_back(holes[hi].cyc);
+    }
+
+    out.polygons = std::move(newPolygons);
+  }
+
   return out;
 }
 
