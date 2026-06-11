@@ -4214,8 +4214,8 @@ TEST(Manifold, RemoveSelfIntersectionsCleanInputUnchanged) {
 TEST(Manifold, RemoveSelfIntersectionsBooleanResult) {
   // The common case: a clean Boolean output round-trips bit-
   // identically (no pierce events, no coplanar trace chords - the
-  // empty-chord early-exit). (HullMask and SelfIntersect below cover
-  // the actually-piercing paths.)
+  // empty-chord early-exit). (HullResolvesAtOriginScale and
+  // SelfIntersectFixture cover the actually-piercing paths.)
   Manifold a = Manifold::Cube({2, 2, 2}, true);
   Manifold b = Manifold::Cube({2, 2, 2}, true)
                    .Translate({1, 0.5, 0.3})
@@ -4228,16 +4228,27 @@ TEST(Manifold, RemoveSelfIntersectionsBooleanResult) {
   ExpectMeshGL64Identical(cleaned, result);
 }
 
-TEST(Manifold, DISABLED_RemoveSelfIntersectionsHullResolvesAtOriginScale) {
-  // TDD ANCHOR (red until the eps-retry ladder lands; the DISABLED_
-  // seed-queue convention): the origin-scale hull fixture should
-  // resolve the way the SAME geometry already does at 1e4 scale -
-  // probing showed 100x the inferred eps absorbs the degenerate
-  // clusters (strict pierce reduction, all three hulls kept, volume
-  // preserved); 40x and below still fall back. Today the
-  // single-attempt driver falls back bit-identically via the
-  // folded-shell gate, so the resolution asserts below fail - the
-  // stated red reason.
+TEST(Manifold, RemoveSelfIntersectionsHullResolvesAtOriginScale) {
+  // Public hull pin: hull-body Subtract hull-mask at ORIGIN SCALE.
+  // The body is THREE disjoint hulls (a trimaran); the mask grazes all
+  // of them tangentially and Boolean3 produces a self-intersecting
+  // manifold. The eps-retry ladder resolves the fixture at the 100x
+  // rung: that rung's wider eps absorbs the degenerate vert clusters
+  // that caused the folded-shell gate to fire at 1x; strict pierce
+  // reduction is confirmed, all three hulls are kept, and volume is
+  // preserved to 0.1%. (40x and below still fall back in probing.)
+  //
+  // History: before the ladder landed, the folded-shell volume gate
+  // detected that the tangent-degenerate contacts folded two of the
+  // three untouched-shell cell complexes (a k = 1 rim chain on one,
+  // near-tangent radial fans on the other), which would silently delete
+  // those hulls - so the driver fell back to the input bit-identically.
+  // The 100x retry absorbs those clusters and the fold does not occur.
+  // Resolving to zero pierces at origin scale still needs exact/extended
+  // predicates (the conditioned-band pierce residue documented in
+  // Known limitations item 1); strict reduction is the achievable bar.
+  // The same geometry far from the origin resolves at 1x inferred eps -
+  // see RemoveSelfIntersectionsFarFromOrigin.
   Manifold body = Manifold(ReadTestMeshGL64OBJ("hull-body.obj"));
   Manifold mask = Manifold(ReadTestMeshGL64OBJ("hull-mask.obj"));
   Manifold result = body - mask;
@@ -4250,38 +4261,15 @@ TEST(Manifold, DISABLED_RemoveSelfIntersectionsHullResolvesAtOriginScale) {
   EXPECT_NEAR(cleaned.Volume(), result.Volume(), result.Volume() * 1e-3);
 }
 
-TEST(Manifold, RemoveSelfIntersectionsHullMaskFixture) {
-  // Real-world adversarial fixture: hull-body Subtract hull-mask. The
-  // body is THREE disjoint hulls (a trimaran); the mask grazes all of
-  // them tangentially and Boolean3 produces a self-intersecting
-  // manifold (~31 interior pierces). The tangent-degenerate contacts
-  // fold two of the three untouched-shell cell complexes (a k = 1 rim
-  // chain on one, near-tangent radial fans on the other), which would
-  // silently delete those hulls (volume -> 1/3) - the folded-shell
-  // volume gate detects this and falls back to the input unchanged.
-  // Actually resolving this fixture (0 pierces, all three hulls kept)
-  // needs exact predicates at the degenerate contacts; see
-  // docs/OverlapRemoval.md "Known limitations". The same geometry
-  // far from the origin resolves cleanly (its scale-derived eps
-  // absorbs the cluster) - see RemoveSelfIntersectionsFarFromOrigin.
-  Manifold body = Manifold(ReadTestMeshGL64OBJ("hull-body.obj"));
-  Manifold mask = Manifold(ReadTestMeshGL64OBJ("hull-mask.obj"));
-  Manifold result = body - mask;
-  EXPECT_EQ(result.Status(), Manifold::Error::NoError);
-  ASSERT_GT(InteriorPierces(result), 0);  // premise: input actually pierces
-  Manifold cleaned = result.RemoveSelfIntersections();
-  EXPECT_EQ(cleaned.Status(), Manifold::Error::NoError);
-  // Fail-closed fallback: bit-identical input passthrough.
-  ExpectMeshGL64Identical(cleaned, result);
-  EXPECT_EQ(InteriorPierces(cleaned), InteriorPierces(result));
-}
-
 TEST(Manifold, RemoveSelfIntersectionsSelfIntersectFixture) {
   // self_intersect: Add of two interpenetrating ovoids, dense interior
   // pierces. This is the dense-sliver fallback class - the pipeline
   // cannot cleanly reduce it, so it must fall back to the input
   // BIT-IDENTICALLY (the fail-closed contract; a partial rebuild
   // slipping out with merely-monotonic pierces would break it).
+  // Confirmed probe: still falls back bit-identically under the full
+  // ladder (1x, 10x, and 100x rungs all gate or produce equal-pierce
+  // candidates that the strict-reduction rule rejects).
   //
   // test_main.cpp sets ManifoldParams().processOverlaps = false for
   // stricter validation; that enables a CCW-check assertion in Boolean3's
@@ -4503,21 +4491,25 @@ TEST(Manifold, RemoveSelfIntersectionsEmptyInput) {
 }
 
 TEST(Manifold, RemoveSelfIntersectionsIdempotent) {
-  // Repeated passes never regress. At origin scale the hull fixture
-  // takes the folded-shell fallback, so pass 2 of an identical input
-  // must be the identical fallback (fixed point, bit-identical). On
-  // the success path (the same fixture at 1e4) a second pass must
-  // hold the monotonicity contract: no new pierces, valid status.
+  // Repeated passes never regress. The origin-scale hull fixture now
+  // RESOLVES via the 100x retry rung (first pass: strict pierce
+  // reduction). A second pass on the resolved output is bit-identical:
+  // the 100x retry candidate has the same pierce count as the resolved
+  // output (the strict-reduction rule rejects equal-pierce wider-eps
+  // candidates), so the ladder falls back to the input unchanged. On
+  // the success path at 1e4 a second pass must hold monotonicity: no
+  // new pierces, valid status.
   Manifold body = Manifold(ReadTestMeshGL64OBJ("hull-body.obj"));
   Manifold mask = Manifold(ReadTestMeshGL64OBJ("hull-mask.obj"));
   Manifold input = body - mask;
   ASSERT_GT(InteriorPierces(input), 0);
   Manifold once = input.RemoveSelfIntersections();
   ASSERT_EQ(once.Status(), Manifold::Error::NoError);
-  EXPECT_LE(InteriorPierces(once), InteriorPierces(input));
+  ASSERT_LT(InteriorPierces(once), InteriorPierces(input));  // success path
   Manifold twice = once.RemoveSelfIntersections();
   EXPECT_EQ(twice.Status(), Manifold::Error::NoError);
-  ExpectMeshGL64Identical(twice, once);
+  ExpectMeshGL64Identical(
+      twice, once);  // second pass: bit-identical (strict-reduction rule)
 
   Manifold far = input.Translate({1e4, 1e4, 1e4});
   Manifold farOnce = far.RemoveSelfIntersections();
@@ -4532,18 +4524,20 @@ TEST(Manifold, RemoveSelfIntersectionsIdempotent) {
 TEST(Manifold, RemoveSelfIntersectionsDeterministic) {
   // The pipeline is deterministic: repeated runs on the same input
   // produce identical output. The origin-scale hull exercises the
-  // fallback path; the far-from-origin variant exercises the FULL
-  // rebuild (the fallback runs alone would pin only
-  // trivial identity, not pipeline-ordering determinism).
+  // REBUILD path via the 100x retry rung; the far-from-origin variant
+  // exercises the 1x rebuild. Both use geometry-only identity: a fresh
+  // meshID is allocated per run (derived-metadata posture), so full
+  // MeshGL64 identity would be a spurious failure.
   Manifold body = Manifold(ReadTestMeshGL64OBJ("hull-body.obj"));
   Manifold mask = Manifold(ReadTestMeshGL64OBJ("hull-mask.obj"));
   Manifold result = body - mask;
   ASSERT_GT(InteriorPierces(result), 0);  // premise: pipeline does real work
   Manifold first = result.RemoveSelfIntersections();
   ASSERT_EQ(first.Status(), Manifold::Error::NoError);
+  ASSERT_LT(InteriorPierces(first), InteriorPierces(result));  // success path
   for (int i = 0; i < 4; ++i) {
     Manifold again = result.RemoveSelfIntersections();
-    ExpectMeshGL64Identical(again, first);
+    ExpectMeshGL64GeometryIdentical(again, first);
   }
   Manifold far = result.Translate({1e4, 1e4, 1e4});
   Manifold farFirst = far.RemoveSelfIntersections();
@@ -4572,8 +4566,8 @@ TEST(Manifold, RemoveSelfIntersectionsFarFromOrigin) {
   EXPECT_GT(cleaned.Volume(), 0);
   // All three disjoint hulls survive (the fold class resolves here:
   // the larger scale-derived eps absorbs the degenerate clusters) and
-  // the volume holds to 0.1% - the success-path complement of the
-  // origin-scale folded-shell fallback.
+  // the volume holds to 0.1%. At origin scale the same geometry
+  // resolves via the 100x retry rung - see HullResolvesAtOriginScale.
   EXPECT_EQ(cleaned.Decompose().size(), 3u);
   EXPECT_NEAR(cleaned.Volume(), result.Volume(), result.Volume() * 1e-3);
   // The derived metadata posture: a rebuilt mesh is NOT an original

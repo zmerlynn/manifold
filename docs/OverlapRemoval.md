@@ -54,6 +54,21 @@ the emit triangulation retry ladder and the seed-cast target skip). EARLY-EXIT: 
 covers clean inputs, the all-pairs-dropped case, and pancake-free coplanar
 contact.
 
+**Eps-retry ladder** (`RemoveOverlaps`, the wrapper): when the caller
+passes `eps <= 0` (the inferred-eps path, i.e. the public member), the
+wrapper runs the single pipeline attempt at the inferred base first. If
+that attempt returns nullopt AND the input has strict-interior pierces
+(checked once with `CheckSelfIntersection`), the wrapper retries at
+small fixed multiples of the inferred base: 10x first, then 100x. A
+retry candidate is accepted only if it STRICTLY reduces the pierce
+count; equal-pierce wider-eps rebuilds are rejected (they break
+idempotence). Cancelled-status results propagate immediately from any
+rung. All attempts nullopt -> nullopt (the bit-identical fallback
+contract is unchanged). Callers passing `eps > 0` get exactly one
+attempt at that eps - the ladder does not apply. A successful retry
+produces a result with tolerance covering 10x the retry eps (wider than
+the 1x-attempt floor), reflecting the coarser working scale.
+
 ## House terminology and style (from the boolean2 review logs)
 
 - halfedge structure (not DCEL); near-line sliver (not T-junction);
@@ -444,53 +459,53 @@ numbers go stale instantly; the suite is the source of truth.)
   non-cancellation arms; interior-island detection (the free-island,
   pinched-loop, and proper-double-crossing cases).
 - `Manifold.RemoveSelfIntersections*` feature tests: API smoke; clean-input
-  and Boolean-result passthrough (bit-identical); the hull fixture (the
-  trimaran fold class - pins the folded-shell gate's bit-identical
-  fallback, see Known limitations); the ovoid dense-sliver fixture (falls
-  back bit-identically - the outcome is pinned, not which internal
-  guard fires); the interior-island stamp (resolve pin: free-island
-  decomposition yields a single-component, zero-pierce, correct-volume
-  result; idempotent; the pinched class is covered by the unit gate
-  pins); the merge-displacement tolerance fixture (the
-  eps-chain-strip weld; mutation-checked against the formula); empty
-  input; idempotence (fallback fixed point + success-path monotonicity);
-  determinism; far-from-origin (the same trimaran at scale: strict pierce
-  reduction, all components preserved, volume preserved to the test's
-  bar); glued boxes (equal-face early-exit bit-identical;
+  and Boolean-result passthrough (bit-identical); the hull fixture
+  (HullResolvesAtOriginScale: the trimaran resolves via the 100x retry
+  rung - strict pierce reduction, all three components kept, volume
+  preserved; see Known limitations for the conditioned-band residue);
+  the ovoid dense-sliver fixture (SelfIntersectFixture: still falls back
+  bit-identically under the full ladder - probed at 1x, 10x, 100x);
+  the interior-island stamp (resolve pin: free-island decomposition
+  yields a single-component, zero-pierce, correct-volume result;
+  idempotent; the pinched class is covered by the unit gate pins); the
+  merge-displacement tolerance fixture (the eps-chain-strip weld;
+  mutation-checked against the formula); empty input; idempotence (first
+  pass resolves at 100x, second pass returns bit-identical via the
+  strict-reduction rule; far-from-origin arm: success-path monotonicity);
+  determinism (both origin and far-scale arms: geometry-only identity,
+  fresh meshID per run); far-from-origin (the same trimaran at scale:
+  strict pierce reduction, all components preserved, volume preserved to
+  the test's bar); glued boxes (equal-face early-exit bit-identical;
   smaller-on-larger welds, winding-faithfully, to one component).
 
 ## Known limitations
 
-1. **The tangent-degenerate contact class** (the hull fixture). A
-   shallow-incidence edge piercing two eps-SEPARATED coplanar sheets produces
-   twin step-7 events that are geometrically REAL distinct points
-   ~eps/sin(incidence) apart (observed at tens of eps), beside an original
-   corner.
+1. **The tangent-degenerate contact class** (conditioned-band pierce
+   residue). A shallow-incidence edge piercing two eps-SEPARATED coplanar
+   sheets produces twin step-7 events that are geometrically REAL distinct
+   points ~eps/sin(incidence) apart (observed at tens of eps), beside an
+   original corner.
    The exact arrangement has a micro-triangle facet there that per-face FP
    partitions cannot consistently produce. Every snap policy beyond ~10 eps
    (fixed wide anchors and conditioned isotropic/anisotropic step-7 snap
    variants alike) traded the twin-rim holes for MORE eps-overlap pierces
    and was reverted: moving geometry tens of eps deforms kept triangles whose
-   neighbors did not move with them. The class shows up at two severities
-   on the hull fixture (multiple disjoint hulls grazed by one mask):
-   - **Micro-facet pierce residue**: input pierces run thousands of eps
-     deep; a successful rebuild leaves residual pierces tens of eps
-     deep - above the 10x-eps output tolerance, inside the conditioned band
-     of that corner.
-   - **Folded shells**: the grazing contacts on the outrigger hulls leave
-     vert clusters spread a few times past the 10 eps unification radius
-     (k = 1 rim chains) and near-tangent k = 4 radial fans; either folds the
-     entire shell's front cell onto its back cell, so every polygon of that
-     hull reads front == back and the keep rule would silently delete the
-     whole component. The folded-shell volume gate (Driver gate) detects
-     this and falls back to the input bit-identically.
-   Far from the origin the same geometry succeeds (strict pierce
-   reduction, every component preserved): the scale-derived eps absorbs the
-   clusters and the residual sits within a few eps - INSIDE its working
-   band. Closing the class soundly (resolving the fixture at origin scale
-   to zero pierces with every component preserved) needs
-   exact/extended-precision
-   local predicates (the family Emmett deferred).
+   neighbors did not move with them. The residual class after a successful
+   rebuild is the **micro-facet pierce residue**: input pierces run thousands
+   of eps deep; the rebuilt surface leaves residual pierces tens of eps deep -
+   above the 10x-eps output tolerance, inside the conditioned band of that
+   corner.
+
+   **Folded-shell status**: at origin scale the hull fixture (multiple
+   disjoint hulls grazed by one mask) previously fell back bit-identically
+   because the folded-shell volume gate fired at 1x inferred eps. The
+   eps-retry ladder resolves it at the 100x rung: the wider eps absorbs the
+   degenerate vert clusters (k = 1 rim chains and near-tangent k = 4 radial
+   fans) that caused the fold. All three hulls are kept and strict pierce
+   reduction is achieved; the conditioned-band pierce residue documented
+   above remains. Far from the origin the same geometry resolves at 1x
+   inferred eps. Closing the class to zero pierces at origin scale needs
+   exact/extended-precision local predicates (the family Emmett deferred).
 2. **Dense slivers** (the ovoid class): the arrangement is not a closed
    surface after FP partitioning; the BFS disagreement guard detects it and
    the pipeline falls back to the input, monotonic by construction.

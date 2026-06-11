@@ -4140,26 +4140,63 @@ bool FoldedCellsEncloseVolume(const Manifold::Impl& impl,
 std::optional<Manifold::Impl> RemoveOverlaps(const Manifold::Impl& input,
                                              double eps,
                                              ExecutionContext::Impl* ctx) {
-  // Throwing assertions exist only when BOTH MANIFOLD_ASSERT and
-  // MANIFOLD_DEBUG are set (optional_assert.h compiles DEBUG_ASSERT /
-  // ASSERT to throws under that conjunction and defines the error
-  // types under MANIFOLD_DEBUG; release manifold is exception-free and
-  // errors are status enums). The guard keys on MANIFOLD_DEBUG - the
-  // superset where the types exist; without MANIFOLD_ASSERT it is dead
-  // but harmless. A throwing assertion anywhere in the pipeline -
-  // including inside manifold's own Triangulate checks - becomes the
-  // nullopt fallback arm (the caller returns its input), preserving
-  // pierce-monotonicity; the guard pattern matches polygon.cpp's
-  // TriangulateIdxHalfedges.
+  // Retry ladder applies ONLY on the inferred-eps path (eps <= 0).
+  // Explicit-eps callers keep exact single-attempt semantics.
+  //
+  // Per-attempt helper: wraps RemoveOverlapsImpl with the MANIFOLD_DEBUG
+  // try/catch so a debug-only assertion throw is that attempt's nullopt
+  // and the ladder continues. Without MANIFOLD_ASSERT&&MANIFOLD_DEBUG no
+  // exception can arise; the guard keys on MANIFOLD_DEBUG (the superset
+  // where the throw-types exist), matching polygon.cpp's pattern.
+  auto attempt = [&](double epsArg) -> std::optional<Manifold::Impl> {
 #ifdef MANIFOLD_DEBUG
-  try {
-    return RemoveOverlapsImpl(input, eps, ctx);
-  } catch (...) {
-    return std::nullopt;
-  }
+    try {
+      return RemoveOverlapsImpl(input, epsArg, ctx);
+    } catch (...) {
+      return std::nullopt;
+    }
 #else
-  return RemoveOverlapsImpl(input, eps, ctx);
+    return RemoveOverlapsImpl(input, epsArg, ctx);
 #endif
+  };
+
+  // First attempt: caller's eps verbatim (the impl infers for eps <= 0).
+  auto first = attempt(eps);
+  // Any valued return - success OR Cancelled-status Impl - propagates
+  // immediately. Explicit-eps path stops here.
+  if (first.has_value() || eps > 0) return first;
+
+  // nullopt + inferred-eps path: check whether retries can help.
+  // Zero strict-interior pierces makes the nullopt retry-ineligible.
+  // Not a class label - island/hazard gates can fail closed without
+  // strict pierces - but acceptance below must strictly reduce a
+  // positive count, so a zero-pierce retry could never be accepted;
+  // skipping it cannot change the outcome.
+  const int pierces = CheckSelfIntersection(input).interiorPierces;
+  if (pierces == 0) return std::nullopt;
+
+  // Retry ladder. base = InferEps(input), the same deterministic
+  // inference the impl's eps <= 0 first attempt used; rungs scale it.
+  // kEpsRetryFactors is fixed and small: the known class needs 100x;
+  // 10x first so inputs that resolve earlier keep tighter tolerance.
+  static constexpr double kEpsRetryFactors[] = {10.0, 100.0};
+  const double base = InferEps(input);
+  for (const double factor : kEpsRetryFactors) {
+    // Cancel poll BEFORE launching new work: completed work keeps
+    // winning over a racing cancel (the empty-chord arm's precedent);
+    // this poll covers work that has not started yet.
+    if (IsCancelled(ctx)) return CancelledImpl();
+    auto cand = attempt(factor * base);
+    if (!cand.has_value()) continue;
+    // Cancelled-status Impl: return immediately, exempt from acceptance.
+    if (cand->status_ == Manifold::Error::Cancelled) return cand;
+    // Accept only on STRICT pierce reduction - an equal-pierce wider-eps
+    // rebuild is churn, not progress (review simulation: a second pass
+    // accepting its equal-pierce 100x candidate widens tolerance and
+    // drifts components instead of reaching a fixed point).
+    if (CheckSelfIntersection(*cand).interiorPierces < pierces) return cand;
+  }
+  return std::nullopt;
 }
 
 }  // namespace overlap_removal

@@ -252,7 +252,10 @@ class Manifold {
    * coincident interior walls between positive-winding regions are
    * removed, so face-glued solids weld into one winding-faithful
    * solid. The reported tolerance covers the movements the pipeline
-   * applied (at least 10x its working epsilon).
+   * applied (at least 10x its working epsilon). When the working
+   * epsilon is inferred (the default path), the pipeline retries a
+   * small fixed ladder of wider epsilons before falling back; a
+   * resolved output reports correspondingly wider tolerance.
    *
    * Algorithm: Emmett Lalish's #289 13-step sketch - surface
    * arrangement (intersection chords, per-face partition), volume
