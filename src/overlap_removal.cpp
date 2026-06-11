@@ -3094,7 +3094,10 @@ FacePartition PartitionFace(const Manifold::Impl& impl, int face,
           subResGate = true;
           break;
         }
-        // Hole cycle: reversed to be negative-area for the triangulator.
+        // Hole cycle: appended AS WALKED - the negative-area
+        // orientation is what the walk already produced for the
+        // island's hole twin; reversing here would double-flip it
+        // positive and force the validation fallback.
         SimplePolygonIdx hole;
         hole.reserve(hci.cyc.size());
         for (const int v : hci.cyc) {

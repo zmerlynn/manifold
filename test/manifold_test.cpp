@@ -3928,6 +3928,47 @@ TEST(OverlapRemoval, Step65CoplanarNeighborsEmitNothing) {
   EXPECT_TRUE(res.newVertPositions.empty());
 }
 
+TEST(OverlapRemoval, Step65HazardFlagAntiAlignedOnly) {
+  // The cancellation-hazard flag's PRODUCTION path (the gating pin
+  // injects the flag directly; this pins where it comes from):
+  // anti-aligned overlapping coplanar pairs flag their faces, while
+  // same-oriented coplanar neighbors - every flat face's own tris -
+  // must NOT flag, or the hole decomposition would re-gate ordinary
+  // stamped faces (the plan-review round-5 class).
+  {  // Pancake: two opposite-winding sheets over the unit quad.
+    Manifold::Impl impl;
+    impl.vertPos_.push_back({0.0, 0.0, 0.0});
+    impl.vertPos_.push_back({1.0, 0.0, 0.0});
+    impl.vertPos_.push_back({1.0, 1.0, 0.0});
+    impl.vertPos_.push_back({0.0, 1.0, 0.0});
+    const int tris[4][3] = {{0, 1, 2}, {0, 2, 3}, {3, 1, 0}, {3, 2, 1}};
+    for (const auto& t : tris) {
+      for (int k = 0; k < 3; ++k) impl.halfedge_.push_back(t[k], -1, -1);
+    }
+    const std::vector<overlap_removal::Edge> edges =
+        overlap_removal::EnumerateEdges(impl);
+    const std::vector<int> he2e =
+        overlap_removal::BuildHalfedgeToEdgeIndex(impl, edges);
+    const double eps = 1e-9;
+    const overlap_removal::TraceChordResult res =
+        overlap_removal::CoplanarTraceChords(impl, edges, he2e, {}, eps, eps);
+    // Every face overlaps an anti-aligned partner: all four flag.
+    EXPECT_EQ(res.coplanarHazardFaces.size(), 4u);
+  }
+  {  // Clean cube: same-oriented coplanar neighbors only - no flags.
+    Manifold::Impl impl(Manifold::Cube({1, 1, 1}).GetMeshGL64());
+    const std::vector<overlap_removal::Edge> edges =
+        overlap_removal::EnumerateEdges(impl);
+    const std::vector<int> he2e =
+        overlap_removal::BuildHalfedgeToEdgeIndex(impl, edges);
+    const double eps = std::max(impl.epsilon_, 1e-12);
+    const overlap_removal::TraceChordResult res =
+        overlap_removal::CoplanarTraceChords(
+            impl, edges, he2e, {}, std::max(impl.tolerance_, eps), eps);
+    EXPECT_TRUE(res.coplanarHazardFaces.empty());
+  }
+}
+
 TEST(OverlapRemoval, Step65AddVertsToOnEdgeLists) {
   // The trace-chord sibling of PropagateNewVertsToOnEdgeLists:
   // id-dedup against the existing list, then per-edge t re-sort.
