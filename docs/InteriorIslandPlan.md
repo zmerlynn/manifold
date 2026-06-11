@@ -36,9 +36,12 @@ Cycle-bearing chord components split by attachment count:
   does not establish that. Ungate the component only when ALL hold:
   every component vert has degree exactly 2 within the component (a
   connected degree-2 component is exactly one closed loop); the loop
-  does not SELF-CROSS in the face frame (explicit pairwise
-  non-adjacent segment check - degree-2 proves closure, not planarity
-  of the embedding); the loop
+  is SIMPLE in the face frame - the pairwise non-adjacent segment
+  check rejects every non-simple contact class (strict crossings,
+  vertex-on-nonincident-edge, endpoint touches beyond shared loop
+  adjacency, collinear overlaps), the same PSLG rules the
+  triangulation validation applies, because degree-2 proves closure,
+  not embedding; the loop
   has nonzero projected area in the face frame; no component vert is
   shared with any other island component; and no component vert is
   incident to a boundary-rider sub-edge that the walk SKIPPED before
@@ -131,8 +134,11 @@ the decomposition VALIDATES its output in every build config:
 - signed-area preservation: sum(triangle areas) == outerArea +
   sum(signed hole areas) - the holes are NEGATIVE, so this is
   outerArea minus their magnitudes; spelled signed to prevent the
-  double-negation implementation bug - within the pipeline's relative
-  tolerance;
+  double-negation implementation bug. Tolerance (area-dimensioned, the
+  only implementable form): |difference| <= triEps * regionBboxScale +
+  kAreaRelTol * |expected|, with kAreaRelTol a small relative constant
+  (1e-9 order) - NOT the pierce predicates' kPipelineRelTol, which is
+  scoped to dimensionless ratios;
 - boundary coverage: every outer and hole sub-edge appears exactly
   once, correctly oriented, among the triangle edges; every triangle
   edge is either a boundary/hole sub-edge or shared by exactly two
@@ -160,8 +166,10 @@ OUT OF SCOPE. Instead `CoplanarTraceChords` EXPOSES a per-face
 CANCELLATION-HAZARD flag: among its plane-gated pairs (taken BEFORE
 interval filtering, so equal-boundary coincidences whose
 boundary-riding intervals are rejected still count), flag ONLY pairs
-whose face normals are ANTI-ALIGNED and whose in-plane bounding boxes
-overlap. Same-oriented coplanar neighbors - every triangulated flat
+whose face WINDING normals - computed locally as normalized
+cross(v1 - v0, v2 - v0), the 6.5 pass's existing convention, never the
+stored faceNormal_ (which can oppose winding) - are ANTI-ALIGNED and
+whose in-plane bounding boxes overlap. Same-oriented coplanar neighbors - every triangulated flat
 face's own tris, which the plane gate also pairs - can never form a
 step-12 cancellation pair (cancellation requires opposite
 orientations) and MUST NOT be flagged: flagging them would re-gate
@@ -177,7 +185,7 @@ try/catch inside PartitionFace (the existing broad catch sits at the
 RemoveOverlaps entry and can neither set `interiorIslandVerts` nor
 serve the direct seam tests; the emit's retry catch is local to the
 final output triangulation). On a caught debug throw, a validation
-failure, an empty result for a >= 4-vert region, a sub-minArea hole,
+failure, a sub-minArea hole,
 or a hole with no candidate region: set `interiorIslandVerts` and
 return - exactly the current gate; the driver falls back
 bit-identically. ONE rule for emptiness: ANY empty triangulation for
@@ -236,8 +244,13 @@ Feature:
   feature-level pinched fixture is optional, not required).
 
 Docs: Known limitations item 8 rewrites to "resolved for detached
-islands; pinched (single-attachment) loops remain gated"; pipeline
-overview row for steps 10-11 mentions the hole decomposition.
+islands; pinched (single-attachment) loops and
+coplanar-cancellation-hazard faces remain gated"; pipeline overview
+row for steps 10-11 mentions the hole decomposition; and the PUBLIC
+doc comment in include/manifold/manifold.h, which today names "an
+interior-island chord loop" among the fail-closed gates, updates to
+the narrowed residual (pinched / hazard-flagged / validation-failure
+arms).
 
 ## Stop-rule tripwires (escalate to the user, do not improvise)
 
