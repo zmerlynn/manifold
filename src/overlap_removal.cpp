@@ -418,6 +418,10 @@ std::optional<Manifold::Impl> RemoveOverlapsImpl(const Manifold::Impl& input,
   using la::cross;
   using la::dot;
   if (input.IsEmpty()) return std::nullopt;
+  // Entry poll BEFORE any real work: the input pierce count below is
+  // the most expensive pre-step, and a pre-cancelled caller should not
+  // pay it.
+  if (IsCancelled(ctx)) return CancelledImpl();
   if (eps <= 0) eps = InferEps(input);
   // The input's pierce count, computed once for the gate's
   // monotonicity arm.
@@ -534,6 +538,7 @@ std::optional<Manifold::Impl> RemoveOverlapsImpl(const Manifold::Impl& input,
   // ...) fall back to the input.
   const CellComplex cellCx =
       BuildCellComplex(impl, polys, threaded.newVertPositions);
+  if (IsCancelled(ctx)) return CancelledImpl();
   const CellWinding winding =
       ClassifyCells(impl, polys, threaded.newVertPositions, cellCx, eps);
   if (!winding.ok) return std::nullopt;
@@ -1117,6 +1122,10 @@ ChordEdges GenerateChordEdges(const Manifold::Impl& impl,
       continue;
     }
     int found = -1;
+    // First match within eps, not nearest: which of two eps-coincident
+    // events allocates the vert is insertion-order-dependent, but the
+    // choice is identity-only - step 9.5's arrangement-wide
+    // unification (nearest-wins) owns the final representative.
     for (size_t j = 0; j < r.newVertPositions.size(); ++j) {
       const vec3 d = x.position - r.newVertPositions[j];
       if (dot(d, d) <= eps2) {
@@ -1640,6 +1649,11 @@ UnifyResult UnifyArrangementVerts(const Manifold::Impl& impl,
   // Broad phase over the new verts; new-new self-collisions unite,
   // and each ORIGINAL vert within a new vert's snap radius becomes a
   // snap candidate for its cluster (nearest wins, ties to smallest).
+  // One BVH pass padded at the GLOBAL maxSnapR serves both phases: for
+  // ill-conditioned inputs (snapR up to kCondSnapCapEps * eps) the
+  // new-new narrow phase (10 * eps) sees over-broad candidates - a
+  // bounded, accepted perf cost; splitting into per-phase BVHs would
+  // re-arm verification of this pass for zero behavioral gain.
   std::vector<Box> newBoxes(nNew);
   const double half = 0.5 * maxSnapR;
   for (int i = 0; i < nNew; ++i) {

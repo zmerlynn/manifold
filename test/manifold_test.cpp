@@ -2959,9 +2959,13 @@ TEST(OverlapRemoval, Step13FoldedOppositeShellsDoNotCancel) {
 // Impl-typed view of a fixture Manifold for the Impl-to-Impl pipeline
 // seams (RemoveOverlaps, MergeVertsEps, CheckSelfIntersection). Goes
 // through the public MeshGL64 boundary + the Impl ctor - for an
-// already-constructed Manifold that round-trip is a fixed point
-// (sorted stays sorted), pinned by the fresh-rebuild determinism
-// test.
+// already-constructed Manifold whose construction sweep is complete
+// and stable that round-trip is a fixed point (sorted stays sorted),
+// pinned by the fresh-rebuild determinism test. The qualifier
+// matters: the ctor re-runs CleanupTopology / RemoveDegenerates, so a
+// fixture with collapsible micro-features (sub-epsilon slivers, the
+// 775k ball below) can come back ALTERED - such fixtures must
+// hand-build their Impl instead.
 Manifold::Impl MakeImpl(const Manifold& m) {
   return Manifold::Impl(m.GetMeshGL64());
 }
@@ -3499,6 +3503,10 @@ TEST(OverlapRemoval, Step7PropagateDropsOutOfRangeSnappedT) {
 // White-box interior-pierce count via the internal checker (external
 // linkage in the linked manifold library), used to assert the
 // pierce-monotonicity contract that the public API does not expose.
+// relTol = 1e-12 is tight for origin-scale fixtures and tolerated for
+// the far-from-origin ones: at 1e4 coordinates the FP noise floor is
+// of the same order, but no far-scale assertion depends on an exact
+// count (they bound with GT 0 / LT / LE).
 int InteriorPierces(const Manifold& m) {
   return overlap_removal::CheckSelfIntersection(MakeImpl(m), 1e-12)
       .interiorPierces;
@@ -3574,13 +3582,13 @@ TEST(Manifold, RemoveSelfIntersectionsPropagatesErrorStatus) {
 }
 
 TEST(Manifold, RemoveSelfIntersectionsCancelBeforeRun) {
-  // A pre-cancelled ExecutionContext stops the pipeline at its first
-  // stage boundary and the cancellation is OBSERVABLE: an empty
-  // result carrying Error::Cancelled, exactly like a cancelled
-  // boolean - never a silent input-return, which would be
-  // indistinguishable from "nothing to do". Discriminates poll
-  // removal: without the IsCancelled checks this pierce-free input
-  // early-exits to a bit-identical NoError passthrough.
+  // A pre-cancelled ExecutionContext stops the pipeline at the ENTRY
+  // poll - before even the input pierce count - and the cancellation
+  // is OBSERVABLE: an empty result carrying Error::Cancelled, exactly
+  // like a cancelled boolean - never a silent input-return, which
+  // would be indistinguishable from "nothing to do". Discriminates
+  // poll removal: without the IsCancelled checks this pierce-free
+  // input early-exits to a bit-identical NoError passthrough.
   Manifold cube = Manifold::Cube({1, 1, 1});
   ExecutionContext ctx;
   ctx.Cancel();
