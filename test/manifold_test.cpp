@@ -2958,11 +2958,12 @@ TEST(OverlapRemoval, Step13FoldedOppositeShellsDoNotCancel) {
 }
 
 TEST(OverlapRemoval, EpsilonFromScaleDelegatesToAlphaBudget) {
-  // The tree's ONE Smith-formula copy: boolean2's EpsilonFromScale
-  // must be bit-identical to shared.h's AlphaBudgetEpsilon at every
-  // scale class (zero, sub-unit, exact power of two, non-power, large)
-  // and budget. A reintroduced local formula or a changed default
-  // budget breaks exact equality here.
+  // Pins exact behavioral EQUALITY between boolean2's EpsilonFromScale
+  // and shared.h's AlphaBudgetEpsilon at every scale class (zero,
+  // sub-unit, exact power of two, non-power, large) and budget. This
+  // guards DRIFT (a diverging formula or changed default budget fails
+  // here); the one-copy-in-the-tree rule itself is a review contract -
+  // a reintroduced bit-identical local copy would pass this test.
   for (const double L : {0.0, 0.37, 1.0, 1.5, 1024.0, 7.3e15}) {
     EXPECT_EQ(boolean2::EpsilonFromScale(L), AlphaBudgetEpsilon(L));
     EXPECT_EQ(boolean2::EpsilonFromScale(L, 0), AlphaBudgetEpsilon(L, 0));
@@ -3612,6 +3613,21 @@ TEST(Manifold, RemoveSelfIntersectionsCancelBeforeRun) {
   EXPECT_TRUE(cleaned.IsEmpty());
 }
 
+TEST(Manifold, RemoveSelfIntersectionsCancelBeforeRunEmptyInput) {
+  // The entry poll precedes even the empty-input exit: a pre-cancelled
+  // run is observable as Cancelled for EVERY input class. Discriminates
+  // re-ordering the empty exit ahead of the poll (which would return
+  // the empty input as NoError).
+  Manifold empty;
+  ASSERT_TRUE(empty.IsEmpty());
+  ASSERT_EQ(empty.Status(), Manifold::Error::NoError);
+  ExecutionContext ctx;
+  ctx.Cancel();
+  Manifold cleaned = empty.WithContext(ctx).RemoveSelfIntersections();
+  EXPECT_EQ(cleaned.Status(), Manifold::Error::Cancelled);
+  EXPECT_TRUE(cleaned.IsEmpty());
+}
+
 TEST(Manifold, RemoveSelfIntersectionsUncancelledContextRuns) {
   // The ctx plumbing must not disturb an uncancelled run: same
   // bit-identical clean-input passthrough as without a context.
@@ -3631,8 +3647,11 @@ TEST(Manifold, RemoveSelfIntersectionsCancelBeforeLazyEval) {
   // A pre-cancelled ctx on a LAZY CSG input: GetCsgLeafNode(ctx)
   // evaluates the boolean under the cancelled ctx, so the member's
   // status-propagation arm surfaces Cancelled before the pipeline
-  // ever runs. Pins the member's ctx handoff into CSG evaluation
-  // end-to-end (removing all ctx plumbing makes this a NoError weld).
+  // ever runs. The pipeline's own entry poll is a CO-witness (with
+  // the GetCsgLeafNode handoff removed, the entry poll still yields
+  // Cancelled), so this pins the lazy-input cancellation OUTCOME
+  // end-to-end, not the CSG arm specifically - removing all ctx
+  // plumbing makes this a NoError weld.
   Manifold lazy = Manifold::Cube({1, 1, 1}) +
                   Manifold::Cube({1, 1, 1}).Translate({0.5, 0.5, 0.5});
   ExecutionContext ctx;

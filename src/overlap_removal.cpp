@@ -3386,13 +3386,17 @@ bool FoldedCellsEncloseVolume(const Manifold::Impl& impl,
 std::optional<Manifold::Impl> RemoveOverlaps(const Manifold::Impl& input,
                                              double eps,
                                              ExecutionContext::Impl* ctx) {
-  // Exceptions exist only in MANIFOLD_DEBUG builds (optional_assert.h
-  // defines the error types there; release manifold is exception-free
-  // and errors are status enums). Under MANIFOLD_DEBUG, a throwing
-  // assertion anywhere in the pipeline - including inside manifold's
-  // own Triangulate checks - becomes the nullopt fallback arm (the
-  // caller returns its input), preserving pierce-monotonicity; the
-  // guard pattern matches polygon.cpp's TriangulateIdxHalfedges.
+  // Throwing assertions exist only when BOTH MANIFOLD_ASSERT and
+  // MANIFOLD_DEBUG are set (optional_assert.h compiles DEBUG_ASSERT /
+  // ASSERT to throws under that conjunction and defines the error
+  // types under MANIFOLD_DEBUG; release manifold is exception-free and
+  // errors are status enums). The guard keys on MANIFOLD_DEBUG - the
+  // superset where the types exist; without MANIFOLD_ASSERT it is dead
+  // but harmless. A throwing assertion anywhere in the pipeline -
+  // including inside manifold's own Triangulate checks - becomes the
+  // nullopt fallback arm (the caller returns its input), preserving
+  // pierce-monotonicity; the guard pattern matches polygon.cpp's
+  // TriangulateIdxHalfedges.
 #ifdef MANIFOLD_DEBUG
   try {
     return RemoveOverlapsImpl(input, eps, ctx);

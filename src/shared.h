@@ -38,8 +38,10 @@ inline double MaxEpsilon(double minEpsilon, const Box& bBox) {
  * where u = 2^-53 (double-precision unit roundoff), sqrt(153) ~= 12.37
  * is Smith's per-intersection coefficient bound, kBudget is the
  * caller's expected upper bound on how many times any one edge may be
- * adjusted (default 1000), and lPow2 is the scale L rounded up to the
- * nearest power of 2 (Smith's analysis assumes this).
+ * adjusted (default 1000), and lPow2 is the smallest power of 2 with
+ * lPow2 >= L per frexp binning - an L that is itself an exact power of
+ * 2 lands on the NEXT power (a conservative 2x; Smith's analysis only
+ * needs lPow2 >= L).
  *
  * Distinct from `MaxEpsilon` / `kPrecision * scale` above:
  * - `MaxEpsilon` returns kPrecision (1e-12, an empirical constant well
@@ -50,7 +52,8 @@ inline double MaxEpsilon(double minEpsilon, const Box& bBox) {
  *   feature still resolved after k operations?" decisions.
  *
  * At the default budget the two land in the SAME order of magnitude
- * (kBudget * sqrt(153) * u is ~1.4e-12 against kPrecision's 1e-12);
+ * ((kBudget + 1) * sqrt(153) * u is ~1.4e-12 against kPrecision's
+ * 1e-12);
  * they differ in DERIVATION - an empirical constant vs Smith's
  * analyzed iterated-operation bound, which scales linearly with the
  * caller's budget - not in default size.

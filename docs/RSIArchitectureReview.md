@@ -474,6 +474,13 @@ recommendation, with this document as the record.
   for completed accounting, and the phase counters are not reachable
   from tests. The uncancelled-ctx test asserts the 1.0 convention;
   full discrimination is accepted as unpinned.
+- The non-entry cancellation polls and the merge/emit Cancelled-status
+  arms have no deterministic pin: `ExecutionContext::Impl::cancel` is
+  private with no test-reachable writer, no public accessor yields the
+  Impl pointer, and every end-to-end path is masked by the entry poll.
+  A pin would require new surface added solely for tests - declined;
+  the entry-class pins (plain, empty, lazy-CSG inputs) plus the
+  finalize sweep's reviewed conversion arm are the coverage.
 
 ### 2.5 What the design critique changed in Part 1
 

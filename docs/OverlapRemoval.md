@@ -41,11 +41,13 @@ assumptions hold in doubles, and add no new algorithmic ideas.
 | gate | driver | folded-shell volume (pre-emit) + status / volume / pierce-monotonicity, else return input |
 
 The driver (`RemoveOverlapsImpl`) composes these serially (per-face
-parallelization is an open follow-up; nothing is parallel yet). Exceptions
-exist only in MANIFOLD_DEBUG builds (optional_assert.h defines the error
-types there; release manifold is exception-free and all RSI failure arms
-are status-based) - under MANIFOLD_DEBUG the entry point wraps the body in
-try/catch so a throwing assertion anywhere falls back to the input, the
+parallelization is an open follow-up; nothing is parallel yet). Throwing
+assertions exist only when both MANIFOLD_ASSERT and MANIFOLD_DEBUG are set
+(optional_assert.h compiles them to throws under that conjunction and
+defines the error types under MANIFOLD_DEBUG; release manifold is
+exception-free and all RSI failure arms are status-based) - the entry
+point's try/catch is guarded on MANIFOLD_DEBUG, the superset where the
+types exist, so a throwing assertion anywhere falls back to the input, the
 polygon.cpp guard pattern (two inner debug-only catches have local roles:
 the emit triangulation retry ladder and the seed-cast target skip). EARLY-EXIT: if the combined chord list
 (transversal + trace) is empty, the input is returned bit-identical - this

@@ -189,9 +189,16 @@ std::vector<TriVertList> BuildOnTriVertLists(const Manifold::Impl& impl,
 // arrangement-wide identification happens at step 9.5), ties to
 // smallest id.
 //
-// Includes pierces where the edge endpoint coincides with a tri vert
-// (= the shared-vert pierce case post-Boolean merge), which the classic
-// Emmett #289 step 6 behavior would miss.
+// PAIR inclusion: an edge-tri pair is NOT skipped for sharing a vert
+// (the post-Boolean-merge shared-vert pierce case the classic Emmett
+// #289 step 6 would miss) - only the edge's own two faces are skipped.
+// EVENTS stay strict-interior on both parameters regardless: an edge
+// ENDPOINT lying on the tri plane (s == 0/1) generates no event by
+// design - a pair left with one event drops as a tip touch (see
+// GenerateChordEdges below), and a vertex-on-face through-pierce is
+// part of the documented arrangement-incompleteness class
+// (docs/OverlapRemoval.md, Known limitations), caught by the
+// fail-closed gates.
 std::vector<EdgeTriIntersection> FindEdgeTriIntersections(
     const Manifold::Impl& impl, const std::vector<Edge>& edges,
     const std::vector<EdgeVertList>& onEdgeLists,
