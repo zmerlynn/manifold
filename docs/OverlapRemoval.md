@@ -100,14 +100,13 @@ One absolute pipeline epsilon `eps` (from `InferEps` =
   (eps, 10 eps] band are unified onto originals by step 9.5 anyway, and a
   tolerance-scale radius on a tolerance-inflated input would drag pierce
   events onto far verts and deform the arrangement.
-- `tolerance + eps` (with `tolerance = max(impl.tolerance_, eps)` from the
-  post-merge impl): snaps that resolve NEW verts against existing ids at
-  ALLOCATION time - step 6.5's corner-snap base, step 9's crossing
-  resolution and on-chord contacts - matching boolean2's `newToOldThresh`
-  (prior drift plus current-op error).
-- 10x eps: the nearby-crossing merge radius (new-to-new for the SAME point
-  computed twice), matching boolean2's `kIntersectionMergeEpsFactor`; reused
-  by step 9.5's sweep.
+- 2x eps: snaps that resolve NEW verts against existing ids at ALLOCATION
+  time - step 6.5's corner-snap base, step 9's crossing resolution and
+  on-chord contacts. The combined eps reach of an old endpoint and a
+  generated crossing; tolerance-scale widening is Simplify's job, per #1757.
+- 10x eps: step 9.5's new-new unification sweep (the same point computed
+  through two different frames lands up to ~10x eps apart) and new-onto-
+  original snap. Step 9's nearby-crossing merge uses eps (section below).
 - eps / sin(angle), capped at `kCondSnapCapEps` (128) x eps: the CONDITIONED
   radius of a computed crossing whose defining lines are near-parallel (the
   lever arm). Used by step 6.5's corner snap and new-to-new dedup and by
@@ -121,13 +120,13 @@ One absolute pipeline epsilon `eps` (from `InferEps` =
   max(hint, impl.epsilon_, machine eps at the arrangement scale) - without
   the hint it would probe at `impl.epsilon_`, which can be tighter than the
   epsilon the arrangement was built with.
-- OUTPUT tolerance: `max(tolerance, 10 * eps, measured step-1 merge
+- OUTPUT tolerance: `max(impl.tolerance_, 10 * eps, measured step-1 merge
   displacement, measured step-9.5 remap displacement)` - the pipeline
-  deliberately moves verts by up to the merge radius, an eps-pair CHAIN or a
-  conditioned snap can move one further, and claiming the input tolerance
-  would overstate the output's precision. Ill-conditioned shallow-incidence
-  corners can carry residual error beyond this, up to the conditioned band -
-  a documented limitation, not part of the tolerance claim.
+  deliberately moves verts by up to the 9.5 unification radius, a conditioned
+  snap can move one further, and claiming the input tolerance would overstate
+  the output's precision. Ill-conditioned shallow-incidence corners can carry
+  residual error beyond this, up to the conditioned band - a documented
+  limitation, not part of the tolerance claim.
 
 ## Step 6.5: coplanar trace chords
 
@@ -160,10 +159,9 @@ cutting the sketch implicitly assumes:
    equal-size face-glued solids pass through bit-identical.
 4. **Endpoint ids.** t = 0/1 endpoints use the source edge's vert id.
    Crossing endpoints snap to the nearest of the pair's six corners within
-   max(tolerance + eps, the CAPPED conditioned radius eps/sin(angle)) -
-   the cap applies to the conditioned term only, so an inflated mesh
-   tolerance still widens the base - nearest, ties to smallest id (the
-   step-9 convention); else allocate,
+   max(2 * eps, the CAPPED conditioned radius eps/sin(angle)) - the
+   conditioned radius is the ONLY widener beyond the 2-eps base - nearest,
+   ties to smallest id (the step-9 convention); else allocate,
    deduping new-to-new over the whole pool at the SOURCE-GATED radius
    min(this crossing's conditioned radius, the pool entry's recorded radius),
    eps-floored - an ill-conditioned crossing must not claim an unrelated
@@ -198,9 +196,9 @@ Completes the per-face arrangement: after step 9 the chord set is CONFORMING
 classification.
 
 0. **On-chord endpoint pass** (`FindOnChordEndpointContacts`): a chord
-   endpoint lying on another same-face chord's interior, within
-   tolerance + eps and inside the t-guard
-   (t in ((tol+eps)/len, 1 - (tol+eps)/len) - the endpoint-proximity zone is
+   endpoint lying on another same-face chord's interior, within 2 * eps
+   (using the endpoint's recorded snap radius, eps-floored) and inside the
+   t-guard (t in (snapR/len, 1 - snapR/len) - the endpoint-proximity zone is
    excluded in t-space), recorded into the explicit `OnChordContact`
    accumulator. Required because the crossing kernel REJECTS near-endpoint
    crossings (`AwayFromEndpoints`); without this pass those contacts are
@@ -214,7 +212,8 @@ classification.
    index, lift accepted crossings back to 3D.
 3. **Nearby-crossing merge** (`MergeAndPropagateCrossings`): union-find over
    raw crossings; unite when they share an incident face (hosting face plus
-   both chords' face pairs) AND lie within 10 * eps. Cluster position =
+   both chords' face pairs) AND lie within eps. True k-fold concurrences
+   still cluster (their raw crossings land sub-eps apart). Cluster position =
    member centroid (ascending order), re-projected onto the HOST face plane
    via a member hosted there. The face gate (not a chord gate) is what
    unifies a 4-chord concurrence whose two crossings share no chord.
@@ -223,9 +222,10 @@ classification.
    so a k-fold point lands on all k chords even when a pairwise intersection
    was missed.
 5. **Resolve-then-allocate** (`ResolveAndThreadClusters`): per cluster, ONCE,
-   symmetric across all incident chords: candidates within tolerance + eps =
-   every incident chord endpoint, their existing extras, and the pass-0
-   accumulator; nearest wins (ties to smallest id); else allocate. A crossing
+   symmetric across all incident chords: candidates within max(2 * eps,
+   cl.snapR) for ORIGINAL verts or max(2 * eps, min(cl.snapR, snapR(cand)))
+   for NEW verts - every incident chord endpoint, their existing extras, and
+   the pass-0 accumulator; nearest wins (ties to smallest id); else allocate. A crossing
    can therefore never thread as an endpoint id on one chord and a fresh id
    on another (the split-identity class). Each raw crossing records its
    conditioned radius (eps / sin(angle of the two chord lines), capped);
@@ -239,11 +239,9 @@ classification.
    survive - they were admitted under step 8's weaker guard); id-dedup, sort
    by t (ties by id), eps/len t-dedup backstop.
 
-Known accepted hole: when tolerance > 9 * eps, two clusters can sit within
-tolerance + eps of each other yet beyond the 10 * eps merge radius and
-allocate two near-coincident fresh ids; the t-dedup backstop collapses them
-only when both land on one chord. Revisit if the tolerance-inflated regime
-becomes a target.
+Note: step 9's merge radius is eps; step 9.5 still unifies at 10x eps. Two
+clusters 9x eps apart that step 9 keeps distinct can be united by step 9.5
+at a real member's position (no manufactured centroid). See step 9.5 below.
 
 ## Step 9.5: arrangement-wide new-vert unification
 
@@ -254,7 +252,9 @@ The unpaired sub-edges then read as open rims, whose ambient unification
 collapses the cell complex (observed: rim folds merged nearly every
 cell). One union-find sweep (`UnifyArrangementVerts`):
 
-- new-new pairs unite within 10 * eps (the merge-radius philosophy);
+- new-new pairs unite within 10 * eps (frame-to-frame FP spread of ONE
+  computed point, not distinct-crossing fusion - step 9 already kept those
+  distinct at eps);
 - new verts snap onto ORIGINAL verts within max(10 * eps, the vert's recorded
   conditioned radius from step 6.5 or 9) - NEAREST wins, ties to the smallest
   id, originals before new (an id-priority pick could jump past the adjacent

@@ -63,7 +63,7 @@ SIGNATURE CHANGE: `PartitionFace` gains an explicit `double eps`
 parameter (no default - the severance-proofing convention); the driver
 passes the pipeline eps it already holds, and the seam tests pass it
 explicitly. The decomposition's triEps derives from it as
-`max(impl.tolerance_, impl.epsilon_, eps)`, the emit's existing seed.
+`max(impl.epsilon_, eps)`, the emit's existing seed.
 `PartitionFace` also gains the driver-computed COPLANAR-PARTNER flag
 described under failure arms.
 
@@ -112,8 +112,8 @@ Decomposition pass (only when islands were detected):
   positive-area, holes negative-area - the triangulator's confirmed
   convention: `FindStart` classifies `area < -minArea` contours as
   holes} carrying vert ids, call `TriangulateIdx` at the same epsilon
-  ladder seed the emit uses (`max(impl.tolerance_, impl.epsilon_,
-  eps)`), and append the resulting triangles to the face's polygon
+  ladder seed the emit uses (`max(impl.epsilon_, eps)`), and append
+  the resulting triangles to the face's polygon
   list IN FACE-WINDING ORIENTATION as ordinary walked cycles -
   `MergePolygons` computes canonical signed multiplicity itself; the
   decomposition synthesizes no `MergedPolygon` and no multiplicity.

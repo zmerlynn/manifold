@@ -355,10 +355,12 @@ double SegmentPiercesTriInterior(vec3 a, vec3 b, vec3 v0, vec3 v1, vec3 v2,
 // metadata posture: one fresh reserved meshID on every triRef,
 // originalID = -1. A rebuilt mesh is NOT an original (it matches what
 // Manifold(MeshGL64) produces, and OriginalID() stays -1); callers
-// wanting a provenance root use AsOriginal(). `toleranceSeed` lands
-// in tolerance_ BEFORE SetEpsilon, which floors it at the
-// bbox-derived epsilon_ and never lowers it - the working eps never
-// overwrites epsilon_. Invariant failures come back as an error
+// wanting a provenance root use AsOriginal(). The sweep runs with the
+// epsilon-floored default (toleranceSeed is applied AFTER
+// RemoveUnreferencedVerts so it never licenses construction-time
+// geometry changes - per #1757: a claim DESCRIBES movement already
+// applied, it must not LICENSE more). The epsilon floor is set by
+// SetEpsilon and preserved. Invariant failures come back as an error
 // status (MakeEmpty), exactly as the ctor reports them. The sweep is
 // ctx-aware at its heaviest stage: SortGeometry(ctx) can return early
 // on cancel with partial state, so it is followed by an IsCancelled
@@ -389,12 +391,15 @@ Manifold::Impl BuildImplFromTris(std::vector<vec3>&& positions,
                                                false};
   out.meshRelation_.originalID = -1;
   out.CalculateBBox();
-  out.tolerance_ = toleranceSeed;
   out.SetEpsilon();
   out.CleanupTopology();
   out.SetNormalsAndCoplanar();
   out.RemoveDegenerates();
   out.RemoveUnreferencedVerts();
+  // Apply the tolerance claim AFTER the construction sweep: the seed
+  // describes movement already measured by the caller (step-1 merge, step-9.5
+  // remap), not a license for the sweep to make further geometry changes.
+  out.tolerance_ = std::max(out.tolerance_, toleranceSeed);
   out.SortGeometry(ctx);
   if (IsCancelled(ctx)) {
     out.MakeEmpty(Manifold::Error::Cancelled);
@@ -448,7 +453,6 @@ std::optional<Manifold::Impl> RemoveOverlapsImpl(const Manifold::Impl& input,
     return std::nullopt;
   }
   if (IsCancelled(ctx)) return CancelledImpl();
-  const double tolerance = std::max(impl.tolerance_, eps);
   const int baseId = static_cast<int>(impl.NumVert());
   const int numTri = static_cast<int>(impl.NumTri());
 
@@ -472,8 +476,7 @@ std::optional<Manifold::Impl> RemoveOverlapsImpl(const Manifold::Impl& input,
   // whole arrangement machinery consumes them unchanged.
   const std::vector<int> halfedge2Edge = BuildHalfedgeToEdgeIndex(impl, edges);
   TraceChordResult trace = CoplanarTraceChords(
-      impl, edges, halfedge2Edge, std::move(chordEdges.newVertPositions),
-      tolerance, eps);
+      impl, edges, halfedge2Edge, std::move(chordEdges.newVertPositions), eps);
   chordEdges.newVertPositions = std::move(trace.newVertPositions);
   chordEdges.newEdges.insert(chordEdges.newEdges.end(), trace.chords.begin(),
                              trace.chords.end());
@@ -506,17 +509,18 @@ std::optional<Manifold::Impl> RemoveOverlapsImpl(const Manifold::Impl& input,
   // resolve-then-allocate threading.
   const std::vector<std::vector<int>> face2Chords =
       GroupChordsByFace(chordEdges.newEdges, numTri);
-  const std::vector<OnChordContact> contacts = FindOnChordEndpointContacts(
-      impl, chords, chordEdges.newVertPositions, face2Chords, tolerance, eps);
+  const std::vector<OnChordContact> contacts =
+      FindOnChordEndpointContacts(impl, chords, chordEdges.newVertPositions,
+                                  trace.newVertSnapR, face2Chords, eps);
   const std::vector<ChordChordCrossing> rawCrossings =
       FindChordChordCrossings(impl, chords, chordEdges.newVertPositions,
                               face2Chords, impl.faceNormal_, eps);
   const std::vector<ChordCrossing> clusters = MergeAndPropagateCrossings(
       impl, chords, chordEdges.newVertPositions, rawCrossings, face2Chords,
-      impl.faceNormal_, tolerance, eps);
+      impl.faceNormal_, eps);
   Step9Threading threaded = ResolveAndThreadClusters(
       impl, std::move(chords), std::move(chordEdges.newVertPositions),
-      std::move(trace.newVertSnapR), clusters, contacts, tolerance, eps);
+      std::move(trace.newVertSnapR), clusters, contacts, eps);
 
   // Step 9.5: unify new verts across allocation paths (the same
   // geometric point computed through two frames lands up to ~10 * eps
@@ -616,10 +620,11 @@ std::optional<Manifold::Impl> RemoveOverlapsImpl(const Manifold::Impl& input,
     // Manifold construction. Release builds return the same
     // triangulation without the debug CCW check, so behavior matches.
     std::vector<ivec3> tris;
-    // Start from the pipeline eps, not just the mesh epsilon: kept
-    // cycles carry pipeline-scale jitter (10 * eps merges), so seeding
-    // the retry ladder below it just burns doubling attempts.
-    double triEps = std::max({impl.tolerance_, impl.epsilon_, eps});
+    // Start from max(impl.epsilon_, eps): kept cycles carry pipeline-scale
+    // jitter (step-9.5 merges at 10*eps), so seeding below the pipeline eps
+    // burns doubling attempts. tolerance_ is out: a propagated claim inflates
+    // the seed and reshapes emitted triangulations for no geometric reason.
+    double triEps = std::max(impl.epsilon_, eps);
     // The retry ladder exists for MANIFOLD_DEBUG, where Triangulate's
     // CCW check can throw on micro-tail cycles; widening epsilon moves
     // the tail into the triangulator's own degenerate class. Capped at
@@ -664,6 +669,9 @@ std::optional<Manifold::Impl> RemoveOverlapsImpl(const Manifold::Impl& input,
   // to the conditioned band (eps / sin(incidence), capped at
   // kCondSnapCapEps * eps) - a documented limitation, not part of the
   // tolerance claim.
+  // Output-claim only: tolerance_ from the post-merge impl sets the floor on
+  // the exported claim (the input's measured drift), not a snap budget.
+  const double tolerance = std::max(impl.tolerance_, eps);
   Manifold::Impl out = BuildImplFromTris(
       std::move(ringPos), outTris,
       std::max({tolerance, 10.0 * eps, merged.maxMove, unified.maxMove}), ctx);
@@ -1037,11 +1045,10 @@ std::vector<EdgeTriIntersection> FindEdgeTriIntersections(
   // Snap radius: eps - EVENT IDENTITY at the computational scale, the
   // same scale as the step-1 old-old merge (stored positions are the
   // geometry; only the pipeline's own error is absorbed). NOT the
-  // tolerance + eps allocation radius: events in the (eps, 10 eps]
-  // band are unified onto originals by step 9.5 anyway, and a
-  // tolerance-scale radius on a tolerance-inflated input would drag
-  // pierce events onto far verts and deform the arrangement (the
-  // documented re-pierce class).
+  // 2*eps allocation radius: events in the (eps, 10 eps] band are
+  // unified onto originals by step 9.5 anyway, and a wider radius on
+  // a tolerance-inflated input would drag pierce events onto far verts
+  // and deform the arrangement (the documented re-pierce class).
   const double snapR = eps;
   const double snapR2 = snapR * snapR;
 
@@ -1288,7 +1295,7 @@ TraceChordResult CoplanarTraceChords(const Manifold::Impl& impl,
                                      const std::vector<Edge>& edges,
                                      const std::vector<int>& halfedge2Edge,
                                      std::vector<vec3> newVertPositions,
-                                     double tolerance, double eps) {
+                                     double eps) {
   using la::cross;
   using la::dot;
   TraceChordResult out;
@@ -1500,10 +1507,10 @@ TraceChordResult CoplanarTraceChords(const Manifold::Impl& impl,
         }
         // Resolve the two endpoint ids. t == 0/1: the src edge's own
         // vert. Crossings: snap to the nearest of the pair's six
-        // corners at max(tolerance + eps, the conditioned radius)
-        // (ties to smallest id - the step-9 convention), else
-        // allocate, deduping new-to-new over the whole pool at the
-        // SOURCE-GATED radius (see below).
+        // corners at max(2*eps, the conditioned radius) (ties to
+        // smallest id - the step-9 convention), else allocate,
+        // deduping new-to-new over the whole pool at the SOURCE-GATED
+        // radius (see below).
         int ids[2];
         int clipK[2] = {k0, k1};
         vec3 pos3[2] = {P0, P1};
@@ -1536,9 +1543,6 @@ TraceChordResult CoplanarTraceChords(const Manifold::Impl& impl,
             break;
           }
           // Conditioning of THIS crossing (see ConditionedSnapRadius).
-          // Kept SEPARATE from the snap base: the tolerance + eps
-          // new-to-old term must never widen the new-to-new dedup
-          // below.
           double condOnly = eps;
           if (clipK[e] >= 0) {
             const vec2 d1(q.x - p.x, q.y - p.y);
@@ -1546,10 +1550,11 @@ TraceChordResult CoplanarTraceChords(const Manifold::Impl& impl,
                           dst2[(clipK[e] + 1) % 3].y - dst2[clipK[e]].y);
             condOnly = ConditionedSnapRadius(d1, d2, eps);
           }
-          // Corner snap (new-to-old): the step-9 base radius, widened
-          // by the conditioning; nearest, ties to smallest id.
+          // Corner snap (new-to-old): 2*eps base budget (the combined eps reach
+          // of two represented points, per #1757) widened by the conditioning.
+          // Nearest wins; ties to smallest id.
           int best = -1;
-          double bestD = std::max(tolerance + eps, condOnly);
+          double bestD = std::max(2.0 * eps, condOnly);
           for (int c = 0; c < 6; ++c) {
             const int vid = c < 3 ? triVert(fa, c) : triVert(fb, c - 3);
             const vec3 dv = (c < 3 ? av[c] : bv[c - 3]) - x3;
@@ -1894,15 +1899,24 @@ UnifyResult UnifyArrangementVerts(const Manifold::Impl& impl,
 std::vector<OnChordContact> FindOnChordEndpointContacts(
     const Manifold::Impl& impl, const std::vector<NewEdgeWithExtras>& chords,
     const std::vector<vec3>& newVertPositions,
-    const std::vector<std::vector<int>>& face2Chords, double tolerance,
-    double eps) {
+    const std::vector<double>& newVertSnapR,
+    const std::vector<std::vector<int>>& face2Chords, double eps) {
   using la::dot;
   std::vector<OnChordContact> out;
   const int baseId = static_cast<int>(impl.NumVert());
-  // New-to-old snap: prior drift plus current-op error, matching
-  // boolean2's newToOldThresh (tolerance + eps), not bare eps.
-  const double snap = tolerance + eps;
-  const double snap2 = snap * snap;
+  // Per-endpoint snap radius: 2*eps base (the combined eps reach of two
+  // represented points, per #1757) widened by the endpoint's own conditioned
+  // radius if it is a NEW vert (originals are exact; their conditioned radius
+  // is zero - the 2*eps base covers them). snapR for endpoint e is:
+  //   - ORIGINAL (e < baseId): 0 (the 2*eps base covers it)
+  //   - NEW (e >= baseId):     newVertSnapR[e - baseId]
+  // Per-contact radius is max(2*eps, snapR(endpoint)).
+  auto snapR = [&](int id) -> double {
+    if (id < baseId) return 0.0;
+    const int idx = id - baseId;
+    if (idx < static_cast<int>(newVertSnapR.size())) return newVertSnapR[idx];
+    return 0.0;
+  };
   // A chord pair shares up to two faces; record each (chord, vert)
   // contact once.
   std::set<std::pair<int, int>> seen;
@@ -1917,18 +1931,23 @@ std::vector<OnChordContact> FindOnChordEndpointContacts(
         const vec3 ab = b - a;
         const double abLen2 = dot(ab, ab);
         if (abLen2 == 0) continue;
-        // Endpoint-proximity zone in t-space: a contact within snap of
-        // d's own endpoints is an endpoint-near-endpoint case, not an
-        // interior vert (it would re-create the near-line sliver the
-        // guard exists to block). snap/len >= 0.5 excludes the whole
-        // chord (shorter than 2*snap).
-        const double tGuard = snap / std::sqrt(abLen2);
         for (const int e : {c.v0, c.v1}) {
           if (e == d.v0 || e == d.v1) continue;
+          // Per-endpoint snap radius: 2*eps base widened by the endpoint's
+          // conditioned radius (zero for original verts; their exact
+          // position means the base covers them).
+          const double contactR = std::max(2.0 * eps, snapR(e));
+          const double contactR2 = contactR * contactR;
+          // Endpoint-proximity zone in t-space: a contact within contactR of
+          // d's own endpoints is an endpoint-near-endpoint case, not an
+          // interior vert (it would re-create the near-line sliver the
+          // guard exists to block). contactR/len >= 0.5 excludes the whole
+          // chord (shorter than 2*contactR).
+          const double tGuard = contactR / std::sqrt(abLen2);
           const vec3 p = GetPos3(e, baseId, impl, newVertPositions);
           const LineProj pr = ProjectToLine(p, a, ab, abLen2);
           if (pr.t <= tGuard || pr.t >= 1.0 - tGuard) continue;
-          if (pr.distSq > snap2) continue;
+          if (pr.distSq > contactR2) continue;
           if (!seen.insert({di, e}).second) continue;
           out.push_back({di, e, pr.t});
         }
@@ -2014,34 +2033,48 @@ Step9Threading ResolveAndThreadClusters(
     const Manifold::Impl& impl, std::vector<NewEdgeWithExtras> chords,
     std::vector<vec3> newVertPositions, std::vector<double> newVertSnapR,
     const std::vector<ChordCrossing>& clusters,
-    const std::vector<OnChordContact>& contacts, double tolerance, double eps) {
+    const std::vector<OnChordContact>& contacts, double eps) {
   using la::dot;
   const int baseId = static_cast<int>(impl.NumVert());
-  const double snap = tolerance + eps;
-  const double snap2 = snap * snap;
   // Keep the per-vert conditioned radii parallel to the pool: eps for
   // any pool entry that arrived without one (defensive; the trace pass
   // emits a full-length vector).
   newVertSnapR.resize(newVertPositions.size(), eps);
   // Canonical-id resolution: resolve-then-allocate, per cluster,
-  // symmetric across ALL incident chords. Candidates are every
-  // existing vert the crossing could BE - chord endpoints,
-  // already-threaded on-chord verts, and the pass-0 contacts (not yet
-  // threaded at this point) - within tolerance + eps. Nearest wins;
-  // ties take the smallest id. Only when no candidate exists is a
-  // fresh vert allocated. This is what prevents a crossing threading
-  // as an endpoint id on one chord and a fresh id on another (the
-  // split-identity bug).
+  // symmetric across ALL incident chords. Candidates are every existing
+  // vert within the cluster's snap radius (candidate-class split per the
+  // #1757 posture - see below). Nearest wins; ties take smallest id.
+  // Only when no candidate exists is a fresh vert allocated. This is what
+  // prevents a crossing threading as an endpoint id on one chord and a
+  // fresh id on another (the split-identity bug).
   std::vector<ChordCrossing> crossings;
   crossings.reserve(clusters.size());
   for (const ChordCrossing& cl : clusters) {
     int best = -1;
     double bestD2 = 0.0;
+    // ORIGINAL candidates: resolve at max(2*eps, cl.snapR). Original
+    // positions are exact; the cluster's uncertainty disc is the only spread.
+    const double origR = std::max(2.0 * eps, cl.snapR);
+    const double origR2 = origR * origR;
+    // NEW candidates: resolve at max(2*eps, min(cl.snapR, snapR(candidate))).
+    // The 6.5 source-gate convention: both claims must be conditioned before
+    // the radius widens, else an ill-conditioned cluster absorbs a
+    // well-conditioned DISTINCT new vert (the exact weld 6.5's min-gate
+    // prevents).
+    auto newR = [&](int id) -> double {
+      const int idx = id - baseId;
+      const double vr =
+          (idx >= 0 && idx < static_cast<int>(newVertSnapR.size()))
+              ? newVertSnapR[idx]
+              : eps;
+      return std::max(2.0 * eps, std::min(cl.snapR, vr));
+    };
     auto consider = [&](int id) {
       const vec3 p = GetPos3(id, baseId, impl, newVertPositions);
       const vec3 dv = cl.pos - p;
       const double d2 = dot(dv, dv);
-      if (d2 > snap2) return;
+      const double r2 = (id < baseId) ? origR2 : newR(id) * newR(id);
+      if (d2 > r2) return;
       if (best < 0 || d2 < bestD2 || (d2 == bestD2 && id < best)) {
         best = id;
         bestD2 = d2;
@@ -2079,9 +2112,9 @@ Step9Threading ResolveAndThreadClusters(
   // Threading: per chord, the unified record list (existing extras +
   // pass-0 contacts + resolved crossings), with every t RECOMPUTED
   // from the resolved position (a snap can move the vertex by up to
-  // tolerance + eps - enough to reorder a stale t-sort), the pass-0
-  // endpoint-zone guard re-applied, id-dedup over the unified list,
-  // then t-sort with an eps/len dedup backstop.
+  // max(2*eps, condR) on a short chord - enough to reorder a stale
+  // t-sort), the pass-0 endpoint-zone guard re-applied, id-dedup over
+  // the unified list, then t-sort with an eps/len dedup backstop.
   std::vector<std::vector<int>> pending(chords.size());
   for (const OnChordContact& c : contacts) {
     pending[c.chord].push_back(c.vertId);
@@ -2100,7 +2133,6 @@ Step9Threading ResolveAndThreadClusters(
     const double abLen2 = dot(ab, ab);
     if (abLen2 == 0) continue;
     const double len = std::sqrt(abLen2);
-    const double tGuard = snap / len;
     const double tDedup = eps / len;
     // Pre-existing step-8 extras were admitted under step 8's weaker
     // t-guard; the step-9 endpoint-zone guard applies only to NEWLY
@@ -2117,7 +2149,18 @@ Step9Threading ResolveAndThreadClusters(
       const vec3 p = GetPos3(id, baseId, impl, newVertPositions);
       const double t = dot(p - a, ab) / abLen2;
       const bool isNew = preexisting.count(id) == 0;
-      if (isNew && (t <= tGuard || t >= 1.0 - tGuard)) continue;
+      if (isNew) {
+        // Per-record endpoint-zone guard: 2*eps base widened by the record's
+        // own conditioned radius. Records are new-capable; preexisting step-8
+        // extras keep their exemption (isNew == false branch above).
+        const int idx = id - baseId;
+        const double vr =
+            (id >= baseId && idx < static_cast<int>(newVertSnapR.size()))
+                ? newVertSnapR[idx]
+                : 0.0;
+        const double tGuard = std::max(2.0 * eps, vr) / len;
+        if (t <= tGuard || t >= 1.0 - tGuard) continue;
+      }
       recs.push_back({t, id});
     }
     std::sort(recs.begin(), recs.end());
@@ -2141,7 +2184,7 @@ Step9Threading ResolveAndThreadCrossings(
     const Manifold::Impl& impl, std::vector<NewEdgeWithExtras> chords,
     std::vector<vec3> newVertPositions, std::vector<double> newVertSnapR,
     const std::vector<ChordChordCrossing>& raw,
-    const std::vector<OnChordContact>& contacts, double tolerance, double eps) {
+    const std::vector<OnChordContact>& contacts, double eps) {
   // Singleton-cluster delegation: each raw crossing is its own
   // cluster (the test seam; MergeAndPropagateCrossings supplies
   // real clusters in the full pipeline).
@@ -2153,7 +2196,7 @@ Step9Threading ResolveAndThreadCrossings(
   }
   return ResolveAndThreadClusters(
       impl, std::move(chords), std::move(newVertPositions),
-      std::move(newVertSnapR), clusters, contacts, tolerance, eps);
+      std::move(newVertSnapR), clusters, contacts, eps);
 }
 
 std::vector<ChordCrossing> MergeAndPropagateCrossings(
@@ -2161,15 +2204,18 @@ std::vector<ChordCrossing> MergeAndPropagateCrossings(
     const std::vector<vec3>& newVertPositions,
     const std::vector<ChordChordCrossing>& raw,
     const std::vector<std::vector<int>>& face2Chords,
-    VecView<const vec3> faceNormals, double tolerance, double eps) {
+    VecView<const vec3> faceNormals, double eps) {
   using la::dot;
   std::vector<ChordCrossing> out;
   if (raw.empty()) return out;
   const int baseId = static_cast<int>(impl.NumVert());
-  const double snap = tolerance + eps;
-  // New-to-new merge radius, matching boolean2's
-  // kIntersectionMergeEpsFactor (covers shallow crossings to ~6 deg).
-  const double mergeR = 10.0 * eps;
+  // New-to-new merge radius: eps. True k-fold concurrences still cluster
+  // (their raw crossings land sub-eps apart). Two distinct crossings in the
+  // (eps, 10*eps] band are still united by step 9.5's frame-spread pass
+  // onto a REAL member position - no manufactured centroid, no eager
+  // 10x-scale propagation. This is #1757's "don't let the merge manufacture
+  // geometry" posture applied to step 9.
+  const double mergeR = eps;
   const double mergeR2 = mergeR * mergeR;
 
   // Incident faces of a raw crossing: the hosting face plus both
@@ -2286,7 +2332,10 @@ std::vector<ChordCrossing> MergeAndPropagateCrossings(
         const vec3 ab = b - a;
         const double abLen2 = dot(ab, ab);
         if (abLen2 == 0) continue;
-        const double tGuard = snap / std::sqrt(abLen2);
+        // Endpoint-zone guard: 2*eps base widened by the cluster's
+        // aggregated conditioned radius (per the plan's #1757 posture).
+        const double tGuard =
+            std::max(2.0 * eps, cluster.snapR) / std::sqrt(abLen2);
         const LineProj pr = ProjectToLine(centroid, a, ab, abLen2);
         if (pr.t <= tGuard || pr.t >= 1.0 - tGuard) continue;
         if (pr.distSq > eps2) continue;
@@ -2625,8 +2674,9 @@ FacePartition PartitionFace(const Manifold::Impl& impl, int face,
   // already-computed n, basis, planePt above) via p2. Done here so the
   // same lazy pos2 cache is shared with the walk.
   //
-  // The `triEps` ladder seed for TriangulateIdx.
-  const double triEps = std::max({impl.tolerance_, impl.epsilon_, eps});
+  // triEps seed for TriangulateIdx: max(impl.epsilon_, eps). tolerance_ is out
+  // - a propagated claim must not reshape island triangulations.
+  const double triEps = std::max(impl.epsilon_, eps);
   if (!cleanIslandLoops.empty()) {
     // Geometry check helper: is loop simple in 2D?
     // Full PSLG rules: no strict crossings, no endpoint-on-nonincident-edge.
@@ -3636,17 +3686,18 @@ CellWinding ClassifyCells(const Manifold::Impl& impl,
         // eps is the effective classifier epsilon (>= impl.epsilon_ and
         // the pipeline epsHint): cycles here carry pipeline-eps-scale
         // jitter, so triangulating at the raw mesh epsilon could fail
-        // on cycles the pipeline considers clean. A MANIFOLD_DEBUG
-        // throw on a near-line sliver skips to the next target;
-        // release Triangulate does not throw.
+        // on cycles the pipeline considers clean. tolerance_ is out -
+        // a propagated claim must not reshape the seed-cast target choice.
+        // A MANIFOLD_DEBUG throw on a near-line sliver skips to the
+        // next target; release Triangulate does not throw.
 #ifdef MANIFOLD_DEBUG
         try {
-          tris = Triangulate({poly2}, std::max(impl.tolerance_, eps), true);
+          tris = Triangulate({poly2}, std::max(impl.epsilon_, eps), true);
         } catch (...) {
           continue;
         }
 #else
-        tris = Triangulate({poly2}, std::max(impl.tolerance_, eps), true);
+        tris = Triangulate({poly2}, std::max(impl.epsilon_, eps), true);
 #endif
         if (tris.empty()) continue;
         double bestA = -1.0;

@@ -246,8 +246,8 @@ std::vector<NewEdgeWithExtras> AddInteriorVertsToNewEdges(
 // face by > eps (full-through cuts qualify - their midpoints are
 // interior; boundary-riding intervals from coplanar neighbors never
 // do, so clean flat meshes emit nothing). Crossing endpoints snap to
-// the pair's six corners at max(tolerance + eps, the conditioned
-// radius) (nearest, ties to smallest - the step-9 convention), then
+// the pair's six corners at max(2 * eps, the conditioned radius)
+// (nearest, ties to smallest - the step-9 convention), then
 // dedup new-to-new over the pool at the SOURCE-GATED radius
 // min(this crossing's conditioned radius, the entry's recorded
 // radius), eps-floored; an endpoint farther than eps from either
@@ -291,7 +291,7 @@ TraceChordResult CoplanarTraceChords(const Manifold::Impl& impl,
                                      const std::vector<Edge>& edges,
                                      const std::vector<int>& halfedge2Edge,
                                      std::vector<vec3> newVertPositions,
-                                     double tolerance, double eps);
+                                     double eps);
 
 // Apply explicit on-edge additions: id-dedup against the existing
 // list, then per-edge re-sort by t. The trace-chord sibling of
@@ -310,12 +310,16 @@ std::vector<std::vector<int>> GroupChordsByFace(
 
 // Step 9 pass 0: endpoint-on-chord contacts - the on-chord analog of
 // the step-4 on-edge vert lists. A chord endpoint lying on another
-// same-face chord's interior, within tolerance + eps and outside the
-// endpoint-proximity zone in t-space (t in (snap/len, 1 - snap/len)),
-// is recorded for threading. These records are consulted by the
-// step-9 canonical-id resolution before any new vert is allocated;
-// without this pass, IntersectSegments' near-endpoint rejection would
-// silently drop these contacts (near-line slivers otherwise).
+// same-face chord's interior, within max(2*eps, snapR(endpoint)) and
+// outside the endpoint-proximity zone in t-space (t in
+// (contactR/len, 1 - contactR/len)), is recorded for threading.
+// These records are consulted by the step-9 canonical-id resolution
+// before any new vert is allocated; without this pass,
+// IntersectSegments' near-endpoint rejection would silently drop
+// these contacts (near-line slivers otherwise).
+// snapR is the newVertSnapR view (parallel to newVertPositions):
+// original endpoints carry zero conditioned radius (their 2*eps base
+// covers them); new endpoints carry their recorded conditioned radius.
 struct OnChordContact {
   int chord;   // chord index gaining the vert
   int vertId;  // existing vert id inserted onto it
@@ -324,8 +328,8 @@ struct OnChordContact {
 std::vector<OnChordContact> FindOnChordEndpointContacts(
     const Manifold::Impl& impl, const std::vector<NewEdgeWithExtras>& chords,
     const std::vector<vec3>& newVertPositions,
-    const std::vector<std::vector<int>>& face2Chords, double tolerance,
-    double eps);
+    const std::vector<double>& newVertSnapR,
+    const std::vector<std::vector<int>>& face2Chords, double eps);
 
 // Step 9 passes 2-3: one raw chord-chord crossing found in a face's
 // plane (boolean2::IntersectSegments on the chords re-projected onto
@@ -354,14 +358,16 @@ std::vector<ChordChordCrossing> FindChordChordCrossings(
 // the test seam for resolution/threading without the merge -
 // production goes through MergeAndPropagateCrossings +
 // ResolveAndThreadClusters). Canonical-id resolution is
-// resolve-then-allocate: snap to any
-// existing endpoint / on-chord vert / pass-0 contact within
-// tolerance + eps BEFORE allocating, symmetric across both chords -
-// a crossing must never thread as an endpoint id on one chord and a
-// fresh id on the other. Threading recomputes every t from the
-// resolved position, re-applies the pass-0 endpoint-zone guard,
-// id-dedups over the unified pass-0 + crossing list, then t-sorts
-// with an eps/len dedup backstop.
+// resolve-then-allocate: snap to any existing endpoint / on-chord
+// vert / pass-0 contact within the candidate-class radius BEFORE
+// allocating, symmetric across both chords - a crossing must never
+// thread as an endpoint id on one chord and a fresh id on the other.
+// Candidate class split (the #1757 source-gate convention):
+//   ORIGINAL candidates: max(2*eps, cl.snapR)
+//   NEW candidates:      max(2*eps, min(cl.snapR, snapR(candidate)))
+// Threading recomputes every t from the resolved position, re-applies
+// the pass-0 endpoint-zone guard, id-dedups over the unified pass-0
+// + crossing list, then t-sorts with an eps/len dedup backstop.
 struct ChordCrossing {
   vec3 pos;                 // crossing position (face plane)
   int id;                   // canonical vert id (existing or fresh)
@@ -383,26 +389,28 @@ Step9Threading ResolveAndThreadCrossings(
     const Manifold::Impl& impl, std::vector<NewEdgeWithExtras> chords,
     std::vector<vec3> newVertPositions, std::vector<double> newVertSnapR,
     const std::vector<ChordChordCrossing>& raw,
-    const std::vector<OnChordContact>& contacts, double tolerance, double eps);
+    const std::vector<OnChordContact>& contacts, double eps);
 
 // Step 9 nearby-crossing merge and eager propagation (runs between
 // FindChordChordCrossings and ResolveAndThreadClusters). Raw crossings unite
 // (union-find, sorted pair order) when they share an incident face AND lie
-// within 10 * eps - the face gate, not a chord gate, so a 4-chord concurrence
-// whose two crossings share no chord still merges. Cluster position is the
-// member centroid (ascending member order), re-projected onto the
-// hosting face plane. Propagation then tests the cluster position
-// against every chord incident to any involved face (point-to-segment
-// <= eps, the pass-0 endpoint-zone t-guard re-applied) so a k-fold
-// point lands on all k chords even when a pairwise crossing was
-// missed. Output clusters carry id == -1; ResolveAndThreadClusters
-// assigns canonical ids.
+// within eps - the face gate, not a chord gate, so a 4-chord concurrence
+// whose two crossings share no chord still merges. Two distinct crossings in
+// the (eps, 10*eps] band are NOT merged here but remain distinct; step 9.5's
+// frame-spread unification still unites them onto a REAL member position
+// (not a manufactured centroid). Cluster position is the member centroid
+// (ascending member order), re-projected onto the hosting face plane.
+// Propagation then tests the cluster position against every chord incident
+// to any involved face (point-to-segment <= eps, the pass-0 endpoint-zone
+// t-guard re-applied) so a k-fold point lands on all k chords even when a
+// pairwise crossing was missed. Output clusters carry id == -1;
+// ResolveAndThreadClusters assigns canonical ids.
 std::vector<ChordCrossing> MergeAndPropagateCrossings(
     const Manifold::Impl& impl, const std::vector<NewEdgeWithExtras>& chords,
     const std::vector<vec3>& newVertPositions,
     const std::vector<ChordChordCrossing>& raw,
     const std::vector<std::vector<int>>& face2Chords,
-    VecView<const vec3> faceNormals, double tolerance, double eps);
+    VecView<const vec3> faceNormals, double eps);
 
 // Cluster form of ResolveAndThreadCrossings: resolution + threading
 // over merged clusters (k incident chords). ResolveAndThreadCrossings
@@ -411,7 +419,7 @@ Step9Threading ResolveAndThreadClusters(
     const Manifold::Impl& impl, std::vector<NewEdgeWithExtras> chords,
     std::vector<vec3> newVertPositions, std::vector<double> newVertSnapR,
     const std::vector<ChordCrossing>& clusters,
-    const std::vector<OnChordContact>& contacts, double tolerance, double eps);
+    const std::vector<OnChordContact>& contacts, double eps);
 
 // ---- Step 9.5: arrangement-wide new-vert unification ----
 
@@ -423,8 +431,8 @@ Step9Threading ResolveAndThreadClusters(
 // faces - the unpaired sub-edges then read as open rims, whose
 // ambient unification collapses the cell complex (observed: a handful
 // of rims merged nearly every cell). One union-find sweep at the
-// nearby-crossing merge radius (10 * eps - the design's existing
-// "same point computed twice" constant) unites new-new pairs and
+// 9.5 unification radius (10 * eps - the "same point computed twice"
+// constant; step 9's merge is eps, not this) unites new-new pairs and
 // snaps new verts onto originals within max(that radius, the vert's
 // recorded conditioned radius) - NEAREST wins across the cluster,
 // ties to the smallest id, originals before new. Consumers are
