@@ -35,7 +35,7 @@ Polygons OutEdgesToPolygons(const std::vector<vec2>& verts,
 // machine-scale eps. Fill-rule application, not tolerance decimation.
 Polygons ApplyFillRule(const Polygons& polys, double eps);
 Polygons Boolean2D(const Polygons& a, const Polygons& b, OpType op,
-                   double eps = 0.0, double tolerance = 0.0);
+                   double eps = 0.0);
 
 // Polygon offset backing CrossSection::Offset.
 enum class OffsetJoinType { Square, Round, Miter, Bevel };

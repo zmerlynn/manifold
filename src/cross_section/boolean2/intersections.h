@@ -24,8 +24,6 @@
 namespace manifold {
 namespace boolean2 {
 
-inline constexpr double kIntersectionMergeEpsFactor = 10.0;
-
 void CollectIntersectionPairs(const std::vector<EdgeM>& edges,
                               const std::vector<vec2>& verts, double eps,
                               const std::vector<Box2>& edgeBoxes,

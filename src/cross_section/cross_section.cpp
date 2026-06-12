@@ -330,7 +330,7 @@ CrossSection CrossSection::Boolean(const CrossSection& second,
   const Polygons& b = second.GetPaths()->paths_;
   const double eps = b2::InferEps(a, b);
   const double tolerance = std::max({tolerance_, second.tolerance_, eps});
-  CrossSection result(shared_paths(b2::Boolean2D(a, b, op, eps, tolerance)));
+  CrossSection result(shared_paths(b2::Boolean2D(a, b, op, eps)));
   result.tolerance_ = tolerance;
   return result;
 }
@@ -352,7 +352,7 @@ CrossSection CrossSection::BatchBoolean(
       const double eps = b2::InferEps(result, clip);
       const double tolerance =
           std::max({tol, crossSections[i].tolerance_, eps});
-      result = b2::Boolean2D(result, clip, OpType::Intersect, eps, tolerance);
+      result = b2::Boolean2D(result, clip, OpType::Intersect, eps);
       tol = tolerance;
     }
     CrossSection out(shared_paths(std::move(result)));
@@ -371,8 +371,7 @@ CrossSection CrossSection::BatchBoolean(
   const double eps = b2::InferEps(subject, clips);
   const double tolerance =
       std::max({crossSections[0].tolerance_, clipsTol, eps});
-  CrossSection out(
-      shared_paths(b2::Boolean2D(subject, clips, op, eps, tolerance)));
+  CrossSection out(shared_paths(b2::Boolean2D(subject, clips, op, eps)));
   out.tolerance_ = tolerance;
   return out;
 }

@@ -136,7 +136,7 @@ void AppendInput(const Polygons& polys, int mult, std::vector<vec2>& verts,
 
 // `bSign` is +1 for Add/Intersect-style accumulation and -1 for Subtract.
 Polygons ApplyFillRule(const Polygons& a, const Polygons& b, int bSign,
-                       WindRule rule, double eps, double tolerance) {
+                       WindRule rule, double eps) {
   DEBUG_ASSERT(bSign == 1 || bSign == -1, logicErr,
                "Boolean2 input multiplicity must be +/-1");
   if (!AllFinite(a) || !AllFinite(b)) return {};
@@ -144,7 +144,6 @@ Polygons ApplyFillRule(const Polygons& a, const Polygons& b, int bSign,
   Polygons localA = TranslatePolygons(a, -origin);
   Polygons localB = TranslatePolygons(b, -origin);
   if (eps <= 0.0) eps = InferEps(localA, localB);
-  if (tolerance < eps) tolerance = eps;
 
   std::vector<vec2> verts;
   std::vector<EdgeM> edges;
@@ -152,8 +151,7 @@ Polygons ApplyFillRule(const Polygons& a, const Polygons& b, int bSign,
   AppendInput(localB, bSign, verts, edges);
   if (verts.empty()) return {};
 
-  OverlapResult r =
-      RemoveOverlaps2D(verts, edges, eps, tolerance, /*debug=*/false, rule);
+  OverlapResult r = RemoveOverlaps2D(verts, edges, eps, /*debug=*/false, rule);
   return TranslatePolygons(OutEdgesToPolygons(r.verts, r.edges), origin);
 }
 
@@ -235,7 +233,7 @@ Polygons OutEdgesToPolygons(const std::vector<vec2>& verts,
 // what construction and Offset use to resolve self-intersections - as opposed
 // to CrossSection::Simplify, which decimates at a user-designated tolerance.
 Polygons ApplyFillRule(const Polygons& polys, double eps) {
-  return ApplyFillRule(polys, {}, 1, WindRule::Add, eps, 0.0);
+  return ApplyFillRule(polys, {}, 1, WindRule::Add, eps);
 }
 
 // Infer eps from a polygon set's coordinate half-extent via Smith's
@@ -251,12 +249,12 @@ double InferEps(const Polygons& a, const Polygons& b) {
 }
 
 // Binary boolean over one combined edge set; Subtract flips B's multiplicity.
-Polygons Boolean2D(const Polygons& a, const Polygons& b, OpType op, double eps,
-                   double tolerance) {
+Polygons Boolean2D(const Polygons& a, const Polygons& b, OpType op,
+                   double eps) {
   const int bSign = op == OpType::Subtract ? -1 : 1;
   const WindRule rule =
       op == OpType::Intersect ? WindRule::Intersect : WindRule::Add;
-  return ApplyFillRule(a, b, bSign, rule, eps, tolerance);
+  return ApplyFillRule(a, b, bSign, rule, eps);
 }
 
 }  // namespace boolean2

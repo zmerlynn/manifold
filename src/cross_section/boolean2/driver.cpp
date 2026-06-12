@@ -23,6 +23,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <utility>
 #include <vector>
 
@@ -45,19 +46,20 @@ namespace {
 // Unlike MergeVerts, this pass only considers vertices with intersection
 // incidence: newly inserted intersection points and old vertices that an
 // intersection snapped onto. The close-pair threshold is intersection-specific,
-// and endpoint tolerance snaps are limited to truly-new vertices, so this does
-// not re-run broad old-vertex clustering across the input.
+// and endpoint snaps are limited to truly-new vertices, so this does not re-run
+// broad old-vertex clustering across the input.
 void MergeNearbyIntersectionVerts(
     std::vector<vec2>& verts, std::vector<EdgeM>& edges,
     std::vector<std::vector<int>>& lists,
     const std::vector<std::vector<int>>& vertEdges, int oldVertEnd, double eps,
-    double tolerance, std::vector<int>& inputVert2Merged) {
+    std::vector<int>& inputVert2Merged) {
   DisjointSets uf(static_cast<int>(verts.size()));
-  const double newToNewThresh = kIntersectionMergeEpsFactor * eps;
-  const double newToNewThresh2 = newToNewThresh * newToNewThresh;
-  // Fresh intersection vs old endpoint: prior drift plus current-op error.
-  const double newToOldThresh = tolerance + eps;
-  const double newToOldThresh2 = newToOldThresh * newToOldThresh;
+  // Merge intersection verts only at the eps snap scale; a wider band fuses
+  // distinct crossings of one edge into a non-manifold pinch.
+  const double newToNewThresh2 = eps * eps;
+  // Fresh intersection vs old endpoint: a 2*eps snap budget, the combined eps
+  // reach of an old endpoint and a generated crossing.
+  const double newToOldThresh2 = 4 * eps * eps;
   std::vector<std::pair<int, int>> pairs;
   std::vector<std::pair<double, int>> tlist;
   for (size_t e = 0; e < edges.size(); ++e) {
@@ -70,7 +72,7 @@ void MergeNearbyIntersectionVerts(
     const double abLen2 = dot(ab, ab);
     if (abLen2 == 0) continue;
     const double abLen = std::sqrt(abLen2);
-    const double tThresh = newToNewThresh / abLen;
+    const double tThresh = eps / abLen;
     tlist.clear();
     tlist.reserve(list.size());
     for (int v : list) {
@@ -81,7 +83,7 @@ void MergeNearbyIntersectionVerts(
       const double t = dot(p - a, ab) / abLen2;
       tlist.emplace_back(t, v);
       // Only truly-new verts: widening old-old would stack error across ops.
-      if (v >= oldVertEnd && newToOldThresh > 0.0) {
+      if (v >= oldVertEnd) {
         const vec2 dA = p - a;
         if (dot(dA, dA) <= newToOldThresh2) {
           const int p0 = std::min(v, v0);
@@ -127,13 +129,29 @@ void MergeNearbyIntersectionVerts(
   }
   if (distinctClusters == nV) return;
 
+  // Pin a cluster with an old (pre-intersection) vertex to that vertex (nearest
+  // the centroid, like MergeVerts), not the centroid: drifting an old vertex
+  // sub-eps folds the winding walk at a near-coincident tip.
+  std::vector<int> anchor(nV, -1);
+  std::vector<double> anchorDist2(nV, std::numeric_limits<double>::infinity());
+  for (int i = 0; i < oldVertEnd; ++i) {
+    const int r = uf.find(i);
+    const vec2 d = verts[i] - sumPos[r] * (1.0 / sumCnt[r]);
+    const double dist2 = dot(d, d);
+    if (dist2 < anchorDist2[r]) {
+      anchorDist2[r] = dist2;
+      anchor[r] = i;
+    }
+  }
+
   std::vector<int> rootToNew(nV, -1);
   std::vector<vec2> newVerts;
   newVerts.reserve(distinctClusters);
   for (int r = 0; r < nV; ++r) {
     if (sumCnt[r] == 0) continue;
     rootToNew[r] = static_cast<int>(newVerts.size());
-    newVerts.push_back(sumPos[r] * (1.0 / sumCnt[r]));
+    newVerts.push_back(anchor[r] >= 0 ? verts[anchor[r]]
+                                      : sumPos[r] * (1.0 / sumCnt[r]));
   }
   std::vector<int> preMergeToPost(nV);
   for (int i = 0; i < nV; ++i) preMergeToPost[i] = rootToNew[uf.find(i)];
@@ -153,9 +171,7 @@ void MergeNearbyIntersectionVerts(
 
 OverlapResult RemoveOverlaps2D(const std::vector<vec2>& vertsIn,
                                const std::vector<EdgeM>& edgesIn, double eps,
-                               double tolerance, bool debug, WindRule pred,
-                               Trace* trace) {
-  if (tolerance < eps) tolerance = eps;
+                               bool debug, WindRule pred, Trace* trace) {
   auto& P = GlobalPhases();
   ScopedTiming totalTiming(P.totalNs);
   TraceRecorder traceRecorder(trace, eps, pred);
@@ -228,8 +244,7 @@ OverlapResult RemoveOverlaps2D(const std::vector<vec2>& vertsIn,
   {
     ScopedTiming timing(P.nearbyIxMergeNs);
     MergeNearbyIntersectionVerts(merge.verts, edges, lists, vertEdges,
-                                 numMerged, eps, tolerance,
-                                 merge.inputVert2Merged);
+                                 numMerged, eps, merge.inputVert2Merged);
   }
   traceRecorder.RecordNearbyIntersectionMerge(merge.verts, edges, lists);
   // Sub-edge canonicalization.
