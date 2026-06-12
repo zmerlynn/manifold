@@ -661,8 +661,8 @@ std::optional<Manifold::Impl> RemoveOverlapsImpl(const Manifold::Impl& input,
   // loop: the invariant sweep and the metadata policy are deliberate
   // calls in BuildImplFromTris, not ctor side effects. The tolerance
   // claim propagates the pipeline's MEASURED applied movements: the
-  // 10 * eps floor covers the nearby-crossing merge radius (step-9
-  // crossing merges, step-9.5 new-new unification), and the measured
+  // 10 * eps floor covers step-9.5's unification radius (step 9's
+  // own crossing merge is narrower, at eps), and the measured
   // step-1 cluster and step-9.5 remap displacements widen it when a
   // chain or a conditioned snap moved a vert further. Ill-conditioned
   // shallow-incidence corners can carry residual error beyond this, up
@@ -849,8 +849,9 @@ MergeVertsResult MergeVertsEps(const Manifold::Impl& in, double eps,
   // `verts`); tris that collapse to fewer than three distinct verts
   // drop here, the same dropping Manifold(MeshGL64) does with its
   // distinct-vert check before CreateHalfedges. BuildImplFromTris then
-  // owns the construction sweep. The input's tolerance_ carries into
-  // the rebuild (SetEpsilon floors, never lowers it).
+  // owns the construction sweep. The input's tolerance_ passes as
+  // toleranceSeed, applied AFTER the geometry-changing sweep (a claim
+  // never licenses construction-time changes); the epsilon floor holds.
   std::vector<ivec3> tris;
   tris.reserve(in.NumTri());
   for (size_t t = 0; t < in.NumTri(); ++t) {
@@ -1716,10 +1717,11 @@ UnifyResult UnifyArrangementVerts(const Manifold::Impl& impl,
   const int baseId = static_cast<int>(impl.NumVert());
   const int nNew = static_cast<int>(newVertPositions.size());
   if (nNew == 0) return {};
-  // New-new pairs unite at the nearby-crossing merge radius (10 *
-  // eps - frame-to-frame spread of one computed point). New verts
-  // snap onto nearby originals at the same radius, widened PER VERT
-  // by its conditioned allocation radius (TraceChordResult::
+  // New-new pairs unite at 10 * eps - frame-to-frame spread of ONE
+  // computed point (this is 9.5's own radius; step 9's crossing
+  // merge is narrower, at eps - distinct crossings are structure).
+  // New verts snap onto nearby originals at the same radius, widened
+  // PER VERT by its conditioned allocation radius (TraceChordResult::
   // newVertSnapR) - blanket widening was tried and rejected: it
   // rounded real geometry into corners and re-pierced.
   const double radius = 10.0 * eps;
@@ -2231,7 +2233,7 @@ std::vector<ChordCrossing> MergeAndPropagateCrossings(
   }
 
   // Face-gated union-find in sorted pair order: unite when the two
-  // crossings share an incident face AND lie within 10 * eps. The
+  // crossings share an incident face AND lie within mergeR (eps). The
   // FACE gate (not a chord gate) is what unites a 4-chord concurrence
   // whose two crossings share no chord.
   DisjointSets uf(n);

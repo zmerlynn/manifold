@@ -196,11 +196,12 @@ Completes the per-face arrangement: after step 9 the chord set is CONFORMING
 classification.
 
 0. **On-chord endpoint pass** (`FindOnChordEndpointContacts`): a chord
-   endpoint lying on another same-face chord's interior, within 2 * eps
-   (using the endpoint's recorded snap radius, eps-floored) and inside the
-   t-guard (t in (snapR/len, 1 - snapR/len) - the endpoint-proximity zone is
-   excluded in t-space), recorded into the explicit `OnChordContact`
-   accumulator. Required because the crossing kernel REJECTS near-endpoint
+   endpoint lying on another same-face chord's interior, within
+   max(2 * eps, snapR(endpoint)) - the endpoint's recorded conditioned
+   radius widens the base, originals carry zero - and inside the t-guard
+   (t in (r/len, 1 - r/len) at the same per-endpoint radius: the
+   endpoint-proximity zone is excluded in t-space), recorded into the
+   explicit `OnChordContact` accumulator. Required because the crossing kernel REJECTS near-endpoint
    crossings (`AwayFromEndpoints`); without this pass those contacts are
    silently lost as near-line slivers.
 1. **Group** (`GroupChordsByFace`): chord indices with triA==t or triB==t.
@@ -514,7 +515,13 @@ numbers go stale instantly; the suite is the source of truth.)
 3. **Collinear-overlapping chords**: the partition's per-face dedup absorbs
    exact-id duplicates; eps-distinct near-collinear duplicates remain (the
    doubled-cut class; measure-zero for generic inputs).
-4. **tolerance > 9 eps**: the step-9 fresh-id hole above.
+4. **The (eps, 10 eps] crossing band**: two distinct crossings in that band
+   stay distinct at step 9 (merge radius eps) but unite in step 9.5 at a
+   REAL member position - the chord whose crossing lost the representative
+   election consumes a point off itself by up to the pair spacing. A
+   categorical improvement over the old manufactured centroid (no invented
+   positions, no eager 10x propagation), not a metric one; see the plan's
+   stated trade.
 5. **Welding**: coincident interior walls separating w = 1|1 drop (see step
    6.5's semantics note) - winding-faithful, documented, pinned by fixture.
 6. **Properties**: non-position properties are not preserved (numProp = 3).

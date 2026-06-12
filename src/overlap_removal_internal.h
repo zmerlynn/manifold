@@ -144,8 +144,9 @@ struct MergeVertsResult {
 // construction sweep (CreateHalfedges, CleanupTopology,
 // SetNormalsAndCoplanar, RemoveDegenerates, RemoveUnreferencedVerts,
 // SortGeometry) - the same invariant chain the MeshGL ctor provides,
-// owned here because no ctor runs. The input's tolerance_ carries
-// into the rebuild (SetEpsilon floors, never lowers it).
+// owned here because no ctor runs. The input's tolerance_ passes as
+// toleranceSeed, applied AFTER the geometry-changing sweep (a claim
+// never licenses construction-time changes); the epsilon floor holds.
 //
 // `mergedCount` is the authoritative answer to "did anything get
 // merged?" - counted directly from the union-find, not inferred from

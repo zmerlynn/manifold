@@ -1110,7 +1110,7 @@ TEST(OverlapRemoval, Step9EndpointOnChordContact) {
   const std::vector<overlap_removal::NewEdgeWithExtras> chords = {
       MakeChord(0, 1, 0, 9), MakeChord(2, 3, 0, 11)};
   const std::vector<manifold::vec3> pos =
-      EndpointOnChordPositions(/*h=*/1e-9);  // within tolerance + eps
+      EndpointOnChordPositions(/*h=*/1e-9);  // within 2 * eps
   const std::vector<std::vector<int>> byFace = {{0, 1}};
   const std::vector<overlap_removal::OnChordContact> contacts =
       overlap_removal::FindOnChordEndpointContacts(impl, chords, pos, {},
@@ -1122,7 +1122,7 @@ TEST(OverlapRemoval, Step9EndpointOnChordContact) {
 }
 
 TEST(OverlapRemoval, Step9EndpointOnChordRespectsDistance) {
-  // h far beyond tolerance + eps: no contact.
+  // h far beyond the 2 * eps contact radius: no contact.
   const double eps = 1e-9;
   Manifold::Impl impl;
   const std::vector<overlap_removal::NewEdgeWithExtras> chords = {
@@ -1170,7 +1170,8 @@ const manifold::vec3 kStep9FaceNormal{0.0, 0.0, 1.0};
 TEST(OverlapRemoval, Step9SimpleCrossing) {
   // Two chords forming an X in face 0's plane (normal z): one raw
   // crossing at (0.5, 0, 0), t = 0.5 on both; resolution finds no
-  // existing vert within tolerance + eps, so a fresh id is allocated
+  // existing vert within its 2 * eps / conditioned radius, so a fresh
+  // id is allocated
   // and threaded onto both chords.
   const double eps = 1e-9;
   Manifold::Impl impl;
@@ -1210,14 +1211,14 @@ TEST(OverlapRemoval, Step9SimpleCrossing) {
 
 TEST(OverlapRemoval, Step9CrossingResolvesToEndpointBand) {
   // The split-identity regression (design round 3): a crossing in the
-  // (eps, tolerance+eps] band of chord 0's endpoint id 1. The kernel
+  // (eps, 2*eps] band of chord 0's endpoint id 1. The kernel
   // accepts it (> eps from endpoints), but resolution must give the
   // ENDPOINT id to the crossing on BOTH chords - never a fresh id on
   // one and the endpoint on the other. On chord 0 itself the
   // recomputed t for id 1 is 1.0, outside the endpoint-zone guard, so
   // chord 0 threads nothing.
   const double eps = 1e-9;
-  const double x0 = 1.0 - 1.5e-9;  // in (eps, tolerance+eps] of id 1
+  const double x0 = 1.0 - 1.5e-9;  // in (eps, 2*eps] of id 1
   Manifold::Impl impl;
   std::vector<overlap_removal::NewEdgeWithExtras> chords = {
       MakeChord(0, 1, 0, 9), MakeChord(2, 3, 0, 11)};
@@ -1243,8 +1244,9 @@ TEST(OverlapRemoval, Step9CrossingResolvesToEndpointBand) {
 
 TEST(OverlapRemoval, Step9CrossingSeesPassZeroContacts) {
   // A third chord's endpoint (id 4) rests on both crossing chords
-  // within tolerance + eps; pass 0 records it onto both. The c-x-d
-  // crossing lands within tolerance + eps of id 4, so resolution must
+  // within the 2 * eps contact radius; pass 0 records it onto both.
+  // The c-x-d crossing lands within its resolution radius of id 4, so
+  // resolution must
   // pick id 4 (consulting the pass-0 accumulator - design round 4),
   // allocate nothing, and the unified id-dedup must leave exactly one
   // entry per chord.
@@ -1320,10 +1322,10 @@ TEST(OverlapRemoval, Step9FaceGateMergesDisjointPairs) {
   // The face-gate regression (design round 3): crossings (c1,c2) and
   // (c3,c4) share NO chord - a chord-gated merge would leave two
   // distinct clusters 0.5*eps apart at a genuine 4-chord concurrence.
-  // The face gate + eps-merge-radius unite them into one. Resolution
-  // snaps to the nearest existing endpoint (id 3, nearest the
-  // centroid). Hand-built raw records avoid endpoint-contact
-  // contamination from sub-eps geometry.
+  // The face gate + eps-merge-radius unite them into one cluster; the
+  // pin stops at the merge (resolution is other tests' subject).
+  // Hand-built raw records avoid endpoint-contact contamination from
+  // sub-eps geometry.
   const double eps = 1e-12;
   Manifold::Impl impl;
   std::vector<overlap_removal::NewEdgeWithExtras> chords = {
@@ -1474,7 +1476,7 @@ TEST(OverlapRemoval, Step9CollinearOverlapSnapsEndpointsNoCrossing) {
 TEST(OverlapRemoval, Step9ResolutionSnapsToRealMeshVert) {
   // Mixed id space: a real Impl (tetrahedron, baseId == 4) supplies a
   // chord endpoint with id < baseId. A crossing in the
-  // (eps, tolerance+eps] band of that REAL vert must resolve to its id
+  // (eps, 2*eps] band of that REAL vert must resolve to its id
   // through GetPos3's impl.vertPos_ branch - the path every
   // empty-Impl test misses.
   const double eps = 1e-9;
@@ -3597,12 +3599,13 @@ TEST(OverlapRemoval, Step8ExtrasThreadedSortedAlongChord) {
 }
 
 TEST(OverlapRemoval, Step65OppositeCornerSnapDoesNotSubdivideEdge) {
-  // The opposite-corner exclusion: a crossing on T1's bottom edge that
-  // corner-snaps to T1's own APEX (the obtuse face's third vert, 0.45
-  // off the edge yet projecting to t ~ 0.475) must NOT thread the apex
-  // onto the bottom edge - the apex is a whole altitude away; only the
-  // chord uses the snapped id. Tolerance 0.5 makes the apex the
-  // nearest in-radius corner for both crossings.
+  // The opposite-corner exclusion: T1's APEX (the obtuse face's third
+  // vert, 0.45 off the bottom edge yet projecting to t ~ 0.475) reaches
+  // the trace chords as an interval-endpoint id (the t-clamp arm hands
+  // the src edge's own vert to the chord; no snap radius reaches 0.45).
+  // However a chord acquires the apex id, it must NOT thread onto the
+  // bottom edge - the apex is a whole altitude away; only the chord
+  // uses the id.
   const double eps = 1e-6;
   const manifold::vec3 t1[3] = {{0, 0, 0}, {4, 0, 0}, {1.9, 0.45, 0}};
   const manifold::vec3 t2[3] = {
@@ -4450,11 +4453,15 @@ TEST(Manifold, RemoveSelfIntersectionsGluedBoxes) {
   EXPECT_EQ(cleanedMix.Decompose().size(), 1u);  // welded
 }
 
-// Tolerance-blind geometry comparator: asserts identical vertex positions and
-// triangle topology (both sorted into canonical order) without comparing the
-// tolerance field. The two RSI outputs legitimately differ in their exported
-// tolerance claims (each is seeded by the input's claim) so ExpectMeshGL64-
-// GeometryIdentical, which checks tolerance, would spuriously fail here.
+// GEOMETRY-ONLY comparator: asserts identical vertex positions and triangle
+// topology, with tri lists sorted into canonical order first. Deliberately
+// blind to MORE than the tolerance field: triangle ORDER (the two runs may
+// SortGeometry differently), merge vectors, and run/meshID metadata are all
+// out of scope - this is positions-and-topology identity, nothing else.
+// The two RSI outputs legitimately differ in their exported tolerance
+// claims (each is seeded by the input's claim) so ExpectMeshGL64-
+// GeometryIdentical, which checks tolerance and order, would spuriously
+// fail here.
 void ExpectMeshGL64GeometryIdenticalNoTolerance(const Manifold& got,
                                                 const Manifold& want) {
   const MeshGL64 g = got.GetMeshGL64();
@@ -4542,16 +4549,10 @@ TEST(Manifold, RemoveSelfIntersectionsToleranceIndependent) {
   // Premise: the two constructed inputs are geometry-identical pre-RSI.
   // If this fires, the ctor consumed the tolerance difference and the anchor
   // would misattribute a ctor difference to RSI - fix the fixture instead.
-  {
-    const MeshGL64 gLow = inputLow.GetMeshGL64();
-    const MeshGL64 gHigh = inputHigh.GetMeshGL64();
-    ASSERT_EQ(gLow.NumVert(), gHigh.NumVert())
-        << "premise: ctor consumed tolerance difference; fix the fixture";
-    ASSERT_EQ(gLow.NumTri(), gHigh.NumTri())
-        << "premise: ctor consumed tolerance difference; fix the fixture";
-    ASSERT_EQ(gLow.vertProperties, gHigh.vertProperties)
-        << "premise: ctor consumed tolerance difference; fix the fixture";
-  }
+  // Full positions-and-topology identity (the same comparator the core
+  // assertion uses) - counts/positions alone could miss a ctor
+  // retriangulation and misattribute it to RSI.
+  ExpectMeshGL64GeometryIdenticalNoTolerance(inputLow, inputHigh);
 
   // Run RSI through the PUBLIC member so the pipeline rebuilds (not the
   // test-seam RemoveOverlaps with fixed eps which would bypass tolerance).
