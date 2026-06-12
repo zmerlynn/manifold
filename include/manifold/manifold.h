@@ -261,8 +261,8 @@ class Manifold {
    * arrangement (intersection chords, per-face partition), volume
    * cell complex, winding classification by seed cast + BFS, emit.
    * Implementation in `src/overlap_removal.cpp`; algorithm notes and
-   * known limitations (e.g. tangent-degenerate contacts that fall
-   * back) in `docs/OverlapRemoval.md`.
+   * known limitations (e.g. dense-sliver inputs that fall back,
+   * conditioned-band residual pierces) in `docs/OverlapRemoval.md`.
    */
   Manifold RemoveSelfIntersections() const;
   ///@}

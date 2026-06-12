@@ -45,10 +45,12 @@ parallelization is an open follow-up; nothing is parallel yet). Throwing
 assertions exist only when both MANIFOLD_ASSERT and MANIFOLD_DEBUG are set
 (optional_assert.h compiles them to throws under that conjunction and
 defines the error types under MANIFOLD_DEBUG; release manifold is
-exception-free and all RSI failure arms are status-based) - the entry
-point's try/catch is guarded on MANIFOLD_DEBUG, the superset where the
-types exist, so a throwing assertion anywhere falls back to the input, the
-polygon.cpp guard pattern (two inner debug-only catches have local roles:
+exception-free and all RSI failure arms are status-based) - the wrapper's
+per-attempt try/catch is guarded on MANIFOLD_DEBUG, the superset where the
+types exist, so a throwing assertion becomes that attempt's nullopt (a
+later retry rung may still resolve; the input fallback is the public
+outcome only when no rung is accepted), the polygon.cpp guard pattern
+(two inner debug-only catches have local roles:
 the emit triangulation retry ladder and the seed-cast target skip). EARLY-EXIT: if the combined chord list
 (transversal + trace) is empty, the input is returned bit-identical - this
 covers clean inputs, the all-pairs-dropped case, and pancake-free coplanar

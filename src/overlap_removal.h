@@ -52,10 +52,12 @@ namespace overlap_removal {
 // `eps` is the WORKING EPSILON (the pipeline's computational scale,
 // not the mesh tolerance - see the eps contract in
 // docs/OverlapRemoval.md). eps <= 0 (the inferred-eps path) derives
-// AlphaBudgetEpsilon(input.bBox_.Scale(), 1000) for the first attempt,
-// then retries a small fixed ladder of wider multiples of that base
-// before returning nullopt. eps > 0 is a single attempt at exactly
-// that eps (no ladder). `ctx` may be null (no cancellation checks).
+// AlphaBudgetEpsilon(input.bBox_.Scale(), 1000) for the first attempt;
+// if that falls back and the input has strict-interior pierces, it
+// retries a small fixed ladder of wider multiples of that base,
+// accepting a retry only on strict pierce reduction, before returning
+// nullopt. eps > 0 is a single attempt at exactly that eps (no
+// ladder). `ctx` may be null (no cancellation checks).
 std::optional<Manifold::Impl> RemoveOverlaps(const Manifold::Impl& input,
                                              double eps,
                                              ExecutionContext::Impl* ctx);
