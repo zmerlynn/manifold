@@ -1159,3 +1159,51 @@ TEST(Boolean2, IntersectSegmentsSeeds) {
     }
   }
 }
+
+// GAUNTLET (currently failing): pre-existing near-degenerate bugs from the
+// 2026-06-12 4-Codex stress test. Enabled to track them; fail on the no-fix
+// base.
+
+// Stress C: a Subtract of near-origin near-degenerate inputs leaves the
+// arrangement with a missed split - a retained vertex lands in another edge's
+// interior band, so the regularized graph is invalid.
+TEST(Boolean2, GauntletStressC_MissedSplitInvalidTopology) {
+  const Polygons a = {{{0, 0},
+                       {0, -1.3875065265425851e-15},
+                       {0.00013875065265428477, -7.4683028744398387e-16},
+                       {0, 1.3875065265425851e-15}}};
+  const Polygons b = {{{-2.7755575615628914e-16, -4.1136016361401099e-16},
+                       {1.0547118733938987e-15, -8.4012326012156754e-16},
+                       {4.0732494168083111e-05, 0.00012536172672923465},
+                       {-1.609823385706477e-15, 1.7402932893545559e-17}},
+                      {{3.3306690738754696e-16, -9.7814953183777337e-16},
+                       {-4.9960036108132044e-16, 1.4436682794117381e-16},
+                       {-0.00010663905417918063, -7.7477808007594485e-05},
+                       {1.1657341758564144e-15, -2.1006658916167206e-15}}};
+  const double eps = InferEps(a, b);
+  const auto [verts, edges] = CombinedInput(a, b, /*bMult=*/-1);
+  const auto result = RemoveOverlaps2D(verts, edges, eps);
+  EXPECT_TRUE(CheckRetainedGraphValidity(result, edges, result.inputVert2Merged,
+                                         result.numMergedVerts, eps));
+}
+
+// Stress D: a host rectangle plus two closed probes that should cancel under
+// Subtract, leaving the host (area d*h = 2.6). Short-edge endpoint fusion in
+// the merge band loses area (observed 1.24). Fails at eps 1e-6/1e-9/1e-12.
+TEST(Boolean2, GauntletStressD_ShortEdgeFusion) {
+  const double eps = 1e-6;
+  const double d = 2.6 * eps, h = 1.0 / eps, x0 = 1.1 * eps, x1 = 1.5 * eps;
+  const SimplePolygon host = {{0, 0}, {d, 0}, {d, h}, {0, h}};
+  const SimplePolygon probe0 = {{-10 * eps, -0.20 * h},
+                                {x0, -0.20 * h},
+                                {x0, 0.25 * h},
+                                {-10 * eps, 0.25 * h}};
+  const SimplePolygon probe1 = {{x1, -0.25 * h},
+                                {d + 10 * eps, -0.25 * h},
+                                {d + 10 * eps, 0.20 * h},
+                                {x1, 0.20 * h}};
+  const Polygons out = Boolean2D({host, probe0, probe1}, {probe0, probe1},
+                                 OpType::Subtract, eps);
+  EXPECT_NEAR(std::fabs(TotalSignedArea(out)), d * h, 1e-3 * d * h)
+      << "probes did not cancel to the host";
+}

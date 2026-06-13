@@ -411,7 +411,7 @@ TEST(CrossSection, TinyFeatureNearCornerHostFeatureSwap) {
 // Host-drop: the host's zero-radius star vertex makes it a thin spike that
 // collapses. Built from raw radii (StarRing's 0.1 floor would remove the
 // spike).
-TEST(CrossSection, DISABLED_TinyFeatureNearCornerHostDropAtOffset4096) {
+TEST(CrossSection, GauntletTinyFeatureNearCornerHostDropAtOffset4096) {
   const std::vector<double> hostRadii = {
       0., 356.3220416075996, 176.46461822660299, 2.451081611797258, 1.};
   SimplePolygon host;
@@ -453,7 +453,7 @@ TEST(CrossSection, DISABLED_TinyFeatureNearCornerHostDropAtOffset4096) {
 
 // Host-drop only at large offset (passes at the origin): the StarRing host plus
 // an 8-vertex feature anchored 1e-9 from host[1].
-TEST(CrossSection, DISABLED_TinyFeatureNearCornerHostDropAtOffset1024) {
+TEST(CrossSection, GauntletTinyFeatureNearCornerHostDropAtOffset1024) {
   SimplePolygon host = StarRing({0., 1., 0., 181.7694024845519});
   SimplePolygon feature =
       StarRing({712.03169893044037, 1., 549.34829370834473, 0., 0.,
@@ -487,6 +487,35 @@ TEST(CrossSection, DISABLED_TinyFeatureNearCornerHostDropAtOffset1024) {
     EXPECT_NEAR((ca + cb).Area(), sum, 1e-3 * (1.0 + ca.Area() + cb.Area()))
         << "offset=" << offset;
   }
+}
+
+// GAUNTLET (currently failing): pre-existing near-degenerate bugs from the
+// 2026-06-12 4-Codex stress test of the boolean2 arrangement. Enabled here so
+// the gauntlet tracks them; they fail on the PR'd (no winding fix) base.
+
+// Stress A: a unit square unioned with a tiny triangle whose middle vertex is
+// exactly 2*eps from a corner annihilates the whole square (area 1 -> 0). The
+// winding face-walk routes everything into one zero-area face; translation-
+// sensitive (without the local-origin shift the same graph yields area 1).
+TEST(CrossSection, GauntletStressA_SquareAnnihilation) {
+  const CrossSection a(SimplePolygon{{0, 0}, {1, 0}, {1, 1}, {0, 1}});
+  const CrossSection b(
+      SimplePolygon{{1.5000023810829433e-06, -8.6602402906521135e-07},
+                    {2.3810953209135732e-12, 1.3747192273300745e-12},
+                    {2.3810953209135732e-12, -1.7320494328496497e-06}});
+  EXPECT_GT((a + b).Area(), a.Area() - AreaTol(a, b)) << "square annihilated";
+}
+
+// Stress B: two disjoint triangles where one's vertex is within eps of the
+// other's sloped edge; the union adds a ~4e-6 outside sliver that intersect
+// does not see (inclusion-exclusion violation via the near-vertex split path).
+TEST(CrossSection, GauntletStressB_InclusionExclusionSliver) {
+  const CrossSection a(SimplePolygon{{0.0, 1e-8}, {0.5, 5e-9}, {1.0, 0.5}});
+  const CrossSection b(
+      SimplePolygon{{2048.0, 0.0}, {4096.0, 4.096e-6}, {0.0, 0.0}});
+  const auto inter = a.Boolean(b, OpType::Intersect);
+  EXPECT_NEAR((a + b).Area(), a.Area() + b.Area() - inter.Area(),
+              AreaTol(a, b));
 }
 
 // Regression test for the BR-cell hole pattern from Samples.Sponge4. Two
