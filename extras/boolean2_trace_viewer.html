@@ -418,6 +418,52 @@
       );
     }
 
+    // Liang-Barsky clip of a world-space segment to the current view (with a
+    // one-view-width margin), so deep zoom never maps a far endpoint to a giant
+    // SVG coordinate the browser refuses to draw (e.g. a unit-length edge while
+    // zoomed to eps scale). Returns clipped [a, b] in world coords, or null if
+    // the segment is fully outside.
+    function clipToView(a, b) {
+      const vb = state.viewBox;
+      if (!vb) return [a, b];
+      const mx = vb[2];
+      const my = vb[3];
+      const xmin = vb[0] - mx;
+      const xmax = vb[0] + vb[2] + mx;
+      const ymin = -(vb[1] + vb[3]) - my;
+      const ymax = -vb[1] + my;
+      const x0 = a[0];
+      const y0 = a[1];
+      const dx = b[0] - x0;
+      const dy = b[1] - y0;
+      let t0 = 0;
+      let t1 = 1;
+      const edges = [
+        [-dx, x0 - xmin],
+        [dx, xmax - x0],
+        [-dy, y0 - ymin],
+        [dy, ymax - y0],
+      ];
+      for (const [p, q] of edges) {
+        if (p === 0) {
+          if (q < 0) return null;
+          continue;
+        }
+        const r = q / p;
+        if (p < 0) {
+          if (r > t1) return null;
+          if (r > t0) t0 = r;
+        } else {
+          if (r < t0) return null;
+          if (r < t1) t1 = r;
+        }
+      }
+      return [
+        [x0 + t0 * dx, y0 + t0 * dy],
+        [x0 + t1 * dx, y0 + t1 * dy],
+      ];
+    }
+
     function showDetails(item) {
       els.details.textContent = JSON.stringify(item, null, 2);
     }
@@ -447,8 +493,10 @@
       const verts = poly.verts || [];
       if (verts.length < 2) return;
       for (let i = 0; i < verts.length; ++i) {
-        const a = pt(verts[i]);
-        const b = pt(verts[(i + 1) % verts.length]);
+        const clip = clipToView(verts[i], verts[(i + 1) % verts.length]);
+        if (!clip) continue;
+        const a = pt(clip[0]);
+        const b = pt(clip[1]);
         const node = svgEl('line', {
           x1: a[0],
           y1: a[1],
@@ -545,8 +593,10 @@
       }
       if (els.showSegments.checked) {
         for (const seg of phase.segments || []) {
-          const a = pt(seg.a);
-          const b = pt(seg.b);
+          const clip = clipToView(seg.a, seg.b);
+          if (!clip) continue;
+          const a = pt(clip[0]);
+          const b = pt(clip[1]);
           const node = svgEl('line', {
             x1: a[0],
             y1: a[1],
@@ -646,6 +696,26 @@
       return named >= 0 ? named : 0;
     }
 
+    // Optional initial camera from the URL: ?view=cx,cy,halfspan (centered) or
+    // ?view=x,y,w,h (raw viewBox). Lets a deep-zoom link be shared; phase swaps
+    // keep it.
+    function applyViewParam() {
+      const v = params.get('view');
+      if (!v) return;
+      const n = v.split(',').map(Number);
+      if (n.length === 3 && n.every(Number.isFinite)) {
+        const [cx, cy, half] = n;
+        setViewBox(
+          viewBoxForPoints([
+            [cx - half, cy - half],
+            [cx + half, cy + half],
+          ]),
+        );
+      } else if (n.length === 4 && n.every(Number.isFinite)) {
+        setViewBox(n);
+      }
+    }
+
     function loadTrace(trace, source = '') {
       state.trace = trace;
       state.phaseIndex = phaseIndexFromParam(trace, params.get('phase'));
@@ -659,6 +729,7 @@
       }
       setViewBox(defaultViewBox(trace));
       fitCurrentPhase();
+      applyViewParam();
       render();
     }
 
