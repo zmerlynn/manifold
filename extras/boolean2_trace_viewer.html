@@ -295,11 +295,21 @@
       return node;
     }
 
+    // Bounded faces are tinted by winding number: gray at 0, green ramp for
+    // positive windings, red ramp for negative, deepening with magnitude.
+    function windingColor(w) {
+      if (!Number.isFinite(w) || w === 0) return '#b9c2bd';
+      const mag = Math.min(Math.abs(w), 4);
+      const lightness = 60 - mag * 9;
+      const hue = w > 0 ? 150 : 8;
+      return `hsl(${hue}, 58%, ${lightness}%)`;
+    }
+
     function colorFor(item) {
       const text = `${item.kind || ''} ${item.source || ''} ${item.label || ''}`;
       if (text.includes('outer_face')) return '#69746f';
+      if ((item.kind || '') === 'face') return windingColor(item.winding);
       if (item.inside === true) return 'var(--output)';
-      if ((item.kind || '') === 'face') return '#8a9a94';
       if (text.includes('candidate')) return 'var(--candidate)';
       if (text.includes('retained') || text.includes('final')) return 'var(--output)';
       if (item.mult < 0 || text.includes('clip')) return 'var(--clip)';
@@ -512,6 +522,25 @@
           bindInspect(node, poly);
           group.appendChild(node);
           renderPolygonOutline(group, poly, ghost);
+          if (!ghost && els.showLabels.checked &&
+              Number.isFinite(poly.winding) && (poly.verts || []).length) {
+            let cx = 0;
+            let cy = 0;
+            for (const v of poly.verts) {
+              const [px, py] = pt(v);
+              cx += px;
+              cy += py;
+            }
+            const wlabel = svgEl('text', {
+              x: cx / poly.verts.length,
+              y: cy / poly.verts.length,
+              class: 'label',
+              'font-weight': '700',
+              fill: colorFor(poly),
+            });
+            wlabel.textContent = `w=${poly.winding}`;
+            group.appendChild(wlabel);
+          }
         }
       }
       if (els.showSegments.checked) {
@@ -534,7 +563,11 @@
             const lx = (a[0] + b[0]) * 0.5;
             const ly = (a[1] + b[1]) * 0.5;
             const text = svgEl('text', { x: lx, y: ly, class: 'label', fill: colorFor(seg) });
-            text.textContent = seg.id || '';
+            const mult =
+              Number.isInteger(seg.mult) && seg.mult !== 0
+                ? ` m${seg.mult > 0 ? '+' : ''}${seg.mult}`
+                : '';
+            text.textContent = `${seg.id || ''}${mult}`;
             group.appendChild(text);
           }
         }
