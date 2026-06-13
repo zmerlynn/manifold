@@ -672,23 +672,22 @@
       loadTrace(JSON.parse(await file.text()), file.name);
     });
 
+    // Phase swaps keep the current pan/zoom so the camera stays put while the
+    // arrangement evolves; use the Fit button to reframe the current phase.
     els.phase.addEventListener('change', () => {
       state.phaseIndex = Number(els.phase.value);
-      fitCurrentPhase();
       render();
     });
 
     els.prev.addEventListener('click', () => {
       if (!state.trace) return;
       state.phaseIndex = Math.max(0, state.phaseIndex - 1);
-      fitCurrentPhase();
       render();
     });
 
     els.next.addEventListener('click', () => {
       if (!state.trace) return;
       state.phaseIndex = Math.min(state.trace.phases.length - 1, state.phaseIndex + 1);
-      fitCurrentPhase();
       render();
     });
 
