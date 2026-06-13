@@ -19,9 +19,12 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <map>
+#include <ostream>
 #include <random>
 #include <sstream>
 #include <string>
@@ -29,6 +32,7 @@
 #include <utility>
 #include <vector>
 
+#include "../src/boolean2_diagnostics.h"
 #include "manifold/common.h"
 #include "manifold/cross_section.h"
 #include "manifold/manifold.h"
@@ -1207,3 +1211,210 @@ TEST(Boolean2, GauntletStressD_ShortEdgeFusion) {
   EXPECT_NEAR(std::fabs(TotalSignedArea(out)), d * h, 1e-3 * d * h)
       << "probes did not cancel to the host";
 }
+#ifdef MANIFOLD_DEBUG
+namespace {
+void WriteEscaped(std::ostream& os, const std::string& s) {
+  os << '"';
+  for (char c : s) {
+    switch (c) {
+      case '"':
+        os << "\\\"";
+        break;
+      case '\\':
+        os << "\\\\";
+        break;
+      case '\n':
+        os << "\\n";
+        break;
+      case '\r':
+        os << "\\r";
+        break;
+      case '\t':
+        os << "\\t";
+        break;
+      default:
+        os << c;
+        break;
+    }
+  }
+  os << '"';
+}
+
+void WriteVec2(std::ostream& os, const vec2& p) {
+  os << '[' << p.x << ',' << p.y << ']';
+}
+
+void WriteField(std::ostream& os, const char* name, const std::string& value,
+                bool comma = true) {
+  WriteEscaped(os, name);
+  os << ':';
+  WriteEscaped(os, value);
+  if (comma) os << ',';
+}
+
+template <typename T, typename F>
+void WriteArray(std::ostream& os, const std::vector<T>& items, F writeItem) {
+  os << '[';
+  for (size_t i = 0; i < items.size(); ++i) {
+    if (i > 0) os << ',';
+    writeItem(os, items[i]);
+  }
+  os << ']';
+}
+
+void WriteTraceJson(std::ostream& os, const Trace& trace) {
+  os << std::setprecision(17);
+  os << "{\n";
+  WriteEscaped(os, "eps");
+  os << ':' << trace.eps << ",\n";
+  WriteField(os, "rule", trace.rule);
+  os << "\n";
+  WriteEscaped(os, "phases");
+  os << ":[\n";
+  for (size_t i = 0; i < trace.phases.size(); ++i) {
+    const TracePhase& phase = trace.phases[i];
+    if (i > 0) os << ",\n";
+    os << '{';
+    WriteField(os, "name", phase.name);
+    WriteEscaped(os, "points");
+    os << ':';
+    WriteArray(os, phase.points, [](std::ostream& out, const TracePoint& p) {
+      out << '{';
+      WriteField(out, "id", p.id);
+      WriteEscaped(out, "xy");
+      out << ':';
+      WriteVec2(out, p.p);
+      out << ',';
+      WriteField(out, "kind", p.kind);
+      WriteField(out, "source", p.source);
+      WriteField(out, "label", p.label, false);
+      out << '}';
+    });
+    os << ',';
+    WriteEscaped(os, "segments");
+    os << ':';
+    WriteArray(os, phase.segments,
+               [](std::ostream& out, const TraceSegment& s) {
+                 out << '{';
+                 WriteField(out, "id", s.id);
+                 WriteEscaped(out, "a");
+                 out << ':';
+                 WriteVec2(out, s.a);
+                 out << ',';
+                 WriteEscaped(out, "b");
+                 out << ':';
+                 WriteVec2(out, s.b);
+                 out << ',';
+                 WriteField(out, "kind", s.kind);
+                 WriteField(out, "source", s.source);
+                 WriteEscaped(out, "mult");
+                 out << ':' << s.mult << ',';
+                 WriteField(out, "label", s.label, false);
+                 out << '}';
+               });
+    os << ',';
+    WriteEscaped(os, "polygons");
+    os << ':';
+    WriteArray(os, phase.polygons,
+               [](std::ostream& out, const TracePolygon& p) {
+                 out << '{';
+                 WriteField(out, "id", p.id);
+                 WriteEscaped(out, "verts");
+                 out << ":[";
+                 for (size_t j = 0; j < p.verts.size(); ++j) {
+                   if (j > 0) out << ',';
+                   WriteVec2(out, p.verts[j]);
+                 }
+                 out << "],";
+                 WriteField(out, "kind", p.kind);
+                 WriteField(out, "source", p.source);
+                 WriteEscaped(out, "winding");
+                 out << ':' << p.winding << ',';
+                 WriteEscaped(out, "inside");
+                 out << ':' << (p.inside ? "true" : "false") << ',';
+                 WriteField(out, "label", p.label, false);
+                 out << '}';
+               });
+    os << ',';
+    WriteEscaped(os, "annotations");
+    os << ':';
+    WriteArray(os, phase.annotations,
+               [](std::ostream& out, const TraceAnnotation& a) {
+                 out << '{';
+                 WriteField(out, "target", a.target);
+                 WriteField(out, "key", a.key);
+                 WriteField(out, "value", a.value, false);
+                 out << '}';
+               });
+    os << '}';
+  }
+  os << "\n]\n}\n";
+}
+}  // namespace
+
+// Case A (gauntlet StressA): a unit square unioned with a tiny triangle whose
+// middle vertex sits ~2*eps from a square corner. With the local-origin
+// translate the arrangement annihilates the whole square (area 1 -> 0); without
+// it the result is correct. RemoveOverlaps2D operates on already-translated
+// coordinates, so apply the bbox-center shift here (as ApplyFillRule does) to
+// record the failing arrangement. Run with --gtest_also_run_disabled_tests.
+TEST(Boolean2, DISABLED_TraceSquareAnnihilation) {
+  SimplePolygon square = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
+  SimplePolygon tri = {{1.5000023810829433e-06, -8.6602402906521135e-07},
+                       {2.3810953209135732e-12, 1.3747192273300745e-12},
+                       {2.3810953209135732e-12, -1.7320494328496497e-06}};
+
+  vec2 lo = square[0], hi = square[0];
+  auto extend = [&](const SimplePolygon& ring) {
+    for (const vec2& v : ring) {
+      lo.x = std::min(lo.x, v.x);
+      lo.y = std::min(lo.y, v.y);
+      hi.x = std::max(hi.x, v.x);
+      hi.y = std::max(hi.y, v.y);
+    }
+  };
+  extend(square);
+  extend(tri);
+  const vec2 origin = 0.5 * (lo + hi);
+  for (vec2& v : square) v -= origin;
+  for (vec2& v : tri) v -= origin;
+
+  const Polygons a{square}, b{tri};
+  const double eps = InferEps(a, b);
+
+  std::vector<vec2> verts;
+  std::vector<EdgeM> edges;
+  auto append = [&](const Polygons& polys, int mult) {
+    for (const SimplePolygon& loop : polys) {
+      const int base = static_cast<int>(verts.size());
+      const int n = static_cast<int>(loop.size());
+      for (const vec2& v : loop) verts.push_back(v);
+      for (int i = 0; i < n; ++i)
+        edges.push_back({base + i, base + (i + 1) % n, mult});
+    }
+  };
+  append(a, 1);
+  append(b, 1);
+
+  Trace trace;
+  const OverlapResult result = RemoveOverlaps2D(
+      verts, edges, eps, /*debug=*/false, WindRule::Add, &trace);
+  const Polygons finalPolys = OutEdgesToPolygons(result.verts, result.edges);
+
+  TracePhase& phase = trace.AddPhase("final_polygons");
+  for (int i = 0; i < static_cast<int>(finalPolys.size()); ++i)
+    phase.polygons.push_back({"poly" + std::to_string(i), finalPolys[i],
+                              "final_polygon", "", 0, true, ""});
+  phase.annotations.push_back(
+      {"summary",
+       "Add(unit square, tiny triangle): expected the square (area ~1); got " +
+           std::to_string(finalPolys.size()) + " output ring(s).",
+       ""});
+
+  std::ofstream out("boolean2_trace_square_annihilation.json");
+  ASSERT_TRUE(out.good());
+  WriteTraceJson(out, trace);
+  std::cout << "[trace] wrote boolean2_trace_square_annihilation.json; rings="
+            << finalPolys.size() << "\n";
+}
+#endif  // MANIFOLD_DEBUG
