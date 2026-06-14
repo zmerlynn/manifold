@@ -54,6 +54,7 @@
 #include "manifold/cross_section.h"
 #include "manifold/manifold.h"
 #include "manifold/polygon.h"
+#include "test.h"
 
 using namespace fuzztest;
 
@@ -102,6 +103,76 @@ double MultiStepBooleanAreaTol(const manifold::CrossSection& a,
   // lost faces, loose enough for eps-scale sliver churn in three-op formulas.
   return 1e-5 * (1.0 + std::fabs(a.Area()) + std::fabs(b.Area()) +
                  std::fabs(c.Area()));
+}
+
+double RawOrient(const manifold::vec2& a, const manifold::vec2& b,
+                 const manifold::vec2& c) {
+  return la::cross(b - a, c - a);
+}
+
+bool RawOnSegment(const manifold::vec2& a, const manifold::vec2& b,
+                  const manifold::vec2& p) {
+  constexpr double kTol = 1e-12;
+  return std::fabs(RawOrient(a, b, p)) <= kTol &&
+         p.x >= std::min(a.x, b.x) - kTol && p.x <= std::max(a.x, b.x) + kTol &&
+         p.y >= std::min(a.y, b.y) - kTol && p.y <= std::max(a.y, b.y) + kTol;
+}
+
+bool RawSegmentsIntersect(const manifold::vec2& a, const manifold::vec2& b,
+                          const manifold::vec2& c, const manifold::vec2& d) {
+  const double o1 = RawOrient(a, b, c);
+  const double o2 = RawOrient(a, b, d);
+  const double o3 = RawOrient(c, d, a);
+  const double o4 = RawOrient(c, d, b);
+  if ((o1 > 0) != (o2 > 0) && (o3 > 0) != (o4 > 0)) return true;
+  return RawOnSegment(a, b, c) || RawOnSegment(a, b, d) ||
+         RawOnSegment(c, d, a) || RawOnSegment(c, d, b);
+}
+
+bool IsSimplePositiveRawRing(const manifold::SimplePolygon& ring) {
+  if (ring.size() < 3) return false;
+  const double area = RawSignedArea(ring);
+  if (!std::isfinite(area) || area <= 1e-9) return false;
+  const size_t n = ring.size();
+  for (size_t i = 0; i < n; ++i) {
+    const size_t iNext = (i + 1) % n;
+    for (size_t j = i + 1; j < n; ++j) {
+      const size_t jNext = (j + 1) % n;
+      if (i == j || iNext == j || jNext == i) continue;
+      if (RawSegmentsIntersect(ring[i], ring[iNext], ring[j], ring[jNext])) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+double SimplePositiveRawArea(const manifold::Polygons& polys) {
+  if (polys.size() != 1 || !IsSimplePositiveRawRing(polys.front())) return 0.0;
+  return RawSignedArea(polys.front());
+}
+
+// Assert a CrossSection's area against an engine-independent raw anchor: Exact
+// pins it to the anchor (an input that should round-trip), Floor requires it to
+// stay >= the anchor (a union that must retain a piece). Returns whether the
+// section is non-empty so callers can skip dependent checks on a collapse.
+enum class AreaAnchor { Exact, Floor };
+
+bool ExpectAreaAnchor(const manifold::CrossSection& crossSection, double anchor,
+                      double relTol, const char* context,
+                      AreaAnchor mode = AreaAnchor::Exact) {
+  if (!std::isfinite(anchor) || anchor <= 1e-9) return false;
+  const double tol = relTol * (1.0 + std::fabs(anchor));
+  EXPECT_FALSE(crossSection.IsEmpty())
+      << context << " collapsed despite independent raw area " << anchor;
+  if (mode == AreaAnchor::Exact) {
+    EXPECT_NEAR(crossSection.Area(), anchor, tol)
+        << context << " area differs from independent raw anchor";
+  } else {
+    EXPECT_GE(crossSection.Area(), anchor - tol)
+        << context << " dropped below independent raw-area floor";
+  }
+  return !crossSection.IsEmpty() && std::fabs(crossSection.Area()) > 1e-9;
 }
 
 manifold::Polygons ToPolygons(const RawPolygons& raw) {
@@ -249,6 +320,14 @@ void BooleanRobustness(const RawPolygons& rawA, const RawPolygons& rawB,
   const manifold::CrossSection b(bPolys);
   const auto result = ApplyBoolean(a, b, op);
   ExpectCrossSectionValid(result);
+  if (op == manifold::OpType::Add) {
+    const double rawAreaA = SimplePositiveRawArea(aPolys);
+    const double rawAreaB = SimplePositiveRawArea(bPolys);
+    if (rawAreaA > 1e-9 && rawAreaB > 1e-9) {
+      ExpectAreaAnchor(result, std::max(rawAreaA, rawAreaB), 1e-5,
+                       "raw simple-ring union", AreaAnchor::Floor);
+    }
+  }
 }
 
 void OffsetRobustness(const RawPolygons& raw, double delta,
@@ -263,20 +342,38 @@ void OffsetRobustness(const RawPolygons& raw, double delta,
 
 void ManifoldExtrudeRoundTrip(const RawPolygons& raw, double height,
                               int nDivisions) {
-  const manifold::CrossSection input(ToPolygons(raw));
+  const manifold::Polygons inputPolys = ToPolygons(raw);
+  const double rawArea = SimplePositiveRawArea(inputPolys);
+  const manifold::CrossSection input(inputPolys);
   ExpectCrossSectionValid(input);
-  if (input.IsEmpty() || std::fabs(input.Area()) <= 1e-9) return;
+  if (rawArea > 1e-9) {
+    if (!ExpectAreaAnchor(input, rawArea, 1e-6, "raw simple extrude input")) {
+      return;
+    }
+  } else if (input.IsEmpty() || std::fabs(input.Area()) <= 1e-9) {
+    return;
+  }
 
   const auto solid =
       manifold::Manifold::Extrude(input.ToPolygons(), height, nDivisions);
   EXPECT_EQ(solid.Status(), manifold::Manifold::Error::NoError);
   EXPECT_TRUE(std::isfinite(solid.Volume()));
+  if (rawArea > 1e-9) {
+    EXPECT_NEAR(solid.Volume(), rawArea * height,
+                1e-6 * (1.0 + std::fabs(rawArea * height)));
+  }
 
   const manifold::CrossSection projected(solid.Project());
   ExpectCrossSectionValid(projected);
+  if (rawArea > 1e-9) {
+    EXPECT_NEAR(projected.Area(), rawArea, 1e-6 * (1.0 + std::fabs(rawArea)));
+  }
 
   const manifold::CrossSection middle(solid.Slice(height * 0.5));
   ExpectCrossSectionValid(middle);
+  if (rawArea > 1e-9) {
+    EXPECT_NEAR(middle.Area(), rawArea, 1e-6 * (1.0 + std::fabs(rawArea)));
+  }
 }
 
 manifold::SimplePolygon StarPolygon(const std::vector<double>& radii) {
@@ -354,26 +451,28 @@ std::vector<manifold::CrossSection> SeparatedRegulars(int sides, double radius,
 
 void ManifoldSimpleExtrudeRoundTrip(const std::vector<double>& radii,
                                     double height, int nDivisions) {
-  const manifold::CrossSection input(StarPolygon(radii));
+  const manifold::SimplePolygon ring = StarPolygon(radii);
+  const double rawArea = RawArea(ring);
+  const manifold::CrossSection input(ring);
   ExpectCrossSectionValid(input);
-  if (input.IsEmpty() || std::fabs(input.Area()) <= 1e-9) return;
+  if (!ExpectAreaAnchor(input, rawArea, 1e-6, "star extrude input")) {
+    return;
+  }
 
   const auto solid =
       manifold::Manifold::Extrude(input.ToPolygons(), height, nDivisions);
   EXPECT_EQ(solid.Status(), manifold::Manifold::Error::NoError);
   EXPECT_TRUE(std::isfinite(solid.Volume()));
-  EXPECT_NEAR(solid.Volume(), input.Area() * height,
-              1e-6 * (1.0 + std::fabs(input.Area() * height)));
+  EXPECT_NEAR(solid.Volume(), rawArea * height,
+              1e-6 * (1.0 + std::fabs(rawArea * height)));
 
   const manifold::CrossSection projected(solid.Project());
   ExpectCrossSectionValid(projected);
-  EXPECT_NEAR(projected.Area(), input.Area(),
-              1e-6 * (1.0 + std::fabs(input.Area())));
+  EXPECT_NEAR(projected.Area(), rawArea, 1e-6 * (1.0 + std::fabs(rawArea)));
 
   const manifold::CrossSection middle(solid.Slice(height * 0.5));
   ExpectCrossSectionValid(middle);
-  EXPECT_NEAR(middle.Area(), input.Area(),
-              1e-6 * (1.0 + std::fabs(input.Area())));
+  EXPECT_NEAR(middle.Area(), rawArea, 1e-6 * (1.0 + std::fabs(rawArea)));
 }
 
 void BooleanExtrudeRoundTrip(const std::vector<double>& radiiA,
@@ -691,45 +790,49 @@ void ManifoldTransformedExtrudeRoundTrip(const std::vector<double>& radii,
                                          double rotation, double scaleX,
                                          double scaleY, double height,
                                          int nDivisions) {
+  const double rawArea =
+      RawArea(StarPolygon(radii)) * std::fabs(scaleX * scaleY);
   const manifold::CrossSection input =
       manifold::CrossSection(StarPolygon(radii))
           .Rotate(rotation)
           .Scale({scaleX, scaleY});
   ExpectCrossSectionValid(input);
-  if (input.IsEmpty() || std::fabs(input.Area()) <= 1e-9) return;
+  if (!ExpectAreaAnchor(input, rawArea, 1e-6, "transformed star input")) {
+    return;
+  }
 
   const auto solid =
       manifold::Manifold::Extrude(input.ToPolygons(), height, nDivisions);
   EXPECT_EQ(solid.Status(), manifold::Manifold::Error::NoError);
   EXPECT_TRUE(std::isfinite(solid.Volume()));
-  EXPECT_NEAR(solid.Volume(), input.Area() * height,
-              1e-6 * (1.0 + std::fabs(input.Area() * height)));
+  EXPECT_NEAR(solid.Volume(), rawArea * height,
+              1e-6 * (1.0 + std::fabs(rawArea * height)));
 
   const manifold::CrossSection projected(solid.Project());
   ExpectCrossSectionValid(projected);
-  EXPECT_NEAR(projected.Area(), input.Area(),
-              1e-6 * (1.0 + std::fabs(input.Area())));
+  EXPECT_NEAR(projected.Area(), rawArea, 1e-6 * (1.0 + std::fabs(rawArea)));
 
   const manifold::CrossSection middle(solid.Slice(height * 0.5));
   ExpectCrossSectionValid(middle);
-  EXPECT_NEAR(middle.Area(), input.Area(),
-              1e-6 * (1.0 + std::fabs(input.Area())));
+  EXPECT_NEAR(middle.Area(), rawArea, 1e-6 * (1.0 + std::fabs(rawArea)));
 }
 
 void SimpleBooleanIdentities(const std::vector<double>& radii) {
-  const manifold::CrossSection input(StarPolygon(radii));
+  const manifold::SimplePolygon ring = StarPolygon(radii);
+  const double rawArea = RawArea(ring);
+  const manifold::CrossSection input(ring);
   ExpectCrossSectionValid(input);
-  if (input.IsEmpty() || std::fabs(input.Area()) <= 1e-9) return;
+  if (!ExpectAreaAnchor(input, rawArea, 1e-6, "star boolean input")) {
+    return;
+  }
 
   const auto unioned = input + input;
   ExpectCrossSectionValid(unioned);
-  EXPECT_NEAR(unioned.Area(), input.Area(),
-              1e-6 * (1.0 + std::fabs(input.Area())));
+  EXPECT_NEAR(unioned.Area(), rawArea, 1e-6 * (1.0 + std::fabs(rawArea)));
 
   const auto intersected = input.Boolean(input, manifold::OpType::Intersect);
   ExpectCrossSectionValid(intersected);
-  EXPECT_NEAR(intersected.Area(), input.Area(),
-              1e-6 * (1.0 + std::fabs(input.Area())));
+  EXPECT_NEAR(intersected.Area(), rawArea, 1e-6 * (1.0 + std::fabs(rawArea)));
 
   const auto subtracted = input - input;
   ExpectCrossSectionValid(subtracted);
@@ -775,9 +878,12 @@ void TranslationInvariance(const std::vector<double>& radii, double translateX,
   if (!std::isfinite(translateX) || !std::isfinite(translateY)) return;
 
   const manifold::SimplePolygon ring = StarPolygon(radii);
+  const double rawArea = RawArea(ring);
   const manifold::CrossSection base(ring);
   ExpectCrossSectionValid(base);
-  if (base.IsEmpty() || std::fabs(base.Area()) <= 1e-9) return;
+  if (!ExpectAreaAnchor(base, rawArea, 1e-6, "translation base input")) {
+    return;
+  }
 
   manifold::SimplePolygon translated;
   translated.reserve(ring.size());
@@ -786,11 +892,12 @@ void TranslationInvariance(const std::vector<double>& radii, double translateX,
   }
   const manifold::CrossSection shifted(translated);
   ExpectCrossSectionValid(shifted);
+  ExpectAreaAnchor(shifted, rawArea, 1e-6, "translated star input");
 
   // Area and contour count are invariants of translation.
-  const double tol = 1e-6 * (1.0 + std::fabs(base.Area()) +
-                             std::fabs(translateX) + std::fabs(translateY));
-  EXPECT_NEAR(shifted.Area(), base.Area(), tol);
+  const double tol = 1e-6 * (1.0 + std::fabs(rawArea) + std::fabs(translateX) +
+                             std::fabs(translateY));
+  EXPECT_NEAR(shifted.Area(), rawArea, tol);
   EXPECT_EQ(shifted.NumContour(), base.NumContour());
 }
 
@@ -805,10 +912,15 @@ void BooleanCommutativity(const std::vector<double>& radiiA,
                           double translateY) {
   if (!std::isfinite(translateX) || !std::isfinite(translateY)) return;
 
-  const manifold::CrossSection a(StarPolygon(radiiA));
-  const manifold::CrossSection b = manifold::CrossSection(StarPolygon(radiiB))
-                                       .Translate({translateX, translateY});
-  if (a.IsEmpty() || b.IsEmpty()) return;
+  const manifold::SimplePolygon rawA = StarPolygon(radiiA);
+  const manifold::SimplePolygon rawB = StarPolygon(radiiB);
+  const double rawAreaA = RawArea(rawA);
+  const double rawAreaB = RawArea(rawB);
+  const manifold::CrossSection a(rawA);
+  const manifold::CrossSection b =
+      manifold::CrossSection(rawB).Translate({translateX, translateY});
+  if (!ExpectAreaAnchor(a, rawAreaA, 1e-6, "commutativity A")) return;
+  if (!ExpectAreaAnchor(b, rawAreaB, 1e-6, "commutativity B")) return;
 
   const auto unionAB = a + b;
   const auto unionBA = b + a;
@@ -822,6 +934,10 @@ void BooleanCommutativity(const std::vector<double>& radiiA,
   const double tol = 1e-6 * (1.0 + std::fabs(a.Area()) + std::fabs(b.Area()));
   EXPECT_NEAR(unionAB.Area(), unionBA.Area(), tol) << "A + B != B + A";
   EXPECT_NEAR(intersectAB.Area(), intersectBA.Area(), tol) << "A ∩ B != B ∩ A";
+  ExpectAreaAnchor(unionAB, std::max(rawAreaA, rawAreaB), 1e-5,
+                   "commutativity A+B", AreaAnchor::Floor);
+  ExpectAreaAnchor(unionBA, std::max(rawAreaA, rawAreaB), 1e-5,
+                   "commutativity B+A", AreaAnchor::Floor);
 }
 
 // Subtract invariants: for any two 2D regions A and B,
@@ -845,12 +961,20 @@ void BooleanAssociativity(const std::vector<double>& radiiA,
   if (!std::isfinite(tBx) || !std::isfinite(tBy)) return;
   if (!std::isfinite(tCx) || !std::isfinite(tCy)) return;
 
-  const manifold::CrossSection a(StarPolygon(radiiA));
+  const manifold::SimplePolygon rawA = StarPolygon(radiiA);
+  const manifold::SimplePolygon rawB = StarPolygon(radiiB);
+  const manifold::SimplePolygon rawC = StarPolygon(radiiC);
+  const double rawAreaA = RawArea(rawA);
+  const double rawAreaB = RawArea(rawB);
+  const double rawAreaC = RawArea(rawC);
+  const manifold::CrossSection a(rawA);
   const manifold::CrossSection b =
-      manifold::CrossSection(StarPolygon(radiiB)).Translate({tBx, tBy});
+      manifold::CrossSection(rawB).Translate({tBx, tBy});
   const manifold::CrossSection c =
-      manifold::CrossSection(StarPolygon(radiiC)).Translate({tCx, tCy});
-  if (a.IsEmpty() || b.IsEmpty() || c.IsEmpty()) return;
+      manifold::CrossSection(rawC).Translate({tCx, tCy});
+  if (!ExpectAreaAnchor(a, rawAreaA, 1e-6, "associativity A")) return;
+  if (!ExpectAreaAnchor(b, rawAreaB, 1e-6, "associativity B")) return;
+  if (!ExpectAreaAnchor(c, rawAreaC, 1e-6, "associativity C")) return;
 
   const auto ab = a + b;
   const auto ab_c = ab + c;
@@ -868,6 +992,9 @@ void BooleanAssociativity(const std::vector<double>& radiiA,
 
   const double tol = MultiStepBooleanAreaTol(a, b, c);
   EXPECT_NEAR(ab_c.Area(), a_bc.Area(), tol) << "(A ∪ B) ∪ C != A ∪ (B ∪ C)";
+  const double rawFloor = std::max({rawAreaA, rawAreaB, rawAreaC});
+  ExpectAreaAnchor(ab_c, rawFloor, 1e-5, "(A+B)+C", AreaAnchor::Floor);
+  ExpectAreaAnchor(a_bc, rawFloor, 1e-5, "A+(B+C)", AreaAnchor::Floor);
   EXPECT_NEAR(aIntB_C.Area(), a_IntBC.Area(), tol)
       << "(A ∩ B) ∩ C != A ∩ (B ∩ C)";
 }
@@ -884,12 +1011,20 @@ void BooleanDistributivity(const std::vector<double>& radiiA,
   if (!std::isfinite(tBx) || !std::isfinite(tBy)) return;
   if (!std::isfinite(tCx) || !std::isfinite(tCy)) return;
 
-  const manifold::CrossSection a(StarPolygon(radiiA));
+  const manifold::SimplePolygon rawA = StarPolygon(radiiA);
+  const manifold::SimplePolygon rawB = StarPolygon(radiiB);
+  const manifold::SimplePolygon rawC = StarPolygon(radiiC);
+  const double rawAreaA = RawArea(rawA);
+  const double rawAreaB = RawArea(rawB);
+  const double rawAreaC = RawArea(rawC);
+  const manifold::CrossSection a(rawA);
   const manifold::CrossSection b =
-      manifold::CrossSection(StarPolygon(radiiB)).Translate({tBx, tBy});
+      manifold::CrossSection(rawB).Translate({tBx, tBy});
   const manifold::CrossSection c =
-      manifold::CrossSection(StarPolygon(radiiC)).Translate({tCx, tCy});
-  if (a.IsEmpty() || b.IsEmpty() || c.IsEmpty()) return;
+      manifold::CrossSection(rawC).Translate({tCx, tCy});
+  if (!ExpectAreaAnchor(a, rawAreaA, 1e-6, "distributivity A")) return;
+  if (!ExpectAreaAnchor(b, rawAreaB, 1e-6, "distributivity B")) return;
+  if (!ExpectAreaAnchor(c, rawAreaC, 1e-6, "distributivity C")) return;
 
   // Left side: A ∩ (B ∪ C)
   const auto bUc = b + c;
@@ -904,6 +1039,8 @@ void BooleanDistributivity(const std::vector<double>& radiiA,
   ExpectCrossSectionValid(right);
 
   const double tol = MultiStepBooleanAreaTol(a, b, c);
+  ExpectAreaAnchor(bUc, std::max(rawAreaB, rawAreaC), 1e-5, "B+C",
+                   AreaAnchor::Floor);
   EXPECT_NEAR(left.Area(), right.Area(), tol)
       << "A ∩ (B ∪ C) != (A ∩ B) ∪ (A ∩ C)";
 }
@@ -986,9 +1123,10 @@ void ScaleInvariance(const std::vector<double>& radii, double scale) {
   if (scale < 1e-4 || scale > 1e4) return;  // bound the domain
 
   const manifold::SimplePolygon ring = StarPolygon(radii);
+  const double rawArea = RawArea(ring);
   const manifold::CrossSection base(ring);
   ExpectCrossSectionValid(base);
-  if (base.IsEmpty() || std::fabs(base.Area()) <= 1e-9) return;
+  if (!ExpectAreaAnchor(base, rawArea, 1e-6, "scale base input")) return;
 
   manifold::SimplePolygon scaled;
   scaled.reserve(ring.size());
@@ -996,7 +1134,7 @@ void ScaleInvariance(const std::vector<double>& radii, double scale) {
   const manifold::CrossSection scaledCs(scaled);
   ExpectCrossSectionValid(scaledCs);
 
-  const double expectedArea = base.Area() * scale * scale;
+  const double expectedArea = rawArea * scale * scale;
   const double tol = 1e-6 * (1.0 + std::fabs(expectedArea));
   EXPECT_NEAR(scaledCs.Area(), expectedArea, tol)
       << "area(scale(P, " << scale << ")) != " << scale << "^2 * area(P)";
@@ -1013,9 +1151,12 @@ void RotationInvariance(const std::vector<double>& radii, double thetaRadians) {
   if (!std::isfinite(thetaRadians)) return;
 
   const manifold::SimplePolygon ring = StarPolygon(radii);
+  const double rawArea = RawArea(ring);
   const manifold::CrossSection base(ring);
   ExpectCrossSectionValid(base);
-  if (base.IsEmpty() || std::fabs(base.Area()) <= 1e-9) return;
+  if (!ExpectAreaAnchor(base, rawArea, 1e-6, "rotation base input")) {
+    return;
+  }
 
   const double c = std::cos(thetaRadians);
   const double s = std::sin(thetaRadians);
@@ -1027,8 +1168,8 @@ void RotationInvariance(const std::vector<double>& radii, double thetaRadians) {
   const manifold::CrossSection rotatedCs(rotated);
   ExpectCrossSectionValid(rotatedCs);
 
-  const double tol = 1e-6 * (1.0 + std::fabs(base.Area()));
-  EXPECT_NEAR(rotatedCs.Area(), base.Area(), tol)
+  const double tol = 1e-6 * (1.0 + std::fabs(rawArea));
+  EXPECT_NEAR(rotatedCs.Area(), rawArea, tol)
       << "area changed under rotation by " << thetaRadians << " radians";
   EXPECT_EQ(rotatedCs.NumContour(), base.NumContour())
       << "contour count changed under rotation";
@@ -1042,16 +1183,20 @@ void RotationInvariance(const std::vector<double>& radii, double thetaRadians) {
 // generation entirely).
 void OffsetIdentityAtZero(const std::vector<double>& radii,
                           manifold::CrossSection::JoinType joinType) {
-  const manifold::CrossSection input(StarPolygon(radii));
+  const manifold::SimplePolygon ring = StarPolygon(radii);
+  const double rawArea = RawArea(ring);
+  const manifold::CrossSection input(ring);
   ExpectCrossSectionValid(input);
-  if (input.IsEmpty() || std::fabs(input.Area()) <= 1e-9) return;
+  if (!ExpectAreaAnchor(input, rawArea, 1e-6, "offset identity input")) {
+    return;
+  }
 
   const auto output =
       input.Offset(0.0, joinType, /*miter_limit=*/2.0, /*segments=*/0);
   ExpectCrossSectionValid(output);
 
-  const double tol = 1e-6 * (1.0 + std::fabs(input.Area()));
-  EXPECT_NEAR(output.Area(), input.Area(), tol)
+  const double tol = 1e-6 * (1.0 + std::fabs(rawArea));
+  EXPECT_NEAR(output.Area(), rawArea, tol)
       << "Offset(0, " << static_cast<int>(joinType) << ") changed area";
   EXPECT_EQ(output.NumContour(), input.NumContour())
       << "Offset(0) changed contour count";
@@ -1062,9 +1207,11 @@ void OffsetIdentityAtZero(const std::vector<double>& radii,
 // Catches null-pointer / empty-vector edge cases that don't surface
 // in the standard fuzz targets (which generate non-trivial inputs).
 void EmptyIdentities(const std::vector<double>& radii) {
-  const manifold::CrossSection a(StarPolygon(radii));
+  const manifold::SimplePolygon ring = StarPolygon(radii);
+  const double rawArea = RawArea(ring);
+  const manifold::CrossSection a(ring);
   ExpectCrossSectionValid(a);
-  if (a.IsEmpty() || std::fabs(a.Area()) <= 1e-9) return;
+  if (!ExpectAreaAnchor(a, rawArea, 1e-6, "empty identity input")) return;
   const manifold::CrossSection e;
   ASSERT_TRUE(e.IsEmpty());
 
@@ -1077,11 +1224,11 @@ void EmptyIdentities(const std::vector<double>& radii) {
   ExpectCrossSectionValid(aIntE);
   ExpectCrossSectionValid(aMinusE);
 
-  const double tol = 1e-6 * (1.0 + std::fabs(a.Area()));
-  EXPECT_NEAR(aUnionE.Area(), a.Area(), tol) << "A + empty != A";
-  EXPECT_NEAR(eUnionA.Area(), a.Area(), tol) << "empty + A != A";
+  const double tol = 1e-6 * (1.0 + std::fabs(rawArea));
+  EXPECT_NEAR(aUnionE.Area(), rawArea, tol) << "A + empty != A";
+  EXPECT_NEAR(eUnionA.Area(), rawArea, tol) << "empty + A != A";
   EXPECT_TRUE(aIntE.IsEmpty()) << "A ∩ empty is non-empty";
-  EXPECT_NEAR(aMinusE.Area(), a.Area(), tol) << "A - empty != A";
+  EXPECT_NEAR(aMinusE.Area(), rawArea, tol) << "A - empty != A";
 }
 
 // Double mirror: A.Mirror(axis).Mirror(axis) == A. Mirror is its
@@ -1092,16 +1239,18 @@ void DoubleMirrorIdentity(const std::vector<double>& radii, double axisX,
   if (!std::isfinite(axisX) || !std::isfinite(axisY)) return;
   if (std::fabs(axisX) + std::fabs(axisY) < 1e-9) return;  // zero axis
 
-  const manifold::CrossSection a(StarPolygon(radii));
+  const manifold::SimplePolygon ring = StarPolygon(radii);
+  const double rawArea = RawArea(ring);
+  const manifold::CrossSection a(ring);
   ExpectCrossSectionValid(a);
-  if (a.IsEmpty() || std::fabs(a.Area()) <= 1e-9) return;
+  if (!ExpectAreaAnchor(a, rawArea, 1e-6, "double mirror input")) return;
 
   const manifold::vec2 axis{axisX, axisY};
   const auto twice = a.Mirror(axis).Mirror(axis);
   ExpectCrossSectionValid(twice);
 
-  const double tol = 1e-6 * (1.0 + std::fabs(a.Area()));
-  EXPECT_NEAR(twice.Area(), a.Area(), tol)
+  const double tol = 1e-6 * (1.0 + std::fabs(rawArea));
+  EXPECT_NEAR(twice.Area(), rawArea, tol)
       << "Mirror(axis).Mirror(axis) changed area";
   EXPECT_EQ(twice.NumContour(), a.NumContour())
       << "Mirror.Mirror changed contour count";
@@ -1112,12 +1261,21 @@ void SubtractInvariants(const std::vector<double>& radiiA,
                         double translateY) {
   if (!std::isfinite(translateX) || !std::isfinite(translateY)) return;
 
-  const manifold::CrossSection a(StarPolygon(radiiA));
-  const manifold::CrossSection b = manifold::CrossSection(StarPolygon(radiiB))
-                                       .Translate({translateX, translateY});
+  const manifold::SimplePolygon rawA = StarPolygon(radiiA);
+  const manifold::SimplePolygon rawB = StarPolygon(radiiB);
+  const double rawAreaA = RawArea(rawA);
+  const double rawAreaB = RawArea(rawB);
+  const manifold::CrossSection a(rawA);
+  const manifold::CrossSection b =
+      manifold::CrossSection(rawB).Translate({translateX, translateY});
   ExpectCrossSectionValid(a);
   ExpectCrossSectionValid(b);
-  if (a.IsEmpty() || b.IsEmpty()) return;
+  if (!ExpectAreaAnchor(a, rawAreaA, 1e-6, "subtract invariant A")) {
+    return;
+  }
+  if (!ExpectAreaAnchor(b, rawAreaB, 1e-6, "subtract invariant B")) {
+    return;
+  }
 
   const auto aMinusB = a - b;
   const auto bMinusA = b - a;
@@ -1141,6 +1299,8 @@ void SubtractInvariants(const std::vector<double>& radiiA,
   // area(A ∪ B) == area(A) + area(B) - area(A ∩ B)
   EXPECT_NEAR(aUnionB.Area(), a.Area() + b.Area() - aIntersectB.Area(), tol)
       << "inclusion-exclusion violated";
+  ExpectAreaAnchor(aUnionB, std::max(rawAreaA, rawAreaB), 1e-5,
+                   "subtract invariant union", AreaAnchor::Floor);
 }
 
 #if defined(MANIFOLD_PAR) && MANIFOLD_PAR == 1
@@ -1482,19 +1642,21 @@ void InputLoopOrderInvariance(const std::vector<double>& radiiA,
 // inputs, so this property checks area plus validity.
 void LargeEdgeCountSelfUnion(const std::vector<double>& radii) {
   if (radii.size() < 256) return;
-  const manifold::CrossSection input(StarPolygon(radii));
+  const manifold::SimplePolygon ring = StarPolygon(radii);
+  const double rawArea = RawArea(ring);
+  const manifold::CrossSection input(ring);
   ExpectCrossSectionValid(input);
-  if (input.IsEmpty()) return;
-  const double area = input.Area();
-  if (!std::isfinite(area) || std::fabs(area) <= 1e-9) return;
+  if (!ExpectAreaAnchor(input, rawArea, 1e-6, "large-edge self-union input")) {
+    return;
+  }
 
   const auto doubled = input + input;
   ExpectCrossSectionValid(doubled);
 
-  const double tol = 1e-6 * (1.0 + std::fabs(area));
-  EXPECT_NEAR(doubled.Area(), area, tol)
+  const double tol = 1e-6 * (1.0 + std::fabs(rawArea));
+  EXPECT_NEAR(doubled.Area(), rawArea, tol)
       << "Self-union changed area on large-edge-count input: " << "X.Area()="
-      << area << " (X+X).Area()=" << doubled.Area();
+      << rawArea << " (X+X).Area()=" << doubled.Area();
 }
 
 // Degenerate-input stress: inject deliberate degeneracies into star
@@ -1656,12 +1818,21 @@ void TinyFeatureNearCorner(const std::vector<double>& hostRadii,
 
     const manifold::CrossSection ca(shiftedHost);
     const manifold::CrossSection cb(shiftedFeature);
-    if (ca.IsEmpty() || cb.IsEmpty()) continue;
+    const double rawBigArea = RawArea(shiftedHost);
+    const double rawTinyArea = RawArea(shiftedFeature);
+    if (!ExpectAreaAnchor(ca, rawBigArea, 1e-6, "big piece input")) {
+      continue;
+    }
+    if (!ExpectAreaAnchor(cb, rawTinyArea, 1e-6, "tiny piece input")) {
+      continue;
+    }
 
     const auto unionAB = ca + cb;
     const auto intersectAB = ca.Boolean(cb, manifold::OpType::Intersect);
     ExpectCrossSectionValid(unionAB);
     ExpectCrossSectionValid(intersectAB);
+    ExpectAreaAnchor(unionAB, std::max(rawBigArea, rawTinyArea), 1e-3,
+                     "big+tiny union", AreaAnchor::Floor);
 
     // Edge-soup constructor path - the constructor takes the
     // polygons as one collection and runs cleanup itself.
@@ -1690,6 +1861,85 @@ void TinyFeatureNearCorner(const std::vector<double>& hostRadii,
         << "Edge-soup constructor disagrees with binary union (offset="
         << offset << " eps=" << eps << " i=" << i << ")";
   }
+}
+
+void ExpectRawUnionRetainsInputs(const manifold::SimplePolygon& a,
+                                 const manifold::SimplePolygon& b,
+                                 const char* context, bool expectDisjointSum) {
+  const double rawAreaA = RawArea(a);
+  const double rawAreaB = RawArea(b);
+  ASSERT_GT(rawAreaA, 0.0) << context;
+  ASSERT_GT(rawAreaB, 0.0) << context;
+
+  const manifold::CrossSection ca(a);
+  const manifold::CrossSection cb(b);
+  ExpectCrossSectionValid(ca);
+  ExpectCrossSectionValid(cb);
+  ExpectAreaAnchor(ca, rawAreaA, 1e-6, context);
+  ExpectAreaAnchor(cb, rawAreaB, 1e-6, context);
+
+  const auto unionAB = ca + cb;
+  ExpectCrossSectionValid(unionAB);
+  ExpectAreaAnchor(unionAB, std::max(rawAreaA, rawAreaB), 1e-3, context,
+                   AreaAnchor::Floor);
+  if (expectDisjointSum) {
+    EXPECT_NEAR(unionAB.Area(), rawAreaA + rawAreaB,
+                1e-3 * (1.0 + rawAreaA + rawAreaB))
+        << context << " union differs from independent raw disjoint sum";
+  }
+}
+
+// DISABLED: these three curated near-degenerate cases (big-piece drop at large
+// offset, StressA square annihilation, StressB sliver) collapse on today's
+// winding filter. Kept as a deterministic record with the independent raw-area
+// oracle; enable when the winding-robustness fix lands.
+TEST(CrossSectionFuzz, DISABLED_GauntletIndependentAreaAnchors) {
+  manifold::SimplePolygon big;
+  const std::vector<double> bigRadii = {
+      0., 356.3220416075996, 176.46461822660299, 2.451081611797258, 1.};
+  for (int k = 0; k < 5; ++k) {
+    const double theta = 2.0 * std::acos(-1.0) * k / 5;
+    big.push_back(
+        {bigRadii[k] * std::cos(theta), bigRadii[k] * std::sin(theta)});
+  }
+  manifold::SimplePolygon tiny;
+  const std::vector<double> tinyRadii = {
+      999.86970256972995, 1., 1., 823.03853274897119, 253.38906741827319};
+  for (int k = 0; k < 5; ++k) {
+    const double theta = 2.0 * std::acos(-1.0) * k / 5;
+    tiny.push_back({1e-3 * tinyRadii[k] * std::cos(theta),
+                    1e-3 * tinyRadii[k] * std::sin(theta)});
+  }
+  const double dirX = 0.41098114346248393;
+  const double dirY = -0.227966841143317;
+  const double dlen = std::sqrt(dirX * dirX + dirY * dirY);
+  const manifold::vec2 anchor{big[1].x + 1e-9 * dirX / dlen,
+                              big[1].y + 1e-9 * dirY / dlen};
+  const manifold::vec2 shift{anchor.x - tiny[0].x, anchor.y - tiny[0].y};
+  for (auto& v : tiny) {
+    v.x += shift.x + 4096.0;
+    v.y += shift.y + 4096.0;
+  }
+  for (auto& v : big) {
+    v.x += 4096.0;
+    v.y += 4096.0;
+  }
+  ExpectRawUnionRetainsInputs(big, tiny, "big-piece drop offset 4096",
+                              /*expectDisjointSum=*/true);
+
+  const manifold::SimplePolygon square{{0, 0}, {1, 0}, {1, 1}, {0, 1}};
+  const manifold::SimplePolygon tinyTri{
+      {1.5000023810829433e-06, -8.6602402906521135e-07},
+      {2.3810953209135732e-12, 1.3747192273300745e-12},
+      {2.3810953209135732e-12, -1.7320494328496497e-06}};
+  ExpectRawUnionRetainsInputs(square, tinyTri, "StressA square annihilation",
+                              /*expectDisjointSum=*/false);
+
+  const manifold::SimplePolygon sliverA{{0.0, 1e-8}, {0.5, 5e-9}, {1.0, 0.5}};
+  const manifold::SimplePolygon sliverB{
+      {2048.0, 0.0}, {4096.0, 4.096e-6}, {0.0, 0.0}};
+  ExpectRawUnionRetainsInputs(sliverA, sliverB, "StressB sliver",
+                              /*expectDisjointSum=*/true);
 }
 
 // Decompose/Compose round-trip on a HOLED CrossSection. The existing
@@ -1759,9 +2009,11 @@ void DecomposeRecomposeWithHoles(const std::vector<double>& outerRadii,
 // indistinguishable from once. Catches vertex jitter, contour drift,
 // or area regression on the second hull pass.
 void HullIdempotence(const std::vector<double>& radii) {
-  const manifold::CrossSection input(StarPolygon(radii));
+  const manifold::SimplePolygon ring = StarPolygon(radii);
+  const double rawArea = RawArea(ring);
+  const manifold::CrossSection input(ring);
   ExpectCrossSectionValid(input);
-  if (input.IsEmpty() || std::fabs(input.Area()) <= 1e-9) return;
+  if (!ExpectAreaAnchor(input, rawArea, 1e-6, "hull input")) return;
 
   const auto hull1 = input.Hull();
   ExpectCrossSectionValid(hull1);
@@ -1826,15 +2078,19 @@ void OffsetInverseConvex(int sides, double radius, double delta) {
 void SimplePositiveOffset(const std::vector<double>& radii, double delta,
                           manifold::CrossSection::JoinType joinType,
                           int circularSegments) {
-  const manifold::CrossSection input(StarPolygon(radii));
+  const manifold::SimplePolygon ring = StarPolygon(radii);
+  const double rawArea = RawArea(ring);
+  const manifold::CrossSection input(ring);
   ExpectCrossSectionValid(input);
-  if (input.IsEmpty() || std::fabs(input.Area()) <= 1e-9) return;
+  if (!ExpectAreaAnchor(input, rawArea, 1e-6, "positive offset input")) {
+    return;
+  }
 
   const auto output =
       input.Offset(delta, joinType, /*miter_limit=*/2.0, circularSegments);
   ExpectCrossSectionValid(output);
   EXPECT_FALSE(output.IsEmpty());
-  EXPECT_GE(output.Area(), input.Area() - 1e-6 * (1.0 + input.Area()));
+  EXPECT_GE(output.Area(), rawArea - 1e-6 * (1.0 + rawArea));
 }
 
 void OffsetExtrudeRoundTrip(const std::vector<double>& radii, double delta,

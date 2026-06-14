@@ -122,9 +122,9 @@ if(MANIFOLD_FUZZ)
   if(NOT FUZZTEST_COMPATIBILITY_MODE)
     set(FUZZTEST_FUZZING_MODE ON)
   endif()
-  # address sanitizer required
-  add_compile_options(-fsanitize=address)
-  add_link_options(-fsanitize=address)
+  # address and undefined behavior sanitizers required
+  add_compile_options(-fsanitize=address,undefined)
+  add_link_options(-fsanitize=address,undefined)
   # On aarch64 with clang, abseil's int128 code (pulled in by
   # fuzztest) emits calls to 128-bit overflow builtins like
   # __muloti4. These live in compiler-rt's builtins library;
