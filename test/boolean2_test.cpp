@@ -1417,4 +1417,75 @@ TEST(Boolean2, DISABLED_TraceSquareAnnihilation) {
   std::cout << "[trace] wrote boolean2_trace_square_annihilation.json; rings="
             << finalPolys.size() << "\n";
 }
+
+// Lane-2 audit witness: two axis-aligned rectangles overlapping by exactly
+// 2*eps in x. Intersect should yield a 2*eps x 256 sliver (~1.4e-6); the engine
+// drops it to empty, and bumping B's left x by one ULP flips it correct. Trace
+// both to see at which phase the two diverge (arrangement vs winding).
+TEST(Boolean2, DISABLED_TraceRectangleOverlapSliver) {
+  auto run = [](double x0, const std::string& tag, const std::string& file) {
+    SimplePolygon A = {{0, 0}, {2048, 0}, {2048, 2048}, {0, 2048}};
+    SimplePolygon B = {{x0, 512},
+                       {2303.9999999943693, 512},
+                       {2303.9999999943693, 768},
+                       {x0, 768}};
+    vec2 lo = A[0], hi = A[0];
+    auto extend = [&](const SimplePolygon& ring) {
+      for (const vec2& v : ring) {
+        lo.x = std::min(lo.x, v.x);
+        lo.y = std::min(lo.y, v.y);
+        hi.x = std::max(hi.x, v.x);
+        hi.y = std::max(hi.y, v.y);
+      }
+    };
+    extend(A);
+    extend(B);
+    const vec2 origin = 0.5 * (lo + hi);
+    for (vec2& v : A) v -= origin;
+    for (vec2& v : B) v -= origin;
+
+    const Polygons a{A}, b{B};
+    const double eps = InferEps(a, b);
+    std::vector<vec2> verts;
+    std::vector<EdgeM> edges;
+    auto append = [&](const Polygons& polys, int mult) {
+      for (const SimplePolygon& loop : polys) {
+        const int base = static_cast<int>(verts.size());
+        const int n = static_cast<int>(loop.size());
+        for (const vec2& v : loop) verts.push_back(v);
+        for (int i = 0; i < n; ++i)
+          edges.push_back({base + i, base + (i + 1) % n, mult});
+      }
+    };
+    append(a, 1);
+    append(b, 1);
+
+    Trace trace;
+    const OverlapResult result = RemoveOverlaps2D(
+        verts, edges, eps, /*debug=*/false, WindRule::Intersect, &trace);
+    const Polygons finalPolys = OutEdgesToPolygons(result.verts, result.edges);
+
+    TracePhase& phase = trace.AddPhase("final_polygons");
+    for (int i = 0; i < static_cast<int>(finalPolys.size()); ++i)
+      phase.polygons.push_back({"poly" + std::to_string(i), finalPolys[i],
+                                "final_polygon", "", 0, true, ""});
+    phase.annotations.push_back(
+        {"summary",
+         tag +
+             ": Intersect of two rectangles overlapping by 2*eps; expected a "
+             "2*eps x 256 sliver, got " +
+             std::to_string(finalPolys.size()) + " output ring(s).",
+         ""});
+
+    std::ofstream out(file);
+    ASSERT_TRUE(out.good());
+    WriteTraceJson(out, trace);
+    std::cout << "[trace] wrote " << file << "; rings=" << finalPolys.size()
+              << "\n";
+  };
+  run(2047.9999999943693, "dropped (x0=...43693)",
+      "boolean2_trace_rect_overlap_dropped.json");
+  run(2047.9999999943691, "kept (x0=...43691, +1 ULP)",
+      "boolean2_trace_rect_overlap_kept.json");
+}
 #endif  // MANIFOLD_DEBUG
