@@ -153,7 +153,18 @@ Polygons ApplyFillRule(const Polygons& a, const Polygons& b, int bSign,
   AppendInput(localB, bSign, verts, edges);
   if (verts.empty()) return {};
 
-  OverlapResult r = RemoveOverlaps2D(verts, edges, eps, /*debug=*/false, rule);
+  // Collect the un-translated coordinates (same append order, so index-parallel
+  // to `verts`); with `origin`, these let RemoveOverlaps2D evaluate the on-edge
+  // perp band translation-stably.
+  std::vector<vec2> origVerts;
+  {
+    std::vector<EdgeM> tmp;
+    AppendInput(a, 1, origVerts, tmp);
+    AppendInput(b, bSign, origVerts, tmp);
+  }
+
+  OverlapResult r = RemoveOverlaps2D(verts, edges, eps, /*debug=*/false, rule,
+                                     /*trace=*/nullptr, &origVerts, origin);
   return TranslatePolygons(OutEdgesToPolygons(r.verts, r.edges), origin);
 }
 
@@ -580,13 +591,107 @@ void BuildEdgeGeometry(const std::vector<EdgeM>& edges,
   }
 }
 
+// Minimal double-double so the on-edge perp can be evaluated in the
+// translated frame WITHOUT the catastrophic cancellation that the
+// local-origin shift injects for features far from the bbox center. Only the
+// handful of ops the band test needs (exact diff of two doubles, dd*dd, dd-dd).
+struct DD {
+  double hi = 0.0, lo = 0.0;
+};
+inline DD TwoDiff(double a, double b) {
+  const double s = a - b;
+  const double bb = s - a;
+  const double err = (a - (s - bb)) - (b + bb);
+  return {s, err};
+}
+inline DD QuickTwoSum(double a, double b) {
+  const double s = a + b;
+  const double e = b - (s - a);
+  return {s, e};
+}
+inline DD TwoProd(double a, double b) {
+  const double p = a * b;
+  return {p, std::fma(a, b, -p)};
+}
+inline DD DDSub(DD a, DD b) {
+  DD s = TwoDiff(a.hi, b.hi);
+  s.lo += a.lo - b.lo;
+  return QuickTwoSum(s.hi, s.lo);
+}
+inline DD DDAdd(DD a, DD b) {
+  DD s = TwoDiff(a.hi, -b.hi);
+  s.lo += a.lo + b.lo;
+  return QuickTwoSum(s.hi, s.lo);
+}
+inline DD DDMul(DD a, DD b) {
+  DD p = TwoProd(a.hi, b.hi);
+  p.lo += a.hi * b.lo + a.lo * b.hi;
+  return QuickTwoSum(p.hi, p.lo);
+}
+inline double DDValue(DD a) { return a.hi + a.lo; }
+
+// Translated coordinate `orig - origin` carried as a double-double, so a later
+// difference of two such coordinates reconstructs the relative position to
+// ~106-bit precision, with the origin term cancelling to ~1e-32 rather than at
+// the double round-off the bare subtraction would incur. This makes the on-edge
+// decision invariant to the global translation.
+struct DDVec2 {
+  DD x, y;
+};
+inline DDVec2 TranslatedDD(vec2 orig, vec2 origin) {
+  return {TwoDiff(orig.x, origin.x), TwoDiff(orig.y, origin.y)};
+}
+
+// origVerts[v] (if present and finite) is the untranslated coordinate of input
+// vertex v; origin is the local-origin shift. Returns whether a stable dd
+// coordinate is available for v.
+inline bool TryStableCoord(const std::vector<vec2>* origVerts, vec2 origin,
+                           int v, DDVec2* out) {
+  if (!origVerts || v < 0 || v >= static_cast<int>(origVerts->size())) {
+    return false;
+  }
+  const vec2 o = (*origVerts)[v];
+  if (!std::isfinite(o.x) || !std::isfinite(o.y)) return false;
+  *out = TranslatedDD(o, origin);
+  return true;
+}
+
 void RecordEdgeVertHit(const std::vector<EdgeM>& edges,
                        const std::vector<vec2>& verts,
                        const std::vector<EdgeGeom>& edgeG, double eps2, int v,
-                       int e, std::vector<EdgeVertHit>* hits) {
+                       int e, std::vector<EdgeVertHit>* hits,
+                       const std::vector<vec2>* origVerts = nullptr,
+                       vec2 origin = vec2(0.0)) {
   if (v == edges[e].v0 || v == edges[e].v1) return;
   const auto& g = edgeG[e];
   if (g.abLen2 == 0) return;
+
+  // Translation-stable path: evaluate the same perp band in a double-double
+  // frame reconstructed from the untranslated coordinates of v and the edge
+  // endpoints. Needs all three to be original input verts; otherwise fall
+  // through to the double path.
+  if (origVerts) {
+    DDVec2 dv, da, db;
+    if (TryStableCoord(origVerts, origin, v, &dv) &&
+        TryStableCoord(origVerts, origin, edges[e].v0, &da) &&
+        TryStableCoord(origVerts, origin, edges[e].v1, &db)) {
+      const DD abx = DDSub(db.x, da.x);
+      const DD aby = DDSub(db.y, da.y);
+      const DD apx = DDSub(dv.x, da.x);
+      const DD apy = DDSub(dv.y, da.y);
+      const DD abLen2 = DDAdd(DDMul(abx, abx), DDMul(aby, aby));
+      const double dotAB = DDValue(DDAdd(DDMul(apx, abx), DDMul(apy, aby)));
+      const double abLen2d = DDValue(abLen2);
+      if (dotAB <= 0 || dotAB >= abLen2d) return;
+      const DD cross = DDSub(DDMul(apx, aby), DDMul(apy, abx));
+      const double cross2 = DDValue(DDMul(cross, cross));
+      const double eps2_abLen2 = eps2 * abLen2d;
+      if (cross2 > eps2_abLen2) return;
+      hits->push_back({e, dotAB / abLen2d, v});
+      return;
+    }
+  }
+
   const vec2 ap = verts[v] - g.a;
   const double dotAB = dot(ap, g.ab);
   if (dotAB <= 0 || dotAB >= g.abLen2) return;
@@ -606,16 +711,21 @@ void ProcessEdgePair(const std::vector<EdgeM>& edges,
                      const std::vector<EdgeGeom>& edgeG, double eps,
                      const std::pair<int, int>& pr,
                      std::vector<EdgeVertHit>* hits,
-                     std::vector<IntersectionPoint>* intersections) {
+                     std::vector<IntersectionPoint>* intersections,
+                     const std::vector<vec2>* origVerts, vec2 origin) {
   const int i = pr.first;
   const int j = pr.second;
   const auto& ei = edges[i];
   const auto& ej = edges[j];
   const double eps2 = eps * eps;
-  RecordEdgeVertHit(edges, verts, edgeG, eps2, ei.v0, j, hits);
-  RecordEdgeVertHit(edges, verts, edgeG, eps2, ei.v1, j, hits);
-  RecordEdgeVertHit(edges, verts, edgeG, eps2, ej.v0, i, hits);
-  RecordEdgeVertHit(edges, verts, edgeG, eps2, ej.v1, i, hits);
+  RecordEdgeVertHit(edges, verts, edgeG, eps2, ei.v0, j, hits, origVerts,
+                    origin);
+  RecordEdgeVertHit(edges, verts, edgeG, eps2, ei.v1, j, hits, origVerts,
+                    origin);
+  RecordEdgeVertHit(edges, verts, edgeG, eps2, ej.v0, i, hits, origVerts,
+                    origin);
+  RecordEdgeVertHit(edges, verts, edgeG, eps2, ej.v1, i, hits, origVerts,
+                    origin);
   if (SharesEndpoint(ei, ej)) return;
   vec2 p;
   if (IntersectSegments({verts[ei.v0], verts[ei.v1], i},
@@ -662,7 +772,8 @@ void SortIntersections(std::vector<IntersectionPoint>* intersections) {
 
 NarrowPhaseResult BuildListsAndFindIntersections(
     const std::vector<EdgeM>& edges, const std::vector<vec2>& verts, double eps,
-    const std::vector<std::pair<int, int>>& pairs) {
+    const std::vector<std::pair<int, int>>& pairs,
+    const std::vector<vec2>* origVerts, vec2 origin) {
   const int nE = static_cast<int>(edges.size());
   NarrowPhaseResult result;
 
@@ -684,7 +795,8 @@ NarrowPhaseResult BuildListsAndFindIntersections(
                          countAt(size_t{0}), pairs.size(), [&](size_t idx) {
                            auto& l = tls.local();
                            ProcessEdgePair(edges, verts, edgeGRef, eps,
-                                           pairs[idx], &l.hits, &l.ix);
+                                           pairs[idx], &l.hits, &l.ix,
+                                           origVerts, origin);
                          });
     tls.combine_each([&](const Local& l) {
       flatHits.insert(flatHits.end(), l.hits.begin(), l.hits.end());
@@ -696,7 +808,7 @@ NarrowPhaseResult BuildListsAndFindIntersections(
   {
     for (const auto& pr : pairs) {
       ProcessEdgePair(edges, verts, edgeGRef, eps, pr, &flatHits,
-                      &result.intersections);
+                      &result.intersections, origVerts, origin);
     }
   }
   MaterializeEdgeVertLists(nE, flatHits, result.lists);
@@ -1042,6 +1154,78 @@ void MergeNearbyIntersectionVerts(
   const double newToOldThresh2 = 4 * eps * eps;
   std::vector<std::pair<int, int>> pairs;
   std::vector<std::pair<double, int>> tlist;
+  const double eps2 = eps * eps;
+
+  // Provenance/perpendicular-incidence gate for fusing a fresh intersection
+  // vertex onto a nearby OLD endpoint. A new-old pair is within the 2*eps broad
+  // band whenever a crossing lands near a corner, but proximity alone
+  // over-fuses distinct near-corner crossings (the along-line jitter of a true
+  // concurrency is unbounded as the crossing angle shallows, so no distance
+  // threshold separates must-fuse from must-not-fuse). Instead accept only when
+  // the crossing is GENUINELY at the old vertex: one of the new vertex's source
+  // edges - a real input edge transversal to `e` that passes through it - lies
+  // within the BOUNDED eps perpendicular band of the old endpoint. That
+  // perpendicular error is bounded (~the intersection rounding), so this test
+  // is sound where the along-line distance is not. `e` itself (and its exact
+  // duplicate from subject/clip doubling) is collinear with the sub-edge and
+  // trivially contains the endpoint, so it is excluded; only a transversal
+  // partner edge witnesses a true concurrency.
+  auto oldOnNewSourceEdge = [&](int newv, int vOld, int e) -> bool {
+    const vec2 pOld = verts[vOld];
+    const vec2 ea = verts[edges[e].v0];
+    const vec2 eDir = verts[edges[e].v1] - ea;
+    const double eLen2 = dot(eDir, eDir);
+    for (int f : vertEdges[newv]) {
+      if (f == e) continue;
+      const vec2 fa = verts[edges[f].v0];
+      const vec2 fb = verts[edges[f].v1];
+      const vec2 fDir = fb - fa;
+      const double fLen2 = dot(fDir, fDir);
+      if (fLen2 == 0) continue;
+      // Skip edges collinear with `e` (its duplicate or any overlapping
+      // collinear edge): they share `e`'s direction, so their perpendicular
+      // distance to an endpoint ON `e` is ~0 regardless of any real
+      // concurrency, which would re-admit the proximity over-fusion.
+      if (eLen2 > 0) {
+        // cr^2 / (eLen2*fLen2) == sin^2(angle), so 1e-20 is a ~1e-10 rad
+        // collinearity cutoff: only edges essentially parallel to `e` skip.
+        const double cr = la::cross(eDir, fDir);
+        if (cr * cr <= 1e-20 * eLen2 * fLen2) continue;
+      }
+      const double crf = la::cross(fDir, pOld - fa);
+      if (crf * crf <= eps2 * fLen2) return true;
+    }
+    return false;
+  };
+
+  // Provenance gate for fusing two fresh crossings that lie on the same edge
+  // `e`. The caller only pairs crossings already within ~eps ALONG `e` (the
+  // inner-loop tThresh bound), so this rescues a pair whose 2D distance landed
+  // just past the eps proximity cap while its along-edge separation stayed
+  // inside it; it does not reach concurrencies whose along-line jitter exceeds
+  // eps (~uL/sin(theta) at a shallow crossing) - those never enter the loop.
+  // The witness is shared provenance: a third input edge, transversal to `e`,
+  // incident to BOTH crossings means they are the SAME point (a straight edge
+  // meets `e` in one point, so two crossings within its eps perpendicular band
+  // coincide). Two genuinely distinct crossings of `e` never share such an
+  // edge.
+  auto shareTransversalEdge = [&](int va, int vb, int e) -> bool {
+    const vec2 eDir = verts[edges[e].v1] - verts[edges[e].v0];
+    const double eLen2 = dot(eDir, eDir);
+    for (int f : vertEdges[va]) {
+      if (f == e || !VESetContains(vertEdges[vb], f)) continue;
+      const vec2 fDir = verts[edges[f].v1] - verts[edges[f].v0];
+      const double fLen2 = dot(fDir, fDir);
+      if (fLen2 == 0) continue;
+      if (eLen2 > 0) {
+        const double cr = la::cross(eDir, fDir);
+        if (cr * cr <= 1e-20 * eLen2 * fLen2)
+          continue;  // collinear: not a witness
+      }
+      return true;
+    }
+    return false;
+  };
   for (size_t e = 0; e < edges.size(); ++e) {
     const auto& list = lists[e];
     const int v0 = edges[e].v0;
@@ -1064,17 +1248,18 @@ void MergeNearbyIntersectionVerts(
       tlist.emplace_back(t, v);
       // Only truly-new verts: widening old-old would stack error across ops.
       if (v >= oldVertEnd) {
-        const vec2 dA = p - a;
-        if (dot(dA, dA) <= newToOldThresh2) {
-          const int p0 = std::min(v, v0);
-          const int q0 = std::max(v, v0);
-          if (p0 != q0) pairs.emplace_back(p0, q0);
-        }
-        const vec2 dB = p - b;
-        if (dot(dB, dB) <= newToOldThresh2) {
-          const int p0 = std::min(v, v1);
-          const int q0 = std::max(v, v1);
-          if (p0 != q0) pairs.emplace_back(p0, q0);
+        // Broad-phase prefilter is distance (<= 2*eps); the ACCEPT decision is
+        // perpendicular incidence of a transversal source edge, not distance.
+        for (int endIdx = 0; endIdx < 2; ++endIdx) {
+          const int vOld = endIdx == 0 ? v0 : v1;
+          const vec2 dE = p - (endIdx == 0 ? a : b);
+          if (dot(dE, dE) > newToOldThresh2) continue;
+          const bool accept = oldOnNewSourceEdge(v, vOld, static_cast<int>(e));
+          if (accept) {
+            const int p0 = std::min(v, vOld);
+            const int q0 = std::max(v, vOld);
+            if (p0 != q0) pairs.emplace_back(p0, q0);
+          }
         }
       }
     }
@@ -1086,7 +1271,14 @@ void MergeNearbyIntersectionVerts(
         const int va = tlist[i].second;
         const int vb = tlist[j].second;
         const vec2 d = verts[vb] - verts[va];
-        if (dot(d, d) > newToNewThresh2) continue;
+        // Accept on either the eps proximity cap OR a shared transversal edge
+        // (the bounded concurrency witness, which also fuses a pair whose 2D
+        // distance landed just past the eps cap).
+        const bool nearEnough = dot(d, d) <= newToNewThresh2;
+        const bool concurrent =
+            va >= oldVertEnd && vb >= oldVertEnd &&
+            shareTransversalEdge(va, vb, static_cast<int>(e));
+        if (!nearEnough && !concurrent) continue;
         const int p = std::min(va, vb);
         const int q = std::max(va, vb);
         pairs.emplace_back(p, q);
@@ -1135,7 +1327,9 @@ void MergeNearbyIntersectionVerts(
 
 OverlapResult RemoveOverlaps2D(const std::vector<vec2>& vertsIn,
                                const std::vector<EdgeM>& edgesIn, double eps,
-                               bool debug, WindRule pred, Trace* trace) {
+                               bool debug, WindRule pred, Trace* trace,
+                               const std::vector<vec2>* origVertsIn,
+                               vec2 origin) {
   auto& P = GlobalPhases();
   ScopedTiming totalTiming(P.totalNs);
   TraceRecorder traceRecorder(trace, eps, pred);
@@ -1149,6 +1343,25 @@ OverlapResult RemoveOverlaps2D(const std::vector<vec2>& vertsIn,
   }
   const int numMerged = static_cast<int>(merge.verts.size());
   traceRecorder.RecordMergedVertices(merge.verts, merge.inputVert2Merged);
+
+  // Build untranslated coordinates for each merged vert, so the on-edge perp
+  // band can be evaluated translation-stably. MergeVerts keeps an actual input
+  // vertex as each cluster's representative, so the representative's
+  // untranslated coordinate is the input whose translated coordinate equals
+  // merge.verts[m] bit-for-bit. NaN-fill marks merged verts with no resolvable
+  // original (should not happen for representatives).
+  std::vector<vec2> mergedOrig;
+  if (origVertsIn && origVertsIn->size() == vertsIn.size()) {
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    mergedOrig.assign(numMerged, vec2(nan, nan));
+    for (size_t i = 0; i < vertsIn.size(); ++i) {
+      const int m = merge.inputVert2Merged[i];
+      if (m >= 0 && m < numMerged && vertsIn[i] == merge.verts[m])
+        mergedOrig[m] = (*origVertsIn)[i];
+    }
+  }
+  const std::vector<vec2>* mergedOrigPtr =
+      mergedOrig.empty() ? nullptr : &mergedOrig;
   // Edge collapse.
   std::vector<EdgeM> edges;
   {
@@ -1189,8 +1402,8 @@ OverlapResult RemoveOverlaps2D(const std::vector<vec2>& vertsIn,
   NarrowPhaseResult narrow;
   {
     ScopedTiming timing(P.narrowPhaseNs);
-    narrow = BuildListsAndFindIntersections(edges, merge.verts, eps,
-                                            intersectionPairs);
+    narrow = BuildListsAndFindIntersections(
+        edges, merge.verts, eps, intersectionPairs, mergedOrigPtr, origin);
   }
   traceRecorder.RecordEdgeVertLists(merge.verts, edges, narrow.lists);
   IntersectionInsertion inserted;

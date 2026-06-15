@@ -250,9 +250,16 @@ struct NarrowPhaseResult {
 // edge-vertex split lists and independent proper edge-edge intersection
 // candidates without mutating `verts` or `edges`; serial vs TBB execution is
 // an internal thresholded implementation detail.
+//
+// `origVerts` (optional, parallel to `verts`) + `origin` provide the
+// untranslated coordinates for the translation-stable on-edge perp band; see
+// RemoveOverlaps2D. `origVerts` entries are only consulted for vertices that
+// map to an original input vertex (index < its size and finite);
+// intersection-born vertices fall back to the translated doubles.
 NarrowPhaseResult BuildListsAndFindIntersections(
     const std::vector<EdgeM>& edges, const std::vector<vec2>& verts, double eps,
-    const std::vector<std::pair<int, int>>& pairs);
+    const std::vector<std::pair<int, int>>& pairs,
+    const std::vector<vec2>* origVerts = nullptr, vec2 origin = vec2(0.0));
 
 void CollectIntersectionPairs(const std::vector<EdgeM>& edges,
                               const std::vector<vec2>& verts, double eps,
@@ -302,11 +309,23 @@ struct OverlapResult {
 
 // `eps` is the per-op FP-noise bound (3D: Impl::epsilon_). The arrangement is
 // eps-only; tolerance-scale decimation is Simplify's job, as in boolean3.
+//
+// Translation-stable insertion: `origVertsIn` (optional, parallel to
+// `vertsIn`) carries the un-translated original input coordinates and `origin`
+// the local-origin shift such that vertsIn[i] == fl(origVertsIn[i] - origin).
+// When supplied, the on-edge perp band is evaluated in a compensated
+// double-double frame reconstructed from (orig - origin), which cancels
+// `origin` to ~106-bit precision (~1e-32, not bit-exact) and makes the on-edge
+// decision invariant to the global translation (fixes the band-edge flip that
+// drops StressA-class pieces). When null, the band is evaluated on the
+// translated doubles.
 OverlapResult RemoveOverlaps2D(const std::vector<vec2>& vertsIn,
                                const std::vector<EdgeM>& edgesIn, double eps,
                                bool debug = false,
                                WindRule pred = WindRule::Add,
-                               Trace* trace = nullptr);
+                               Trace* trace = nullptr,
+                               const std::vector<vec2>* origVertsIn = nullptr,
+                               vec2 origin = vec2(0.0));
 
 double InferEps(const Polygons& a, const Polygons& b);
 
