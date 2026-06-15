@@ -294,11 +294,15 @@ enum class WindRule {
   Intersect,
 };
 
-std::vector<OutEdge> FilterByWindingHalfedges(const CanonicalSubEdges& canon,
-                                              const std::vector<vec2>& verts,
-                                              bool debug = false,
-                                              WindRule rule = WindRule::Add,
-                                              Trace* trace = nullptr);
+// Dirt-simplest winding: Emmett's per-edge-left-side rule (#1707). For each
+// canonical sub-edge, ray-cast the winding just to its left and right and keep
+// it iff the rule disagrees across it. Correct ONLY on a true arrangement. The
+// nearest-edge clearance and the +x ray-cast winding both reuse boolean2's BVH
+// over the canonical sub-edges, so the pass is ~O(E log E) amortized rather
+// than O(E^2).
+std::vector<OutEdge> FilterByWinding(const CanonicalSubEdges& canon,
+                                     const std::vector<vec2>& verts,
+                                     WindRule rule = WindRule::Add);
 
 struct OverlapResult {
   std::vector<vec2> verts;

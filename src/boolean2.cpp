@@ -1431,11 +1431,11 @@ OverlapResult RemoveOverlaps2D(const std::vector<vec2>& vertsIn,
     canon = Canonicalize(edges, lists);
   }
   traceRecorder.RecordCanonicalSubedges(merge.verts, canon);
-  // Halfedge face-traversal winding filter.
+  // Per-edge ray-cast winding filter.
   std::vector<OutEdge> out;
   {
-    ScopedTiming timing(P.filterHalfedgeNs);
-    out = FilterByWindingHalfedges(canon, merge.verts, debug, pred, trace);
+    ScopedTiming timing(P.filterWindingNs);
+    out = FilterByWinding(canon, merge.verts, pred);
   }
   traceRecorder.RecordFilteredOutput(merge.verts, out);
   CountTimingCase();
