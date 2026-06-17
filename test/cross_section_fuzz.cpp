@@ -921,6 +921,10 @@ void ApexSkipNearLine(double apexPerpDist, double crossOffset) {
 void TranslationInvariance(const std::vector<double>& radii, double translateX,
                            double translateY) {
   if (!std::isfinite(translateX) || !std::isfinite(translateY)) return;
+  // Inputs above 1e6 encode a different polygon in double (ULP ~1e-7 at
+  // |t|~640M). The domain is capped to 1e6; this guard silently discards
+  // any corpus entries from the old [1e3, 1e9] domain on replay.
+  if (std::fabs(translateX) > 1e6 || std::fabs(translateY) > 1e6) return;
 
   const manifold::SimplePolygon ring = StarPolygon(radii);
   const double rawArea = RawArea(ring);
