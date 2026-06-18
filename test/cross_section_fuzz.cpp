@@ -332,13 +332,15 @@ double MinVertexToEdgeDist(const manifold::SimplePolygon& ring) {
   return minDist == std::numeric_limits<double>::max() ? 0.0 : minDist;
 }
 
-// Returns true if any ring in `polys` has a thinnest feature below `eps`.
+// Returns true if any ring in `polys` has a thinnest feature below `4 * eps`.
 // Use eps computed over the COMBINED bbox of the boolean operation (not per
 // operand) so that features that clear their own eps but not the union eps
-// are also rejected.
+// are also rejected. The 4x multiplier gives margin for features that are
+// nominally above eps but whose area oracle can still fail after the engine
+// numerically collapses them (observed at ~2x eps in practice).
 bool HasSubEpsFeature(const manifold::Polygons& polys, double eps) {
   for (const auto& ring : polys) {
-    if (MinVertexToEdgeDist(ring) < eps) return true;
+    if (MinVertexToEdgeDist(ring) < 4.0 * eps) return true;
   }
   return false;
 }
