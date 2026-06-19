@@ -923,10 +923,6 @@ void ApexSkipNearLine(double apexPerpDist, double crossOffset) {
 void TranslationInvariance(const std::vector<double>& radii, double translateX,
                            double translateY) {
   if (!std::isfinite(translateX) || !std::isfinite(translateY)) return;
-  // Inputs above 1e6 encode a different polygon in double (ULP ~1e-7 at
-  // |t|~640M). The domain is capped to 1e6; this guard silently discards
-  // any corpus entries from the old [1e3, 1e9] domain on replay.
-  if (std::fabs(translateX) > 1e6 || std::fabs(translateY) > 1e6) return;
 
   const manifold::SimplePolygon ring = StarPolygon(radii);
   const double rawArea = RawArea(ring);
@@ -943,14 +939,14 @@ void TranslationInvariance(const std::vector<double>& radii, double translateX,
   }
   const manifold::CrossSection shifted(translated);
   ExpectCrossSectionValid(shifted);
-  ExpectAreaAnchor(shifted, rawArea, 1e-6, "translated star input");
 
-  // Area and contour count are invariants of translation. The tolerance does
-  // not need to scale with |t| here because the domain is capped to 1e6 where
-  // double-encoding loss stays ~1e-8, well under the 1e-6 relTol budget.
+  // With position-inclusive eps (InferEps uses bBox.Scale()), far-from-origin
+  // polygons have larger eps, which can merge thin features. These are
+  // one-sided checks: eps merging can only shrink area and drop contours,
+  // never invent area or add contours.
   const double tol = 1e-6 * (1.0 + std::fabs(rawArea));
-  EXPECT_NEAR(shifted.Area(), rawArea, tol);
-  EXPECT_EQ(shifted.NumContour(), base.NumContour());
+  EXPECT_LE(shifted.Area(), rawArea + tol);
+  EXPECT_LE(shifted.NumContour(), base.NumContour());
 }
 
 // Boolean commutativity: A + B == B + A and A ∩ B == B ∩ A. The op is
@@ -2565,7 +2561,7 @@ FUZZ_TEST(CrossSectionFuzz, ApexSkipNearLine)
     .WithDomains(InRange(1e-15, 1e-1), InRange(-1.5, 1.5));
 
 FUZZ_TEST(CrossSectionFuzz, TranslationInvariance)
-    .WithDomains(StarRadiiDomain(), InRange(1e3, 1e6), InRange(1e3, 1e6));
+    .WithDomains(StarRadiiDomain(), InRange(1e3, 1e9), InRange(1e3, 1e9));
 
 FUZZ_TEST(CrossSectionFuzz, SubtractInvariants)
     .WithDomains(StarRadiiDomain(), StarRadiiDomain(), InRange(-5.0, 5.0),
