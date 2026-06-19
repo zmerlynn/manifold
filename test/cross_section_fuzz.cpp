@@ -941,11 +941,14 @@ void TranslationInvariance(const std::vector<double>& radii, double translateX,
   ExpectCrossSectionValid(shifted);
 
   // With position-inclusive eps (InferEps uses bBox.Scale()), far-from-origin
-  // polygons have larger eps, which can merge thin features. These are
-  // one-sided checks: eps merging can only shrink area and drop contours,
-  // never invent area or add contours.
-  const double tol = 1e-6 * (1.0 + std::fabs(rawArea));
-  EXPECT_LE(shifted.Area(), rawArea + tol);
+  // polygons have larger eps. Vertex snapping near the origin changes area by
+  // O(N * eps * edge_length) = O(|translate| * 1e-7), and the direction is
+  // not monotone (snapping can increase or decrease area). The tol scales with
+  // |translate| to cover this: at |t| = 1e3, tol ~ 2e-3; at 1e9, tol ~ 1e3.
+  // NumContour is one-sided: larger eps can only merge features, never invent.
+  const double tol = 1e-6 * (1.0 + std::fabs(rawArea) + std::fabs(translateX) +
+                             std::fabs(translateY));
+  EXPECT_NEAR(shifted.Area(), rawArea, tol);
   EXPECT_LE(shifted.NumContour(), base.NumContour());
 }
 
