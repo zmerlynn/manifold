@@ -593,7 +593,8 @@ void PrismBooleanMatchesCrossSection(int sidesA, double radiusA, int sidesB,
 void DecomposeComposeAndHull(const std::vector<double>& radii, int copies,
                              double spacing) {
   const auto stars = SeparatedStars(radii, copies, spacing);
-  const auto input = manifold::CrossSection::Compose(stars);
+  const auto input =
+      manifold::CrossSection::BatchBoolean(stars, manifold::OpType::Add);
   ExpectCrossSectionValid(input);
   if (input.IsEmpty() || std::fabs(input.Area()) <= 1e-9) return;
 
@@ -607,7 +608,8 @@ void DecomposeComposeAndHull(const std::vector<double>& radii, int copies,
   EXPECT_NEAR(componentArea, input.Area(),
               1e-6 * (1.0 + std::fabs(input.Area())));
 
-  const auto recomposed = manifold::CrossSection::Compose(components);
+  const auto recomposed =
+      manifold::CrossSection::BatchBoolean(components, manifold::OpType::Add);
   ExpectCrossSectionValid(recomposed);
   EXPECT_NEAR(recomposed.Area(), input.Area(),
               1e-6 * (1.0 + std::fabs(input.Area())));
@@ -660,7 +662,8 @@ void BatchBooleanSeparated(int sides, double radius, int copies,
 void DecomposedExtrusionsRecompose(int sides, double radius, int copies,
                                    double spacing) {
   const auto sections = SeparatedRegulars(sides, radius, copies, spacing);
-  const auto input = manifold::CrossSection::Compose(sections);
+  const auto input =
+      manifold::CrossSection::BatchBoolean(sections, manifold::OpType::Add);
   ExpectCrossSectionValid(input);
 
   const auto components = input.Decompose();
@@ -903,13 +906,11 @@ void ApexSkipNearLine(double apexPerpDist, double crossOffset) {
                                         {crossOffset - 0.05, 2.0}};
 
   const manifold::Polygons inputAB{tri, quad};
-  const manifold::CrossSection cs(inputAB,
-                                  manifold::CrossSection::FillRule::Positive);
+  const manifold::CrossSection cs(inputAB);
   ExpectCrossSectionValid(cs);
 
   const manifold::Polygons inputABA{tri, quad, tri};
-  const manifold::CrossSection csDup(
-      inputABA, manifold::CrossSection::FillRule::Positive);
+  const manifold::CrossSection csDup(inputABA);
   ExpectCrossSectionValid(csDup);
   EXPECT_NEAR(cs.Area(), csDup.Area(), 1e-6 * (1.0 + std::fabs(cs.Area())));
 }
@@ -1410,8 +1411,7 @@ void WindingFilterStarburstStress(int numStrips, double angleSpread,
         {10.0 * cosA + stripWidth * sinA, 10.0 * sinA - stripWidth * cosA}};
     strips.push_back(rect);
   }
-  const manifold::CrossSection cs(strips,
-                                  manifold::CrossSection::FillRule::Positive);
+  const manifold::CrossSection cs(strips);
   ExpectCrossSectionValid(cs);
   if (cs.IsEmpty() || std::fabs(cs.Area()) <= 1e-9) return;
 
@@ -1993,11 +1993,11 @@ TEST(CrossSectionFuzz, DISABLED_GauntletIndependentAreaAnchors) {
                               /*expectDisjointSum=*/true);
 }
 
-// Decompose/Compose round-trip on a HOLED CrossSection. The existing
+// Decompose/BatchBoolean(Add) round-trip on a HOLED CrossSection. The existing
 // DecomposeComposeAndHull covers separated stars (no negative-orientation
 // rings), which doesn't exercise hole containment in the decompose
 // path. Build a holed shape via outer - inner_translated_subtract, then
-// Decompose -> Compose and assert area + NumContour preservation.
+// Decompose -> BatchBoolean(Add) and assert area + NumContour preservation.
 void DecomposeRecomposeWithHoles(const std::vector<double>& outerRadii,
                                  const std::vector<double>& holeRadii,
                                  double holeOffsetX, double holeOffsetY) {
@@ -2035,12 +2035,13 @@ void DecomposeRecomposeWithHoles(const std::vector<double>& outerRadii,
   EXPECT_EQ(componentContourSum, holed.NumContour())
       << "Decompose split or merged contours unexpectedly";
 
-  const auto recomposed = manifold::CrossSection::Compose(components);
+  const auto recomposed =
+      manifold::CrossSection::BatchBoolean(components, manifold::OpType::Add);
   ExpectCrossSectionValid(recomposed);
   EXPECT_NEAR(recomposed.Area(), holed.Area(), tol)
-      << "Compose(Decompose(holed)) changed area";
+      << "BatchBoolean(Add, Decompose(holed)) changed area";
   EXPECT_EQ(recomposed.NumContour(), holed.NumContour())
-      << "Compose(Decompose(holed)) changed contour count";
+      << "BatchBoolean(Add, Decompose(holed)) changed contour count";
 }
 
 // Offset round-trip on convex inputs: input.Offset(d, Miter).Offset(-d,
