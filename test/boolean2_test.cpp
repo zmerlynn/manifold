@@ -1749,4 +1749,154 @@ TEST(Boolean2, DISABLED_EpsRelocatesBand) {
               << imb << "  " << (imb ? "OPEN <- relocated" : "closed") << "\n";
   }
 }
+
+// Per-stage eps sweep: which stage's eps closes which case, and is there a
+// combo that closes both? Each cell is the imbalance (0 = closed walk).
+TEST(Boolean2, DISABLED_PerStageEpsSweep) {
+  const double e = 3.519281e-10;  // base eps at both cases' ~160-170 scale
+  const std::vector<SimplePolygon> centered = {
+      {{16.326654361604518, -168.72132050147599},
+       {126.43622068872992, 170.16107906902442},
+       {-126.4362206896044, -64.998020356457175},
+       {14.343687683060599, -170.16203012505568},
+       {16.635671355979465, -169.67237701777114}},
+      {{126.4362206896044, 170.16107906853938},
+       {125.43666000402905, 170.16203012505565},
+       {125.43554197004028, 170.16166685379164},
+       {124.77049882701533, 169.67730915692113},
+       {125.51465251505573, 169.92009174481331}}};
+  const std::vector<SimplePolygon> triangle = {
+      {{100, 0}, {70, -20}, {120, 0}},
+      {{100 - 1.5 * e, 0}, {40, -50}, {150, 0}},
+      {{100 - 3.0 * e, 0}, {150, -20}, {160, 0}}};
+  const double mults[] = {0.3, 1.0, 3.0, 10.0, 100.0};
+  const auto run = [&](const std::vector<SimplePolygon>& tris, double mM,
+                       double mN, double mS) {
+    setenv("B2_M_MERGE", std::to_string(mM).c_str(), 1);
+    setenv("B2_M_NARROW", std::to_string(mN).c_str(), 1);
+    setenv("B2_M_SNAP", std::to_string(mS).c_str(), 1);
+    return CountImbalance(tris, e);
+  };
+  const auto sweep = [&](const char* name,
+                         const std::vector<SimplePolygon>& tris) {
+    std::cerr << "\n[" << name
+              << "] single knob (others=1; mult->imbalance):\n";
+    std::cerr << "  mMerge :";
+    for (const double m : mults)
+      std::cerr << " " << m << "->" << run(tris, m, 1, 1);
+    std::cerr << "\n  mNarrow:";
+    for (const double m : mults)
+      std::cerr << " " << m << "->" << run(tris, 1, m, 1);
+    std::cerr << "\n  mSnap  :";
+    for (const double m : mults)
+      std::cerr << " " << m << "->" << run(tris, 1, 1, m);
+    std::cerr << "\n";
+  };
+  sweep("centered", centered);
+  sweep("triangle", triangle);
+
+  std::cerr << "\n[combos] (mMerge,mNarrow,mSnap) -> centered / triangle "
+               "imbalance:\n";
+  const double combos[][3] = {
+      {1, 0.3, 0.3}, {1, 0.3, 1}, {1, 1, 0.3}, {1, 0.1, 0.1}, {0.3, 0.3, 0.3}};
+  for (const auto& c : combos)
+    std::cerr << "  (" << c[0] << "," << c[1] << "," << c[2] << ") -> "
+              << run(centered, c[0], c[1], c[2]) << " / "
+              << run(triangle, c[0], c[1], c[2]) << "\n";
+}
+
+// At the tightened combo (mMerge=1, mNarrow=0.3, mSnap=0.3), sweep each case's
+// near-incidence tightness t (t<1 = tighter). If some t reopens, tightening
+// only relocates the band downward rather than escaping it.
+TEST(Boolean2, DISABLED_TightenRelocationSweep) {
+  const double e = 3.519281e-10;
+  const auto triAt = [&](double t) {
+    return std::vector<SimplePolygon>{
+        {{100, 0}, {70, -20}, {120, 0}},
+        {{100 - 1.5 * t * e, 0}, {40, -50}, {150, 0}},
+        {{100 - 3.0 * t * e, 0}, {150, -20}, {160, 0}}};
+  };
+  const SimplePolygon big = {{16.326654361604518, -168.72132050147599},
+                             {126.43622068872992, 170.16107906902442},
+                             {-126.4362206896044, -64.998020356457175},
+                             {14.343687683060599, -170.16203012505568},
+                             {16.635671355979465, -169.67237701777114}};
+  const SimplePolygon tinyBase = {{126.4362206896044, 170.16107906853938},
+                                  {125.43666000402905, 170.16203012505565},
+                                  {125.43554197004028, 170.16166685379164},
+                                  {124.77049882701533, 169.67730915692113},
+                                  {125.51465251505573, 169.92009174481331}};
+  const vec2 gap = big[1] - tinyBase[0];  // tiny corner -> big corner
+  const auto cenAt = [&](double t) {
+    const vec2 shift = (1.0 - t) * gap;  // t<1 pulls tiny's corner toward big's
+    SimplePolygon tiny = tinyBase;
+    for (vec2& v : tiny) v = v + shift;
+    return std::vector<SimplePolygon>{big, tiny};
+  };
+  for (const char* mNS : {"1", "0.3"}) {
+    setenv("B2_M_MERGE", "1", 1);
+    setenv("B2_M_NARROW", mNS, 1);
+    setenv("B2_M_SNAP", mNS, 1);
+    std::cerr << "\n[narrow=snap=" << mNS
+              << ", merge=1] t -> centered / triangle imbalance:\n";
+    for (const double t :
+         {0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.8, 1.0, 1.5, 2.0, 3.0}) {
+      std::cerr << "  t=" << t << "\t-> " << CountImbalance(cenAt(t), e)
+                << " / " << CountImbalance(triAt(t), e) << "\n";
+    }
+  }
+}
+
+// (a) Is (1,0.3,0.3) just (3,1,1)? Sweep configs by merge/narrow ratio.
+// (b) Decoupled vertex-near-distant-edge: does tightening only narrow the band?
+TEST(Boolean2, DISABLED_RatioAndDecoupled) {
+  const double e = 3.519281e-10;
+  const std::vector<SimplePolygon> centered = {
+      {{16.326654361604518, -168.72132050147599},
+       {126.43622068872992, 170.16107906902442},
+       {-126.4362206896044, -64.998020356457175},
+       {14.343687683060599, -170.16203012505568},
+       {16.635671355979465, -169.67237701777114}},
+      {{126.4362206896044, 170.16107906853938},
+       {125.43666000402905, 170.16203012505565},
+       {125.43554197004028, 170.16166685379164},
+       {124.77049882701533, 169.67730915692113},
+       {125.51465251505573, 169.92009174481331}}};
+  const std::vector<SimplePolygon> triangle = {
+      {{100, 0}, {70, -20}, {120, 0}},
+      {{100 - 1.5 * e, 0}, {40, -50}, {150, 0}},
+      {{100 - 3.0 * e, 0}, {150, -20}, {160, 0}}};
+  const auto at = [&](double mM, double mN, double mS) {
+    setenv("B2_M_MERGE", std::to_string(mM).c_str(), 1);
+    setenv("B2_M_NARROW", std::to_string(mN).c_str(), 1);
+    setenv("B2_M_SNAP", std::to_string(mS).c_str(), 1);
+  };
+  std::cerr << "\n[ratio] (mM,mN,mS) -> centered / triangle  (mM/mN):\n";
+  const double cfgs[][3] = {{1, 1, 1},     {2, 1, 1},  {3, 1, 1},    {4, 1, 1},
+                            {1, 0.3, 0.3}, {10, 3, 3}, {1, 0.5, 0.5}};
+  for (const auto& c : cfgs) {
+    at(c[0], c[1], c[2]);
+    std::cerr << "  (" << c[0] << "," << c[1] << "," << c[2] << ") -> "
+              << CountImbalance(centered, e) << " / "
+              << CountImbalance(triangle, e) << "\t(mM/mN=" << c[0] / c[1]
+              << ")\n";
+  }
+  // A long edge B = (0,0)-(200,0); a triangle whose endpoint V sits perp p*eps
+  // above B's interior (x=100) and crosses B at (105,0). V is far from every
+  // vertex, so the input merge cannot swallow it.
+  const SimplePolygon longEdge = {{0, 0}, {200, 0}, {100, -100}};
+  const auto decoupled = [&](double p) {
+    return std::vector<SimplePolygon>{
+        longEdge, {{100, p * e}, {110, -p * e}, {105, 100}}};
+  };
+  std::cerr
+      << "\n[decoupled] perp p (eps) -> imbalance at (1,1,1) / (1,0.3,0.3):\n";
+  for (const double p : {0.1, 0.2, 0.3, 0.5, 0.8, 1.0, 2.0}) {
+    at(1, 1, 1);
+    const int a = CountImbalance(decoupled(p), e);
+    at(1, 0.3, 0.3);
+    const int b = CountImbalance(decoupled(p), e);
+    std::cerr << "  p=" << p << "\t-> " << a << " / " << b << "\n";
+  }
+}
 #endif

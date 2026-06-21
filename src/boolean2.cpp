@@ -1099,11 +1099,25 @@ OverlapResult RemoveOverlaps2D(const std::vector<vec2>& vertsIn,
   TraceRecorder traceRecorder(trace, eps, pred);
   traceRecorder.RecordInput(vertsIn, edgesIn);
 
+  // Diagnostics: independent per-stage eps multipliers - B2_M_MERGE (input
+  // vertex merge), B2_M_NARROW (incidence-list / I4 trigger), B2_M_SNAP
+  // (crossing snap). Broad phase pads to the larger of narrow/snap so no
+  // candidate pair is missed.
+  const auto mult = [](const char* name) {
+    const char* v = std::getenv(name);
+    return v ? std::atof(v) : 1.0;
+  };
+  const double fN = mult("B2_M_NARROW"), fS = mult("B2_M_SNAP");
+  const double epsMerge = eps * mult("B2_M_MERGE");
+  const double epsNarrow = eps * fN;
+  const double epsSnap = eps * fS;
+  const double epsBroad = eps * std::fmax(fN, fS);
+
   // Vertex merge.
   VertexMerge merge;
   {
     ScopedTiming timing(P.mergeNs);
-    merge = MergeVerts(vertsIn, eps);
+    merge = MergeVerts(vertsIn, epsMerge);
   }
   const int numMerged = static_cast<int>(merge.verts.size());
   traceRecorder.RecordMergedVertices(merge.verts, merge.inputVert2Merged);
@@ -1121,8 +1135,8 @@ OverlapResult RemoveOverlaps2D(const std::vector<vec2>& vertsIn,
   thread_local static std::vector<Box2> edgeBoxes;
   edgeBoxes.resize(edges.size());
   for (size_t e = 0; e < edges.size(); ++e) {
-    edgeBoxes[e] =
-        BoxOf2DEdge(merge.verts[edges[e].v0], merge.verts[edges[e].v1], eps);
+    edgeBoxes[e] = BoxOf2DEdge(merge.verts[edges[e].v0],
+                               merge.verts[edges[e].v1], epsBroad);
   }
   BVH bvh;
   {
@@ -1138,7 +1152,7 @@ OverlapResult RemoveOverlaps2D(const std::vector<vec2>& vertsIn,
   // an overlapping edge pair.
   {
     ScopedTiming timing(P.broadPairWorkNs);
-    CollectIntersectionPairs(edges, merge.verts, eps, edgeBoxes, bvh,
+    CollectIntersectionPairs(edges, merge.verts, epsBroad, edgeBoxes, bvh,
                              &intersectionPairs);
   }
   traceRecorder.RecordBroadPhasePairs(merge.verts, edges, intersectionPairs);
@@ -1148,7 +1162,7 @@ OverlapResult RemoveOverlaps2D(const std::vector<vec2>& vertsIn,
   NarrowPhaseResult narrow;
   {
     ScopedTiming timing(P.narrowPhaseNs);
-    narrow = BuildListsAndFindIntersections(edges, merge.verts, eps,
+    narrow = BuildListsAndFindIntersections(edges, merge.verts, epsNarrow,
                                             intersectionPairs);
   }
   traceRecorder.RecordEdgeVertLists(merge.verts, edges, narrow.lists);
@@ -1156,7 +1170,7 @@ OverlapResult RemoveOverlaps2D(const std::vector<vec2>& vertsIn,
   {
     ScopedTiming timing(P.findIxNs);
     inserted = FindAndInsertIntersections(edges, std::move(merge.verts),
-                                          std::move(narrow.lists), eps,
+                                          std::move(narrow.lists), epsSnap,
                                           edgeBoxes, bvh, narrow.intersections);
   }
   merge.verts = std::move(inserted.verts);
