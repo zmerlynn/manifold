@@ -19,6 +19,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <map>
@@ -29,6 +31,9 @@
 #include <utility>
 #include <vector>
 
+#ifdef MANIFOLD_DEBUG
+#include "../src/boolean2_diagnostics.h"
+#endif
 #include "manifold/common.h"
 #include "manifold/cross_section.h"
 #include "manifold/manifold.h"
@@ -1426,3 +1431,222 @@ TEST(Boolean2, MergeWindingVertsChainDeterministic) {
     }
   }
 }
+
+#ifdef MANIFOLD_DEBUG
+// ===== Arrangement trace serializer (consumed by
+// extras/boolean2_trace_viewer.html) =====
+// Lifted from pr/boolean2-diagnostics' cross_section_test.cpp; the Trace struct
+// already lives in manifold:: (boolean2_diagnostics.h), so no namespace flatten
+// is needed. Emits the phase list the static viewer reads.
+namespace {
+
+void WriteEscaped(std::ostream& os, const std::string& s) {
+  os << '"';
+  for (char c : s) {
+    switch (c) {
+      case '"':
+        os << "\\\"";
+        break;
+      case '\\':
+        os << "\\\\";
+        break;
+      case '\n':
+        os << "\\n";
+        break;
+      case '\r':
+        os << "\\r";
+        break;
+      case '\t':
+        os << "\\t";
+        break;
+      default:
+        os << c;
+        break;
+    }
+  }
+  os << '"';
+}
+
+void WriteVec2(std::ostream& os, const vec2& p) {
+  os << '[' << p.x << ',' << p.y << ']';
+}
+
+void WriteField(std::ostream& os, const char* name, const std::string& value,
+                bool comma = true) {
+  WriteEscaped(os, name);
+  os << ':';
+  WriteEscaped(os, value);
+  if (comma) os << ',';
+}
+
+template <typename T, typename F>
+void WriteArray(std::ostream& os, const std::vector<T>& items, F writeItem) {
+  os << '[';
+  for (size_t i = 0; i < items.size(); ++i) {
+    if (i > 0) os << ',';
+    writeItem(os, items[i]);
+  }
+  os << ']';
+}
+
+void WriteTraceJson(std::ostream& os, const Trace& trace) {
+  os << std::setprecision(17);
+  os << "{\n";
+  WriteEscaped(os, "eps");
+  os << ':' << trace.eps << ",\n";
+  WriteField(os, "rule", trace.rule);
+  os << "\n";
+  WriteEscaped(os, "phases");
+  os << ":[\n";
+  for (size_t i = 0; i < trace.phases.size(); ++i) {
+    const TracePhase& phase = trace.phases[i];
+    if (i > 0) os << ",\n";
+    os << '{';
+    WriteField(os, "name", phase.name);
+    WriteEscaped(os, "points");
+    os << ':';
+    WriteArray(os, phase.points, [](std::ostream& out, const TracePoint& p) {
+      out << '{';
+      WriteField(out, "id", p.id);
+      WriteEscaped(out, "xy");
+      out << ':';
+      WriteVec2(out, p.p);
+      out << ',';
+      WriteField(out, "kind", p.kind);
+      WriteField(out, "source", p.source);
+      WriteField(out, "label", p.label, false);
+      out << '}';
+    });
+    os << ',';
+    WriteEscaped(os, "segments");
+    os << ':';
+    WriteArray(os, phase.segments,
+               [](std::ostream& out, const TraceSegment& s) {
+                 out << '{';
+                 WriteField(out, "id", s.id);
+                 WriteEscaped(out, "a");
+                 out << ':';
+                 WriteVec2(out, s.a);
+                 out << ',';
+                 WriteEscaped(out, "b");
+                 out << ':';
+                 WriteVec2(out, s.b);
+                 out << ',';
+                 WriteField(out, "kind", s.kind);
+                 WriteField(out, "source", s.source);
+                 WriteEscaped(out, "mult");
+                 out << ':' << s.mult << ',';
+                 WriteField(out, "label", s.label, false);
+                 out << '}';
+               });
+    os << ',';
+    WriteEscaped(os, "polygons");
+    os << ':';
+    WriteArray(os, phase.polygons,
+               [](std::ostream& out, const TracePolygon& p) {
+                 out << '{';
+                 WriteField(out, "id", p.id);
+                 WriteEscaped(out, "verts");
+                 out << ":[";
+                 for (size_t j = 0; j < p.verts.size(); ++j) {
+                   if (j > 0) out << ',';
+                   WriteVec2(out, p.verts[j]);
+                 }
+                 out << "],";
+                 WriteField(out, "kind", p.kind);
+                 WriteField(out, "source", p.source);
+                 WriteEscaped(out, "winding");
+                 out << ':' << p.winding << ',';
+                 WriteEscaped(out, "inside");
+                 out << ':' << (p.inside ? "true" : "false") << ',';
+                 WriteField(out, "label", p.label, false);
+                 out << '}';
+               });
+    os << ',';
+    WriteEscaped(os, "annotations");
+    os << ':';
+    WriteArray(os, phase.annotations,
+               [](std::ostream& out, const TraceAnnotation& a) {
+                 out << '{';
+                 WriteField(out, "target", a.target);
+                 WriteField(out, "key", a.key);
+                 WriteField(out, "value", a.value, false);
+                 out << '}';
+               });
+    os << '}';
+  }
+  os << "\n]\n}\n";
+}
+
+}  // namespace
+
+// trial-324: CrossSection(Polygons{square, t0, t1, t2}) throws the boolean2
+// closed-walk assert (boolean2.cpp:207). Three triangle feet cluster ~2.5 eps
+// at x~73.3811075 on the square's bottom edge; the insertion endpoint-skip
+// drops a real edge-edge crossing, leaving a non-planar arrangement, and
+// FilterByWinding then yields a macro-separated degree imbalance -> open walk.
+// This drives the low-level engine directly with the exact joint-ctor input
+// (each loop appended with mult +1, eps = InferEps(combined, {})), records all
+// arrangement phases, and serializes the trace for the viewer. The final
+// OutEdgesToPolygons conversion is the throw site, so it is wrapped to capture
+// the failure as an annotation after the trace has already been written.
+TEST(Boolean2, DISABLED_TraceTrial324OpenWalk) {
+  const SimplePolygon square = {{0, 0}, {170, 0}, {170, 170}, {0, 170}};
+  const SimplePolygon t0 = {{73.381107530109091, 0},
+                            {40.054648114698736, -22.365989872622364},
+                            {89.411341676837409, 0}};
+  const SimplePolygon t1 = {{73.381107529636097, 0},
+                            {16.377850934138927, -50.79596025536646},
+                            {126.40044174123, 0}};
+  const SimplePolygon t2 = {{73.381107529241589, 0},
+                            {121.6636219234416, -22.048589199114925},
+                            {131.92460659713575, 0}};
+  const Polygons combined{square, t0, t1, t2};
+
+  // Mirror the CrossSection(Polygons) joint ctor exactly: InferEps over the
+  // combined set with an empty B, then AppendInput each loop with mult +1.
+  const double eps = InferEps(combined, {});
+  std::vector<vec2> verts;
+  std::vector<EdgeM> edges;
+  for (const SimplePolygon& loop : combined) {
+    const int base = static_cast<int>(verts.size());
+    const int n = static_cast<int>(loop.size());
+    for (const vec2& v : loop) verts.push_back(v);
+    for (int i = 0; i < n; ++i)
+      edges.push_back({base + i, base + ((i + 1) % n), 1});
+  }
+
+  Trace trace;
+  // RemoveOverlaps2D records input -> merged -> collapsed -> broad-phase ->
+  // edge-vert lists -> inserted -> canonical -> filtered and returns the raw
+  // OutEdges; it does NOT itself walk them into polygons, so the recorder
+  // completes every phase before the open-walk assert can fire.
+  OverlapResult result = RemoveOverlaps2D(verts, edges, eps, /*debug=*/false,
+                                          WindRule::Add, &trace);
+
+  // The open walk surfaces only when the retained directed edges are walked
+  // into loops (OutEdgesToPolygons, where the boolean2.cpp:207 assert lives).
+  // Add it as a final phase if it succeeds; otherwise record the throw so the
+  // trace itself documents the failure.
+  TracePhase& finalPhase = trace.AddPhase("final_polygons");
+  try {
+    const Polygons finalPolys = OutEdgesToPolygons(result.verts, result.edges);
+    for (int i = 0; i < static_cast<int>(finalPolys.size()); ++i)
+      finalPhase.polygons.push_back({std::string("poly") + std::to_string(i),
+                                     finalPolys[i], "final_polygon", "", 0,
+                                     true, ""});
+  } catch (const std::exception& e) {
+    // Strip the leading absolute build path so the shared trace carries only
+    // "boolean2.cpp (207): ...".
+    std::string msg = e.what();
+    const size_t cut = msg.find("boolean2.cpp");
+    finalPhase.annotations.push_back(
+        {"final_polygons", "open_walk_assert",
+         cut == std::string::npos ? msg : msg.substr(cut)});
+  }
+
+  std::ofstream out("trial324.json");
+  ASSERT_TRUE(out.good());
+  WriteTraceJson(out, trace);
+}
+#endif  // MANIFOLD_DEBUG
