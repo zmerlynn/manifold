@@ -19,6 +19,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
+#include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <map>
@@ -29,6 +32,7 @@
 #include <utility>
 #include <vector>
 
+#include "../src/boolean2_diagnostics.h"
 #include "manifold/common.h"
 #include "manifold/cross_section.h"
 #include "manifold/manifold.h"
@@ -1426,3 +1430,214 @@ TEST(Boolean2, MergeWindingVertsChainDeterministic) {
     }
   }
 }
+
+#ifdef MANIFOLD_DEBUG
+namespace {
+
+// Minimal JSON writer matching the schema extras/boolean2_trace_viewer.html
+// consumes (points use "xy", segments "a"/"b", polygons "verts").
+void TraceWriteEscaped(std::ostream& os, const std::string& s) {
+  os << '"';
+  for (char c : s) {
+    switch (c) {
+      case '"':
+        os << "\\\"";
+        break;
+      case '\\':
+        os << "\\\\";
+        break;
+      case '\n':
+        os << "\\n";
+        break;
+      case '\r':
+        os << "\\r";
+        break;
+      case '\t':
+        os << "\\t";
+        break;
+      default:
+        os << c;
+        break;
+    }
+  }
+  os << '"';
+}
+
+void TraceWriteVec2(std::ostream& os, const vec2& p) {
+  os << '[' << p.x << ',' << p.y << ']';
+}
+
+void TraceWriteField(std::ostream& os, const char* name,
+                     const std::string& value, bool comma = true) {
+  TraceWriteEscaped(os, name);
+  os << ':';
+  TraceWriteEscaped(os, value);
+  if (comma) os << ',';
+}
+
+template <typename T, typename F>
+void TraceWriteArray(std::ostream& os, const std::vector<T>& items,
+                     F writeItem) {
+  os << '[';
+  for (size_t i = 0; i < items.size(); ++i) {
+    if (i > 0) os << ',';
+    writeItem(os, items[i]);
+  }
+  os << ']';
+}
+
+void WriteTraceJson(std::ostream& os, const Trace& trace) {
+  os << std::setprecision(17);
+  os << "{\n";
+  TraceWriteEscaped(os, "eps");
+  os << ':' << trace.eps << ",\n";
+  TraceWriteField(os, "rule", trace.rule);
+  os << "\n";
+  TraceWriteEscaped(os, "phases");
+  os << ":[\n";
+  for (size_t i = 0; i < trace.phases.size(); ++i) {
+    const TracePhase& phase = trace.phases[i];
+    if (i > 0) os << ",\n";
+    os << '{';
+    TraceWriteField(os, "name", phase.name);
+    TraceWriteEscaped(os, "points");
+    os << ':';
+    TraceWriteArray(os, phase.points, [](std::ostream& o, const TracePoint& p) {
+      o << '{';
+      TraceWriteField(o, "id", p.id);
+      TraceWriteEscaped(o, "xy");
+      o << ':';
+      TraceWriteVec2(o, p.p);
+      o << ',';
+      TraceWriteField(o, "kind", p.kind);
+      TraceWriteField(o, "source", p.source);
+      TraceWriteField(o, "label", p.label, false);
+      o << '}';
+    });
+    os << ',';
+    TraceWriteEscaped(os, "segments");
+    os << ':';
+    TraceWriteArray(os, phase.segments,
+                    [](std::ostream& o, const TraceSegment& s) {
+                      o << '{';
+                      TraceWriteField(o, "id", s.id);
+                      TraceWriteEscaped(o, "a");
+                      o << ':';
+                      TraceWriteVec2(o, s.a);
+                      o << ',';
+                      TraceWriteEscaped(o, "b");
+                      o << ':';
+                      TraceWriteVec2(o, s.b);
+                      o << ',';
+                      TraceWriteField(o, "kind", s.kind);
+                      TraceWriteField(o, "source", s.source);
+                      TraceWriteEscaped(o, "mult");
+                      o << ':' << s.mult << ',';
+                      TraceWriteField(o, "label", s.label, false);
+                      o << '}';
+                    });
+    os << ',';
+    TraceWriteEscaped(os, "polygons");
+    os << ':';
+    TraceWriteArray(os, phase.polygons,
+                    [](std::ostream& o, const TracePolygon& p) {
+                      o << '{';
+                      TraceWriteField(o, "id", p.id);
+                      TraceWriteEscaped(o, "verts");
+                      o << ":[";
+                      for (size_t j = 0; j < p.verts.size(); ++j) {
+                        if (j > 0) o << ',';
+                        TraceWriteVec2(o, p.verts[j]);
+                      }
+                      o << "],";
+                      TraceWriteField(o, "kind", p.kind);
+                      TraceWriteField(o, "source", p.source);
+                      TraceWriteEscaped(o, "winding");
+                      o << ':' << p.winding << ',';
+                      TraceWriteEscaped(o, "inside");
+                      o << ':' << (p.inside ? "true" : "false") << ',';
+                      TraceWriteField(o, "label", p.label, false);
+                      o << '}';
+                    });
+    os << ',';
+    TraceWriteEscaped(os, "annotations");
+    os << ':';
+    TraceWriteArray(os, phase.annotations,
+                    [](std::ostream& o, const TraceAnnotation& a) {
+                      o << '{';
+                      TraceWriteField(o, "target", a.target);
+                      TraceWriteField(o, "key", a.key);
+                      TraceWriteField(o, "value", a.value, false);
+                      o << '}';
+                    });
+    os << '}';
+  }
+  os << "\n]\n}\n";
+}
+
+}  // namespace
+
+// Records CenteredSubEpsNonClosingWalk (cross_section_test.cpp) through the
+// arrangement pipeline with MergeWindingVerts reverted (boolean2.cpp), so the
+// trace captures the open walk the merge would close. The final_polygons phase
+// shows OutEdgesToPolygons dropping the non-closing piece (ASSERT off). Run:
+//   manifold_test --gtest_also_run_disabled_tests \
+//     --gtest_filter=Boolean2.DISABLED_TraceCenteredMwvReverted
+TEST(Boolean2, DISABLED_TraceCenteredMwvReverted) {
+  const SimplePolygon big = {{16.326654361604518, -168.72132050147599},
+                             {126.43622068872992, 170.16107906902442},
+                             {-126.4362206896044, -64.998020356457175},
+                             {14.343687683060599, -170.16203012505568},
+                             {16.635671355979465, -169.67237701777114}};
+  const SimplePolygon tiny = {{126.4362206896044, 170.16107906853938},
+                              {125.43666000402905, 170.16203012505565},
+                              {125.43554197004028, 170.16166685379164},
+                              {124.77049882701533, 169.67730915692113},
+                              {125.51465251505573, 169.92009174481331}};
+  const double eps = InferEps(Polygons{big}, Polygons{tiny});
+
+  std::vector<vec2> verts;
+  std::vector<EdgeM> edges;
+  const auto append = [&](const SimplePolygon& loop, int mult) {
+    const int base = static_cast<int>(verts.size());
+    const int n = static_cast<int>(loop.size());
+    for (const vec2& v : loop) verts.push_back(v);
+    for (int i = 0; i < n; ++i)
+      edges.push_back({base + i, base + (i + 1) % n, mult});
+  };
+  append(big, 1);
+  append(tiny, 1);
+
+  // Disable MergeWindingVerts for this trace so the recorded arrangement and
+  // the final polygons keep the open walk the fuse would otherwise close.
+  setenv("B2_DISABLE_MWV", "1", 1);
+  Trace trace;
+  const OverlapResult r = RemoveOverlaps2D(verts, edges, eps, /*debug=*/false,
+                                           WindRule::Add, &trace);
+
+  // With MergeWindingVerts reverted, OutEdgesToPolygons drops the non-closing
+  // walk, so this phase shows the union with the dropped piece missing. A
+  // MANIFOLD_ASSERT=ON build throws on the open walk instead; skip the phase
+  // then (the imbalance is already visible in filtered_output_edges).
+  try {
+    const Polygons polys = OutEdgesToPolygons(r.verts, r.edges);
+    TracePhase& finalPhase = trace.AddPhase("final_polygons");
+    for (size_t i = 0; i < polys.size(); ++i) {
+      TracePolygon tp;
+      tp.id = "poly" + std::to_string(i);
+      tp.verts = polys[i];
+      tp.kind = "output";
+      tp.source = "OutEdgesToPolygons";
+      finalPhase.polygons.push_back(std::move(tp));
+    }
+  } catch (const std::exception&) {
+  }
+
+  const std::string path = "boolean2_trace_centered_mwv_reverted.json";
+  std::ofstream os(path);
+  WriteTraceJson(os, trace);
+  ASSERT_TRUE(os.good());
+  std::cerr << "[trace] wrote " << path << " (" << trace.phases.size()
+            << " phases, eps=" << std::setprecision(17) << eps << ")\n";
+}
+#endif

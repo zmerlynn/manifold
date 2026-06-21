@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <limits>
 #include <numeric>
 #include <utility>
@@ -1177,8 +1178,12 @@ OverlapResult RemoveOverlaps2D(const std::vector<vec2>& vertsIn,
   }
   traceRecorder.RecordFilteredOutput(merge.verts, out);
   // FilterByWinding can leave a split corner imbalanced; fuse it so the walk
-  // closes (contract on the declaration).
-  out = MergeWindingVerts(std::move(out), merge.verts, eps);
+  // closes (contract on the declaration). Diagnostics-only: setting the
+  // B2_DISABLE_MWV env var skips the fuse so a trace can record the open walk
+  // this step would otherwise close. Defaults to on, so default behavior is
+  // identical to the PR.
+  if (std::getenv("B2_DISABLE_MWV") == nullptr)
+    out = MergeWindingVerts(std::move(out), merge.verts, eps);
   CountTimingCase();
   return {std::move(merge.verts), std::move(out),
           std::move(merge.inputVert2Merged), numMerged};
