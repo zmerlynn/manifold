@@ -1694,4 +1694,59 @@ TEST(Boolean2, DISABLED_TraceNearCoincidentCorners) {
   std::cerr << "[trace] wrote " << path << " (" << trace.phases.size()
             << " phases, eps=" << std::setprecision(17) << eps << ")\n";
 }
+
+// Drives RemoveOverlaps2D at an explicit eps (MWV disabled) and counts output
+// vertices with in-degree != out-degree. >0 means the retained edges don't form
+// closed walks - an open walk / non-manifold arrangement.
+static int CountImbalance(const std::vector<SimplePolygon>& tris, double eps) {
+  std::vector<vec2> verts;
+  std::vector<EdgeM> edges;
+  for (const auto& loop : tris) {
+    const int base = static_cast<int>(verts.size());
+    const int n = static_cast<int>(loop.size());
+    for (const vec2& v : loop) verts.push_back(v);
+    for (int i = 0; i < n; ++i)
+      edges.push_back({base + i, base + (i + 1) % n, 1});
+  }
+  setenv("B2_DISABLE_MWV", "1", 1);
+  const OverlapResult r =
+      RemoveOverlaps2D(verts, edges, eps, /*debug=*/false, WindRule::Add);
+  std::map<int, std::pair<int, int>> deg;  // vert -> (in, out)
+  for (const auto& e : r.edges) {
+    deg[e.v0].second++;
+    deg[e.v1].first++;
+  }
+  int imbalanced = 0;
+  for (const auto& kv : deg)
+    if (kv.second.first != kv.second.second) ++imbalanced;
+  return imbalanced;
+}
+
+// Demonstrates that bumping eps relocates the failure band rather than removing
+// it: the original near-coincident-corner case closes once eps is large enough
+// to swallow its corners, but an input with corners spread to the same fraction
+// of the bumped eps fails identically.
+TEST(Boolean2, DISABLED_EpsRelocatesBand) {
+  const double e = 3.519281e-10;  // current op eps at this ~160 scale
+  const auto tri = [](double pert) {
+    return std::vector<SimplePolygon>{
+        {{100, 0}, {70, -20}, {120, 0}},
+        {{100 - 1.5 * pert, 0}, {40, -50}, {150, 0}},
+        {{100 - 3.0 * pert, 0}, {150, -20}, {160, 0}}};
+  };
+  std::cerr << "\n[eps-band] current eps = " << e << "\n";
+  std::cerr << "  original case (corners 1.5-3 eps apart):\n";
+  for (const double m : {1.0, 10.0, 100.0, 1000.0}) {
+    const int imb = CountImbalance(tri(e), m * e);
+    std::cerr << "    eps x" << m << "\t-> imbalance " << imb << "  "
+              << (imb ? "OPEN" : "closed") << "\n";
+  }
+  std::cerr
+      << "  scaled equivalent (corners spread to 1.5-3 of the bumped eps):\n";
+  for (const double m : {100.0, 1000.0}) {
+    const int imb = CountImbalance(tri(m * e), m * e);
+    std::cerr << "    pert x" << m << " @ eps x" << m << "\t-> imbalance "
+              << imb << "  " << (imb ? "OPEN <- relocated" : "closed") << "\n";
+  }
+}
 #endif
