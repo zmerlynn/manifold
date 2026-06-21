@@ -1640,4 +1640,58 @@ TEST(Boolean2, DISABLED_TraceCenteredMwvReverted) {
   std::cerr << "[trace] wrote " << path << " (" << trace.phases.size()
             << " phases, eps=" << std::setprecision(17) << eps << ")\n";
 }
+
+// The new near-coincident-corner case
+// (CrossSection.DISABLED_NearCoincidentCornersNonClosingWalk): three triangles
+// whose base corners sit within eps on y=0. MergeWindingVerts does NOT close
+// this one - its imbalance is macro-separated, not a local canceling pair - so
+// no B2_DISABLE_MWV toggle is needed; the real engine leaves the walk open.
+TEST(Boolean2, DISABLED_TraceNearCoincidentCorners) {
+  const double kBuildEps = 3.519281e-10;  // EpsilonFromScale(160) at this scale
+  const SimplePolygon t0 = {{100, 0}, {70, -20}, {120, 0}};
+  const SimplePolygon t1 = {{100 - 1.5 * kBuildEps, 0}, {40, -50}, {150, 0}};
+  const SimplePolygon t2 = {{100 - 3.0 * kBuildEps, 0}, {150, -20}, {160, 0}};
+  const double eps = InferEps(Polygons{t0, t1, t2}, Polygons{});
+
+  std::vector<vec2> verts;
+  std::vector<EdgeM> edges;
+  const auto append = [&](const SimplePolygon& loop, int mult) {
+    const int base = static_cast<int>(verts.size());
+    const int n = static_cast<int>(loop.size());
+    for (const vec2& v : loop) verts.push_back(v);
+    for (int i = 0; i < n; ++i)
+      edges.push_back({base + i, base + (i + 1) % n, mult});
+  };
+  append(t0, 1);
+  append(t1, 1);
+  append(t2, 1);
+
+  Trace trace;
+  const OverlapResult r = RemoveOverlaps2D(verts, edges, eps, /*debug=*/false,
+                                           WindRule::Add, &trace);
+
+  // MergeWindingVerts is a no-op here, so the returned edges keep the open
+  // walk. OutEdgesToPolygons drops the non-closing piece (ASSERT=OFF) or throws
+  // (ASSERT=ON, caught); the imbalance is in filtered_output_edges either way.
+  try {
+    const Polygons polys = OutEdgesToPolygons(r.verts, r.edges);
+    TracePhase& finalPhase = trace.AddPhase("final_polygons");
+    for (size_t i = 0; i < polys.size(); ++i) {
+      TracePolygon tp;
+      tp.id = "poly" + std::to_string(i);
+      tp.verts = polys[i];
+      tp.kind = "output";
+      tp.source = "OutEdgesToPolygons";
+      finalPhase.polygons.push_back(std::move(tp));
+    }
+  } catch (const std::exception&) {
+  }
+
+  const std::string path = "boolean2_trace_near_coincident_corners.json";
+  std::ofstream os(path);
+  WriteTraceJson(os, trace);
+  ASSERT_TRUE(os.good());
+  std::cerr << "[trace] wrote " << path << " (" << trace.phases.size()
+            << " phases, eps=" << std::setprecision(17) << eps << ")\n";
+}
 #endif
