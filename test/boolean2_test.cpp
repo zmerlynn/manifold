@@ -1695,6 +1695,302 @@ TEST(Boolean2, DISABLED_TraceNearCoincidentCorners) {
             << " phases, eps=" << std::setprecision(17) << eps << ")\n";
 }
 
+// #1707 (Emmett): set eps ~ 1/10 the bbox so the snapping is visible at a sane
+// zoom. Three triangles share a near-coincident corner cluster (100/96/92 on
+// y=0, inside the merge band); the apexes spread the bbox to ~120, so eps=12 is
+// ~1/10 of it. #1759 split: merge band = eps = 12, decide band = eps/16 = 0.75.
+TEST(Boolean2, DISABLED_TraceLargeEps) {
+  setenv("B2_DISABLE_MWV", "1", 1);
+  const double eps = 12.0;
+  const SimplePolygon t0 = {{100, 0}, {70, -30}, {120, 0}};
+  const SimplePolygon t1 = {{96, 0}, {40, -60}, {150, 0}};
+  const SimplePolygon t2 = {{92, 0}, {150, -30}, {160, 0}};
+  std::vector<vec2> verts;
+  std::vector<EdgeM> edges;
+  const auto append = [&](const SimplePolygon& loop, int mult) {
+    const int base = static_cast<int>(verts.size());
+    const int n = static_cast<int>(loop.size());
+    for (const vec2& v : loop) verts.push_back(v);
+    for (int i = 0; i < n; ++i)
+      edges.push_back({base + i, base + (i + 1) % n, mult});
+  };
+  append(t0, 1);
+  append(t1, 1);
+  append(t2, 1);
+
+  Trace trace;
+  const OverlapResult r = RemoveOverlaps2D(verts, edges, eps, /*debug=*/false,
+                                           WindRule::Add, &trace);
+  try {
+    const Polygons polys = OutEdgesToPolygons(r.verts, r.edges);
+    TracePhase& fp = trace.AddPhase("final_polygons");
+    for (size_t i = 0; i < polys.size(); ++i) {
+      TracePolygon tp;
+      tp.id = "poly" + std::to_string(i);
+      tp.verts = polys[i];
+      tp.kind = "output";
+      tp.source = "OutEdgesToPolygons";
+      fp.polygons.push_back(std::move(tp));
+    }
+  } catch (const std::exception&) {
+  }
+  const std::string path = "boolean2_trace_large_eps.json";
+  std::ofstream os(path);
+  WriteTraceJson(os, trace);
+  ASSERT_TRUE(os.good());
+  std::cerr << "[trace] wrote " << path << " (" << trace.phases.size()
+            << " phases, eps=" << eps << " merge=" << eps
+            << " decide=" << eps / 16.0 << ")\n";
+}
+
+// The largest eps at which the UNIFORM engine (merge==decide==eps, factor 1)
+// still leaves the open walk, with the corner cluster scaled to eps so it is
+// human-visible (gaps 2.62 and 5.25 units, ~3-4% of the ~160 bbox - resolvable
+// without zooming). d=1.75 is the max; d>=1.8 the uniform walk closes (see
+// DISABLED_UniformMaxVisibleOpenWalk). Also writes the same geometry at eps=8
+// and eps=12 (~1/10 bbox): there the merge band swallows the cluster, so the
+// walk closes - the "larger eps reaches general position by collapsing" case.
+TEST(Boolean2, DISABLED_TraceUniformOpenWalk) {
+  const double d = 1.75;
+  const SimplePolygon t0 = {{100, 0}, {70, -20}, {120, 0}};
+  const SimplePolygon t1 = {{100 - 1.5 * d, 0}, {40, -50}, {150, 0}};
+  const SimplePolygon t2 = {{100 - 3.0 * d, 0}, {150, -20}, {160, 0}};
+  const auto writeTrace = [&](int factor, double merge,
+                              const std::string& path) {
+    setenv("B2_DISABLE_MWV", "1", 1);
+    setenv("B2_MERGE_FACTOR", std::to_string(factor).c_str(), 1);
+    std::vector<vec2> verts;
+    std::vector<EdgeM> edges;
+    const auto append = [&](const SimplePolygon& loop) {
+      const int base = static_cast<int>(verts.size());
+      const int n = static_cast<int>(loop.size());
+      for (const vec2& v : loop) verts.push_back(v);
+      for (int i = 0; i < n; ++i)
+        edges.push_back({base + i, base + (i + 1) % n, 1});
+    };
+    append(t0);
+    append(t1);
+    append(t2);
+    Trace trace;
+    const OverlapResult r = RemoveOverlaps2D(
+        verts, edges, merge, /*debug=*/false, WindRule::Add, &trace);
+    std::map<int, std::pair<int, int>> deg;
+    for (const auto& e : r.edges) {
+      deg[e.v0].second++;
+      deg[e.v1].first++;
+    }
+    int imb = 0;
+    for (const auto& kv : deg)
+      if (kv.second.first != kv.second.second) ++imb;
+    try {
+      const Polygons polys = OutEdgesToPolygons(r.verts, r.edges);
+      TracePhase& fp = trace.AddPhase("final_polygons");
+      for (size_t i = 0; i < polys.size(); ++i) {
+        TracePolygon tp;
+        tp.id = "poly" + std::to_string(i);
+        tp.verts = polys[i];
+        tp.kind = "output";
+        tp.source = "OutEdgesToPolygons";
+        fp.polygons.push_back(std::move(tp));
+      }
+    } catch (const std::exception&) {
+    }
+    std::ofstream os(path);
+    WriteTraceJson(os, trace);
+    ASSERT_TRUE(os.good());
+    std::cerr << "[trace] wrote " << path << " (factor=" << factor
+              << " merge=" << merge << " decide=" << merge / factor
+              << " imbalance=" << imb << ")\n";
+  };
+  writeTrace(1, d, "boolean2_trace_uniform_open.json");    // merge=decide=1.75
+  writeTrace(1, 8.0, "boolean2_trace_uniform_eps8.json");  // collapses cluster
+  writeTrace(1, 12.0, "boolean2_trace_uniform_eps12.json");  // ~1/10 bbox
+}
+
+// Sweep the operative eps (merge band) by powers of 2 from 1/10*bbox down past
+// the production scale, on the fixed near-coincident geometry, watching for any
+// breakdown (open walk / contour / area). decide = eps/16 throughout.
+TEST(Boolean2, DISABLED_LargeEpsSweep) {
+  setenv("B2_DISABLE_MWV", "1", 1);
+  const SimplePolygon t0 = {{100, 0}, {70, -30}, {120, 0}};
+  const SimplePolygon t1 = {{96, 0}, {40, -60}, {150, 0}};
+  const SimplePolygon t2 = {{92, 0}, {150, -30}, {160, 0}};
+  std::vector<vec2> verts;
+  std::vector<EdgeM> edges;
+  const auto append = [&](const SimplePolygon& l) {
+    const int b = static_cast<int>(verts.size());
+    const int n = static_cast<int>(l.size());
+    for (const vec2& v : l) verts.push_back(v);
+    for (int i = 0; i < n; ++i) edges.push_back({b + i, b + (i + 1) % n, 1});
+  };
+  append(t0);
+  append(t1);
+  append(t2);
+  std::cerr << "\n[sweep] eps\timbalance\tNumContour\tarea  (merge=eps, "
+               "decide=eps/16; corner spacing 4 & 8)\n";
+  for (double eps = 12.0; eps > 1e-9; eps /= 2.0) {
+    const OverlapResult r =
+        RemoveOverlaps2D(verts, edges, eps, /*debug=*/false, WindRule::Add);
+    std::map<int, std::pair<int, int>> deg;
+    for (const auto& e : r.edges) {
+      deg[e.v0].second++;
+      deg[e.v1].first++;
+    }
+    int imb = 0;
+    for (const auto& kv : deg)
+      if (kv.second.first != kv.second.second) ++imb;
+    int nc = -1;
+    double area = 0;
+    try {
+      const Polygons p = OutEdgesToPolygons(r.verts, r.edges);
+      nc = static_cast<int>(p.size());
+      area = std::fabs(TotalSignedArea(p));
+    } catch (...) {
+      nc = -99;
+    }
+    std::cerr << "  " << std::setprecision(4) << eps << "\t" << imb << "\t\t"
+              << nc << "\t" << std::setprecision(7) << area
+              << (imb ? "  <-- OPEN WALK" : "") << "\n";
+  }
+}
+
+// Emmett's #1707 framing: scale the corner spacing to the operative eps so the
+// uniform-engine open walk happens at a HUMAN-VISIBLE separation, not a 1e-10
+// one. Corners track d (gaps 1.5d, 3d); uniform decides & merges at d, so the
+// adjacent gap (1.5d) always sits 1.5x above the merge band -> open at every d.
+// Sweep d UPWARD to find the largest eps that still leaves the walk open before
+// the wide band starts merging the rest of the figure (the tightest non-corner
+// feature gap is (150,0)-(160,0) = 10). Reports both configs + corner gaps so a
+// visible d can be picked for rendering.
+TEST(Boolean2, DISABLED_UniformMaxVisibleOpenWalk) {
+  const auto run = [&](int factor, double merge, double cornerD) {
+    setenv("B2_DISABLE_MWV", "1", 1);
+    setenv("B2_MERGE_FACTOR", std::to_string(factor).c_str(), 1);
+    const SimplePolygon t0 = {{100, 0}, {70, -20}, {120, 0}};
+    const SimplePolygon t1 = {{100 - 1.5 * cornerD, 0}, {40, -50}, {150, 0}};
+    const SimplePolygon t2 = {{100 - 3.0 * cornerD, 0}, {150, -20}, {160, 0}};
+    std::vector<vec2> verts;
+    std::vector<EdgeM> edges;
+    const auto app = [&](const SimplePolygon& l) {
+      const int b = static_cast<int>(verts.size());
+      const int n = static_cast<int>(l.size());
+      for (const vec2& v : l) verts.push_back(v);
+      for (int i = 0; i < n; ++i) edges.push_back({b + i, b + (i + 1) % n, 1});
+    };
+    app(t0);
+    app(t1);
+    app(t2);
+    const OverlapResult r =
+        RemoveOverlaps2D(verts, edges, merge, /*debug=*/false, WindRule::Add);
+    std::map<int, std::pair<int, int>> deg;
+    for (const auto& e : r.edges) {
+      deg[e.v0].second++;
+      deg[e.v1].first++;
+    }
+    int imb = 0;
+    for (const auto& kv : deg)
+      if (kv.second.first != kv.second.second) ++imb;
+    int nc = -1;
+    double area = -1;
+    try {
+      const Polygons p = OutEdgesToPolygons(r.verts, r.edges);
+      nc = static_cast<int>(p.size());
+      area = std::fabs(TotalSignedArea(p));
+    } catch (...) {
+      nc = -99;
+    }
+    return std::make_tuple(imb, nc, area);
+  };
+  std::cerr << "\n[max-visible] corners scale with d (gaps 1.5d, 3d). UNIFORM "
+               "merge=decide=d; SPLIT merge=16d decide=d. bbox~160, 1/10=16\n"
+            << "  d\tgap(1.5d,3d)\tUNIFORM(imb,nc,area)\tSPLIT(imb,nc,area)\n";
+  for (double d : {1.5, 1.6, 1.7, 1.75, 1.8, 1.85, 1.9, 1.95, 2.0, 2.1, 2.25}) {
+    const auto u = run(1, d, d);
+    const auto s = run(16, 16 * d, d);
+    std::cerr << "  " << std::setprecision(3) << d << "\t" << 1.5 * d << ","
+              << 3.0 * d << "\tuni(" << std::get<0>(u) << "," << std::get<1>(u)
+              << "," << std::setprecision(6) << std::get<2>(u) << ")\tsplit("
+              << std::get<0>(s) << "," << std::get<1>(s) << ","
+              << std::get<2>(s) << ")"
+              << (std::get<0>(u) && !std::get<0>(s)
+                      ? "  <-- uni open, split closed"
+                      : "")
+              << "\n";
+  }
+}
+
+// Uniform (merge==decide==eps, factor 1) vs the 16x split (merge=eps,
+// decide=eps/16) on the original near-coincident triangle geometry whose corner
+// spacing tracks the deciding scale d (1.5d, 3d apart). Both DECIDE at d; the
+// split also MERGES at 16d, so it fuses the cluster the uniform eps leaves
+// split.
+TEST(Boolean2, DISABLED_UniformVsSplitSweep) {
+  // Geometry LOCKED at the original NearCoincidentCornersNonClosingWalk: the
+  // corner cluster sits at fixed positions (gap 1.5 and 3.0 * scaleEps from
+  // x=100, ~1.06e-9 wide). We sweep the OPERATIVE (merge/advertised) eps and
+  // pass the SAME band to both configs, so the only variable between uniform
+  // and split is the decide band: uniform decides at the merge band, split
+  // decides 16x tighter.
+  const double scaleEps = 3.519281e-10;  // EpsilonFromScale(160)
+  const SimplePolygon t0 = {{100, 0}, {70, -20}, {120, 0}};
+  const SimplePolygon t1 = {{100 - 1.5 * scaleEps, 0}, {40, -50}, {150, 0}};
+  const SimplePolygon t2 = {{100 - 3.0 * scaleEps, 0}, {150, -20}, {160, 0}};
+  const auto run = [&](int factor, double merge) {
+    setenv("B2_DISABLE_MWV", "1", 1);
+    setenv("B2_MERGE_FACTOR", std::to_string(factor).c_str(), 1);
+    std::vector<vec2> verts;
+    std::vector<EdgeM> edges;
+    const auto app = [&](const SimplePolygon& l) {
+      const int b = static_cast<int>(verts.size());
+      const int n = static_cast<int>(l.size());
+      for (const vec2& v : l) verts.push_back(v);
+      for (int i = 0; i < n; ++i) edges.push_back({b + i, b + (i + 1) % n, 1});
+    };
+    app(t0);
+    app(t1);
+    app(t2);
+    const OverlapResult r =
+        RemoveOverlaps2D(verts, edges, merge, /*debug=*/false, WindRule::Add);
+    std::map<int, std::pair<int, int>> deg;
+    for (const auto& e : r.edges) {
+      deg[e.v0].second++;
+      deg[e.v1].first++;
+    }
+    int imb = 0;
+    for (const auto& kv : deg)
+      if (kv.second.first != kv.second.second) ++imb;
+    double area = -1;
+    try {
+      area = std::fabs(TotalSignedArea(OutEdgesToPolygons(r.verts, r.edges)));
+    } catch (...) {
+    }
+    return std::make_pair(imb, area);
+  };
+  std::cerr << "\n[uniform-vs-split] corners LOCKED; sweep merge eps from 1/10 "
+               "bbox (16) down. scaleEps="
+            << scaleEps << " corner span=" << 3.0 * scaleEps << "\n"
+            << "  prod operative points: uniform merge=" << scaleEps
+            << ", split merge=" << 16 * scaleEps << "\n"
+            << "  merge\tUNIFORM(decide=merge)\tSPLIT(decide=merge/16)\n";
+  for (double merge = 16.0; merge > 1e-11; merge /= 2.0) {
+    const auto u = run(1, merge);
+    const auto s = run(16, merge);
+    const char* tag = "";
+    if (u.first && !s.first)
+      tag = "  <-- uniform breaks, split clean";
+    else if (u.first && s.first)
+      tag = "  <-- both break";
+    else if (!u.first && !s.first)
+      tag = "";
+    else
+      tag = "  <-- split breaks, uniform clean";
+    std::cerr << "  " << std::setprecision(3) << merge
+              << "\tuni imb=" << u.first << " area=" << std::setprecision(7)
+              << u.second << "\tsplit imb=" << s.first << " area=" << s.second
+              << tag << "\n";
+  }
+}
+
 // Drives RemoveOverlaps2D at an explicit eps (MWV disabled) and counts output
 // vertices with in-degree != out-degree. >0 means the retained edges don't form
 // closed walks - an open walk / non-manifold arrangement.
@@ -1897,6 +2193,241 @@ TEST(Boolean2, DISABLED_RatioAndDecoupled) {
     at(1, 0.3, 0.3);
     const int b = CountImbalance(decoupled(p), e);
     std::cerr << "  p=" << p << "\t-> " << a << " / " << b << "\n";
+  }
+}
+
+// Campaign curated set: 2 known degenerate cases + 30 fixed-seed
+// clustered-corner cases. Prints "CASE i <imbalance>" at the env-set config;
+// the driver filters to the cases failing at (1,1,1) and scores how many a
+// config closes.
+TEST(Boolean2, DISABLED_CampaignCurated) {
+  const double e = 3.519281e-10;
+  std::vector<std::vector<SimplePolygon>> cases;
+  cases.push_back({{{16.326654361604518, -168.72132050147599},
+                    {126.43622068872992, 170.16107906902442},
+                    {-126.4362206896044, -64.998020356457175},
+                    {14.343687683060599, -170.16203012505568},
+                    {16.635671355979465, -169.67237701777114}},
+                   {{126.4362206896044, 170.16107906853938},
+                    {125.43666000402905, 170.16203012505565},
+                    {125.43554197004028, 170.16166685379164},
+                    {124.77049882701533, 169.67730915692113},
+                    {125.51465251505573, 169.92009174481331}}});
+  cases.push_back({{{100, 0}, {70, -20}, {120, 0}},
+                   {{100 - 1.5 * e, 0}, {40, -50}, {150, 0}},
+                   {{100 - 3.0 * e, 0}, {150, -20}, {160, 0}}});
+  std::mt19937 rng(0xCA11);
+  const auto rnd = [&](double a, double b) {
+    return a + (b - a) * (rng() / 4294967296.0);
+  };
+  for (int i = 0; i < 30; ++i) {
+    cases.push_back(
+        {{{100, 0}, {rnd(40, 90), rnd(-60, -10)}, {rnd(110, 160), rnd(-30, 0)}},
+         {{100 - 1.5 * e, 0},
+          {rnd(30, 80), rnd(-70, -20)},
+          {rnd(120, 170), rnd(-20, 0)}},
+         {{100 - 3.0 * e, 0},
+          {rnd(120, 170), rnd(-40, -5)},
+          {rnd(150, 185), rnd(-10, 0)}}});
+  }
+  for (size_t i = 0; i < cases.size(); ++i)
+    std::cerr << "CASE " << i << " " << CountImbalance(cases[i], e) << "\n";
+}
+
+// Broad fuzz with VARIED corner spacing (s up to 10x eps) to probe relocation:
+// large-s cases sit outside any fixed merge band. Run at several configs and
+// count survivors (failing at config AND at baseline) to see if a config closes
+// the class or just the small-spacing band.
+TEST(Boolean2, DISABLED_CampaignFuzz) {
+  const double e = 3.519281e-10;
+  std::mt19937 rng(0xF0F0);
+  const auto rnd = [&](double a, double b) {
+    return a + (b - a) * (rng() / 4294967296.0);
+  };
+  for (int i = 0; i < 200; ++i) {
+    const double s = rnd(0.3, 10.0);  // corner-spacing scale
+    const std::vector<SimplePolygon> c = {
+        {{100, 0}, {rnd(40, 90), rnd(-60, -10)}, {rnd(110, 160), rnd(-30, 0)}},
+        {{100 - 1.5 * s * e, 0},
+         {rnd(30, 80), rnd(-70, -20)},
+         {rnd(120, 170), rnd(-20, 0)}},
+        {{100 - 3.0 * s * e, 0},
+         {rnd(120, 170), rnd(-40, -5)},
+         {rnd(150, 185), rnd(-10, 0)}}};
+    std::cerr << "CASE " << i << " " << CountImbalance(c, e) << "\n";
+  }
+}
+
+// Single-config gate probe driven by the B2_M_* env (the driver sets K=merge
+// and decide=narrow=snap). Reports, for THAT one config: synthetic open-walk
+// cells over a random-apex s-scan, plus the two real curated cases' imbalance.
+// The driver also runs the suite open-walk tests separately. Output line:
+//   PROBE open=<cells>/<tot> nfail=<structs> centered=<imb> triangle=<imb>
+TEST(Boolean2, DISABLED_ProbeOneConfig) {
+  const double e = 3.519281e-10;  // base op eps at ~160 scale
+  // Scale-stress: B2_PROBE_SCALE multiplies all coordinates and eps together,
+  // so relative geometry (gaps in eps units) is invariant; deviation in open
+  // cells exposes FP-floor / conditioning effects (near-origin is the suspect).
+  const char* scEnv = std::getenv("B2_PROBE_SCALE");
+  const double sc = scEnv ? std::atof(scEnv) : 1.0;
+  const double eUsed = e * sc;
+  const auto scaleP = [&](std::vector<SimplePolygon> ps) {
+    for (auto& loop : ps)
+      for (vec2& v : loop) v *= sc;
+    return ps;
+  };
+  std::mt19937 rng(0xBEEF);  // same seed as RelocationProbe -> same structures
+  const auto rnd = [&](double a, double b) {
+    return a + (b - a) * (rng() / 4294967296.0);
+  };
+  struct Apex {
+    vec2 a1, b1, a2, b2, a3, b3;
+  };
+  std::vector<Apex> apex;
+  for (int i = 0; i < 40; ++i)
+    apex.push_back({{rnd(40, 90), rnd(-60, -10)},
+                    {rnd(110, 160), rnd(-30, 0)},
+                    {rnd(30, 80), rnd(-70, -20)},
+                    {rnd(120, 170), rnd(-20, 0)},
+                    {rnd(120, 170), rnd(-40, -5)},
+                    {rnd(150, 185), rnd(-10, 0)}});
+  const auto build = [&](const Apex& A, double s) {
+    return std::vector<SimplePolygon>{{{100, 0}, A.a1, A.b1},
+                                      {{100 - 1.5 * s * e, 0}, A.a2, A.b2},
+                                      {{100 - 3.0 * s * e, 0}, A.a3, A.b3}};
+  };
+  long open = 0, tot = 0;
+  int nfail = 0;
+  for (const Apex& A : apex) {
+    bool any = false;
+    for (double s = 0.02; s <= 200.0; s *= 1.05) {
+      ++tot;
+      if (CountImbalance(scaleP(build(A, s)), eUsed) > 0) {
+        ++open;
+        any = true;
+      }
+    }
+    if (any) ++nfail;
+  }
+  const std::vector<SimplePolygon> centered = {
+      {{16.326654361604518, -168.72132050147599},
+       {126.43622068872992, 170.16107906902442},
+       {-126.4362206896044, -64.998020356457175},
+       {14.343687683060599, -170.16203012505568},
+       {16.635671355979465, -169.67237701777114}},
+      {{126.4362206896044, 170.16107906853938},
+       {125.43666000402905, 170.16203012505565},
+       {125.43554197004028, 170.16166685379164},
+       {124.77049882701533, 169.67730915692113},
+       {125.51465251505573, 169.92009174481331}}};
+  const std::vector<SimplePolygon> triangle = {
+      {{100, 0}, {70, -20}, {120, 0}},
+      {{100 - 1.5 * e, 0}, {40, -50}, {150, 0}},
+      {{100 - 3.0 * e, 0}, {150, -20}, {160, 0}}};
+  std::cerr << "PROBE scale=" << sc << " open=" << open << "/" << tot
+            << " nfail=" << nfail
+            << " centered=" << CountImbalance(scaleP(centered), eUsed)
+            << " triangle=" << CountImbalance(scaleP(triangle), eUsed) << "\n";
+}
+
+// Targeted relocation probe (the decisive closed-vs-relocated test). For each
+// random apex set, SCAN the corner-spacing scale s across a wide log range and
+// record whether ANY s yields imbalance>0 (a failing window) at each per-stage
+// config. Random rate-fuzzing samples one s and only sees the band there; this
+// scans s, so it separates "config CLOSED the class" (no failing s for any
+// structure) from "config RELOCATED the band" (a failing s still exists, just
+// at a different spacing). Reports, per config: how many structures have any
+// failing s, the open-cell fraction, and the union of failing-s windows.
+TEST(Boolean2, DISABLED_RelocationProbe) {
+  const double e = 3.519281e-10;
+  std::mt19937 rng(0xBEEF);
+  const auto rnd = [&](double a, double b) {
+    return a + (b - a) * (rng() / 4294967296.0);
+  };
+  struct Apex {
+    vec2 a1, b1, a2, b2, a3, b3;
+  };
+  const int kStructs = 40;
+  std::vector<Apex> apex;
+  for (int i = 0; i < kStructs; ++i)
+    apex.push_back({{rnd(40, 90), rnd(-60, -10)},
+                    {rnd(110, 160), rnd(-30, 0)},
+                    {rnd(30, 80), rnd(-70, -20)},
+                    {rnd(120, 170), rnd(-20, 0)},
+                    {rnd(120, 170), rnd(-40, -5)},
+                    {rnd(150, 185), rnd(-10, 0)}});
+  const auto build = [&](const Apex& A, double s) {
+    return std::vector<SimplePolygon>{{{100, 0}, A.a1, A.b1},
+                                      {{100 - 1.5 * s * e, 0}, A.a2, A.b2},
+                                      {{100 - 3.0 * s * e, 0}, A.a3, A.b3}};
+  };
+  std::vector<double> S;  // wide+fine geometric scan (1% eps .. 3000 eps)
+  for (double s = 0.01; s <= 3000.0; s *= 1.03) S.push_back(s);
+
+  struct Cfg {
+    const char* name;
+    double mM, mN, mS;
+  };
+  const Cfg cfgs[] = {
+      {"base     (1,1,1) ", 1, 1, 1},  {"mergeOnly(3,1,1) ", 3, 1, 1},
+      {"mergeOnly(5,1,1) ", 5, 1, 1},  {"mergeOnly(7,1,1) ", 7, 1, 1},
+      {"mergeOnly(10,1,1)", 10, 1, 1}, {"both    (5,.3,.3)", 5, 0.3, 0.3}};
+  std::cerr << "\n[relocation] coupled near-coincident corner cluster, s-scan ["
+            << S.front() << ", " << S.back() << "] eps over " << kStructs
+            << " random structures:\n";
+  for (const Cfg& c : cfgs) {
+    setenv("B2_M_MERGE", std::to_string(c.mM).c_str(), 1);
+    setenv("B2_M_NARROW", std::to_string(c.mN).c_str(), 1);
+    setenv("B2_M_SNAP", std::to_string(c.mS).c_str(), 1);
+    int nFail = 0;
+    long cells = 0, openCells = 0;
+    double sLo = 1e9, sHi = 0;
+    for (const Apex& A : apex) {
+      bool any = false;
+      for (const double s : S) {
+        ++cells;
+        if (CountImbalance(build(A, s), e) > 0) {
+          ++openCells;
+          any = true;
+          sLo = std::min(sLo, s);
+          sHi = std::max(sHi, s);
+        }
+      }
+      if (any) ++nFail;
+    }
+    std::cerr << "  " << c.name << "  structs-with-failing-s " << nFail << "/"
+              << kStructs << "  open-cells " << openCells << "/" << cells
+              << "  failing-s " << (nFail ? sLo : 0) << ".."
+              << (nFail ? sHi : 0) << "\n";
+  }
+
+  // Decoupled mode: a vertex sitting perp p*eps above a DISTANT edge, crossing
+  // at along-position x. Full 2D (perp x along) sweep - if this never fails at
+  // any config (incl baseline), the only failure mode is coupled clustering, so
+  // a config that empties the coupled window closes the class (no escape
+  // hatch).
+  const auto decoupled = [&](double p, double x) {
+    return std::vector<SimplePolygon>{
+        {{0, 0}, {200, 0}, {100, -100}},
+        {{x - 5, p * e}, {x + 5, -p * e}, {x, 100}}};
+  };
+  std::vector<double> P;
+  for (double p = 0.02; p <= 5.0; p *= 1.06) P.push_back(p);
+  std::cerr << "\n[decoupled] vertex perp p*eps over distant edge, p in ["
+            << P.front() << ", " << P.back() << "] x along x in [20,180]:\n";
+  for (const Cfg& c : cfgs) {
+    setenv("B2_M_MERGE", std::to_string(c.mM).c_str(), 1);
+    setenv("B2_M_NARROW", std::to_string(c.mN).c_str(), 1);
+    setenv("B2_M_SNAP", std::to_string(c.mS).c_str(), 1);
+    int openCells = 0, cells = 0;
+    for (double x = 20; x <= 180; x += 4) {
+      for (const double p : P) {
+        ++cells;
+        if (CountImbalance(decoupled(p, x), e) > 0) ++openCells;
+      }
+    }
+    std::cerr << "  " << c.name << "  open-cells " << openCells << "/" << cells
+              << "\n";
   }
 }
 #endif
