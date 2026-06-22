@@ -1035,6 +1035,24 @@ TEST(CrossSection, DISABLED_TinyFeatureNearCornerUnionCollapseLargeArmB) {
       {0.18935489459782162, -0.86480253691361164});
 }
 
+// DISABLED: Union of two near-Y-axis triangles collapses to empty; both
+// triangles have vertices very close to the Y-axis with one vertex far along Y.
+// The -0. / ~-1e-6 x-coordinates create a near-degenerate arrangement.
+// (CrossSectionFuzz.BooleanRobustness, run 27943748595.)
+TEST(CrossSection, DISABLED_BooleanRobustnessTriangleUnionCollapse) {
+  const SimplePolygon a = {{-0., 540.29526782459561},
+                           {1., -9.9999999999999995e-07},
+                           {-9.9999999999999995e-07, 1000.}};
+  const SimplePolygon b = {
+      {0., -9.9999999999999995e-07}, {1., 0.}, {0., 493.91379213714481}};
+  const CrossSection ca(a), cb(b);
+  const auto u = ca + cb;
+  EXPECT_FALSE(u.IsEmpty())
+      << "union of two near-Y-axis triangles collapsed to empty";
+  const double rawAnchor = std::max(RawArea(a), RawArea(b));
+  ExpectUnionRetainsArea(u, rawAnchor, 1e-5 * (1.0 + rawAnchor),
+                         "triangle union");
+}
 
 // Regression test for the BR-cell hole pattern from Samples.Sponge4. Two
 // CCW polygons that share an endpoint AND form a T-junction at the
