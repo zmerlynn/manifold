@@ -1074,6 +1074,26 @@ TEST(CrossSection, DISABLED_BooleanRobustnessTriangleQuadUnionCollapse) {
                          "triangle+quad union");
 }
 
+// DISABLED: Same near-Y-axis pattern but with third vertex at x=-1 (not x=-0.);
+// shows the bug is not pinned to the -0. value.
+// (CrossSectionFuzz.BooleanRobustness, run 27986764883.)
+TEST(CrossSection, DISABLED_BooleanRobustnessTriangleOffAxisCornerCollapse) {
+  const SimplePolygon a = {{-1., 956.10396430738638},
+                           {1., -9.9999999999999995e-07},
+                           {-9.9999999999999995e-07, 1000.}};
+  const SimplePolygon b = {{0., 9.9999999999999995e-07},
+                           {1., 0.},
+                           {-1., 558.47841640754154},
+                           {-1., -1000.}};
+  const CrossSection ca(a), cb(b);
+  const auto u = ca + cb;
+  EXPECT_FALSE(u.IsEmpty())
+      << "union of off-axis-corner triangle and quad collapsed to empty";
+  const double rawAnchor = std::max(RawArea(a), RawArea(b));
+  ExpectUnionRetainsArea(u, rawAnchor, 1e-5 * (1.0 + rawAnchor),
+                         "off-axis-corner triangle+quad union");
+}
+
 // Regression test for the BR-cell hole pattern from Samples.Sponge4. Two
 // CCW polygons that share an endpoint AND form a T-junction at the
 // non-shared endpoint of one edge. Before the broad-phase / fused-pass
