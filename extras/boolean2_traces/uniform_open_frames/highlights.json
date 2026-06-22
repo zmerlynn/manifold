@@ -1,2 +1,3 @@
 [{"x":97.375,"y":0.0,"label":"in=1 out=2 (corner)","color":"#d00000"},
- {"x":78.179297597043,"y":-16.728280961183,"label":"in=2 out=1 (interior crossing)","color":"#0050d0"}]
+ {"x":78.179297597043,"y":-16.728280961183,"label":"in=2 out=1 (interior crossing)","color":"#0050d0"},
+ {"x":87.874061798061,"y":-6.941324713746,"label":"s0_1 x s3_1: cross, no vertex","color":"#9400d3"}]
