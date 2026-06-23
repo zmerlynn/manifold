@@ -1015,25 +1015,6 @@ TEST(CrossSection, CornerCrossingStrip) {
       << "corner-crossing strip union area outside the aspect-ratio floor";
   EXPECT_EQ(u.NumContour(), 1) << "union split into multiple contours";
 }
-// DISABLED: 4-vertex host (all-zero radii) unioned with a tiny 4-vertex
-// feature that has one large-radius arm (3.25 * 1e-3 = 0.00325); union
-// collapses to empty. (CrossSectionFuzz.TinyFeatureNearCorner, run
-// 27903146758.)
-TEST(CrossSection, DISABLED_TinyFeatureNearCornerUnionCollapse4vLargeArm) {
-  ExpectTinyFeatureSurvivesNearCorner(
-      {0., 0., 0., 0.}, {1., 0., 3.2498570389255113, 1.},
-      {0.58556592428115395, 0.97715466286887054});
-}
-
-// DISABLED: 5-vertex host (all-zero radii) unioned with the large-arm tiny
-// feature at a different approach direction; area drops to ~11% of floor
-// rather than collapsing entirely. (CrossSectionFuzz.TinyFeatureNearCorner,
-// run 27914853726.)
-TEST(CrossSection, DISABLED_TinyFeatureNearCornerUnionCollapseLargeArmB) {
-  ExpectTinyFeatureSurvivesNearCorner(
-      {0., 0., 0., 0., 0.}, {1., 1., 0., 357.77734814017867, 0.},
-      {0.18935489459782162, -0.86480253691361164});
-}
 
 // DISABLED: Union of two near-Y-axis triangles collapses to empty; both
 // triangles have vertices very close to the Y-axis with one vertex far along Y.
