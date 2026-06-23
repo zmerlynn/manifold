@@ -1093,6 +1093,87 @@ TEST(CrossSection, DISABLED_BooleanRobustnessSameYNearAxisCollapse) {
                          "same-y near-axis triangle union");
 }
 
+// DISABLED: TinyFeatureNearCorner with eps=1e-9 (kEpsLadder[3]), 12-vertex
+// host, 47-vertex feature; shows the bug is not limited to eps=1e-12.
+// (CrossSectionFuzz.TinyFeatureNearCorner, run 28019888810.)
+TEST(CrossSection, DISABLED_TinyFeatureNearCornerEps9LargePolygons) {
+  const std::vector<double> hostRadii = {1.,
+                                         1.,
+                                         1.,
+                                         1.,
+                                         4.8362098705575987,
+                                         550.67703899219464,
+                                         127.06772354363986,
+                                         1.,
+                                         1.,
+                                         0.,
+                                         202.09850239328151,
+                                         0.};
+  const std::vector<double> featureRadii = {890.05198705290127,
+                                            133.34448673050963,
+                                            133.34448673050963,
+                                            429.27354064682947,
+                                            2.8279157064093785,
+                                            1.,
+                                            1.,
+                                            1.,
+                                            745.46929423732342,
+                                            1.,
+                                            1.,
+                                            630.29142946932029,
+                                            3.0018281358090264,
+                                            528.81842935531915,
+                                            3.538998694186164,
+                                            1.,
+                                            1.,
+                                            1.,
+                                            1.,
+                                            1.,
+                                            1.,
+                                            1.,
+                                            1.,
+                                            1.,
+                                            1.,
+                                            1.,
+                                            1.,
+                                            1.,
+                                            1.,
+                                            1.,
+                                            1.,
+                                            1.,
+                                            1.,
+                                            1.,
+                                            1.,
+                                            1.,
+                                            1.,
+                                            1.,
+                                            1.,
+                                            1.,
+                                            1.,
+                                            1.,
+                                            1.,
+                                            781.76616384165209,
+                                            2.1401283904774013,
+                                            1.,
+                                            320.25770704447359};
+  const double dirX = 0.29344464529084191, dirY = 0.32767470496241757;
+  const double dlen = std::sqrt(dirX * dirX + dirY * dirY);
+  SimplePolygon host = StarRing(hostRadii);
+  SimplePolygon feature = StarRing(featureRadii);
+  for (auto& v : feature) v *= 1e-3;
+  const vec2 anchor{host[0].x + 1e-9 * dirX / dlen,
+                    host[0].y + 1e-9 * dirY / dlen};
+  const vec2 shift{anchor.x - feature[0].x, anchor.y - feature[0].y};
+  for (auto& v : feature) v += shift;
+  const CrossSection ca(host), cb(feature);
+  const auto aUb = ca + cb;
+  const double rawHostArea = RawArea(host);
+  const double rawFeatureArea = RawArea(feature);
+  ExpectUnionRetainsArea(aUb, rawHostArea, 1e-3 * (1.0 + rawHostArea), "host");
+  ExpectUnionRetainsArea(aUb, rawFeatureArea, 1e-3 * (1.0 + rawFeatureArea),
+                         "feature");
+}
+
 // Regression test for the BR-cell hole pattern from Samples.Sponge4. Two
 // CCW polygons that share an endpoint AND form a T-junction at the
 // non-shared endpoint of one edge. Before the broad-phase / fused-pass
