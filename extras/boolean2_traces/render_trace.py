@@ -80,7 +80,7 @@ def render(phase, eps, cx, cy, half, title, highlights, label_hl):
         o.append(f'<line x1="{ax:.2f}" y1="{ay:.2f}" x2="{bx:.2f}" y2="{by:.2f}" '
                  f'stroke="{color}" stroke-width="{wdt}"{mk}{da}/>')
 
-    show_lbl = half < 1.0
+    show_lbl = half < 1.0 or "[overview]" in title
     for p in phase.get("points", []):
         color, r = pt_style(p.get("kind", ""))
         px, py = X(p["xy"][0]), Y(p["xy"][1])
