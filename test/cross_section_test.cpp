@@ -1221,12 +1221,18 @@ TEST(CrossSection, DISABLED_TinyFeatureNearCornerEps9LargePolygons) {
                          "feature");
 }
 
-// DISABLED: Extrude a 4-ring polygon with near-eps coordinates, then Project
-// and Slice the resulting solid back to 2D. CheckTopologicalValidity fails on
-// the projected or mid-height CrossSection via the RemoveOverlaps2D
-// edge-balance invariant. The topology helpers above (ComputeEdgeBalance,
-// CheckBoolean2TopologyValid, ExpectBoolean2TopologyValid) replicate the fuzz
-// check. (CrossSectionFuzz.ManifoldExtrudeRoundTrip, run 28688536424.)
+// DISABLED: replicates CrossSectionFuzz.ManifoldExtrudeRoundTrip (run
+// 28688536424) faithfully: the fuzz target extrudes the CLEANED cross-section
+// (CrossSection(inputPolys).ToPolygons()), not the raw rings. Clean the 4-ring
+// near-eps input, extrude, then Project/Slice back to 2D. With MANIFOLD_ASSERT
+// the projected section's RemoveOverlaps2D aborts on the open-walk check
+// (boolean2.cpp: "retained directed edges must form closed walks"); without
+// asserts that pass silently drops a fragment and the sliced section's cleaned
+// output re-ingests to a mult-imbalanced (non-manifold) arrangement - its
+// output threads a ~4e-9 pinch cluster with near-twin verts ~1.3 eps apart -
+// caught by the edge-balance check below. Same near-coincident open-walk class
+// as DISABLED_CenteredSubEpsNonClosingWalk, reached via an ordinary 3D
+// Extrude -> Project/Slice round-trip rather than an adversarial 2D construct.
 TEST(CrossSection, DISABLED_ManifoldExtrudeRoundTripTopologyFailure) {
   const Polygons inputPolys = {
       {{0., 9.9999999999999995e-07},
@@ -1251,7 +1257,9 @@ TEST(CrossSection, DISABLED_ManifoldExtrudeRoundTripTopologyFailure) {
   const double height = 3.4451635980796125;
   const int nDivisions = 4;
 
-  const auto solid = Manifold::Extrude(inputPolys, height, nDivisions);
+  // Match the fuzz target: extrude the cleaned cross-section, not raw rings.
+  const CrossSection input(inputPolys);
+  const auto solid = Manifold::Extrude(input.ToPolygons(), height, nDivisions);
   EXPECT_EQ(solid.Status(), Manifold::Error::NoError);
 
   const CrossSection projected(solid.Project());
