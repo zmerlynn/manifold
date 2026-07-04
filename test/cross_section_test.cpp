@@ -26,9 +26,13 @@
 #include <array>
 #include <iostream>
 #include <limits>
+#include <map>
 #include <thread>
 #include <vector>
 
+// Internal header for topology invariant checks used by fuzz-seed regression
+// tests (DISABLED_Manifold*RoundTrip seeds). Not part of the public API.
+#include "../src/boolean2.h"
 #include "manifold/common.h"
 #include "manifold/manifold.h"
 #include "test.h"
@@ -166,6 +170,49 @@ struct DistribCase {
   Shape a, b, c;
   DistribKind kind = DistribKind::Standard;
 };
+
+template <typename Edge>
+std::map<int, int> ComputeEdgeBalance(const std::vector<Edge>& edges) {
+  std::map<int, int> balance;
+  for (const auto& edge : edges) {
+    balance[edge.v0] += edge.mult;
+    balance[edge.v1] -= edge.mult;
+  }
+  return balance;
+}
+
+bool CheckBoolean2TopologyValid(const manifold::OverlapResult& result,
+                                const std::vector<manifold::EdgeM>& inputEdges,
+                                const std::vector<int>& inputVert2Merged,
+                                int numMergedVerts) {
+  std::vector<manifold::EdgeM> remapped;
+  remapped.reserve(inputEdges.size());
+  for (const auto& edge : inputEdges) {
+    const int a = inputVert2Merged[edge.v0];
+    const int b = inputVert2Merged[edge.v1];
+    if (a != b) remapped.push_back({a, b, edge.mult});
+  }
+  const auto expected = ComputeEdgeBalance(remapped);
+  const auto actual = ComputeEdgeBalance(result.edges);
+  for (int v = 0; v < static_cast<int>(result.verts.size()); ++v) {
+    const int expectedBalance =
+        expected.count(v) ? expected.find(v)->second : 0;
+    const int actualBalance = actual.count(v) ? actual.find(v)->second : 0;
+    const int target = (v < numMergedVerts) ? expectedBalance : 0;
+    if (actualBalance != target) return false;
+  }
+  return true;
+}
+
+void ExpectBoolean2TopologyValid(const manifold::Polygons& polys) {
+  const auto [verts, edges] = manifold::PolygonsToInput(polys);
+  if (verts.empty()) return;
+  const double eps = manifold::InferEps(polys, {});
+  const auto result = manifold::RemoveOverlaps2D(verts, edges, eps);
+  EXPECT_TRUE(CheckBoolean2TopologyValid(result, edges, result.inputVert2Merged,
+                                         result.numMergedVerts));
+}
+
 
 }  // namespace
 
@@ -1173,6 +1220,47 @@ TEST(CrossSection, DISABLED_TinyFeatureNearCornerEps9LargePolygons) {
   ExpectUnionRetainsArea(aUb, rawFeatureArea, 1e-3 * (1.0 + rawFeatureArea),
                          "feature");
 }
+
+// DISABLED: Extrude a 4-ring polygon with near-eps coordinates, then Project
+// and Slice the resulting solid back to 2D. CheckTopologicalValidity fails on
+// the projected or mid-height CrossSection via the RemoveOverlaps2D
+// edge-balance invariant. The topology helpers above (ComputeEdgeBalance,
+// CheckBoolean2TopologyValid, ExpectBoolean2TopologyValid) replicate the fuzz
+// check. (CrossSectionFuzz.ManifoldExtrudeRoundTrip, run 28688536424.)
+TEST(CrossSection, DISABLED_ManifoldExtrudeRoundTripTopologyFailure) {
+  const Polygons inputPolys = {
+      {{0., 9.9999999999999995e-07},
+       {1024., 1000.},
+       {-1., 0.},
+       {0., -1000.},
+       {-364.96862275285457, -1024.}},
+      {{1000., 3.385490849236616},
+       {368.52866094522233, -9.9999999999999995e-07},
+       {-1., 9.9999999999999995e-07},
+       {-0., -1.},
+       {1024., 9.9999999999999995e-07},
+       {-9.9999999999999995e-07, -9.9999999999999995e-07}},
+      {{-0., -1.},
+       {-9.9999999999999995e-07, 0.},
+       {0., 9.9999999999999995e-07},
+       {1024., -998.2714902694496}},
+      {{0., -9.9999999999999995e-07},
+       {0., -1024.},
+       {996.36854414150923, 1024.},
+       {-9.9999999999999995e-07, 1000.}}};
+  const double height = 3.4451635980796125;
+  const int nDivisions = 4;
+
+  const auto solid = Manifold::Extrude(inputPolys, height, nDivisions);
+  EXPECT_EQ(solid.Status(), Manifold::Error::NoError);
+
+  const CrossSection projected(solid.Project());
+  ExpectBoolean2TopologyValid(projected.ToPolygons());
+
+  const CrossSection middle(solid.Slice(height * 0.5));
+  ExpectBoolean2TopologyValid(middle.ToPolygons());
+}
+
 
 // Regression test for the BR-cell hole pattern from Samples.Sponge4. Two
 // CCW polygons that share an endpoint AND form a T-junction at the
