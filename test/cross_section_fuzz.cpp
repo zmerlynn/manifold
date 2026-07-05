@@ -1597,8 +1597,8 @@ void PredicatesIdentities(const std::vector<double>& radii) {
                                         static_cast<int>(i)};
     const manifold::GraphSegment2D segB{loop[j], loop[j + 1],
                                         static_cast<int>(j)};
-    const bool hitAB = manifold::IntersectSegments(segA, segB, eps, &outAB);
-    const bool hitBA = manifold::IntersectSegments(segB, segA, eps, &outBA);
+    const bool hitAB = manifold::IntersectSegments(segA, segB, eps, outAB);
+    const bool hitBA = manifold::IntersectSegments(segB, segA, eps, outBA);
     EXPECT_EQ(hitAB, hitBA)
         << "IntersectSegments not order-symmetric at (i,j)=(" << i << "," << j
         << ")";
