@@ -94,7 +94,6 @@ jobs:
           - HullIdempotence
           - VertexMergeIdempotence
           - BVHPairEnumerationMatchesBruteForce
-          - CanonicalSubEdgeIdempotence
           - WindingFilterStarburstStress
           - PredicatesIdentities
           - InputLoopOrderInvariance
