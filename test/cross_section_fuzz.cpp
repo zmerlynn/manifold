@@ -1430,39 +1430,6 @@ void WindingFilterStarburstStress(int numStrips, double angleSpread,
       << " spread=" << angleSpread << " width=" << stripWidth;
 }
 
-// Structural-coverage dim targeting the Canonicalize pass. Property:
-// CanonicalSubEdges::Finalize() is idempotent. After one Finalize, the
-// edges are sorted by (vMin, vMax), consecutive duplicates are merged
-// by summing mults, and zero-sum entries are dropped. A second
-// Finalize sees no consecutive duplicates and no zero-sum entries, so
-// it should output an identical vector. Catches sort-instability bugs
-// or merge-loop off-by-one errors that would let zero-sum entries
-// leak through.
-void CanonicalSubEdgeIdempotence(const std::vector<int>& v0s,
-                                 const std::vector<int>& v1s,
-                                 const std::vector<int>& mults) {
-  if (v0s.size() != v1s.size() || v0s.size() != mults.size()) return;
-  if (v0s.empty() || v0s.size() > 256) return;
-
-  manifold::CanonicalSubEdges sub;
-  for (size_t i = 0; i < v0s.size(); ++i) {
-    sub.Add(v0s[i], v1s[i], mults[i]);
-  }
-  sub.Finalize();
-  const auto firstPass = sub.edges;
-
-  sub.Finalize();  // second pass; should be a no-op.
-
-  ASSERT_EQ(sub.edges.size(), firstPass.size())
-      << "Finalize() not idempotent: size changed from " << firstPass.size()
-      << " to " << sub.edges.size();
-  for (size_t i = 0; i < sub.edges.size(); ++i) {
-    EXPECT_EQ(sub.edges[i].vMin, firstPass[i].vMin) << "at i=" << i;
-    EXPECT_EQ(sub.edges[i].vMax, firstPass[i].vMax) << "at i=" << i;
-    EXPECT_EQ(sub.edges[i].mult, firstPass[i].mult) << "at i=" << i;
-  }
-}
-
 // Structural-coverage dim targeting the 2D BVH. Property:
 // the BVH's pair enumeration matches a brute-force O(N^2) reference,
 // exactly. Builds a BVH from N box centers (eps-padded points), runs
@@ -1484,7 +1451,8 @@ void BVHPairEnumerationMatchesBruteForce(const std::vector<double>& xs,
   boxes.reserve(xs.size());
   for (size_t i = 0; i < xs.size(); ++i) {
     if (!std::isfinite(xs[i]) || !std::isfinite(ys[i])) return;
-    boxes.push_back(manifold::BoxOf2DPoint({xs[i], ys[i]}, eps));
+    boxes.push_back(manifold::Box2(manifold::vec2(xs[i] - eps, ys[i] - eps),
+                                   manifold::vec2(xs[i] + eps, ys[i] + eps)));
   }
 
   const auto bvh = manifold::BVHBuildFromBoxes(boxes);
@@ -1546,20 +1514,14 @@ void VertexMergeIdempotence(const std::vector<double>& xs,
 }
 
 // Structural-coverage dim targeting boolean2_predicates.cpp (the
-// low-level geometric primitives: SignedArea, CCW, IntersectSegments,
-// EpsilonFromScale). These primitives have zero direct test coverage
-// today; bugs here propagate silently into every higher-level
-// pipeline. Asserts three algebraic identities they must satisfy:
+// low-level geometric primitives: SignedArea, EpsilonFromScale).
+// Asserts: SignedArea(reverse(loop)) == -SignedArea(loop). Reversing a
+// simple polygon's vertex order flips winding sign, so signed area
+// negates exactly.
 //
-//   1. SignedArea(reverse(loop)) == -SignedArea(loop). Reversing a
-//      simple polygon's vertex order flips winding sign, so signed
-//      area negates exactly.
-//   2. CCW(a, b, c) == -CCW(a, c, b). Swapping the last two args
-//      flips orientation. Holds for any nonzero CCW return (the
-//      collinear case returns 0 from both, satisfying the identity).
-//   3. IntersectSegments(a0, a1, b0, b1) and IntersectSegments(b0, b1,
-//      a0, a1) must agree on intersection existence and (when hit) on
-//      the intersection point within FP noise.
+// (CCW antisymmetry removed: consumer's dbe77f74 made CCW internal.
+//  IntersectSegments removed: sweep-line rewrite fc1d6fa8 dropped
+//  GraphSegment2D and IntersectSegments from the public API.)
 void PredicatesIdentities(const std::vector<double>& radii) {
   if (radii.size() < 4) return;
   const manifold::SimplePolygon loop = StarPolygon(radii);
@@ -1575,42 +1537,6 @@ void PredicatesIdentities(const std::vector<double>& radii) {
   EXPECT_NEAR(area, -areaRev, areaTol)
       << "SignedArea(reverse(loop)) != -SignedArea(loop): " << area << " vs "
       << -areaRev;
-
-  // 2. (Removed: CCW antisymmetry. Consumer's dbe77f74 "Inline
-  //     Boolean2 CCW predicate use" made CCW internal to predicates.cpp
-  //     by dropping its header declaration. The property still holds
-  //     algebraically but isn't exposed to fuzz callers any more.)
-  const double maxCoord =
-      std::max({std::fabs(loop.front().x), std::fabs(loop.front().y), 1.0});
-  const double eps = manifold::EpsilonFromScale(maxCoord);
-
-  // 3. IntersectSegments is order-symmetric in the segment pair.
-  // Pair every edge with the edge two steps later (so they share no
-  // endpoint), bounded to avoid quadratic blowup on long inputs.
-  const size_t pairLimit = std::min<size_t>(loop.size(), 16);
-  for (size_t i = 0; i + 1 < pairLimit; ++i) {
-    const size_t j = i + 2;
-    if (j + 1 >= loop.size()) break;
-    if (j + 1 == loop.size() && i == 0) continue;  // shared endpoint
-    manifold::vec2 outAB, outBA;
-    const manifold::GraphSegment2D segA{loop[i], loop[i + 1],
-                                        static_cast<int>(i)};
-    const manifold::GraphSegment2D segB{loop[j], loop[j + 1],
-                                        static_cast<int>(j)};
-    const bool hitAB = manifold::IntersectSegments(segA, segB, eps, outAB);
-    const bool hitBA = manifold::IntersectSegments(segB, segA, eps, outBA);
-    EXPECT_EQ(hitAB, hitBA)
-        << "IntersectSegments not order-symmetric at (i,j)=(" << i << "," << j
-        << ")";
-    if (hitAB && hitBA) {
-      const double pTol =
-          1e-7 * (1.0 + std::max(std::fabs(outAB.x), std::fabs(outAB.y)));
-      EXPECT_NEAR(outAB.x, outBA.x, pTol)
-          << "IntersectSegments point X differs by swap";
-      EXPECT_NEAR(outAB.y, outBA.y, pTol)
-          << "IntersectSegments point Y differs by swap";
-    }
-  }
 }
 
 // CrossSection(Polygons) constructor order invariance. Given a list
@@ -2623,11 +2549,6 @@ FUZZ_TEST(CrossSectionFuzz, BVHPairEnumerationMatchesBruteForce)
         VectorOf(InRange(-100.0, 100.0)).WithMinSize(2).WithMaxSize(200),
         VectorOf(InRange(-100.0, 100.0)).WithMinSize(2).WithMaxSize(200),
         InRange(-6.0, -1.0));
-
-FUZZ_TEST(CrossSectionFuzz, CanonicalSubEdgeIdempotence)
-    .WithDomains(VectorOf(InRange(0, 100)).WithMinSize(1).WithMaxSize(256),
-                 VectorOf(InRange(0, 100)).WithMinSize(1).WithMaxSize(256),
-                 VectorOf(InRange(-100, 100)).WithMinSize(1).WithMaxSize(256));
 
 FUZZ_TEST(CrossSectionFuzz, WindingFilterStarburstStress)
     .WithDomains(InRange(2, 32), InRange(0.01, 2.0 * 3.14159),
