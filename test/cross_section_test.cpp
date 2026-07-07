@@ -26,13 +26,9 @@
 #include <array>
 #include <iostream>
 #include <limits>
-#include <map>
 #include <thread>
 #include <vector>
 
-// Internal header for topology invariant checks used by fuzz-seed regression
-// tests (DISABLED_Manifold*RoundTrip seeds). Not part of the public API.
-#include "../src/boolean2.h"
 #include "manifold/common.h"
 #include "manifold/manifold.h"
 #include "test.h"
@@ -170,49 +166,6 @@ struct DistribCase {
   Shape a, b, c;
   DistribKind kind = DistribKind::Standard;
 };
-
-template <typename Edge>
-std::map<int, int> ComputeEdgeBalance(const std::vector<Edge>& edges) {
-  std::map<int, int> balance;
-  for (const auto& edge : edges) {
-    balance[edge.v0] += edge.mult;
-    balance[edge.v1] -= edge.mult;
-  }
-  return balance;
-}
-
-bool CheckBoolean2TopologyValid(const manifold::OverlapResult& result,
-                                const std::vector<manifold::EdgeM>& inputEdges,
-                                const std::vector<int>& inputVert2Merged,
-                                int numMergedVerts) {
-  std::vector<manifold::EdgeM> remapped;
-  remapped.reserve(inputEdges.size());
-  for (const auto& edge : inputEdges) {
-    const int a = inputVert2Merged[edge.v0];
-    const int b = inputVert2Merged[edge.v1];
-    if (a != b) remapped.push_back({a, b, edge.mult});
-  }
-  const auto expected = ComputeEdgeBalance(remapped);
-  const auto actual = ComputeEdgeBalance(result.edges);
-  for (int v = 0; v < static_cast<int>(result.verts.size()); ++v) {
-    const int expectedBalance =
-        expected.count(v) ? expected.find(v)->second : 0;
-    const int actualBalance = actual.count(v) ? actual.find(v)->second : 0;
-    const int target = (v < numMergedVerts) ? expectedBalance : 0;
-    if (actualBalance != target) return false;
-  }
-  return true;
-}
-
-void ExpectBoolean2TopologyValid(const manifold::Polygons& polys) {
-  const auto [verts, edges] = manifold::PolygonsToInput(polys);
-  if (verts.empty()) return;
-  const double eps = manifold::InferEps(polys, {});
-  const auto result = manifold::RemoveOverlaps2D(verts, edges, eps);
-  EXPECT_TRUE(CheckBoolean2TopologyValid(result, edges, result.inputVert2Merged,
-                                         result.numMergedVerts));
-}
-
 
 }  // namespace
 
@@ -1063,163 +1016,9 @@ TEST(CrossSection, CornerCrossingStrip) {
   EXPECT_EQ(u.NumContour(), 1) << "union split into multiple contours";
 }
 
-// DISABLED: Union of two near-Y-axis triangles collapses to empty; both
-// triangles have vertices very close to the Y-axis with one vertex far along Y.
-// The -0. / ~-1e-6 x-coordinates create a near-degenerate arrangement.
-// (CrossSectionFuzz.BooleanRobustness, run 27943748595.)
-TEST(CrossSection, DISABLED_BooleanRobustnessTriangleUnionCollapse) {
-  const SimplePolygon a = {{-0., 540.29526782459561},
-                           {1., -9.9999999999999995e-07},
-                           {-9.9999999999999995e-07, 1000.}};
-  const SimplePolygon b = {
-      {0., -9.9999999999999995e-07}, {1., 0.}, {0., 493.91379213714481}};
-  const CrossSection ca(a), cb(b);
-  const auto u = ca + cb;
-  EXPECT_FALSE(u.IsEmpty())
-      << "union of two near-Y-axis triangles collapsed to empty";
-  const double rawAnchor = std::max(RawArea(a), RawArea(b));
-  ExpectUnionRetainsArea(u, rawAnchor, 1e-5 * (1.0 + rawAnchor),
-                         "triangle union");
-}
-
-// DISABLED: Variant with same near-Y-axis triangle (a) but a 4-vertex quad (b)
-// with ~1e-6 x-offsets; union again collapses to empty.
-// (CrossSectionFuzz.BooleanRobustness, run 27963369380.)
-TEST(CrossSection, DISABLED_BooleanRobustnessTriangleQuadUnionCollapse) {
-  const SimplePolygon a = {{-0., 540.29526782459561},
-                           {1., -9.9999999999999995e-07},
-                           {-9.9999999999999995e-07, 1000.}};
-  const SimplePolygon b = {{0., -9.9999999999999995e-07},
-                           {1., 0.},
-                           {0., 388.88156245949949},
-                           {9.9999999999999995e-07, 1.}};
-  const CrossSection ca(a), cb(b);
-  const auto u = ca + cb;
-  EXPECT_FALSE(u.IsEmpty())
-      << "union of near-Y-axis triangle and quad collapsed to empty";
-  const double rawAnchor = std::max(RawArea(a), RawArea(b));
-  ExpectUnionRetainsArea(u, rawAnchor, 1e-5 * (1.0 + rawAnchor),
-                         "triangle+quad union");
-}
-
-// DISABLED: Same near-Y-axis pattern but with third vertex at x=-1 (not x=-0.);
-// shows the bug is not pinned to the -0. value.
-// (CrossSectionFuzz.BooleanRobustness, run 27986764883.)
-TEST(CrossSection, DISABLED_BooleanRobustnessTriangleOffAxisCornerCollapse) {
-  const SimplePolygon a = {{-1., 956.10396430738638},
-                           {1., -9.9999999999999995e-07},
-                           {-9.9999999999999995e-07, 1000.}};
-  const SimplePolygon b = {{0., 9.9999999999999995e-07},
-                           {1., 0.},
-                           {-1., 558.47841640754154},
-                           {-1., -1000.}};
-  const CrossSection ca(a), cb(b);
-  const auto u = ca + cb;
-  EXPECT_FALSE(u.IsEmpty())
-      << "union of off-axis-corner triangle and quad collapsed to empty";
-  const double rawAnchor = std::max(RawArea(a), RawArea(b));
-  ExpectUnionRetainsArea(u, rawAnchor, 1e-5 * (1.0 + rawAnchor),
-                         "off-axis-corner triangle+quad union");
-}
-
-// DISABLED: Two triangles, arg0 has same-y near-Y-axis edge (x=-1,y=1024 to
-// x=~1e-6,y=1024), union collapses to empty.
-// (CrossSectionFuzz.BooleanRobustness, run 27990682128.)
-TEST(CrossSection, DISABLED_BooleanRobustnessSameYNearAxisCollapse) {
-  const SimplePolygon a = {{-1., 1024.},
-                           {1., -9.9999999999999995e-07},
-                           {9.9999999999999995e-07, 1024.}};
-  const SimplePolygon b = {
-      {0., 0.}, {1., 9.9999999999999995e-07}, {-1., 1024.}};
-  const CrossSection ca(a), cb(b);
-  const auto u = ca + cb;
-  EXPECT_FALSE(u.IsEmpty())
-      << "union of same-y near-axis triangles collapsed to empty";
-  const double rawAnchor = std::max(RawArea(a), RawArea(b));
-  ExpectUnionRetainsArea(u, rawAnchor, 1e-5 * (1.0 + rawAnchor),
-                         "same-y near-axis triangle union");
-}
-
 // DISABLED: TinyFeatureNearCorner with eps=1e-9 (kEpsLadder[3]), 12-vertex
 // host, 47-vertex feature; shows the bug is not limited to eps=1e-12.
 // (CrossSectionFuzz.TinyFeatureNearCorner, run 28019888810.)
-TEST(CrossSection, DISABLED_TinyFeatureNearCornerEps9LargePolygons) {
-  const std::vector<double> hostRadii = {1.,
-                                         1.,
-                                         1.,
-                                         1.,
-                                         4.8362098705575987,
-                                         550.67703899219464,
-                                         127.06772354363986,
-                                         1.,
-                                         1.,
-                                         0.,
-                                         202.09850239328151,
-                                         0.};
-  const std::vector<double> featureRadii = {890.05198705290127,
-                                            133.34448673050963,
-                                            133.34448673050963,
-                                            429.27354064682947,
-                                            2.8279157064093785,
-                                            1.,
-                                            1.,
-                                            1.,
-                                            745.46929423732342,
-                                            1.,
-                                            1.,
-                                            630.29142946932029,
-                                            3.0018281358090264,
-                                            528.81842935531915,
-                                            3.538998694186164,
-                                            1.,
-                                            1.,
-                                            1.,
-                                            1.,
-                                            1.,
-                                            1.,
-                                            1.,
-                                            1.,
-                                            1.,
-                                            1.,
-                                            1.,
-                                            1.,
-                                            1.,
-                                            1.,
-                                            1.,
-                                            1.,
-                                            1.,
-                                            1.,
-                                            1.,
-                                            1.,
-                                            1.,
-                                            1.,
-                                            1.,
-                                            1.,
-                                            1.,
-                                            1.,
-                                            1.,
-                                            1.,
-                                            781.76616384165209,
-                                            2.1401283904774013,
-                                            1.,
-                                            320.25770704447359};
-  const double dirX = 0.29344464529084191, dirY = 0.32767470496241757;
-  const double dlen = std::sqrt(dirX * dirX + dirY * dirY);
-  SimplePolygon host = StarRing(hostRadii);
-  SimplePolygon feature = StarRing(featureRadii);
-  for (auto& v : feature) v *= 1e-3;
-  const vec2 anchor{host[0].x + 1e-9 * dirX / dlen,
-                    host[0].y + 1e-9 * dirY / dlen};
-  const vec2 shift{anchor.x - feature[0].x, anchor.y - feature[0].y};
-  for (auto& v : feature) v += shift;
-  const CrossSection ca(host), cb(feature);
-  const auto aUb = ca + cb;
-  const double rawHostArea = RawArea(host);
-  const double rawFeatureArea = RawArea(feature);
-  ExpectUnionRetainsArea(aUb, rawHostArea, 1e-3 * (1.0 + rawHostArea), "host");
-  ExpectUnionRetainsArea(aUb, rawFeatureArea, 1e-3 * (1.0 + rawFeatureArea),
-                         "feature");
-}
 
 // DISABLED: replicates CrossSectionFuzz.ManifoldExtrudeRoundTrip (run
 // 28688536424) faithfully: the fuzz target extrudes the CLEANED cross-section
@@ -1233,42 +1032,6 @@ TEST(CrossSection, DISABLED_TinyFeatureNearCornerEps9LargePolygons) {
 // caught by the edge-balance check below. Same near-coincident open-walk class
 // as DISABLED_CenteredSubEpsNonClosingWalk, reached via an ordinary 3D
 // Extrude -> Project/Slice round-trip rather than an adversarial 2D construct.
-TEST(CrossSection, DISABLED_ManifoldExtrudeRoundTripTopologyFailure) {
-  const Polygons inputPolys = {
-      {{0., 9.9999999999999995e-07},
-       {1024., 1000.},
-       {-1., 0.},
-       {0., -1000.},
-       {-364.96862275285457, -1024.}},
-      {{1000., 3.385490849236616},
-       {368.52866094522233, -9.9999999999999995e-07},
-       {-1., 9.9999999999999995e-07},
-       {-0., -1.},
-       {1024., 9.9999999999999995e-07},
-       {-9.9999999999999995e-07, -9.9999999999999995e-07}},
-      {{-0., -1.},
-       {-9.9999999999999995e-07, 0.},
-       {0., 9.9999999999999995e-07},
-       {1024., -998.2714902694496}},
-      {{0., -9.9999999999999995e-07},
-       {0., -1024.},
-       {996.36854414150923, 1024.},
-       {-9.9999999999999995e-07, 1000.}}};
-  const double height = 3.4451635980796125;
-  const int nDivisions = 4;
-
-  // Match the fuzz target: extrude the cleaned cross-section, not raw rings.
-  const CrossSection input(inputPolys);
-  const auto solid = Manifold::Extrude(input.ToPolygons(), height, nDivisions);
-  EXPECT_EQ(solid.Status(), Manifold::Error::NoError);
-
-  const CrossSection projected(solid.Project());
-  ExpectBoolean2TopologyValid(projected.ToPolygons());
-
-  const CrossSection middle(solid.Slice(height * 0.5));
-  ExpectBoolean2TopologyValid(middle.ToPolygons());
-}
-
 
 // Regression test for the BR-cell hole pattern from Samples.Sponge4. Two
 // CCW polygons that share an endpoint AND form a T-junction at the
