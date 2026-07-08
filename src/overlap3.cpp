@@ -180,28 +180,29 @@ static StageAResult StageA(const Manifold::Impl& in, double eps) {
   for (int i = 0; i < nVerts; ++i)
     vertMap[i] = rootToMerged[static_cast<int>(uf.find(i))];
 
-  // Canonicalize faces: sort by canonical vert triple, accumulate mult.
-  // Key = sorted (v0, v1, v2) with canonical orientation parity tracked.
+  // Canonicalize faces: key = sorted (v0,v1,v2) unordered vertex set.
+  // Mult is signed relative to the STORED orientation of the canonical
+  // representative (first face with this vertex set). A face with the same
+  // halfedge winding as the representative contributes +1; opposite winding
+  // contributes -1. This gives mult=+1 for each outward-facing triangle in a
+  // manifold mesh, and correct cancellation for touching-disjoint Compose
+  // (opposite-orientation shared face -> mult=0 -> dropped).
   struct FaceKey {
     ivec3 sorted;  // smallest vert id first
-    bool flipped;  // true if canonical order differs from stored order
     bool operator<(const FaceKey& o) const {
-      return sorted.x < o.sorted.x ||
-             (sorted.x == o.sorted.x && sorted.y < o.sorted.y) ||
-             (sorted.x == o.sorted.x && sorted.y == o.sorted.y &&
-              sorted.z < o.sorted.z);
+      if (sorted.x != o.sorted.x) return sorted.x < o.sorted.x;
+      if (sorted.y != o.sorted.y) return sorted.y < o.sorted.y;
+      return sorted.z < o.sorted.z;
     }
   };
 
-  // For each face, the canonical triple and signed mult.
-  struct FaceEntry {
-    int origFaceId;
-    ivec3 mapped;      // merged vert ids
-    int64_t multSign;  // +1 if same as stored orientation, -1 if flipped
+  struct FaceAccumEntry {
+    int64_t mult;   // algebraic sum; positive = same orientation as rep
+    int repTriId;   // representative face triangle index
+    int repParity;  // sort permutation parity of the representative (+1/-1)
   };
 
-  std::map<FaceKey, std::pair<int64_t, int>>
-      faceAccum;  // key -> (mult, representative faceId)
+  std::map<FaceKey, FaceAccumEntry> faceAccum;
 
   for (int tri = 0; tri < nTris; ++tri) {
     const int h = 3 * tri;
@@ -211,7 +212,7 @@ static StageAResult StageA(const Manifold::Impl& in, double eps) {
     // Skip degenerate (collapsed) triangles
     if (v0 == v1 || v1 == v2 || v0 == v2) continue;
 
-    // Canonical orientation: sort verts and track parity
+    // Sort verts and compute permutation parity.
     int a = v0, b = v1, c = v2;
     int parity = 1;
     if (a > b) {
@@ -227,12 +228,16 @@ static StageAResult StageA(const Manifold::Impl& in, double eps) {
       parity = -parity;
     }
 
-    FaceKey key{{a, b, c}, parity < 0};
+    FaceKey key{{a, b, c}};
     auto it = faceAccum.find(key);
     if (it == faceAccum.end()) {
-      faceAccum.emplace(key, std::make_pair((int64_t)parity, tri));
+      // First face with this vertex set: it IS the representative. By
+      // definition it agrees with itself, contributing +1.
+      faceAccum.emplace(key, FaceAccumEntry{1, tri, parity});
     } else {
-      it->second.first += parity;
+      // Subsequent face: +1 if same permutation parity as rep, -1 if opposite.
+      const int matchSign = (parity == it->second.repParity) ? 1 : -1;
+      it->second.mult += matchSign;
     }
   }
 
@@ -242,31 +247,22 @@ static StageAResult StageA(const Manifold::Impl& in, double eps) {
   result.vertMap = std::move(vertMap);
 
   for (auto& [key, entry] : faceAccum) {
-    if (entry.first == 0) continue;  // cancelled
-    const int tri = entry.second;
+    if (entry.mult == 0) continue;  // cancelled (e.g. touching-disjoint)
+    const int tri = entry.repTriId;
     const int h = 3 * tri;
     const int mv0 = result.vertMap[in.halfedge_.Start(h)];
     const int mv1 = result.vertMap[in.halfedge_.Start(h + 1)];
     const int mv2 = result.vertMap[in.halfedge_.Start(h + 2)];
-    // Compute normal from the canonical (possibly reordered) verts
-    const vec3& p0 = result.mergedVerts[key.sorted.x];
-    const vec3& p1 = result.mergedVerts[key.sorted.y];
-    const vec3& p2 = result.mergedVerts[key.sorted.z];
-    vec3 rawNormal = TriNormal(p0, p1, p2);
-    if (la::dot(rawNormal, rawNormal) == 0.0) continue;  // degenerate geometry
-    rawNormal = la::normalize(rawNormal);
-    // Mult sign: if key.flipped, the stored orientation is opposite to
-    // canonical, so normal from stored order is opposite. Adjust: the "face
-    // normal" should match the STORED orientation's normal (used for emission).
-    // Store the normal matching the representative face's stored winding.
-    const vec3 storedNormal = la::normalize(TriNormal(result.mergedVerts[mv0],
-                                                      result.mergedVerts[mv1],
-                                                      result.mergedVerts[mv2]));
+    vec3 storedNormal =
+        TriNormal(result.mergedVerts[mv0], result.mergedVerts[mv1],
+                  result.mergedVerts[mv2]);
+    if (la::dot(storedNormal, storedNormal) == 0.0) continue;
+    storedNormal = la::normalize(storedNormal);
     CanonicalFace cf;
     cf.id = tri;
     cf.verts = {mv0, mv1, mv2};
     cf.normal = storedNormal;
-    cf.mult = entry.first;
+    cf.mult = entry.mult;
     result.faces.push_back(cf);
   }
 
@@ -295,9 +291,11 @@ static bool LineTriClip(vec3 P, vec3 D, vec3 v0, vec3 v1, vec3 v2, vec3 n,
     const double denom = la::dot(n, ev);
     const double num = la::dot(n, evBase);
     if (std::abs(denom) < 1e-14) {
-      // D is parallel to this edge's halfplane: check if P is on the correct
-      // side
-      if (num < -1e-14) return false;  // entirely outside
+      // D is parallel to this edge's halfplane boundary. The constraint is
+      // -num >= 0 (independent of t). When num > 0 the line is outside.
+      // (evBase = cross(e, v-P) = -cross(e, P-v), so num = -A where A is the
+      // signed-area test; A < 0 means outside, i.e., num > 0 means outside.)
+      if (num > 1e-14) return false;  // entirely outside
     } else {
       const double t = num / denom;
       if (denom > 0) {
@@ -484,17 +482,69 @@ static StageBResult StageB(const StageAResult& stageA, double eps,
       const vec3 pb2 = arr.verts[fj_face.verts.z].pos;
 
       // Check for coplanar overlap (out of scope): if normals are parallel and
-      // planes are equal, report EdgeInPlane or CoplanarOverlap.
+      // planes are equal, fire CoplanarOverlap ONLY if the two triangles have
+      // positive-area 2D intersection (not just touching at a point or edge).
+      // Disjoint/point/edge-touching coplanars CONTINUE (e.g. touching-disjoint
+      // Compose where the shared face cancels in stage A and its neighbors
+      // share only an edge or point in the same plane).
       const double normDot = std::abs(la::dot(na, nb));
       if (normDot > 1.0 - 1e-8) {
         // Nearly coplanar: check plane distance
         const double planeSep = std::abs(la::dot(na, pb0) - la::dot(na, pa0));
-        if (planeSep <= eps) {
+        if (planeSep > eps) continue;  // parallel but separated: no seam
+        // Same plane: project both tris to face plane and check area of 2D
+        // intersection. Fire CoplanarOverlap only when interior overlap > 0.
+        const mat2x3 proj = GetAxisAlignedProjection(na);
+        const vec2 a2[3] = {proj * pa0, proj * pa1, proj * pa2};
+        const vec2 b2[3] = {proj * pb0, proj * pb1, proj * pb2};
+        // Sutherland-Hodgman clip of B against A to get intersection polygon.
+        // If resulting polygon has area > eps^2, it's a real overlap.
+        auto clipPoly = [&](std::vector<vec2> poly, vec2 edgeA, vec2 edgeB) {
+          std::vector<vec2> out;
+          const int n = (int)poly.size();
+          for (int k = 0; k < n; ++k) {
+            const vec2& cur = poly[k];
+            const vec2& nxt = poly[(k + 1) % n];
+            // Inside = left of edge (edgeA->edgeB) as seen from normal side
+            auto inside = [&](vec2 p) {
+              return (edgeB.x - edgeA.x) * (p.y - edgeA.y) -
+                         (edgeB.y - edgeA.y) * (p.x - edgeA.x) >=
+                     0.0;
+            };
+            const bool curIn = inside(cur), nxtIn = inside(nxt);
+            if (curIn) out.push_back(cur);
+            if (curIn != nxtIn) {
+              // Edge intersects clip boundary
+              const vec2 d1 = nxt - cur;
+              const vec2 d2 = edgeB - edgeA;
+              const double denom2 = d1.x * d2.y - d1.y * d2.x;
+              if (std::abs(denom2) > 1e-14) {
+                const vec2 dc = edgeA - cur;
+                const double t2 = (dc.x * d2.y - dc.y * d2.x) / denom2;
+                out.push_back(cur + t2 * d1);
+              }
+            }
+          }
+          return out;
+        };
+        // Start with triangle B as polygon, clip by each edge of A.
+        std::vector<vec2> poly = {b2[0], b2[1], b2[2]};
+        for (int k = 0; k < 3 && !poly.empty(); ++k)
+          poly = clipPoly(poly, a2[k], a2[(k + 1) % 3]);
+        // Compute signed area of clipped polygon.
+        double clipArea = 0.0;
+        for (int k = 0; k < (int)poly.size(); ++k) {
+          const vec2& p = poly[k];
+          const vec2& q = poly[(k + 1) % (int)poly.size()];
+          clipArea += p.x * q.y - q.x * p.y;
+        }
+        clipArea = std::abs(clipArea) * 0.5;
+        if (clipArea > eps * eps) {
           result.fatal = FatalReason::CoplanarOverlap;
-          result.detail = "coplanar face pair";
+          result.detail = "coplanar face pair with interior area overlap";
           return result;
         }
-        // Parallel but separated: no seam
+        // Zero or sub-eps area: point/edge touch only, continue normally.
         continue;
       }
 
@@ -527,16 +577,6 @@ static StageBResult StageB(const StageAResult& stageA, double eps,
       if (vA == vB) {
         // After snapping, the seam is sub-eps: treat as degenerate contact.
         const int nA = addContactNode(arr.verts[vA].pos);
-        ++cnt.subEpsContactsDropped;
-        continue;
-      }
-
-      // If both endpoints snap to original Stage-A verts, the seam segment lies
-      // along an original mesh edge (not a genuine volumetric seam).  Skip it.
-      // This handles adjacent face pairs that weren't caught by the 2-vert
-      // check above (e.g. vertex-adjacent faces whose seam happens to be a mesh
-      // edge).
-      if (vA < nOrigVerts && vB < nOrigVerts) {
         ++cnt.subEpsContactsDropped;
         continue;
       }
@@ -900,8 +940,12 @@ struct FacePSLG {
           break;
         }
       if (pos < 0) continue;
-      // Next CW after twin[i] = next in sorted order (wrapping)
-      const int nextPos = (pos + 1) % (int)outgoing.size();
+      // Standard planar face walk: next[e] = rotate CW at the "to" vertex
+      // from twin[e]. "Rotate CW" in ascending-angle order = previous position
+      // (wrapping). With only 2 outgoing edges, CW and CCW agree; the seam
+      // case introduces 3-way vertices where the direction matters.
+      const int n = (int)outgoing.size();
+      const int nextPos = (pos - 1 + n) % n;
       next[i] = outgoing[nextPos].second;
     }
   }
@@ -1284,25 +1328,9 @@ Overlap3Result RemoveOverlaps3D(const Manifold::Impl& in, double eps) {
   }
   ArrangementGeometry& arr = stageB.arr;
 
-  // Fast path: no seams -> no overlaps to resolve.  Reconstruct the output
-  // directly from the canonical faces (pass the mesh through).
-  if (arr.seams.empty()) {
-    std::vector<EmittedTri> emitted;
-    emitted.reserve(arr.faces.size());
-    for (const auto& cf : arr.faces) {
-      // Outward normal direction: positive mult -> face orientation as-is.
-      const vec3 outNormal = (cf.mult > 0) ? cf.normal : -cf.normal;
-      EmittedTri t;
-      t.verts = cf.verts;
-      t.normal = outNormal;
-      t.faceId = cf.id;
-      emitted.push_back(t);
-    }
-    result.impl = BuildImpl(emitted, arr.verts);
-    return result;
-  }
-
   // Stage C: build slabs and run 2D engine.
+  // No-seam fast path removed: nested shells require winding-based emission
+  // even when there are no seams between faces.
   StageResult<std::vector<SlabResult>> slabResult = BuildSlabs(arr, eps, cnt);
   if (!slabResult.ok()) {
     result.fatal = slabResult.fatal;
@@ -1336,21 +1364,59 @@ Overlap3Result RemoveOverlaps3D(const Manifold::Impl& in, double eps) {
     pslg.pos2D.reserve(pslg.vertIds.size());
     for (int v : pslg.vertIds) pslg.pos2D.push_back(proj * arr.verts[v].pos);
 
-    // Add face boundary half-edges (triangle + subdivided by seam verts on
-    // edges). For simplicity: use the three face edges as-is (no subdivision).
-    // A production implementation would subdivide edges by on-edge seam verts.
-    const int v0l = pslg.localId(face.verts.x);
-    const int v1l = pslg.localId(face.verts.y);
-    const int v2l = pslg.localId(face.verts.z);
-    if (v0l < 0 || v1l < 0 || v2l < 0) continue;
-
-    // Triangle boundary edges (both directions for the PSLG).
-    pslg.halfEdges.push_back({v0l, v1l});
-    pslg.halfEdges.push_back({v1l, v2l});
-    pslg.halfEdges.push_back({v2l, v0l});
-    pslg.halfEdges.push_back({v1l, v0l});
-    pslg.halfEdges.push_back({v2l, v1l});
-    pslg.halfEdges.push_back({v0l, v2l});
+    // Add face boundary half-edges, subdivided by any seam verts that lie on
+    // them. Seam endpoints are edge-face events: by construction they land on
+    // one of the three triangle boundary edges (within eps). Without inserting
+    // them as intermediate verts on the boundary, the seam polyline would
+    // dangle in the middle of an unbroken edge and the PSLG walk produces
+    // garbage loops (the seam never connects to the boundary).
+    {
+      const int gv[3] = {face.verts.x, face.verts.y, face.verts.z};
+      for (int ei = 0; ei < 3; ++ei) {
+        const int gA = gv[ei], gB = gv[(ei + 1) % 3];
+        if (pslg.localId(gA) < 0 || pslg.localId(gB) < 0) continue;
+        const vec3 p3A = arr.verts[gA].pos, p3B = arr.verts[gB].pos;
+        const vec3 edgeV = p3B - p3A;
+        const double edgeLen2 = la::dot(edgeV, edgeV);
+        // Collect seam verts lying on this boundary edge (excluding corners).
+        std::vector<std::pair<double, int>> onEdge;  // (t, local vert id)
+        for (int si : arr.faceSeams[fi]) {
+          for (int v : arr.seams[si].vertIds) {
+            if (v == gA || v == gB) continue;
+            if (PointSegDist3(arr.verts[v].pos, p3A, p3B) > eps) continue;
+            const double t =
+                (edgeLen2 > 1e-30)
+                    ? la::dot(arr.verts[v].pos - p3A, edgeV) / edgeLen2
+                    : 0.0;
+            if (t < -1e-8 || t > 1.0 + 1e-8) continue;
+            const int lv = pslg.localId(v);
+            if (lv >= 0) onEdge.push_back({t, lv});
+          }
+        }
+        std::sort(onEdge.begin(), onEdge.end());
+        // Deduplicate by local vert id.
+        onEdge.erase(std::unique(onEdge.begin(), onEdge.end(),
+                                 [](const auto& a, const auto& b) {
+                                   return a.second == b.second;
+                                 }),
+                     onEdge.end());
+        // Build chain: gA -> intermediate verts -> gB.
+        std::vector<int> chain;
+        chain.push_back(pslg.localId(gA));
+        for (const auto& [t, lv] : onEdge) {
+          if (lv != chain.back()) chain.push_back(lv);
+        }
+        {
+          const int lgB = pslg.localId(gB);
+          if (lgB != chain.back()) chain.push_back(lgB);
+        }
+        // Add half-edges in both directions along the chain.
+        for (int k = 0; k + 1 < (int)chain.size(); ++k) {
+          pslg.halfEdges.push_back({chain[k], chain[k + 1]});
+          pslg.halfEdges.push_back({chain[k + 1], chain[k]});
+        }
+      }
+    }
 
     // Add seam polyline half-edges.
     for (int si : arr.faceSeams[fi]) {
@@ -1394,7 +1460,83 @@ Overlap3Result RemoveOverlaps3D(const Manifold::Impl& in, double eps) {
       faceRegions[fi].push_back(std::move(reg));
     }
 
-    // Classify each region using slabs.
+    // X-parallel face classification: for faces where all three verts lie at
+    // the same x (within eps), no slab midpoint is ever inside the face's
+    // x-range, so ClassifyRegion always fails. Instead, query PointWinding2D
+    // on the two slabs immediately adjacent to the face's x-coordinate.
+    // IMPORTANT: each sub-region is classified using ITS OWN centroid (not the
+    // face centroid), because different sub-regions may straddle different
+    // sides of another face's boundary and have different winding values.
+    {
+      const double xv0 = arr.verts[face.verts.x].pos.x;
+      const double xv1 = arr.verts[face.verts.y].pos.x;
+      const double xv2 = arr.verts[face.verts.z].pos.x;
+      if (std::abs(xv0 - xv1) < eps && std::abs(xv1 - xv2) < eps) {
+        const double xFace = (xv0 + xv1 + xv2) / 3.0;
+        // Find adjacent slabs once (same for all sub-regions).
+        int leftSlab = -1, rightSlab = -1;
+        double bestLeft = 1e18, bestRight = 1e18;
+        for (int si = 0; si < (int)slabs.size(); ++si) {
+          const double dL = std::abs(slabs[si].xHi - xFace);
+          const double dR = std::abs(slabs[si].xLo - xFace);
+          if (dL < bestLeft) {
+            bestLeft = dL;
+            leftSlab = si;
+          }
+          if (dR < bestRight) {
+            bestRight = dR;
+            rightSlab = si;
+          }
+        }
+        const mat2x3 proj = GetAxisAlignedProjection(face.normal);
+        for (auto& reg : faceRegions[fi]) {
+          // Compute this region's centroid in 3D from its loop verts.
+          vec3 regCentroid(0.0);
+          for (int v : reg.loopVerts) regCentroid += arr.verts[v].pos;
+          if (!reg.loopVerts.empty())
+            regCentroid /= (double)reg.loopVerts.size();
+
+          // Choose query point: prefer a canonical face corner vert (which lies
+          // on the triangle boundary, away from seam curves) offset slightly
+          // toward the centroid. Corner verts give unambiguous winding numbers
+          // because they are far from the seam boundary and clearly inside
+          // exactly one topological component. For regions with no corner vert
+          // (e.g. the interior seam polygon cut off by seams), fall back to the
+          // centroid.
+          vec3 queryBase = regCentroid;
+          const int faceVertArr[3] = {face.verts.x, face.verts.y, face.verts.z};
+          for (int fv : faceVertArr) {
+            bool inLoop = false;
+            for (int lv : reg.loopVerts)
+              if (lv == fv) {
+                inLoop = true;
+                break;
+              }
+            if (inLoop) {
+              queryBase = arr.verts[fv].pos;
+              break;
+            }
+          }
+          // Offset 1% toward centroid to avoid exact boundary issues in
+          // PointWinding2D (which uses strict inequalities on segment
+          // endpoints).
+          const vec3 queryPt = queryBase * 0.99 + regCentroid * 0.01;
+          const double qy = queryPt.y, qz = queryPt.z;
+
+          int64_t belowW = 0, aboveW = 0;
+          if (leftSlab >= 0 && slabs[leftSlab].built)
+            belowW = PointWinding2D(slabs[leftSlab].pieces, qy, qz);
+          if (rightSlab >= 0 && slabs[rightSlab].built)
+            aboveW = PointWinding2D(slabs[rightSlab].pieces, qy, qz);
+          reg.classified = true;
+          reg.below = belowW;
+          reg.above = aboveW;
+        }
+        continue;  // skip normal ClassifyRegion for this face
+      }
+    }
+
+    // Classify each region using slabs (non-x-parallel faces).
     for (auto& reg : faceRegions[fi]) {
       std::optional<FatalReason> clsFatal;
       auto cls =
@@ -1458,6 +1600,46 @@ Overlap3Result RemoveOverlaps3D(const Manifold::Impl& in, double eps) {
   // Build output Manifold::Impl.
   result.impl = BuildImpl(emitted, arr.verts);
   return result;
+}
+
+// ---------------------------------------------------------------------------
+// Test hooks: run stages A+B+C, return internals
+// ---------------------------------------------------------------------------
+
+Overlap3Internals RemoveOverlaps3D_TestHooks(const Manifold::Impl& in,
+                                             double eps) {
+  Overlap3Internals out;
+
+  if (eps <= 0.0) {
+    const Box& bb = in.bBox_;
+    eps = EpsilonFromScale(bb.Scale(), 1000);
+  }
+  if (eps <= 0.0 || !std::isfinite(eps)) {
+    out.fatal = FatalReason::Starvation;
+    out.detail = "epsilon not computable";
+    return out;
+  }
+
+  const StageAResult stageA = StageA(in, eps);
+  if (stageA.faces.empty()) return out;  // empty mesh
+
+  StageBResult stageB = StageB(stageA, eps, out.counters);
+  if (stageB.fatal.has_value()) {
+    out.fatal = stageB.fatal;
+    out.detail = stageB.detail;
+    return out;
+  }
+  out.arr = std::move(stageB.arr);
+
+  StageResult<std::vector<SlabResult>> slabResult =
+      BuildSlabs(out.arr, eps, out.counters);
+  if (!slabResult.ok()) {
+    out.fatal = slabResult.fatal;
+    out.detail = slabResult.detail;
+    return out;
+  }
+  out.slabs = std::move(*slabResult.value);
+  return out;
 }
 
 }  // namespace manifold

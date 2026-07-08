@@ -180,6 +180,10 @@ StageResult<std::vector<SlabResult>> BuildSlabs(const ArrangementGeometry& arr,
 
     if (edges.empty()) continue;  // no straddling faces
 
+    // Save raw section data for gate-2 test-hook checks.
+    slab.sectionEdges = edges;
+    slab.sectionVerts = sectionVerts;
+
     // Run the 2D engine.
     int conflictCount = 0;
     SweepWinding(edges, sectionVerts, WindRule::Add, &slab.pieces,

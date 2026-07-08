@@ -116,6 +116,10 @@ struct SlabResult {
   bool built;  // false = skipped (sub-eps slab)
   std::vector<SweepCapture> pieces;
   std::vector<SectionFaceSegment> segments;  // all straddling faces this slab
+  // Test-hook: raw section edges and verts fed to the 2D engine (before
+  // arrangement). Populated only when running via RemoveOverlaps3D_TestHooks.
+  std::vector<EdgeM> sectionEdges;
+  std::vector<vec2> sectionVerts;
 };
 
 // ---------------------------------------------------------------------------
@@ -171,5 +175,25 @@ struct Overlap3Result {
 // Main entry point. `eps` = 0 -> compute from bounding box scale
 // (EpsilonFromScale).
 Overlap3Result RemoveOverlaps3D(const Manifold::Impl& in, double eps = 0.0);
+
+// ---------------------------------------------------------------------------
+// Test hooks (not part of the public seam; used only by overlap3_test.cpp)
+// ---------------------------------------------------------------------------
+
+// Intermediate pipeline state exposed for gate-2 section validity checks and
+// gate-1 seam parity assertions.
+struct Overlap3Internals {
+  ArrangementGeometry arr;  // after stages A+B
+  std::vector<SlabResult>
+      slabs;  // after stage C (sectionEdges/sectionVerts populated)
+  std::optional<FatalReason> fatal;
+  std::string detail;
+  Overlap3Counters counters;
+};
+
+// Run stages A+B+C and return internals. Slabs include
+// sectionEdges/sectionVerts.
+Overlap3Internals RemoveOverlaps3D_TestHooks(const Manifold::Impl& in,
+                                             double eps = 0.0);
 
 }  // namespace manifold
