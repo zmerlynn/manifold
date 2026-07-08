@@ -236,4 +236,12 @@ ClassifyRegionResult ClassifyRegion_Test(const PSLGRegion& region, int faceId,
 Overlap3Result RemoveOverlaps3D_FromArr(const ArrangementGeometry& arr,
                                         double eps);
 
+// White-box M6: run anchor-component propagation on synthetic region data.
+// Returns nullopt on success (faceRegions updated), or a FatalReason on
+// failure (AnchorConflict, UnclassifiableComponent).
+std::optional<FatalReason> PropagateAnchorComponents_Test(
+    const ArrangementGeometry& arr,
+    std::vector<std::vector<PSLGRegion>>& faceRegions, double eps,
+    Overlap3Counters& cnt);
+
 }  // namespace manifold

@@ -1001,4 +1001,150 @@ TEST(Overlap3, Pin_P7_Starvation) {
   EXPECT_EQ(*result.fatal, FatalReason::Starvation);
 }
 
+// ---------------------------------------------------------------------------
+// Phase P: M6 anchor-component propagation pins (P8-P10)
+// ---------------------------------------------------------------------------
+
+// P8: PropagateAnchorComponents_Test with conflicting anchors ->
+// AnchorConflict. One face (fi=0), three regions, no seams.
+//   R0 (anchor, below=0, above=1): loopVerts=[0,2,3]  edges: 0->2, 2->3, 3->0
+//   R1 (degenerate):                loopVerts=[3,2,4]  edges: 3->2, 2->4, 4->3
+//   R2 (anchor, below=1, above=0): loopVerts=[2,1,4]  edges: 2->1, 1->4, 4->2
+// Adjacency:
+//   R0 has 2->3; R1 has 3->2 -> R0 adjacent to R1 (anchor).
+//   R2 has 4->2; R1 has 2->4 -> R2 adjacent to R1 (anchor).
+// Anchor set = {(0,1),(1,0)} -> size 2 -> AnchorConflict.
+TEST(Overlap3, Pin_P8_AnchorConflict) {
+  ArrangementGeometry arr;
+  arr.verts = {
+      {{0.0, 0.0, 0.0}},  // v0
+      {{2.0, 0.0, 0.0}},  // v1
+      {{1.0, 0.0, 0.0}},  // v2
+      {{0.0, 1.0, 0.0}},  // v3
+      {{2.0, 1.0, 0.0}},  // v4
+  };
+  CanonicalFace face;
+  face.id = 0;
+  face.verts = {0, 1, 2};
+  face.normal = {0.0, 0.0, 1.0};
+  face.mult = 1;
+  arr.faces = {face};
+  arr.seams = {};
+  arr.faceSeams = {{}};  // face 0: no seams
+
+  PSLGRegion r0, r1, r2;
+  r0.loopVerts = {0, 2, 3};
+  r0.classified = true;
+  r0.below = 0;
+  r0.above = 1;
+  r1.loopVerts = {3, 2, 4};
+  r1.degenerate = true;
+  r2.loopVerts = {2, 1, 4};
+  r2.classified = true;
+  r2.below = 1;
+  r2.above = 0;
+
+  std::vector<std::vector<PSLGRegion>> faceRegions = {{r0, r1, r2}};
+  Overlap3Counters cnt;
+  const auto fatal =
+      PropagateAnchorComponents_Test(arr, faceRegions, 1e-8, cnt);
+  ASSERT_TRUE(fatal.has_value())
+      << "expected AnchorConflict from conflicting anchors";
+  EXPECT_EQ(*fatal, FatalReason::AnchorConflict);
+}
+
+// P9: PropagateAnchorComponents_Test with no anchors and diameter > eps ->
+// UnclassifiableComponent.
+// One face (fi=0), one large degenerate region, no classified neighbors.
+//   R0 (degenerate): loopVerts=[0,1,2,3] - large square, diameter ~14.1
+//   No classified regions -> anchors empty -> UnclassifiableComponent.
+TEST(Overlap3, Pin_P9_UnclassifiableComponent) {
+  ArrangementGeometry arr;
+  arr.verts = {
+      {{0.0, 0.0, 0.0}},    // v0
+      {{10.0, 0.0, 0.0}},   // v1
+      {{10.0, 10.0, 0.0}},  // v2
+      {{0.0, 10.0, 0.0}},   // v3
+  };
+  CanonicalFace face;
+  face.id = 0;
+  face.verts = {0, 1, 2};
+  face.normal = {0.0, 0.0, 1.0};
+  face.mult = 1;
+  arr.faces = {face};
+  arr.seams = {};
+  arr.faceSeams = {{}};
+
+  PSLGRegion r0;
+  r0.loopVerts = {0, 1, 2, 3};  // large square, diameter ~ sqrt(200) > eps
+  r0.degenerate = true;
+
+  std::vector<std::vector<PSLGRegion>> faceRegions = {{r0}};
+  Overlap3Counters cnt;
+  const double eps = 1e-8;  // << diameter ~14.1
+  const auto fatal = PropagateAnchorComponents_Test(arr, faceRegions, eps, cnt);
+  ASSERT_TRUE(fatal.has_value())
+      << "expected UnclassifiableComponent: no anchors, diameter > eps";
+  EXPECT_EQ(*fatal, FatalReason::UnclassifiableComponent);
+}
+
+// P10: PropagateAnchorComponents_Test with agreeing anchor + diameter <= eps ->
+// members classified by propagation.
+// One face (fi=0), two regions, no seams.
+//   R0 (anchor, below=0, above=1): loopVerts=[0,1,3,4]  (quad)
+//     edges: 0->1, 1->3, 3->4, 4->0
+//   R1 (degenerate, tiny):         loopVerts=[1,0,2]
+//     edges: 1->0, 0->2, 2->1
+// Adjacency: R0 has 0->1; R1 has 1->0 -> R0 is anchor of R1.
+// R1 verts: v0=(0,0,0), v1=(5e-5,0,0), v2=(2.5e-5,3e-5,0)
+//   diameter = max(|v0-v1|, ...) = 5e-5 < eps=1e-4 -> span guard passes.
+// Anchor set = {(0,1)} -> one entry -> propagate below=0, above=1.
+TEST(Overlap3, Pin_P10_AnchorPropagation_Positive) {
+  ArrangementGeometry arr;
+  arr.verts = {
+      {{0.0, 0.0, 0.0}},      // v0
+      {{5e-5, 0.0, 0.0}},     // v1 (5e-5 from v0)
+      {{2.5e-5, 3e-5, 0.0}},  // v2 (tiny triangle tip for R1)
+      {{1.0, 0.0, 0.0}},      // v3 (anchor far corner)
+      {{0.0, 1.0, 0.0}},      // v4 (anchor far corner)
+  };
+  CanonicalFace face;
+  face.id = 0;
+  face.verts = {0, 1, 2};
+  face.normal = {0.0, 0.0, 1.0};
+  face.mult = 1;
+  arr.faces = {face};
+  arr.seams = {};
+  arr.faceSeams = {{}};
+
+  PSLGRegion r0, r1;
+  // R0: large quad; edge 0->1 is the shared edge.
+  r0.loopVerts = {0, 1, 3, 4};
+  r0.classified = true;
+  r0.below = 0;
+  r0.above = 1;
+  // R1: tiny triangle; edge 1->0 is the reverse of R0's 0->1.
+  r1.loopVerts = {1, 0, 2};
+  r1.degenerate = true;
+
+  std::vector<std::vector<PSLGRegion>> faceRegions = {{r0, r1}};
+  Overlap3Counters cnt;
+  const double eps = 1e-4;  // > diameter (5e-5)
+  const auto fatal = PropagateAnchorComponents_Test(arr, faceRegions, eps, cnt);
+  ASSERT_FALSE(fatal.has_value())
+      << "expected success from agreeing anchor with diameter <= eps";
+  EXPECT_TRUE(faceRegions[0][1].classified)
+      << "R1 should be classified after propagation";
+  EXPECT_EQ(faceRegions[0][1].below, 0)
+      << "R1.below should propagate from anchor";
+  EXPECT_EQ(faceRegions[0][1].above, 1)
+      << "R1.above should propagate from anchor";
+  EXPECT_EQ(cnt.degenerateClassified, 1)
+      << "one component classified by anchor propagation";
+  // IsInside3D(0)=false != IsInside3D(1)=true -> not a drop ->
+  // epsFeaturesDropped=0.
+  EXPECT_EQ(cnt.epsFeaturesDropped, 0)
+      << "not dropped: R1 straddles the material boundary";
+}
+
 }  // namespace

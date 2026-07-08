@@ -1410,6 +1410,210 @@ static Manifold::Impl BuildImpl(const std::vector<EmittedTri>& emitted,
   return impl;
 }
 
+// ---------------------------------------------------------------------------
+// M6: Anchor-component propagation for degenerate regions
+// ---------------------------------------------------------------------------
+
+// Returns true iff the region's boundary contains the directed edge u->v as a
+// consecutive pair in loopVerts or any holeVerts loop.
+static bool RegionHasDirEdge(const PSLGRegion& reg, int u, int v) {
+  auto hasDir = [](const std::vector<int>& loop, int u, int v) -> bool {
+    const int n = (int)loop.size();
+    for (int i = 0; i < n; ++i)
+      if (loop[i] == u && loop[(i + 1) % n] == v) return true;
+    return false;
+  };
+  if (hasDir(reg.loopVerts, u, v)) return true;
+  for (const auto& h : reg.holeVerts)
+    if (hasDir(h, u, v)) return true;
+  return false;
+}
+
+// Returns true iff the region's boundary contains the undirected edge {u, v}
+// in either direction (u->v or v->u).
+static bool RegionTouchesEdge(const PSLGRegion& reg, int u, int v) {
+  return RegionHasDirEdge(reg, u, v) || RegionHasDirEdge(reg, v, u);
+}
+
+// Build connected components of degenerate regions (adjacency = shared PSLG
+// edges, both within-face and cross-face through seam polyline edges).  For
+// each component, look up nondegenerate anchor neighbors, then:
+//   - no anchors           -> UnclassifiableComponent (slab starvation)
+//   - anchors disagree     -> AnchorConflict
+//   - diameter > eps       -> UnclassifiableComponent (span guard)
+//   - diameter <= eps      -> propagate agreed classification; count
+// Returns nullopt on success (faceRegions updated in place).
+static std::optional<FatalReason> PropagateAnchorComponentsImpl(
+    const ArrangementGeometry& arr,
+    std::vector<std::vector<PSLGRegion>>& faceRegions, double eps,
+    Overlap3Counters& cnt) {
+  // Flatten all unclassified degenerate (fi, ri) pairs into a node list.
+  struct RegNode {
+    int fi, ri;
+  };
+  std::vector<RegNode> nodes;
+  const int nFaces = (int)faceRegions.size();
+  std::vector<std::vector<int>> nodeOf(nFaces);  // nodeOf[fi][ri] = id or -1
+  for (int fi = 0; fi < nFaces; ++fi) {
+    nodeOf[fi].assign(faceRegions[fi].size(), -1);
+    for (int ri = 0; ri < (int)faceRegions[fi].size(); ++ri) {
+      const auto& r = faceRegions[fi][ri];
+      if (r.degenerate && !r.classified) {
+        nodeOf[fi][ri] = (int)nodes.size();
+        nodes.push_back({fi, ri});
+      }
+    }
+  }
+  const int nNodes = (int)nodes.size();
+  if (nNodes == 0) return std::nullopt;
+
+  // Path-compressed union-find.
+  struct UF {
+    std::vector<int> p;
+    explicit UF(int n) : p(n) {
+      for (int i = 0; i < n; ++i) p[i] = i;
+    }
+    int find(int x) {
+      while (p[x] != x) {
+        p[x] = p[p[x]];
+        x = p[x];
+      }
+      return x;
+    }
+    void unite(int a, int b) {
+      a = find(a);
+      b = find(b);
+      if (a != b) p[a] = b;
+    }
+  } uf(nNodes);
+
+  // Within-face adjacency: region rA adjacent to rB iff rA has a->b and rB
+  // has b->a for some vertex pair.  Both must be degenerate nodes.
+  for (int fi = 0; fi < nFaces; ++fi) {
+    const int nReg = (int)faceRegions[fi].size();
+    for (int ra = 0; ra < nReg; ++ra) {
+      if (nodeOf[fi][ra] < 0) continue;
+      const PSLGRegion& rA = faceRegions[fi][ra];
+      for (int rb = ra + 1; rb < nReg; ++rb) {
+        if (nodeOf[fi][rb] < 0) continue;
+        const PSLGRegion& rB = faceRegions[fi][rb];
+        bool adj = false;
+        auto check = [&](const std::vector<int>& loop) {
+          const int n = (int)loop.size();
+          for (int k = 0; k < n && !adj; ++k) {
+            if (RegionHasDirEdge(rB, loop[(k + 1) % n], loop[k])) adj = true;
+          }
+        };
+        check(rA.loopVerts);
+        for (const auto& h : rA.holeVerts) check(h);
+        if (adj) uf.unite(nodeOf[fi][ra], nodeOf[fi][rb]);
+      }
+    }
+  }
+
+  // Cross-face adjacency: degenerate regions on opposite faces of a seam,
+  // both touching the same seam edge {sv, sw} in either direction.
+  for (const Seam& seam : arr.seams) {
+    const int fa = seam.faceId0, fb = seam.faceId1;
+    for (int k = 0; k + 1 < (int)seam.vertIds.size(); ++k) {
+      const int sv = seam.vertIds[k], sw = seam.vertIds[k + 1];
+      for (int ra = 0; ra < (int)faceRegions[fa].size(); ++ra) {
+        if (nodeOf[fa][ra] < 0) continue;
+        if (!RegionTouchesEdge(faceRegions[fa][ra], sv, sw)) continue;
+        for (int rb = 0; rb < (int)faceRegions[fb].size(); ++rb) {
+          if (nodeOf[fb][rb] < 0) continue;
+          if (!RegionTouchesEdge(faceRegions[fb][rb], sv, sw)) continue;
+          uf.unite(nodeOf[fa][ra], nodeOf[fb][rb]);
+        }
+      }
+    }
+  }
+
+  // Group nodes by component root (std::map -> deterministic sorted order).
+  std::map<int, std::vector<int>> components;
+  for (int i = 0; i < nNodes; ++i) components[uf.find(i)].push_back(i);
+
+  for (auto& [root, members] : components) {
+    std::sort(members.begin(),
+              members.end());  // deterministic within component
+
+    // Compute 3D diameter over all boundary verts of component members.
+    std::set<int> vertSet;
+    for (int nd : members) {
+      const PSLGRegion& reg = faceRegions[nodes[nd].fi][nodes[nd].ri];
+      for (int v : reg.loopVerts) vertSet.insert(v);
+      for (const auto& h : reg.holeVerts)
+        for (int v : h) vertSet.insert(v);
+    }
+    const std::vector<int> compVerts(vertSet.begin(), vertSet.end());
+    double diameter = 0.0;
+    for (int i = 0; i < (int)compVerts.size(); ++i)
+      for (int j = i + 1; j < (int)compVerts.size(); ++j)
+        diameter = std::max(diameter, Dist3(arr.verts[compVerts[i]].pos,
+                                            arr.verts[compVerts[j]].pos));
+
+    // Find anchors: classified nondegenerate regions adjacent to any member.
+    // Within-face: degReg has a->b -> anchor r2 has b->a.
+    // Cross-face: both degReg and r2 touch the seam edge {sv, sw}.
+    std::map<std::pair<int64_t, int64_t>, int> anchors;
+
+    for (int nd : members) {
+      const RegNode& rn = nodes[nd];
+      const PSLGRegion& degReg = faceRegions[rn.fi][rn.ri];
+
+      // Within-face anchors.
+      for (const auto& r2 : faceRegions[rn.fi]) {
+        if (!r2.classified || r2.degenerate) continue;
+        bool adj = false;
+        auto checkDeg = [&](const std::vector<int>& loop) {
+          const int n = (int)loop.size();
+          for (int k = 0; k < n && !adj; ++k) {
+            if (RegionHasDirEdge(r2, loop[(k + 1) % n], loop[k])) adj = true;
+          }
+        };
+        checkDeg(degReg.loopVerts);
+        for (const auto& h : degReg.holeVerts) checkDeg(h);
+        if (adj) anchors[{r2.below, r2.above}]++;
+      }
+
+      // Cross-face anchors via seam edges.
+      for (int si : arr.faceSeams[rn.fi]) {
+        const Seam& seam = arr.seams[si];
+        const int otherFi =
+            (seam.faceId0 == rn.fi) ? seam.faceId1 : seam.faceId0;
+        for (int k = 0; k + 1 < (int)seam.vertIds.size(); ++k) {
+          const int sv = seam.vertIds[k], sw = seam.vertIds[k + 1];
+          if (!RegionTouchesEdge(degReg, sv, sw)) continue;
+          for (const auto& r2 : faceRegions[otherFi]) {
+            if (!r2.classified || r2.degenerate) continue;
+            if (RegionTouchesEdge(r2, sv, sw)) anchors[{r2.below, r2.above}]++;
+          }
+        }
+      }
+    }
+
+    // Spec decision tree (order matters).
+    if (anchors.empty()) return FatalReason::UnclassifiableComponent;
+    if (anchors.size() > 1) return FatalReason::AnchorConflict;
+    if (diameter > eps) return FatalReason::UnclassifiableComponent;
+
+    // All anchors agree; diameter <= eps: propagate.
+    const int64_t agrBelow = anchors.begin()->first.first;
+    const int64_t agrAbove = anchors.begin()->first.second;
+    const bool drops = (IsInside3D(agrBelow) == IsInside3D(agrAbove));
+    for (int nd : members) {
+      PSLGRegion& reg = faceRegions[nodes[nd].fi][nodes[nd].ri];
+      reg.classified = true;
+      reg.below = agrBelow;
+      reg.above = agrAbove;
+    }
+    ++cnt.degenerateClassified;
+    if (drops) ++cnt.epsFeaturesDropped;
+  }
+
+  return std::nullopt;
+}
+
 }  // namespace
 
 // Forward declaration: defined after RemoveOverlaps3D_TestHooks.
@@ -1688,23 +1892,23 @@ static Overlap3Result RunStageCDE(ArrangementGeometry& arr, double eps,
       }
     }
 
-    // M6: Degenerate region handling. Prototype: simply drop all degenerate
-    // regions (mark below=0, above=0 so the emission filter skips them).
-    // Full anchor propagation (AnchorConflict / UnclassifiableComponent) is
-    // deferred to post-prototype hardening; dropping eps-features is safe here
-    // because the PSLG walk already classifies the dominant regions via slabs.
-    bool changed = true;
-    while (changed) {
-      changed = false;
-      for (auto& reg : faceRegions[fi]) {
-        if (reg.classified || !reg.degenerate) continue;
-        ++cnt.epsFeaturesDropped;
-        reg.classified = true;
-        reg.below = 0;
-        reg.above = 0;  // winding = 0, won't be emitted
-      }
-    }
   }  // end per-face loop
+
+  // M6: Anchor-component propagation for degenerate regions.  Must run after
+  // the per-face loop so all classified/degenerate flags are final, and
+  // cross-face adjacency through seam edges is visible simultaneously.
+  {
+    auto m6Fatal = PropagateAnchorComponentsImpl(arr, faceRegions, eps, cnt);
+    if (m6Fatal.has_value()) {
+      result.fatal = *m6Fatal;
+      result.detail =
+          (*m6Fatal == FatalReason::AnchorConflict)
+              ? "degenerate component: conflicting anchor classifications"
+              : "degenerate component: unclassifiable (no anchors or span "
+                "guard)";
+      return result;
+    }
+  }
 
   // Seam balance check (M7).
   {
@@ -1846,6 +2050,15 @@ ClassifyRegionResult ClassifyRegion_Test(const PSLGRegion& region, int faceId,
     out.above = cls->above;
   }
   return out;
+}
+
+// White-box M6 anchor-component propagation (P8-P10 pins).
+// Calls PropagateAnchorComponentsImpl with the supplied synthetic data.
+std::optional<FatalReason> PropagateAnchorComponents_Test(
+    const ArrangementGeometry& arr,
+    std::vector<std::vector<PSLGRegion>>& faceRegions, double eps,
+    Overlap3Counters& cnt) {
+  return PropagateAnchorComponentsImpl(arr, faceRegions, eps, cnt);
 }
 
 }  // namespace manifold
