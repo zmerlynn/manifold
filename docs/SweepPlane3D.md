@@ -1,8 +1,9 @@
 # 3D overlap removal by sweep plane (prototype design)
 
-STATUS: DESIGN, crucible round 1 folded (5 adversarial lanes: 2
-reasoning x2, simplicity audit, empirical probe; 4 convergent BREAKs
-resolved below, each marked [R1-fold]). The handoff
+STATUS: DESIGN, crucible rounds 1-2 folded (round 1: 5 lanes, 4
+convergent BREAKs resolved, marked [R1-fold]; round 2: re-attack +
+fresh-eyes + empirical id-plumbing build, all round-1 constructions
+HELD-resolved, narrower findings folded, marked [R2-fold]). The handoff
 (.claude/plans/3d-sweep-plane-prototype-handoff.md) and its
 reconciliation sibling are the framing. Simple-but-robust is the
 bar; performance is a later campaign. The prototype exists to answer
@@ -81,9 +82,15 @@ once, globally, as shared objects:
   - proper segment, length > eps: a seam with exactly two distinct
     canonical endpoint verts (asserted only AFTER the other classes
     are peeled off);
-  - point contact / tangent touch / segment of length <= eps: NO
-    seam; counted and reported (the contact is sub-resolution;
-    winding cannot change across it at eps validity);
+  - point contact / tangent touch / segment of length <= eps: no
+    seam FROM THE PAIR ALONE. [R2-fold] A macroscopic intersection
+    curve chopped by fine triangulation into per-pair sub-eps clips
+    must not vanish clip by clip (and stage-B event merging eats
+    such a chain rather than saving it): skipped contacts cluster
+    into connected components first; a component of total 3D
+    diameter <= eps drops and is counted (a genuinely point-like
+    contact); a larger component is the SUB-RESOLUTION SEAM CHAIN
+    class and fails closed, named;
   - a tri edge lying in the other tri's plane (edge-in-plane, the
     seam-collinear-with-input-edge case): OUT OF SCOPE with the
     coplanar class (below), detected and reported.
@@ -117,10 +124,13 @@ once, globally, as shared objects:
   faces conform across shared input edges by shared vert ids.
 
 Stage C - the sweep: classification by slabs. x-criticals = sorted
-union of merged-vert x's, event-vert x's, and triple-point x's. For
-each slab wider than eps, at mid-x build the SECTION: every face
-straddling mid-x contributes one segment (edge crossings at mid-x
-via `Interpolate`), with its face id and signed multiplicity, seeded
+union of merged-vert x's, event-vert x's, and triple-point x's,
+BRACKETED by two exterior sentinel slabs (before min-x and after
+max-x: empty sections, winding 0 everywhere - [R2-fold] the
+boundary caps of any fixture need an exterior side). For each slab
+wider than eps, at mid-x build the SECTION: every face straddling
+mid-x contributes one segment (edge crossings at mid-x via
+`Interpolate`), with its face id and signed multiplicity, seeded
 into the 2D engine (arrangement + winding passes) in (y, z)
 coordinates. The engine returns every arrangement piece with its
 source id and (below, above) winding (the engine extension, below).
@@ -156,10 +166,12 @@ AXIS-PARALLEL FACES: a face lying in a section plane x = c never
 straddles a slab. Classification: w(just below c) vs w(just above c)
 at a clearance-checked interior probe point (largest-triangle
 centroid of the PSLG region), via the point-winding query against
-the two adjacent slabs' captured arrangements. Querying a settled
-arrangement built by the maintained order is evaluation, not the
-refuted independent-probe pattern; clearance failure falls into the
-degenerate handling. Alternative considered and rejected (round 1):
+the two adjacent slabs' captured arrangements (the exterior sentinel
+slab serves min/max-x caps; an adjacent interior slab that was
+skipped as sub-eps sends the face to the degenerate/starvation
+handling [R2-fold]). Querying a settled arrangement built by the
+maintained order is evaluation, not the refuted independent-probe
+pattern; clearance failure falls into the degenerate handling. Alternative considered and rejected (round 1):
 a tilted "irrational" sweep direction shrinks but cannot eliminate
 the class (any FP direction is rational; adversarial normals still
 hit it), adds rotation FP noise to every coordinate in and out, and
@@ -176,21 +188,53 @@ endpoints are events of the OTHER face's edges floats in this face's
 interior): PSLG components not attached to the outer boundary are
 classified by signed area and fed to `Triangulate` as holes/islands
 through its existing keyhole machinery (nested loops included).
-Then classification: each region takes (below, above) from its
-section piece in the WIDEST slab its x-extent covers, located by
-face id (exact - the id rides the engine) + t-interval along the
-face's section segment.
+Then classification. [R2-fold, the correspondence spelled out] A
+region's covering slabs are those whose OPEN x-interval lies inside
+the region's projected x-extent; take the widest. In that slab, the
+region's pieces are the captured pieces carrying THIS face's id
+whose midpoints locate inside the region (2D point-in-region on the
+face plane, lifting the piece midpoint to 3D along the face's
+section segment), with a clearance guard: a midpoint within eps of
+the region boundary is skipped as ambiguous. The region requires at
+least one located piece, and ALL its located pieces must agree on
+oriented (below, above); zero pieces or disagreement fails closed
+(named: classification ambiguity). One face's section segment
+routinely carries pieces of several regions (each seam crossing at
+that x splits it) - the point-location owns the assignment; no
+t-interval arithmetic against constructed values.
 
-[R1-fold] DEGENERATE REGIONS (every covering slab thinner than eps)
-are classified by ANCHOR-COMPONENT PROPAGATION, not free
-inheritance: build connected components of degenerate regions
-(adjacency = shared PSLG edges); a component's classification
-propagates only from its NONDEGENERATE anchor neighbors; ALL anchors
-must imply the same keep decision, else - or with no anchor at all
-(slab starvation: a whole component whose criticals all pack within
-eps) - the component FAILS CLOSED (reported, run returns failure).
-Dense tangles with agreeing anchors classify; conflicting evidence
-is never averaged or tie-broken.
+EMISSION ORIENTATION, algebraically (vertical-safe) [R2-fold]:
+crossing a face along its outward normal changes winding by
+-m_face, so w_front = w_back - m_face. A captured piece gives
+(below, above) with above = below + m_lex, where m_lex = +/-m_face
+by the piece's lex direction relative to the face's seeded segment
+direction; the sign resolves back/front from below/above without
+any spatial-side reasoning (which fails for vertical pieces). Keep
+iff IsInside(w_back) != IsInside(w_front); output normal = the face
+normal if IsInside(w_back) (material behind), else flipped. One
+unit pin verifies the algebra on a cube's six faces, including the
+normal = +/-y (all-vertical-pieces) sides.
+
+[R1-fold] DEGENERATE REGIONS (no covering slab wider than eps) are
+classified by ANCHOR-COMPONENT PROPAGATION, not free inheritance:
+build connected components of degenerate regions (adjacency =
+shared PSLG edges); a component's classification propagates only
+from its NONDEGENERATE anchor neighbors; [R2-fold] ALL anchors must
+agree on the ORIENTED (below, above) classification (bare keep/drop
+agreement can mask an orientation conflict), else - or with no
+anchor at all (slab starvation: a whole component whose criticals
+all pack within eps) - the component FAILS CLOSED. Dense tangles
+with agreeing anchors classify; conflicting evidence is never
+averaged or tie-broken.
+
+[R2-fold, adjudicated] A dropped degenerate component whose interior
+carried a fill transition is NOT the silent-wrong class: such a
+component is by construction sub-eps-thick along the sweep axis, and
+dropping sub-eps features is the documented eps-scale decision (the
+2D engine's own input quantization; #289 step 1's "smallest feature
+size that is desired to retain"), applied CONSISTENTLY (both sides
+of every seam, enforced by the balance check below) and COUNTED in
+the report. Eps-validity admits it; the report makes it visible.
 
 [R1-fold] SEAM BALANCE is enforced BEFORE emission, not assumed
 after: for every seam polyline edge, the kept incident regions must
@@ -200,14 +244,23 @@ Manifoldness of the output is then the gate-3 CHECK; the design no
 longer claims it as a theorem, it engineers toward it and verifies.
 
 Stage E - triangulation and emission. Each kept region (fill
-transition: IsInside(below) != IsInside(above)) triangulates via
-`Triangulate` projected to the face plane, oriented with kept
-material on the winding > 0 side; exactly ONE sheet per transition
-regardless of multiplicity. The PSLG must already be valid - seams
-crossing anywhere but shared ids is a stage-B miss and a hard
-failure, never a local repair. (With global unification in stage B,
-the round-1 false-assert class - same point, two ids - is resolved
-at its root.)
+transition per the orientation algebra above) triangulates via
+`Triangulate` projected to the face plane; exactly ONE sheet per
+transition regardless of multiplicity. PSLG VALIDITY IS CHECKED
+BEFORE THE STAGE-D WALK RUNS [R2-fold ordering]: seams crossing
+anywhere but shared ids is a stage-B miss and a hard failure, never
+a local repair, and no later stage consumes invalidated data. (With
+global unification in stage B, the round-1 false-assert class -
+same point, two ids - is resolved at its root.)
+
+FAILURE CONTRACT, one shape [R2-fold]: every stage returns a
+StageResult carrying either its product or a fatal reason code
+(diameter guard, sub-resolution chain, classification ambiguity,
+anchor conflict, starvation, balance violation, PSLG invalidity);
+fatal stops the pipeline at that stage. Non-fatal COUNTERS
+(sub-eps contacts dropped, degenerate components classified by
+propagation, eps-feature drops) accumulate in a report struct
+returned alongside success - visible, never fatal.
 
 ## The engine extension (single change to boolean2_sweep, priced)
 
@@ -234,10 +287,23 @@ gate-4 inputs). So the source id threads THROUGH the engine:
 - The per-slab point-location helper (the query above) lives with
   the 3D code, not in the engine.
 
-Honest price: ~40-60 lines touching `boolean2.h` + `boolean2_sweep.cpp`
-value plumbing, replacing the draft's "flag and one push_back" claim
-(round-1 audit) and DELETING the geometric matcher and its failure
-analysis entirely - a net simplification of the 3D side.
+Honest price [R2-fold, measured by building it]: ~174 functional
+lines across `boolean2.h` + `boolean2_sweep.cpp` (+86 net file
+lines). The round-2 empirical lane implemented the full plumbing:
+111/111 existing 2D tests green, id fidelity perfect through splits
+and block-rule re-entry, the round-1 killer (near-parallel segments
+1e-9 apart) attributed correctly by ids where geometric matching is
+provably ambiguous, and the conflict counter safe on
+impossible-in-production coincident-id input. Two items the draft
+under-priced, both confirmed independently by the fresh-eyes lane:
+`MergeVerticals1D` needs an algorithmic rewrite (running-coverage
+delta-sweep -> per-interval active-contributor tracking; adjacent
+same-plane triangles make multi-source vertical groups ORDINARY,
+not a corner case - each emitted interval carries the id of its
+unique active contributor, multi-source overlapping intervals
+count a conflict and carry -1), and the `pending_` inner map's
+value type changes alongside PolySet2's. In exchange the 3D side
+DELETES the geometric matcher and its failure analysis entirely.
 
 ## Epsilon posture
 
@@ -291,14 +357,18 @@ The >= 2^40 coordinate degeneracy is accepted manifold-wide.
    balance holds pre-emission and the output passes the manifold
    gate (paired edges, balanced verts) + Manifold(Impl)
    construction.
-4. DENSE NEAR-CONCURRENCE (adversarial): k thin wedges rotated about
-   a near-common axis through a near-point; near-parallel face
-   bundles eps apart; the June trimaran hulls (OBJ fixtures imported
-   from the old branch) as subtraction leftovers. PASS = manifold
-   output + oracle agreement, OR a clean fail-closed report naming
-   the guard that fired - never a silently wrong mesh. Measured
-   per-fixture; the anchor-propagation and diameter-guard rates are
-   the tractability data the prototype exists to produce.
+4. DENSE NEAR-CONCURRENCE (adversarial) [R2-fold: non-vacuous]: the
+   fixture list is SPLIT. MUST-RESOLVE stress fixtures (k thin
+   wedges at feature scale through a common region; moderately
+   near-parallel bundles well above eps; the June trimaran hulls as
+   subtraction leftovers): PASS requires manifold output + oracle
+   agreement - a fail-closed here FAILS the gate (no vacuous
+   safety). MUST-FAIL-CLOSED degeneracy fixtures (bundles inside
+   eps; sub-resolution chains; authored tolerance-scale features):
+   PASS requires the NAMED guard firing - a resolved-but-wrong mesh
+   or an unnamed crash fails. The anchor-propagation and
+   diameter-guard rates on both lists are the tractability data the
+   prototype exists to produce.
 5. ORACLE: for two-operand fixtures, RemoveOverlaps3D(Compose(A, B))
    vs Boolean3 A+B: |volume difference| <= eps *
    max(surfaceArea(ours), surfaceArea(oracle)); genus equal;
@@ -317,21 +387,38 @@ fence for that plumbing).
 - `src/overlap3_sweep.cpp` - stage C: slabs, sections, engine calls,
   point-location helper (~300 lines).
 - `src/boolean2.h` + `src/boolean2_sweep.cpp` - id/value plumbing +
-  capture out-channel (~40-60 lines).
+  capture out-channel + the MergeVerticals1D contributor-tracking
+  rewrite (~175 functional lines, measured by the round-2 build).
 - `test/overlap3_test.cpp` - the gate ladder (~700 lines).
 - CMake: sources added in `src/CMakeLists.txt`; the test file added
   to the SOURCE_FILES list in `test/CMakeLists.txt`.
 
-## RISKS (round-2 review lanes)
+## Crucible record
 
-R1' Does global unification + anchor propagation + seam balance
-actually resolve the round-1 BREAK constructions (re-attack them
-verbatim), and does the diameter guard fire rarely enough on
-NON-adversarial fixtures to keep gates 3/5 passable?
-R2' The engine id-plumbing: does the value-type change genuinely
-preserve 2D behavior (the id-conflict impossibility argument;
-MergeVerticals1D id handling), and is the capture contract complete
-for stage D's needs?
-R3' Fresh-eyes full-design pass over the REVISED doc for anything
-the round-1 folds broke or newly exposed (the stages changed shape:
-walk before classification, balance before emission).
+Round 1 (5 lanes): 4 convergent BREAKs (triple-point identity;
+inheritance vs seam balance; seam-endpoint invariant; slab
+starvation) - all resolved and HELD under round-2 re-attack. The
+empirical lane validated the core bet (section -> engine -> correct
+winding) and the capture extension against the live 2D suite.
+Round 2 (re-attack + fresh-eyes + empirical build): the round-1
+fixes held; new narrower findings folded - sub-resolution seam
+chains fail closed; the piece->region correspondence specified
+(midpoint point-location, clearance, agreement); oriented anchor
+agreement; eps-feature-drop semantics adjudicated as documented
+behavior, not silent wrongness; exterior sentinel slabs; the
+emission-orientation algebra; one failure contract with PSLG
+validity ordered before the walk; gate-4 non-vacuity split; the
+engine extension re-priced from the round-2 build (~174 functional
+lines; MergeVerticals1D rewrite; 111/111 2D regressions green).
+
+## RISKS (round-3 review lanes - the convergence check)
+
+R1'' Re-attack the round-2 constructions verbatim against the folds
+(the sub-eps chain cluster rule; the oriented-agreement rule; the
+correspondence spec; the orientation algebra on a +/-y face) and
+audit the folded design for internal contradictions introduced by
+two rounds of edits.
+R2'' Fresh-eyes full read: is the design now implementable as
+written by an engineer who has seen none of the review history -
+every stage contract stated, every constant named, every failure
+path reachable and typed?
