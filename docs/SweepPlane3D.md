@@ -1,11 +1,13 @@
 # 3D overlap removal by sweep plane (prototype design)
 
-STATUS: DESIGN DRAFT under adversarial review (crucible). The handoff
+STATUS: DESIGN, crucible round 1 folded (5 adversarial lanes: 2
+reasoning x2, simplicity audit, empirical probe; 4 convergent BREAKs
+resolved below, each marked [R1-fold]). The handoff
 (.claude/plans/3d-sweep-plane-prototype-handoff.md) and its
-reconciliation sibling are the framing; this doc is the concrete
-design. Simple-but-robust is the bar; performance is a later
-campaign. The prototype exists to answer ONE question: is a sweep
-status that is itself a moving 2D arrangement tractable?
+reconciliation sibling are the framing. Simple-but-robust is the
+bar; performance is a later campaign. The prototype exists to answer
+ONE question: is a sweep status that is itself a moving 2D
+arrangement tractable?
 
 ## Contract
 
@@ -14,265 +16,322 @@ cross (a self-overlapping solid; e.g. Compose of overlapping parts,
 or a Boolean output with residual self-intersection). Output: a
 manifold mesh that is the boundary of the input's winding > 0 region,
 eps-valid in Smith's sense (7.7: topological validity, geometric
-positions within the error budget), or a reported failure - never a
-silently wrong mesh. Oracle: Boolean3 (`Manifold::Boolean`) computes
-the same region for two-operand cases.
+positions within the error budget), or a REPORTED failure - never a
+silently wrong mesh. Fail-closed classes are named per stage below;
+the prototype measures them. Oracle: Boolean3 (`Manifold::Boolean`).
 
 ## The 2D lesson, carried up (settled - do not re-litigate)
 
 - Local, order-free decisions do not compose on dense
-  near-concurrences. Every classification in this design derives from
-  a maintained sweep order, never from an independent per-item probe
-  (no per-face ray casts; the June RSI pipeline's non-manifold
-  fallbacks are the 3D empirical record of the same failure).
-- Robustness lever is tolerance + consistency, not precision: shared
+  near-concurrences. Every classification derives from a maintained
+  sweep order or a settled arrangement built by one; never from
+  independent per-item probes deciding arrangement or classification.
+- Robustness lever is tolerance + consistency: shared
   `Interpolate`/`Intersect` kernels, `EpsilonFromScale` budgets, no
   exact predicates, no double-double.
 - Coincident-event handling is the block rule (Smith 7.6.2), not
   symbolic perturbation.
 - The 2D engine (`src/boolean2_sweep.cpp`, `SweepWinding`) is the
-  validated consistency solver for a 2D arrangement: input features
-  are eps-quantized once (vertex merge + incidence pre-split), the
-  sweep itself is tolerance-free with exact-coordinate identity, the
-  block rule collapses dense clusters through event vertices, and the
-  winding pass decides fill by the maintained order.
+  validated consistency solver: input features eps-quantized once,
+  the sweep tolerance-free with exact-coordinate identity, dense
+  clusters collapsed through event vertices by the block rule,
+  winding decided by the maintained order. EMPIRICALLY CONFIRMED
+  (round-1 probe): a hand-built 3D cross-section fed to SweepWinding
+  yields correct union winding; the piece-capture extension is ~15
+  implementation lines with zero behavioral change (111 existing 2D
+  tests green over the patched engine).
 
 ## Design overview
 
-Five stages. The kinetic insight that shapes them: in 2D, two edges
-cross at a POINT (one sweep event); in 3D, two faces cross along a
-SEGMENT that persists across an x-interval of the sweep. So the 3D
-status is a 2D arrangement with PERSISTENT crossings that deform
-continuously, and its TOPOLOGY changes only at discrete x-criticals.
-Between consecutive criticals (a "slab"), the cross-section's
-combinatorial structure is constant. That makes per-slab recompute
-sound: one representative section per slab captures the whole slab.
+The kinetic insight: in 2D two edges cross at a POINT (one event); in
+3D two faces cross along a SEGMENT that persists across an x-interval
+of the sweep. The 3D status is a 2D arrangement with persistent,
+continuously-deforming crossings whose TOPOLOGY changes only at
+discrete x-criticals. Between consecutive criticals (a "slab") the
+section's combinatorial structure is constant, so per-slab recompute
+with one representative section per slab is sound. Held under attack
+(round 1): for supported non-coplanar pairs there is no slab-interior
+topology change - section combinatorics change at vertex x's, seam
+endpoints are input verts or edge-face events, seam-order swaps on a
+face are triple points, and a straight segment's x is monotone.
 
-Stage A - merge and canonicalize (the #289 steps 1-2 that both
-approaches share). Merge input verts within eps (deterministic
-union-find, centroid-nearest representative - the 2D engine's own
-convention). Drop collapsed tris; merge exactly-identical tris
-(same canonical vert triple) into one record with a signed
+Stage A - merge and canonicalize. Merge input verts within eps
+(deterministic union-find, centroid-nearest representative - the 2D
+engine's convention). Drop collapsed tris; merge exactly-identical
+tris (same canonical vert triple) into one record with signed
 multiplicity (orientation-relative); zero-mult records drop.
+[R1-fold] Multiplicity is a WINDING input only - it never rides into
+emission (stage E emits exactly one oriented sheet per fill
+transition, exactly as the 2D engine's EmitBoundary saturates to
++/-1). Its role: Compose(A, B) duplicates interface triangles;
+cancellation and winding accumulation need the signed count, and
+gate 5 is unpassable without it.
 
 Stage B - arrangement geometry (seams and their verts), computed
-ONCE, globally, as shared objects:
+once, globally, as shared objects:
+
 - Edge-face events: for each (edge, tri) candidate from a BVH broad
-  phase, the eps-aware piercing test (shared kernels); each event is
-  one new vert, snapped to an existing vert within eps of it (the
-  incidence quantization, applied once here - the 2D pre-split's
-  analog).
+  phase, the eps-aware piercing test (shared kernels); each event
+  vert snaps to an existing vert within eps (the incidence
+  quantization, applied once here).
 - Seams: for each intersecting tri pair, the clipped intersection
-  segment; its endpoints are exactly two events/verts (per #289 step
-  7's invariant, which the merge is believed to guarantee - asserted,
-  not assumed).
+  segment. [R1-fold] The naive "exactly two endpoint verts"
+  invariant is FALSE for degenerate contacts; the intersection
+  classes are enumerated with a rule each:
+  - proper segment, length > eps: a seam with exactly two distinct
+    canonical endpoint verts (asserted only AFTER the other classes
+    are peeled off);
+  - point contact / tangent touch / segment of length <= eps: NO
+    seam; counted and reported (the contact is sub-resolution;
+    winding cannot change across it at eps validity);
+  - a tri edge lying in the other tri's plane (edge-in-plane, the
+    seam-collinear-with-input-edge case): OUT OF SCOPE with the
+    coplanar class (below), detected and reported.
 - Triple points: for each face, pairwise crossings of its incident
-  seam segments IN THE FACE PLANE (2D crossing test, shared kernel);
-  a crossing is one new vert shared by the three faces' seam
-  structure; crossings within eps of each other or of a seam vert
-  merge into it (1D sort along each seam, neighbor-merge - #289 step
-  4's rule, which IS sound in 1D). Every seam becomes a polyline
-  split at its triple points, and both incident faces reference the
-  SAME polyline object with the same vert ids. This kills the join
-  problem by construction: there is nothing to re-join later.
+  seam segments IN THE FACE PLANE (2D crossing test, shared kernel).
+  [R1-fold, the round's central convergent BREAK] The same physical
+  triple point is computed independently in up to three face frames
+  and lands on different seams as different candidates, ~2*alpha
+  apart (Smith 8.2: alpha ~ 12.37*u*L per construction; 2*alpha is
+  ~eps/500 at budget 1000) - so per-seam local merging CANNOT
+  deliver shared identity, and eps chain-merges along a seam are
+  order-dependent (the #289 step-1 chain problem reborn). The fix is
+  GLOBAL TRIPLE-POINT UNIFICATION, the production lesson of RSI's
+  step 9.5 (same point computed through different frames must be
+  unified globally): after all candidates are computed, one
+  union-find over all triple-point candidates and seam verts within
+  eps of each other, with a DIAMETER GUARD - a cluster whose point
+  spread exceeds eps is the genuinely-degenerate chain class and
+  FAILS CLOSED (reported, run returns failure) rather than
+  chain-merging; each surviving cluster takes one canonical vert
+  (centroid-nearest convention), written back into EVERY incident
+  seam polyline. Sharing is thereby by-construction again: both
+  faces of a seam reference the same polyline object; every face at
+  a triple point references the same vert id. Well-conditioned
+  crossings sit ~2*alpha apart and unify trivially;
+  ill-conditioned (near-coplanar) crossings whose error exceeds eps
+  hit the diameter guard and fail closed - the RSI conditioned-band
+  class, measured not solved.
 - On-edge incidences: events and seam verts within eps of an input
-  edge subdivide that edge (ordered by t - sound in 1D), so adjacent
+  edge subdivide that edge (ordered by t - 1D, sound), so adjacent
   faces conform across shared input edges by shared vert ids.
 
-Stage C - the sweep: classification by slabs. x-criticals = the
-sorted union of merged-vert x's, event-vert x's, and triple-point
-x's. For each slab (an interval between consecutive criticals) that
-is wider than eps, take the mid-x and build the SECTION: every face
-straddling mid-x contributes one segment (its two edge crossings at
-mid-x via `Interpolate`), tagged with (face id, multiplicity, side
-orientation). Feed the section's segments to the 2D engine's
-arrangement + winding passes in (y, z) coordinates. The engine
-returns, for every arrangement piece, the winding below and above it
-in section space (a small engine extension - see "engine extension"
-below). Because the input surface is closed and even-manifold after
-stage A, section winding at a point equals the 3D solid winding
-along that plane, so this per-slab 2D winding IS the 3D
-classification, decided by one maintained order per slab.
+Stage C - the sweep: classification by slabs. x-criticals = sorted
+union of merged-vert x's, event-vert x's, and triple-point x's. For
+each slab wider than eps, at mid-x build the SECTION: every face
+straddling mid-x contributes one segment (edge crossings at mid-x
+via `Interpolate`), with its face id and signed multiplicity, seeded
+into the 2D engine (arrangement + winding passes) in (y, z)
+coordinates. The engine returns every arrangement piece with its
+source id and (below, above) winding (the engine extension, below).
+Because the input surface is closed and even-manifold after stage A,
+section winding equals 3D solid winding along that plane (held under
+attack round 1, including inverted and nested shells and
+multiplicity > 1), so per-slab 2D winding IS the 3D classification,
+decided by one maintained order per slab.
 
-Stage D - classification transfer. Each face's sub-face (stage-E
-region) intersects some set of slabs; it is classified from ONE slab
-- the widest slab its x-extent covers - by locating its section
-segment piece and reading (below, above). A sub-face whose every
-covering slab is thinner than eps is a degenerate piece: it inherits
-the classification of a neighboring piece across its widest seam
-(recorded, counted, and reported - this is where a genuine 3D block
-rule would act; the prototype measures the class instead of solving
-it).
+ORIENTATION AND SIGN CONVENTIONS (empirically validated round 1):
+- Sweep axis x; section coordinates (u, v) = (y, z).
+- A face's section segment is directed CCW AS VIEWED FROM +x
+  (equivalently: direction = normalize(cross(sweepDir,
+  outwardFaceNormal)) up to the segment's own parametrization), with
+  multiplicity = the stage-A signed multiplicity. The engine's lex
+  normalization handles reversal (m negates).
+- (below, above) are STATUS-ORDER sides, not spatial sides: for
+  non-vertical pieces below = smaller-z side; for VERTICAL pieces
+  (z-parallel in section) the labels follow gradient-rank status
+  order and are spatially inverted relative to z intuition. The
+  emission decision IsInside(below) != IsInside(above) is
+  orientation-safe for both; any consumer needing spatial sides must
+  use the non-vertical rule only.
+- Point-winding query (used for axis-parallel faces only): winding
+  at (qy, qz) = sum over NON-VERTICAL captured pieces crossing the
+  downward ray y = qy, z > qz of (below - above). Vertical pieces
+  are skipped (parallel to the ray). Validated round 1 on interior,
+  overlap, and exterior query points; the naive crossing-direction
+  ray count is WRONG (multiplicity), which is why the algorithm is
+  spelled here.
 
-AXIS-PARALLEL FACES (found during drafting; in-scope, explicit): a
-face lying in a section plane x = c never straddles any slab and has
-no section segment anywhere. Its two sides face along the sweep
-axis, so its classification is w(just below c) vs w(just above c) at
-an interior point: probe the two ADJACENT slabs' finished 2D
-arrangements with a point-winding query at a clearance-checked
-interior point of the sub-face (largest-triangle centroid of the
-region). Querying a SETTLED, valid arrangement is evaluation, not
-the refuted pattern (which was deciding arrangement/classification
-by independent probes); the query point is chosen with clearance
-from all section edges, and a clearance failure falls into the
-degenerate-piece rule. Nearly-axis-parallel faces section normally
-but may have sub-eps x-extent; they fall under the thin-slab /
-degenerate-piece rules and are counted in the same report.
+AXIS-PARALLEL FACES: a face lying in a section plane x = c never
+straddles a slab. Classification: w(just below c) vs w(just above c)
+at a clearance-checked interior probe point (largest-triangle
+centroid of the PSLG region), via the point-winding query against
+the two adjacent slabs' captured arrangements. Querying a settled
+arrangement built by the maintained order is evaluation, not the
+refuted independent-probe pattern; clearance failure falls into the
+degenerate handling. Alternative considered and rejected (round 1):
+a tilted "irrational" sweep direction shrinks but cannot eliminate
+the class (any FP direction is rational; adversarial normals still
+hit it), adds rotation FP noise to every coordinate in and out, and
+abandons input-coordinate exactness - while the query is the direct
+3D analog of the engine's own MergeVerticals1D special-casing.
+Cost stated honestly: a per-slab point-location helper over captured
+pieces (~40 lines), not a one-liner.
 
-Stage E - per-face partition and emission. Each face's PSLG = its
-(subdivided) boundary + its seam polylines; regions are found by the
-face-local planar walk and triangulated (`Triangulate`, projected to
-the face plane). A region is EMITTED iff IsInside(below) !=
-IsInside(above) (positive fill: w > 0 on exactly one side), oriented
-with the kept material on the winding>0 side; region multiplicity
-from stage A rides along (opposite coincident faces cancel). The
-PSLG must already be a valid arrangement - seams crossing anywhere
-but shared triple-point ids means stage B missed an event, which is
-a HARD FAILURE reported by an assert-and-fallback, never a local
-repair (repairs are the refuted pattern).
+Stage D - partition and classification. The face-local planar walk
+(purely topological) runs FIRST: each face's PSLG = its subdivided
+boundary + its seam polylines; regions are the walk's output.
+[R1-fold] Interior seam loops are real (a seam both of whose
+endpoints are events of the OTHER face's edges floats in this face's
+interior): PSLG components not attached to the outer boundary are
+classified by signed area and fed to `Triangulate` as holes/islands
+through its existing keyhole machinery (nested loops included).
+Then classification: each region takes (below, above) from its
+section piece in the WIDEST slab its x-extent covers, located by
+face id (exact - the id rides the engine) + t-interval along the
+face's section segment.
 
-Manifoldness is then a THEOREM to check, not a mechanism to add:
-seam ids are shared by construction (B), keep decisions are
-winding-consistent by the maintained order (C), so every output edge
-must pair. The output gate verifies it (every edge shared by exactly
-two output triangles with opposite orientation, start/end balance at
-triplet verts - the 2023 constraint as a check).
+[R1-fold] DEGENERATE REGIONS (every covering slab thinner than eps)
+are classified by ANCHOR-COMPONENT PROPAGATION, not free
+inheritance: build connected components of degenerate regions
+(adjacency = shared PSLG edges); a component's classification
+propagates only from its NONDEGENERATE anchor neighbors; ALL anchors
+must imply the same keep decision, else - or with no anchor at all
+(slab starvation: a whole component whose criticals all pack within
+eps) - the component FAILS CLOSED (reported, run returns failure).
+Dense tangles with agreeing anchors classify; conflicting evidence
+is never averaged or tie-broken.
 
-## The engine extension (minimal, the only 2D change)
+[R1-fold] SEAM BALANCE is enforced BEFORE emission, not assumed
+after: for every seam polyline edge, the kept incident regions must
+pair (equal start/end counts - the 2023 triplet constraint as a
+pre-emission check). A violation names the seam and fails closed.
+Manifoldness of the output is then the gate-3 CHECK; the design no
+longer claims it as a theorem, it engineers toward it and verifies.
 
-`SweepWinding` today emits only the retained boundary. The winding
-pass already computes (below, above) for every piece inside its
-block loop (`EmitBoundary(from, to, m, below, above)`). Extension:
-an optional out-channel that records (from, to, below, above) for
-EVERY piece instead of only retained ones - a flag and one push_back,
-no behavioral change to existing callers. Piece->face matching is
-geometric: a piece lies on its source segment up to the engine's
-constructed-point error; match by point-to-segment distance at eps
-against the slab's tagged input segments, nearest wins, unmatched
-pieces reported. (Threading ids through PolySet2 would be exact but
-touches the engine's core key type; rejected for the prototype -
-the matching is measured by gate 2 instead.)
+Stage E - triangulation and emission. Each kept region (fill
+transition: IsInside(below) != IsInside(above)) triangulates via
+`Triangulate` projected to the face plane, oriented with kept
+material on the winding > 0 side; exactly ONE sheet per transition
+regardless of multiplicity. The PSLG must already be valid - seams
+crossing anywhere but shared ids is a stage-B miss and a hard
+failure, never a local repair. (With global unification in stage B,
+the round-1 false-assert class - same point, two ids - is resolved
+at its root.)
+
+## The engine extension (single change to boolean2_sweep, priced)
+
+Round-1 empirical probe: geometric piece-to-segment matching HARD
+FAILS at sub-eps segment separation (misattribution with no
+resolving threshold, silently wrong classification on exactly the
+gate-4 inputs). So the source id threads THROUGH the engine:
+
+- `PolySet2`'s mapped value grows from `int64_t` to {multiplicity,
+  sourceId}; `SweepEdge` carries the id; splits preserve it;
+  `EmitBoundary` emits it. Exact-coincident segment summing (the
+  only id-conflict site) cannot occur between distinct faces at
+  mid-slab: identical section segments require the two faces to
+  share both crossed edges (impossible for distinct tris), and
+  stage-A merging gives identical tris one record; conflict asserts.
+  Collinear-overlapping verticals from distinct faces would need an
+  input edge lying exactly in the mid-slab plane, which mid-slab
+  placement excludes (verts are criticals); asserted likewise.
+- A default-null out-channel on `SweepWinding` records (from, to,
+  sourceId, below, above) for every winding-pass piece, threaded
+  through `CollectThenMeasure` (a header signature addition with a
+  default, backward-compatible; existing callers unchanged -
+  verified against the 2D suite in the round-1 probe).
+- The per-slab point-location helper (the query above) lives with
+  the 3D code, not in the engine.
+
+Honest price: ~40-60 lines touching `boolean2.h` + `boolean2_sweep.cpp`
+value plumbing, replacing the draft's "flag and one push_back" claim
+(round-1 audit) and DELETING the geometric matcher and its failure
+analysis entirely - a net simplification of the 3D side.
 
 ## Epsilon posture
 
 One absolute eps = `EpsilonFromScale(bbox scale, 1000)` unless the
 caller passes one (identical to 2D). It quantizes input features
-(stage A merge, stage B snapping/merging, on-edge subdivision) and
-bounds the stage-D matching; the 2D engine inside each slab runs its
-own standard posture on section coordinates (same scale). Slabs
-thinner than eps are never classified from. The >= 2^40 coordinate
-degeneracy is accepted manifold-wide, per the handoff. Smith's alpha
-applies to every constructed point (edge-face verts, triple points,
-section endpoints - all via the shared kernels); the budget-1000 eps
-covers them exactly as in 2D.
+(stage A, stage B snapping/unification/on-edge subdivision) and
+gates slab width; the 2D engine inside each slab runs its own
+standard posture. Smith's alpha covers every constructed point
+(edge-face verts, triple points, section endpoints - all via shared
+kernels); the global unification's diameter guard is where the
+budget's limits surface as reported failures instead of corruption.
+The >= 2^40 coordinate degeneracy is accepted manifold-wide.
 
-## Deliberately out of scope (prototype)
+## Deliberately out of scope (prototype; each detected + reported)
 
-- Coplanar face overlap beyond exactly-identical triangles (the
-  hardest 2D-in-3D class; no seams exist between coplanar faces, so
-  their mutual imprint is a separate mechanism - the June 6.5 trace
-  machinery is the reference if it is ever imported). Detected
-  (eps-coplanar overlapping pair with non-identical verts) and
-  reported as unsupported, oracle fixtures avoid it.
-- Cancellation/ExecutionContext, progress, parallelism, performance
-  (per-slab recompute is deliberately quadratic-ish).
+- Coplanar face overlap beyond exactly-identical triangles,
+  INCLUDING the edge-in-plane seam class and the near-coplanar
+  conditioned-band class (ill-conditioned triple crossings whose
+  frame error exceeds eps - they hit the stage-B diameter guard).
+  Reference: the RSI branch's OverlapRemoval.md known limitations 1
+  and the 6.5 trace machinery, if ever imported.
+- Vertex-on-face through-pierces (an edge ENDPOINT exactly on
+  another face's interior plane produces no edge-face event; the RSI
+  known-limitation-10 class). Fixtures avoid it; occurrences surface
+  as seam-balance failures.
+- Slab-starved components (thin-in-sweep-axis geometry, all
+  criticals within eps): fail closed, counted.
+- Cancellation/ExecutionContext, progress, parallelism, performance.
 - Public API: the seam is internal (`RemoveOverlaps3D(const
-  Manifold::Impl&, double eps) -> std::optional<Impl>`); tests reach
-  it directly. Public wiring is post-prototype.
-- Simplification/decimation of the output (Simplify's job, as in 2D).
+  Manifold::Impl&, double eps) -> std::optional<Impl>`, failure =
+  nullopt + a reason report struct for tests); public wiring is
+  post-prototype.
+- Output simplification/decimation (Simplify's job, as in 2D).
 
 ## Validation gates -> tests (test/overlap3_test.cpp)
 
 1. EVENT PARITY: brute-force O(n^2) edge-face and seam-pair
-   enumeration equals stage B's output on small fixtures (two tets,
-   two boxes, box+rotated box).
-2. SECTION VALIDITY: per slab, the section is closed (every 2D vert
-   has even degree; signed multiplicity sums zero around it) and the
-   engine ingests it without assert; piece->face matching resolves
-   every piece (unmatched count == 0 on the fixtures).
+   enumeration equals stage B on small fixtures (two tets, two
+   boxes, box + rotated box).
+2. SECTION VALIDITY: per slab: closed section (even vert degree,
+   signed multiplicity sums zero around each vert); engine ingests
+   without assert; ZERO RESIDUAL CROSSINGS after the arrangement
+   pass (piece endpoints only at shared vertices - the
+   non-overlapping-status property, measured); every piece carries a
+   source id. Sampled at mid-slab AND immediately past each
+   x-critical on the fixtures (a wrong critical set manifests just
+   past the transition, not at mid-slab).
 3. TRIPLET PAIRING / MANIFOLDNESS: on fixtures with genuine
    triple-face verts (three boxes pairwise overlapping around a
-   common region; three plates through one line region), the output
-   passes the manifold gate (paired edges, balanced verts) and
-   Manifold(Impl) construction.
-4. DENSE NEAR-CONCURRENCE (the adversarial gate): k thin wedges
-   rotated about a near-common axis through one near-point (the 2D
-   killer lifted); near-parallel face bundles eps apart; the June
-   trimaran hulls (OBJ fixtures imported from the old branch) as
-   subtraction leftovers. PASS = manifold output + winding oracle
-   agreement; measured, not assumed.
+   common region; three plates through one line region), seam
+   balance holds pre-emission and the output passes the manifold
+   gate (paired edges, balanced verts) + Manifold(Impl)
+   construction.
+4. DENSE NEAR-CONCURRENCE (adversarial): k thin wedges rotated about
+   a near-common axis through a near-point; near-parallel face
+   bundles eps apart; the June trimaran hulls (OBJ fixtures imported
+   from the old branch) as subtraction leftovers. PASS = manifold
+   output + oracle agreement, OR a clean fail-closed report naming
+   the guard that fired - never a silently wrong mesh. Measured
+   per-fixture; the anchor-propagation and diameter-guard rates are
+   the tractability data the prototype exists to produce.
 5. ORACLE: for two-operand fixtures, RemoveOverlaps3D(Compose(A, B))
-   vs Boolean3 A+B: volume within eps-derived bound, genus equal,
-   Contains() agreement on a deterministic point grid (the
-   Monte-Carlo winding oracle's 3D analog, deterministic seed).
+   vs Boolean3 A+B: |volume difference| <= eps *
+   max(surfaceArea(ours), surfaceArea(oracle)); genus equal;
+   Contains() agreement on a deterministic point grid.
 
 Plus: the existing manifold suite stays green (the branch adds files
-and one flagged engine out-channel; nothing else changes).
+plus the engine value-plumbing; the 2D suites are the regression
+fence for that plumbing).
 
 ## File plan
 
-- `src/overlap3.h` - internal seam + stage structs (~100 lines).
-- `src/overlap3.cpp` - stages A, B, D, E (~600-900 lines).
-- `src/overlap3_sweep.cpp` - stage C: slabs, section build, engine
-  calls (~250 lines).
-- `src/boolean2_sweep.cpp` - the piece-capture out-channel (~15
-  lines).
-- `test/overlap3_test.cpp` - the gate ladder (~600 lines).
-- CMake: add the sources to the manifold target, the test to
-  manifold_test.
+- `src/overlap3.h` - internal seam + stage structs (~120 lines).
+- `src/overlap3.cpp` - stages A, B, D, E (~1200-1500 lines; the
+  round-0 estimate was optimistic per audit - stage B's enumeration
+  + unification and stage D's propagation/balance are the bulk).
+- `src/overlap3_sweep.cpp` - stage C: slabs, sections, engine calls,
+  point-location helper (~300 lines).
+- `src/boolean2.h` + `src/boolean2_sweep.cpp` - id/value plumbing +
+  capture out-channel (~40-60 lines).
+- `test/overlap3_test.cpp` - the gate ladder (~700 lines).
+- CMake: sources added in `src/CMakeLists.txt`; the test file added
+  to the SOURCE_FILES list in `test/CMakeLists.txt`.
 
-## RISKS (the review lanes)
+## RISKS (round-2 review lanes)
 
-R1 CROSS-SLAB CONSISTENCY (the core bet). Sub-faces are classified
-from single slabs; manifoldness needs keep-decisions consistent
-across every shared edge whose incident pieces may classify from
-DIFFERENT slabs. The design's claim: both slabs' sections are built
-from the same stage-B objects evaluated by the same kernels, and a
-correct 2D winding of a valid section is unique - so two slabs can
-only disagree if a section is built WRONG (a missed critical, a
-face-straddling misjudgment at a slab boundary). Attack: construct a
-disagreement; find a topology change inside a "slab" that stage C's
-critical set misses (tangencies? a seam whose x-extent endpoints are
-not events? vertical faces?).
-
-R2 DENSE 3D CONCURRENCE. There is no true 3D block rule here: stage
-B merges triple points at eps (1D along seams) and the 2D block rule
-acts only INSIDE each slab's section. A dense 3D tangle (many faces
-near-concurrent through a point) produces: many near-coincident
-triple points (merged at eps - order-dependence of that merge?),
-degenerate slabs (skipped), and degenerate sub-faces (classification
-inherited). Attack: break the inheritance rule; construct a tangle
-where eps-merged triple points produce an invalid face PSLG or an
-unpaired output edge.
-
-R3 PER-FACE PSLG VALIDITY. Stage E asserts seams cross only at
-shared ids; FP residual crossings between near-parallel seams within
-a face are exactly the class the 2D engine solves with forced-through
-- and the design REFUSES to run an independent per-face arrangement
-(it would invent per-face topology and break cross-face sharing).
-Attack: is assert-and-fail acceptable (how often does it fire on
-gate-4 inputs), or does the design need a principled in-face
-resolution that preserves sharing?
-
-R4 SECTION ORIENTATION AND WINDING SIGNS. Section winding == solid
-winding needs the right sign conventions (face normal -> section
-segment orientation in (y,z); Add rule w>0; emission orientation).
-Attack: work a box and an inverted box through the full sign chain
-on paper; find a flipped case (vertical faces, faces parallel to the
-sweep axis are IN the section plane - how are they sectioned?).
-
-R5 PIECE->FACE MATCHING. Geometric matching at eps after the engine
-splits pieces at constructed points. Attack: a slab where two faces'
-section segments are within eps (near-parallel bundle) - nearest-
-segment matching misattributes; quantify and decide whether the
-id-threading alternative is required after all.
-
-R6 STAGE-B INVARIANTS. #289 step 7's "exactly two shared verts per
-seam" is believed-with-proof-wanted; tangent and edge-through-edge
-cases produce 1 or 0. Attack: enumerate the degenerate seam
-configurations and check each resolves to a stated rule (merge, skip,
-or event) rather than an unstated assumption.
-
-R7 SIMPLICITY AUDIT. Anything here not needed to answer the
-tractability question? Anything manifold already provides being
-reinvented? Is the engine extension truly minimal?
+R1' Does global unification + anchor propagation + seam balance
+actually resolve the round-1 BREAK constructions (re-attack them
+verbatim), and does the diameter guard fire rarely enough on
+NON-adversarial fixtures to keep gates 3/5 passable?
+R2' The engine id-plumbing: does the value-type change genuinely
+preserve 2D behavior (the id-conflict impossibility argument;
+MergeVerticals1D id handling), and is the capture contract complete
+for stage D's needs?
+R3' Fresh-eyes full-design pass over the REVISED doc for anything
+the round-1 folds broke or newly exposed (the stages changed shape:
+walk before classification, balance before emission).
