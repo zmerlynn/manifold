@@ -1147,4 +1147,76 @@ TEST(Overlap3, Pin_P10_AnchorPropagation_Positive) {
       << "not dropped: R1 straddles the material boundary";
 }
 
+// ---------------------------------------------------------------------------
+// S3: Inverted-cube pins
+// ---------------------------------------------------------------------------
+
+// Return an Impl with all triangle windings flipped relative to m.
+static Manifold::Impl InvertWinding(const Manifold& m) {
+  MeshGL64 mg = m.GetMeshGL64();
+  for (size_t i = 0; i < mg.triVerts.size(); i += 3)
+    std::swap(mg.triVerts[i + 1], mg.triVerts[i + 2]);
+  mg.runOriginalID.clear();
+  mg.runOriginalID.push_back(Manifold::ReserveIDs(1));
+  return Manifold::Impl(mg);
+}
+
+// Compose A with a winding-inverted copy of B (for subtract oracle test).
+static Manifold::Impl ComposeWithInverted(const Manifold& a,
+                                          const Manifold& b) {
+  const MeshGL64 mga = a.GetMeshGL64();
+  MeshGL64 mgb = b.GetMeshGL64();
+  for (size_t i = 0; i < mgb.triVerts.size(); i += 3)
+    std::swap(mgb.triVerts[i + 1], mgb.triVerts[i + 2]);
+  MeshGL64 combined;
+  combined.numProp = 3;
+  auto append = [&](const MeshGL64& m) {
+    const uint64_t base = combined.NumVert();
+    for (size_t i = 0; i < m.vertProperties.size(); ++i)
+      combined.vertProperties.push_back(m.vertProperties[i]);
+    for (size_t i = 0; i < m.triVerts.size(); ++i)
+      combined.triVerts.push_back(m.triVerts[i] + base);
+  };
+  append(mga);
+  append(mgb);
+  combined.runOriginalID.push_back(Manifold::ReserveIDs(1));
+  return Manifold::Impl(combined);
+}
+
+// S3(a): A single inverted cube (reversed winding) has w>0 nowhere.
+// RemoveOverlaps3D must succeed with an empty output (0 tris).
+TEST(Overlap3, Pin_S3a_InvertedCube_Empty) {
+  const Manifold::Impl impl = InvertWinding(Manifold::Cube({1, 1, 1}));
+  const double eps = ImplEps(impl);
+  const Overlap3Result result = RemoveOverlaps3D(impl, eps);
+  ASSERT_FALSE(result.fatal.has_value())
+      << "Inverted cube: unexpected fatal=" << result.detail;
+  ASSERT_TRUE(result.impl.has_value());
+  // Winding is -1 inside, 0 outside; IsInside3D(-1)=false and
+  // IsInside3D(0)=false -> no fill transition -> nothing emitted.
+  EXPECT_EQ(result.impl->NumTri(), 0u)
+      << "Inverted cube: expected 0 tris (w>0 region is empty)";
+}
+
+// S3(b): Compose(A, inverted(B)) encodes A-B via winding:
+// w_total = w_A + w_{-B} > 0 iff w_A > w_B.
+// Oracle: Manifold::Boolean Subtract (Boolean3). Assert volume/genus agreement.
+TEST(Overlap3, Pin_S3b_CubeMinusInverted_OracleSubtract) {
+  // Generic-offset fixture (same as Gate5) to avoid coplanarity.
+  const Manifold a = Manifold::Cube({2, 2, 2});
+  const Manifold b =
+      Manifold::Cube({1.7, 1.9, 2.3}).Translate({1.13, 0.41, 0.37});
+  const Manifold oracle = a - b;
+
+  const Manifold::Impl impl = ComposeWithInverted(a, b);
+  const double eps = ImplEps(impl);
+
+  const Overlap3Result result = RemoveOverlaps3D(impl, eps);
+  ASSERT_FALSE(result.fatal.has_value())
+      << "CubeMinusInverted: pipeline fatal=" << (int)*result.fatal << " "
+      << result.detail;
+  ASSERT_TRUE(result.impl.has_value());
+  OracleCompare(*result.impl, oracle, eps, "Pin_S3b_CubeMinusInverted");
+}
+
 }  // namespace

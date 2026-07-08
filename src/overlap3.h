@@ -177,7 +177,7 @@ struct Overlap3Result {
 Overlap3Result RemoveOverlaps3D(const Manifold::Impl& in, double eps = 0.0);
 
 // ---------------------------------------------------------------------------
-// Test hooks (not part of the public seam; used only by overlap3_test.cpp)
+// Test seams (overlap3_test.cpp only)
 // ---------------------------------------------------------------------------
 
 // Intermediate pipeline state exposed for gate-2 section validity checks and
@@ -195,10 +195,6 @@ struct Overlap3Internals {
 // sectionEdges/sectionVerts.
 Overlap3Internals RemoveOverlaps3D_TestHooks(const Manifold::Impl& in,
                                              double eps = 0.0);
-
-// ---------------------------------------------------------------------------
-// White-box test types and wrappers (overlap3_test.cpp only)
-// ---------------------------------------------------------------------------
 
 // A region in the face PSLG, exposed for white-box balance and classification
 // pins.  Stage D builds these internally; they are exposed here so test code

@@ -108,6 +108,8 @@ static bool PointInTri(vec3 p, vec3 v0, vec3 v1, vec3 v2, vec3 n) {
   const double u = cross2(b - q, c - q) / areaABC;
   const double v = cross2(c - q, a - q) / areaABC;
   const double w = 1.0 - u - v;
+  // kEps guards the dimensionless barycentric ratio, not coordinate space;
+  // no metric-table entry (FP stability on unit-normalized ratios).
   constexpr double kEps = 1e-10;
   return u >= -kEps && v >= -kEps && w >= -kEps;
 }
@@ -495,6 +497,8 @@ static StageBResult StageB(const StageAResult& stageA, double eps,
       // Compose where the shared face cancels in stage A and its neighbors
       // share only an edge or point in the same plane).
       const double normDot = std::abs(la::dot(na, nb));
+      // 1e-8 ~ sqrt(double_eps): unit-vector parallelism guard, independent of
+      // bbox scale; no metric-table entry (angular test, not coordinate space).
       if (normDot > 1.0 - 1e-8) {
         // Nearly coplanar: check plane distance
         const double planeSep = std::abs(la::dot(na, pb0) - la::dot(na, pa0));
@@ -525,6 +529,10 @@ static StageBResult StageB(const StageAResult& stageA, double eps,
               const vec2 d1 = nxt - cur;
               const vec2 d2 = edgeB - edgeA;
               const double denom2 = d1.x * d2.y - d1.y * d2.x;
+              // Stability guard for 2D face-plane cross-product: exact ==0
+              // would generate huge clip-poly coords from near-parallel
+              // projected edges, overflowing the area check and giving a false
+              // CoplanarOverlap.
               if (std::abs(denom2) > 1e-14) {
                 const vec2 dc = edgeA - cur;
                 const double t2 = (dc.x * d2.y - dc.y * d2.x) / denom2;
@@ -687,9 +695,14 @@ static StageBResult StageB(const StageAResult& stageA, double eps,
         // 2D segment intersection
         const vec2 da = a1 - a0, db = b1 - b0, dc = b0 - a0;
         const double denom = la::cross(da, db);
-        if (std::abs(denom) < 1e-14) continue;  // parallel seams
+        if (denom == 0.0)
+          continue;  // exactly parallel seams; huge tA/tB caught by bounds
+                     // below
         const double tA = la::cross(dc, db) / denom;
         const double tB = la::cross(dc, da) / denom;
+        // 1e-8 slack: parameter-space tolerance approximating eps
+        // point-distance (metric table: 3D Euclidean) divided by seam length;
+        // exact bound would need per-pair division by |da| and |db|.
         if (tA < -1e-8 || tA > 1.0 + 1e-8 || tB < -1e-8 || tB > 1.0 + 1e-8)
           continue;  // intersection outside segment range
         const vec2 q2d = a0 + tA * da;
@@ -834,8 +847,9 @@ static StageBResult StageB(const StageAResult& stageA, double eps,
                 }
               if (!present) {
                 // Insert in order by t along the segment
+                const double segLen = la::length(p1 - p0);
                 const double t =
-                    la::length(pos - p0) / std::max(la::length(p1 - p0), 1e-30);
+                    (segLen == 0.0) ? 0.0 : la::length(pos - p0) / segLen;
                 s.vertIds.insert(s.vertIds.begin() + k + 1, canonical);
               }
               break;
@@ -1154,12 +1168,14 @@ static std::optional<RegionClassification> ClassifyRegion(
 static bool Seg2DCross(vec2 p0, vec2 p1, vec2 q0, vec2 q1, double& tOut) {
   const vec2 dp = p1 - p0, dq = q1 - q0, dc = q0 - p0;
   const double denom = la::cross(dp, dq);
-  if (std::abs(denom) < 1e-30) return false;  // parallel
+  if (denom == 0.0)
+    return false;  // parallel; huge tP/tQ caught by bounds below
   const double tP = la::cross(dc, dq) / denom;
   const double tQ = la::cross(dc, dp) / denom;
-  constexpr double kGap = 1e-8;
-  if (tP < kGap || tP > 1.0 - kGap) return false;
-  if (tQ < kGap || tQ > 1.0 - kGap) return false;
+  // Strict open-interior bounds per function contract; shared-vertex check
+  // in the caller already excludes endpoint-shared segment pairs.
+  if (tP <= 0.0 || tP >= 1.0) return false;
+  if (tQ <= 0.0 || tQ >= 1.0) return false;
   tOut = tP;
   return true;
 }
@@ -1674,6 +1690,7 @@ static Overlap3Result RunStageCDE(ArrangementGeometry& arr, double eps,
   if (!slabResult.ok()) {
     result.fatal = slabResult.fatal;
     result.detail = slabResult.detail;
+    result.counters = cnt;
     return result;
   }
   const std::vector<SlabResult>& slabs = *slabResult.value;
@@ -1711,9 +1728,11 @@ static Overlap3Result RunStageCDE(ArrangementGeometry& arr, double eps,
             if (v == gA || v == gB) continue;
             if (PointSegDist3(arr.verts[v].pos, p3A, p3B) > eps) continue;
             const double t =
-                (edgeLen2 > 1e-30)
+                (edgeLen2 != 0.0)
                     ? la::dot(arr.verts[v].pos - p3A, edgeV) / edgeLen2
                     : 0.0;
+            // 1e-8 slack: parameter-space approximation of eps point-distance
+            // (metric table: 3D point-to-segment distance) / edge length.
             if (t < -1e-8 || t > 1.0 + 1e-8) continue;
             const int lv = pslg.localId(v);
             if (lv >= 0) onEdge.push_back({t, lv});
@@ -1795,7 +1814,9 @@ static Overlap3Result RunStageCDE(ArrangementGeometry& arr, double eps,
         gverts.push_back(pslg.vertIds[lv]);
       }
       const double area = SignedArea2D(poly);
-      if (std::abs(area) < 1e-20) continue;
+      // eps*eps: natural area threshold for eps-scale features in face-plane
+      // 2D Euclidean coordinates (metric table: 2D face-plane Euclidean area).
+      if (std::abs(area) < eps * eps) continue;
       if (area < 0) continue;
       PSLGRegion reg;
       reg.loopVerts = gverts;
@@ -1857,7 +1878,9 @@ static Overlap3Result RunStageCDE(ArrangementGeometry& arr, double eps,
               break;
             }
           }
-          // Offset 1% toward centroid to avoid exact boundary issues.
+          // 0.01/0.99 fraction: directional heuristic offset approximating
+          // 2D face-plane Euclidean clearance (metric table); f6 known
+          // residual.
           const vec3 queryPt = queryBase * 0.99 + regCentroid * 0.01;
           const double qy = queryPt.y, qz = queryPt.z;
           int64_t belowW = 0, aboveW = 0;
@@ -1882,6 +1905,7 @@ static Overlap3Result RunStageCDE(ArrangementGeometry& arr, double eps,
       if (clsFatal.has_value()) {
         result.fatal = *clsFatal;
         result.detail = "classification failed on face " + std::to_string(fi);
+        result.counters = cnt;
         return result;
       } else if (cls.has_value()) {
         reg.classified = true;
@@ -1906,6 +1930,7 @@ static Overlap3Result RunStageCDE(ArrangementGeometry& arr, double eps,
               ? "degenerate component: conflicting anchor classifications"
               : "degenerate component: unclassifiable (no anchors or span "
                 "guard)";
+      result.counters = cnt;
       return result;
     }
   }
@@ -1917,6 +1942,7 @@ static Overlap3Result RunStageCDE(ArrangementGeometry& arr, double eps,
     if (!CheckSeamBalance(arr, faceRegions, balFatal, balDetail)) {
       result.fatal = balFatal;
       result.detail = balDetail;
+      result.counters = cnt;
       return result;
     }
   }
@@ -1936,6 +1962,7 @@ static Overlap3Result RunStageCDE(ArrangementGeometry& arr, double eps,
   }
 
   result.impl = BuildImpl(emitted, arr.verts);
+  result.counters = cnt;
   return result;
 }
 

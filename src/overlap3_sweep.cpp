@@ -116,7 +116,9 @@ StageResult<std::vector<SlabResult>> BuildSlabs(const ArrangementGeometry& arr,
   // Add exterior sentinels (before min-x and after max-x).
   const double xMin = crits.front();
   const double xMax = crits.back();
-  const double margin = std::max(eps * 10.0, (xMax - xMin) * 0.01 + eps);
+  // eps*10 > eps: sentinel slabs stay built (xHi-xLo > eps); metric table:
+  // "scalar xHi-xLo > eps for slab width".
+  const double margin = eps * 10.0;
   // Insert sentinels as boundary criticals.
   crits.insert(crits.begin(), xMin - margin);
   crits.push_back(xMax + margin);
