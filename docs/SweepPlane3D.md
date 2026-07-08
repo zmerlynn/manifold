@@ -1,9 +1,13 @@
 # 3D overlap removal by sweep plane (prototype design)
 
-STATUS: DESIGN, crucible rounds 1-2 folded (round 1: 5 lanes, 4
-convergent BREAKs resolved, marked [R1-fold]; round 2: re-attack +
-fresh-eyes + empirical id-plumbing build, all round-1 constructions
-HELD-resolved, narrower findings folded, marked [R2-fold]). The handoff
+STATUS: DESIGN COMPLETE - crucible closed at round 3 (round 1: 5
+lanes, 4 convergent BREAKs resolved [R1-fold]; round 2: re-attack +
+fresh-eyes + empirical id-plumbing build, round-1 fixes held,
+narrower findings folded [R2-fold]; round 3: convergence check, one
+final BREAK - the chained-degenerate-span hole - resolved by the
+span guard, plus the implementability closures [R3-fold]). The
+Crucible record at the bottom is the review trail; residual risks
+are stated there honestly. The handoff
 (.claude/plans/3d-sweep-plane-prototype-handoff.md) and its
 reconciliation sibling are the framing. Simple-but-robust is the
 bar; performance is a later campaign. The prototype exists to answer
@@ -87,10 +91,15 @@ once, globally, as shared objects:
     curve chopped by fine triangulation into per-pair sub-eps clips
     must not vanish clip by clip (and stage-B event merging eats
     such a chain rather than saving it): skipped contacts cluster
-    into connected components first; a component of total 3D
-    diameter <= eps drops and is counted (a genuinely point-like
-    contact); a larger component is the SUB-RESOLUTION SEAM CHAIN
-    class and fails closed, named;
+    into connected components first. [R3-fold, the graph defined]
+    Nodes are the skipped contact primitives' canonicalized endpoint
+    points (a point contact contributes one node, a sub-eps segment
+    its two endpoints); edges connect nodes of the same primitive
+    and nodes within eps (3D Euclidean); component diameter = max
+    pairwise 3D distance over member points. Diameter <= eps: drop
+    and count (genuinely point-like). Larger: the SUB-RESOLUTION
+    SEAM CHAIN class, fatal (`SubResolutionChain`). A corner-touch
+    of two boxes clusters to one point-like component and drops;
   - a tri edge lying in the other tri's plane (edge-in-plane, the
     seam-collinear-with-input-edge case): OUT OF SCOPE with the
     coplanar class (below), detected and reported.
@@ -180,9 +189,13 @@ abandons input-coordinate exactness - while the query is the direct
 Cost stated honestly: a per-slab point-location helper over captured
 pieces (~40 lines), not a one-liner.
 
-Stage D - partition and classification. The face-local planar walk
-(purely topological) runs FIRST: each face's PSLG = its subdivided
-boundary + its seam polylines; regions are the walk's output.
+Stage D - partition and classification. [R3-fold ordering, one
+place] Stage D opens with PSLG VALIDATION for every face - seams
+crossing anywhere but shared ids is a stage-B miss and fatal
+(`PSLGInvalid`), before any walk consumes the data. Then the
+face-local planar walk (purely topological): each face's PSLG = its
+subdivided boundary + its seam polylines; regions are the walk's
+output.
 [R1-fold] Interior seam loops are real (a seam both of whose
 endpoints are events of the OTHER face's edges floats in this face's
 interior): PSLG components not attached to the outer boundary are
@@ -227,14 +240,20 @@ all pack within eps) - the component FAILS CLOSED. Dense tangles
 with agreeing anchors classify; conflicting evidence is never
 averaged or tie-broken.
 
-[R2-fold, adjudicated] A dropped degenerate component whose interior
-carried a fill transition is NOT the silent-wrong class: such a
-component is by construction sub-eps-thick along the sweep axis, and
-dropping sub-eps features is the documented eps-scale decision (the
-2D engine's own input quantization; #289 step 1's "smallest feature
-size that is desired to retain"), applied CONSISTENTLY (both sides
-of every seam, enforced by the balance check below) and COUNTED in
-the report. Eps-validity admits it; the report makes it visible.
+[R3-fold, replacing round 2's adjudication - its premise was
+punctured on re-attack] Round 2 argued a dropped degenerate
+component is "by construction sub-eps-thick along x"; FALSE for
+CHAINS: connected degenerate regions, each individually without a
+wide covering slab, can span macroscopic x. The rule is therefore a
+SPAN GUARD: anchor propagation and the eps-feature drop apply only
+to components whose 3D diameter is <= eps - for those, dropping is
+the documented eps-scale decision (#289 step 1's "smallest feature
+size that is desired to retain"), applied consistently (balance
+below) and counted. A degenerate component with diameter > eps is
+UNCLASSIFIABLE and fatal (`UnclassifiableComponent`) - never
+propagated into, never silently dropped. How dense an input can get
+before this guard fires is precisely the tractability data the
+prototype exists to produce.
 
 [R1-fold] SEAM BALANCE is enforced BEFORE emission, not assumed
 after: for every seam polyline edge, the kept incident regions must
@@ -246,21 +265,32 @@ longer claims it as a theorem, it engineers toward it and verifies.
 Stage E - triangulation and emission. Each kept region (fill
 transition per the orientation algebra above) triangulates via
 `Triangulate` projected to the face plane; exactly ONE sheet per
-transition regardless of multiplicity. PSLG VALIDITY IS CHECKED
-BEFORE THE STAGE-D WALK RUNS [R2-fold ordering]: seams crossing
-anywhere but shared ids is a stage-B miss and a hard failure, never
-a local repair, and no later stage consumes invalidated data. (With
-global unification in stage B, the round-1 false-assert class -
-same point, two ids - is resolved at its root.)
+transition regardless of multiplicity. (PSLG validity was already
+enforced at stage D's start; with global unification in stage B,
+the round-1 false-assert class - same point, two ids - is resolved
+at its root.) Projection and winding for the Triangulate handoff
+[R3-fold]: each kept region is emitted as flat `PolygonsIdx` in
+`GetAxisAlignedProjection(outputNormal)` - outer contours CCW,
+holes CW, nested islands CCW - so a flipped output normal flips the
+projection rather than post-reversing triangles; returned triangles
+map back through `PolyVert.idx`.
 
-FAILURE CONTRACT, one shape [R2-fold]: every stage returns a
-StageResult carrying either its product or a fatal reason code
-(diameter guard, sub-resolution chain, classification ambiguity,
-anchor conflict, starvation, balance violation, PSLG invalidity);
-fatal stops the pipeline at that stage. Non-fatal COUNTERS
-(sub-eps contacts dropped, degenerate components classified by
-propagation, eps-feature drops) accumulate in a report struct
-returned alongside success - visible, never fatal.
+FAILURE CONTRACT, one shape [R2/R3-fold]: every stage returns a
+StageResult carrying either its product or a fatal reason code:
+`TripleDiameter`, `SubResolutionChain`, `CoplanarOverlap`,
+`EdgeInPlane`, `ClassificationAmbiguity`, `AnchorConflict`,
+`UnclassifiableComponent`, `Starvation`, `BalanceViolation`,
+`PSLGInvalid`, `EngineIdConflict`. Fatal stops the pipeline at that
+stage; no later stage consumes invalidated data. Non-fatal COUNTERS
+(sub-eps point contacts dropped, degenerate components classified
+by propagation, eps-feature drops, clearance skips) accumulate in a
+report struct returned alongside success - visible, never fatal.
+Clearance failures map to `ClassificationAmbiguity` when slabs
+exist and to `Starvation` when none wider than eps does. The
+engine's own capture-conflict counter is nonfatal INSIDE the 2D
+engine (sourceId = -1 + count; 2D callers are unaffected) and any
+nonzero count is fatal to the 3D pipeline (`EngineIdConflict`) -
+one rule, both empirically exercised.
 
 ## The engine extension (single change to boolean2_sweep, priced)
 
@@ -305,6 +335,46 @@ count a conflict and carry -1), and the `pending_` inner map's
 value type changes alongside PolySet2's. In exchange the 3D side
 DELETES the geometric matcher and its failure analysis entirely.
 
+## Types, constants, and metrics [R3-fold: the implementability closures]
+
+- `CanonicalFace { int id; ivec3 verts; /* stored orientation */
+  vec3 normal; /* from that order */ int64_t mult; /* signed,
+  relative to that order */ }` - stage A's output; every later
+  "face id" means this record. `mult == 0` records are dropped in
+  stage A, so `m_face != 0` always.
+- Edge-face event allocation: an event point unifies with an
+  existing canonical vert within eps (3D Euclidean), else appends a
+  new event vert. Event verts and triple vert x's feed the critical
+  set.
+- EPS METRIC TABLE - every bare "within eps" resolves as: 3D
+  Euclidean point distance for vertex merge, event snapping, triple
+  unification and cluster/component diameters; 3D point-to-segment
+  distance for on-edge incidence; 2D face-plane Euclidean for
+  region point-location clearance; scalar `xHi - xLo > eps` for
+  slab width. One absolute eps everywhere (below).
+- `SweepCapture { vec2 from, to; /* section (y,z), lex-forward
+  measure-pass direction */ int32_t sourceId; int64_t below,
+  above; }`; `SweepWinding(..., std::vector<SweepCapture>* capture
+  = nullptr)` - default-null, existing callers unchanged.
+- `SectionFaceSegment { int faceId; vec2 p0, p1; /* directed:
+  dot(p1-p0, yz(cross(+x, face.normal))) > 0 */ int64_t mult; }` -
+  stage C persists one per straddling face per slab; the emission
+  algebra's m_lex sign compares a piece's lex direction against
+  THIS direction.
+- `SlabResult { double xLo, xHi, xMid; bool built; /* false: skipped
+  sub-eps */ std::vector<SweepCapture> pieces; }` per slab, plus
+  the two exterior sentinels (built, empty pieces, winding 0). The
+  point-winding query and region classification read these.
+- Region x-extent = [min, max] of the region's boundary verts'
+  x's (post-unification); covering slab = open (xLo, xHi) inside
+  that interval; ties between equal-width slabs break to lowest
+  xLo. Axis-parallel adjacency at critical c = exactly the two
+  intervals (prevCritical, c) and (c, nextCritical); a sub-eps
+  non-sentinel neighbor routes to degenerate handling, never a
+  farther search.
+- Gate-2 "just past the critical" sample = the midpoint of the
+  adjacent non-skipped interval (no nextafter games).
+
 ## Epsilon posture
 
 One absolute eps = `EpsilonFromScale(bbox scale, 1000)` unless the
@@ -327,8 +397,11 @@ The >= 2^40 coordinate degeneracy is accepted manifold-wide.
   and the 6.5 trace machinery, if ever imported.
 - Vertex-on-face through-pierces (an edge ENDPOINT exactly on
   another face's interior plane produces no edge-face event; the RSI
-  known-limitation-10 class). Fixtures avoid it; occurrences surface
-  as seam-balance failures.
+  known-limitation-10 class). NOT detected [R3-fold wording]: there
+  is no stage-B detector for it; fixtures avoid the class and an
+  occurrence surfaces downstream as a `BalanceViolation` (correct
+  fail-closed outcome, imprecise blame - accepted for the
+  prototype).
 - Slab-starved components (thin-in-sweep-axis geometry, all
   criticals within eps): fail closed, counted.
 - Cancellation/ExecutionContext, progress, parallelism, performance.
@@ -357,22 +430,36 @@ The >= 2^40 coordinate degeneracy is accepted manifold-wide.
    balance holds pre-emission and the output passes the manifold
    gate (paired edges, balanced verts) + Manifold(Impl)
    construction.
-4. DENSE NEAR-CONCURRENCE (adversarial) [R2-fold: non-vacuous]: the
-   fixture list is SPLIT. MUST-RESOLVE stress fixtures (k thin
-   wedges at feature scale through a common region; moderately
-   near-parallel bundles well above eps; the June trimaran hulls as
-   subtraction leftovers): PASS requires manifold output + oracle
-   agreement - a fail-closed here FAILS the gate (no vacuous
-   safety). MUST-FAIL-CLOSED degeneracy fixtures (bundles inside
-   eps; sub-resolution chains; authored tolerance-scale features):
-   PASS requires the NAMED guard firing - a resolved-but-wrong mesh
-   or an unnamed crash fails. The anchor-propagation and
-   diameter-guard rates on both lists are the tractability data the
-   prototype exists to produce.
+4. DENSE NEAR-CONCURRENCE (adversarial) [R2-fold: non-vacuous;
+   R3-fold: fixtures enumerated]: the fixture list is SPLIT.
+   MUST-RESOLVE stress fixtures - constructors with eps-relative
+   numbers, eps ~ 2.75e-9 at unit scale:
+   (a) kWedges(k=8): thin boxes 1 x 0.02 x 0.3, rotated k ways
+       about z through a common region, axis offsets ~1e-3 (>> eps,
+       criticals separated well above eps);
+   (b) nearParallel(sep=1e-6): two unit plates 1e-6 apart (~350
+       eps) crossed by a third at a shallow angle;
+   (c) the June trimaran hulls (hull-body.obj - hull-mask.obj,
+       imported OBJ fixtures) run through Compose + the seam.
+   PASS requires manifold output + oracle agreement - a fail-closed
+   here FAILS the gate (no vacuous safety).
+   MUST-FAIL-CLOSED degeneracy fixtures:
+   (d) nearParallel(sep=1e-10) - inside eps: `TripleDiameter` or
+       `UnclassifiableComponent`;
+   (e) a strip triangulated so per-pair clips are ~0.75 eps:
+       `SubResolutionChain`;
+   (f) kWedges with axis offsets ~0.3 eps: `TripleDiameter` or
+       `UnclassifiableComponent`.
+   PASS requires the NAMED guard - a resolved-but-wrong mesh or an
+   unnamed crash fails. The guard-firing rates across (a)-(f) are
+   the tractability data the prototype exists to produce.
 5. ORACLE: for two-operand fixtures, RemoveOverlaps3D(Compose(A, B))
    vs Boolean3 A+B: |volume difference| <= eps *
    max(surfaceArea(ours), surfaceArea(oracle)); genus equal;
-   Contains() agreement on a deterministic point grid.
+   Contains() agreement on a deterministic grid [R3-fold: spec] -
+   the union bbox inflated by 5%, 17x17x17 lattice, fixed traversal
+   order, points within eps of EITHER surface skipped (counted);
+   all remaining points must agree.
 
 Plus: the existing manifold suite stays green (the branch adds files
 plus the engine value-plumbing; the 2D suites are the regression
@@ -411,14 +498,25 @@ validity ordered before the walk; gate-4 non-vacuity split; the
 engine extension re-priced from the round-2 build (~174 functional
 lines; MergeVerticals1D rewrite; 111/111 2D regressions green).
 
-## RISKS (round-3 review lanes - the convergence check)
+Round 3 (convergence): the round-2 re-attacks HELD (correspondence
+spec computable; orientation algebra verified on +/-y, inverted, and
+mult-2 faces; gates 3/5 walk through without spurious guards). One
+final BREAK - the chained-degenerate-span hole - punctured round 2's
+eps-thickness adjudication and is resolved by the span guard. The
+implementability lane returned 18 definitional closures (no design
+objections), folded as the Types section, the fatal-code
+completions, the fixture/oracle enumerations, and the ordering fix.
 
-R1'' Re-attack the round-2 constructions verbatim against the folds
-(the sub-eps chain cluster rule; the oriented-agreement rule; the
-correspondence spec; the orientation algebra on a +/-y face) and
-audit the folded design for internal contradictions introduced by
-two rounds of edits.
-R2'' Fresh-eyes full read: is the design now implementable as
-written by an engineer who has seen none of the review history -
-every stage contract stated, every constant named, every failure
-path reachable and typed?
+## Residual risks (stated, measured by the gates - not resolved)
+
+- The guard-firing rate on MUST-RESOLVE fixtures is a prediction,
+  not a proof: if kWedges(8) at 1e-3 offsets trips the span guard,
+  the design's supported-density envelope is smaller than believed
+  (that answer, either way, is the prototype's deliverable).
+- The clearance rules can starve thin-but-real regions of usable
+  pieces (gate 2's unmatched/skip counters watch it).
+- The coplanar family (overlap, edge-in-plane) is out of scope by
+  declaration; real CAD inputs containing it fail closed.
+- Per-slab recompute cost is deliberately unoptimized (a later
+  campaign; the handoff's tractability question is about
+  correctness-shape, not speed).
