@@ -39,8 +39,19 @@ constexpr double kAlphaCoeff = 12.37;
 struct EdgeM {
   int v0, v1;
   int mult = 1;
+  int32_t srcId = 0;  // 0 = unattributed (2D path); face id in 3D context
 };
 using OutEdge = EdgeM;
+
+// Capture record emitted by SweepWinding for each retained boundary piece in
+// the winding pass. (from, to) are in lex-forward order (from < to). (below,
+// above) are status-order windings: for non-vertical pieces, below = smaller-z
+// side; for vertical pieces, gradient-rank status order (spec sec. C).
+struct SweepCapture {
+  vec2 from, to;  // section (y,z), lex-forward measure-pass direction
+  int32_t sourceId;
+  int64_t below, above;
+};
 
 double SignedArea(const SimplePolygon& loop);
 double TotalSignedArea(const Polygons& polys);
@@ -176,9 +187,15 @@ enum class WindRule {
 // near-concurrence collapses to one shared vertex), then a second,
 // forced-through winding sweep emits the retained boundary under `rule`.
 // `verts` is extended with the constructed crossing vertices the emitted edges
-// reference.
+// reference. If `capture` is non-null, one SweepCapture per retained winding-
+// pass piece is appended. If `conflictCount` is non-null, *conflictCount
+// receives the total number of source-id attribution conflicts (distinct
+// srcIds at the same key with nonzero net multiplicity); 2D callers pass
+// nullptr for both, leaving behavior unchanged.
 std::vector<OutEdge> SweepWinding(const std::vector<EdgeM>& edges,
-                                  std::vector<vec2>& verts, WindRule rule);
+                                  std::vector<vec2>& verts, WindRule rule,
+                                  std::vector<SweepCapture>* capture = nullptr,
+                                  int* conflictCount = nullptr);
 
 struct OverlapResult {
   std::vector<vec2> verts;

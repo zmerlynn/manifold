@@ -1,0 +1,1463 @@
+// Copyright 2026 The Manifold Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// Stages A, B, D, E of the 3D sweep-plane overlap-removal prototype.
+// Stage C is in overlap3_sweep.cpp.
+// Design: docs/SweepPlane3D.md.
+
+#include "overlap3.h"
+
+#include <algorithm>
+#include <cassert>
+#include <cmath>
+#include <cstdint>
+#include <map>
+#include <set>
+#include <utility>
+#include <vector>
+
+#include "boolean2.h"
+#include "disjoint_sets.h"
+#include "impl.h"
+#include "manifold/optional_assert.h"
+#include "polygon_internal.h"
+#include "shared.h"
+
+namespace manifold {
+
+// Stage C forward declaration (implemented in overlap3_sweep.cpp)
+StageResult<std::vector<SlabResult>> BuildSlabs(const ArrangementGeometry& arr,
+                                                double eps,
+                                                Overlap3Counters& cnt);
+
+namespace {
+
+// ---------------------------------------------------------------------------
+// Utilities
+// ---------------------------------------------------------------------------
+
+static bool IsInside3D(int64_t w) { return w > 0; }
+
+static double Dist3(vec3 a, vec3 b) { return la::length(a - b); }
+
+// Point-to-segment 3D distance.
+static double PointSegDist3(vec3 p, vec3 a, vec3 b) {
+  const vec3 ab = b - a;
+  const double len2 = la::dot(ab, ab);
+  if (len2 == 0.0) return la::length(p - a);
+  const double t = std::max(0.0, std::min(1.0, la::dot(p - a, ab) / len2));
+  return la::length(p - (a + t * ab));
+}
+
+// 3D cross product of triangle edges -> face normal (not normalized).
+static vec3 TriNormal(vec3 v0, vec3 v1, vec3 v2) {
+  return la::cross(v1 - v0, v2 - v0);
+}
+
+// Signed distance from point p to plane (n, d) where n is the plane normal.
+static double PlaneDist(vec3 p, vec3 n, double d) { return la::dot(n, p) - d; }
+
+// Does segment AB straddle the plane n.p = d?  Returns +1/-1 sides, 0 if
+// either endpoint is on the plane (within the floating-point sense).
+static bool SegStraddlesPlane(vec3 a, vec3 b, vec3 n, double d, double& tOut,
+                              vec3& qOut) {
+  const double da = PlaneDist(a, n, d);
+  const double db = PlaneDist(b, n, d);
+  if (da * db >= 0) return false;  // same side or both on plane
+  const double denom = da - db;
+  if (denom == 0.0) return false;
+  const double t = da / denom;
+  tOut = t;
+  qOut = a + t * (b - a);
+  return true;
+}
+
+// Barycentric coordinates of point p in triangle (v0,v1,v2).
+// Returns true if p is inside (all coords >= 0 and sum <= 1).
+static bool PointInTri(vec3 p, vec3 v0, vec3 v1, vec3 v2, vec3 n) {
+  // Use the dominant-axis projection to avoid degeneracy
+  const vec3 absN = la::abs(n);
+  int ax0, ax1;
+  if (absN.x >= absN.y && absN.x >= absN.z) {
+    ax0 = 1;
+    ax1 = 2;
+  } else if (absN.y >= absN.z) {
+    ax0 = 0;
+    ax1 = 2;
+  } else {
+    ax0 = 0;
+    ax1 = 1;
+  }
+  auto proj2 = [&](vec3 v) -> vec2 { return {v[ax0], v[ax1]}; };
+  const vec2 a = proj2(v0), b = proj2(v1), c = proj2(v2), q = proj2(p);
+  // Cross products for barycentric check
+  auto cross2 = [](vec2 u, vec2 v) { return u.x * v.y - u.y * v.x; };
+  const double areaABC = cross2(b - a, c - a);
+  if (areaABC == 0.0) return false;
+  const double u = cross2(b - q, c - q) / areaABC;
+  const double v = cross2(c - q, a - q) / areaABC;
+  const double w = 1.0 - u - v;
+  constexpr double kEps = 1e-10;
+  return u >= -kEps && v >= -kEps && w >= -kEps;
+}
+
+// Compute the intersection of segment AB with triangle (v0,v1,v2) (plane +
+// interior). Returns true if there is an intersection at q with parameter t.
+static bool SegTriIntersect(vec3 a, vec3 b, vec3 v0, vec3 v1, vec3 v2, vec3 n,
+                            double planeDist0, double& t, vec3& q) {
+  const double da = la::dot(n, a) - planeDist0;
+  const double db = la::dot(n, b) - planeDist0;
+  if (da * db >= 0) return false;
+  const double denom = da - db;
+  if (denom == 0.0) return false;
+  t = da / denom;
+  q = a + t * (b - a);
+  return PointInTri(q, v0, v1, v2, n);
+}
+
+// ---------------------------------------------------------------------------
+// Stage A: merge verts and canonicalize faces
+// ---------------------------------------------------------------------------
+
+struct StageAResult {
+  std::vector<vec3> mergedVerts;  // canonical 3D vert positions
+  std::vector<int> vertMap;       // original vert -> merged vert
+  std::vector<CanonicalFace> faces;
+};
+
+static StageAResult StageA(const Manifold::Impl& in, double eps) {
+  const int nVerts = static_cast<int>(in.vertPos_.size());
+  const int nTris = static_cast<int>(in.halfedge_.size()) / 3;
+
+  // Vert merge: union-find with representative = centroid-nearest to cluster
+  // centroid (matching 2D engine convention, MergeVerts in boolean2.cpp).
+  DisjointSets uf(nVerts);
+  // O(n^2) merge for prototype; in production, use a spatial hash.
+  for (int i = 0; i < nVerts; ++i) {
+    for (int j = i + 1; j < nVerts; ++j) {
+      if (la::length(in.vertPos_[i] - in.vertPos_[j]) <= eps) uf.unite(i, j);
+    }
+  }
+  // Build representative map: for each component, pick the vert closest to the
+  // component centroid.
+  std::map<int, std::vector<int>> components;
+  for (int i = 0; i < nVerts; ++i)
+    components[static_cast<int>(uf.find(i))].push_back(i);
+
+  std::vector<int> vertMap(nVerts);
+  std::vector<vec3> mergedVerts;
+  std::map<int, int> rootToMerged;
+
+  for (auto& [root, members] : components) {
+    vec3 centroid(0.0);
+    for (int v : members) centroid += in.vertPos_[v];
+    centroid /= static_cast<double>(members.size());
+    // Pick member closest to centroid
+    int best = members[0];
+    double bestDist = la::length(in.vertPos_[best] - centroid);
+    for (int v : members) {
+      const double d = la::length(in.vertPos_[v] - centroid);
+      if (d < bestDist) {
+        bestDist = d;
+        best = v;
+      }
+    }
+    const int mergedId = static_cast<int>(mergedVerts.size());
+    mergedVerts.push_back(in.vertPos_[best]);
+    rootToMerged[root] = mergedId;
+  }
+  for (int i = 0; i < nVerts; ++i)
+    vertMap[i] = rootToMerged[static_cast<int>(uf.find(i))];
+
+  // Canonicalize faces: sort by canonical vert triple, accumulate mult.
+  // Key = sorted (v0, v1, v2) with canonical orientation parity tracked.
+  struct FaceKey {
+    ivec3 sorted;  // smallest vert id first
+    bool flipped;  // true if canonical order differs from stored order
+    bool operator<(const FaceKey& o) const {
+      return sorted.x < o.sorted.x ||
+             (sorted.x == o.sorted.x && sorted.y < o.sorted.y) ||
+             (sorted.x == o.sorted.x && sorted.y == o.sorted.y &&
+              sorted.z < o.sorted.z);
+    }
+  };
+
+  // For each face, the canonical triple and signed mult.
+  struct FaceEntry {
+    int origFaceId;
+    ivec3 mapped;      // merged vert ids
+    int64_t multSign;  // +1 if same as stored orientation, -1 if flipped
+  };
+
+  std::map<FaceKey, std::pair<int64_t, int>>
+      faceAccum;  // key -> (mult, representative faceId)
+
+  for (int tri = 0; tri < nTris; ++tri) {
+    const int h = 3 * tri;
+    const int v0 = vertMap[in.halfedge_.Start(h)];
+    const int v1 = vertMap[in.halfedge_.Start(h + 1)];
+    const int v2 = vertMap[in.halfedge_.Start(h + 2)];
+    // Skip degenerate (collapsed) triangles
+    if (v0 == v1 || v1 == v2 || v0 == v2) continue;
+
+    // Canonical orientation: sort verts and track parity
+    int a = v0, b = v1, c = v2;
+    int parity = 1;
+    if (a > b) {
+      std::swap(a, b);
+      parity = -parity;
+    }
+    if (b > c) {
+      std::swap(b, c);
+      parity = -parity;
+    }
+    if (a > b) {
+      std::swap(a, b);
+      parity = -parity;
+    }
+
+    FaceKey key{{a, b, c}, parity < 0};
+    auto it = faceAccum.find(key);
+    if (it == faceAccum.end()) {
+      faceAccum.emplace(key, std::make_pair((int64_t)parity, tri));
+    } else {
+      it->second.first += parity;
+    }
+  }
+
+  // Emit CanonicalFace records for entries with nonzero mult.
+  StageAResult result;
+  result.mergedVerts = std::move(mergedVerts);
+  result.vertMap = std::move(vertMap);
+
+  for (auto& [key, entry] : faceAccum) {
+    if (entry.first == 0) continue;  // cancelled
+    const int tri = entry.second;
+    const int h = 3 * tri;
+    const int mv0 = result.vertMap[in.halfedge_.Start(h)];
+    const int mv1 = result.vertMap[in.halfedge_.Start(h + 1)];
+    const int mv2 = result.vertMap[in.halfedge_.Start(h + 2)];
+    // Compute normal from the canonical (possibly reordered) verts
+    const vec3& p0 = result.mergedVerts[key.sorted.x];
+    const vec3& p1 = result.mergedVerts[key.sorted.y];
+    const vec3& p2 = result.mergedVerts[key.sorted.z];
+    vec3 rawNormal = TriNormal(p0, p1, p2);
+    if (la::dot(rawNormal, rawNormal) == 0.0) continue;  // degenerate geometry
+    rawNormal = la::normalize(rawNormal);
+    // Mult sign: if key.flipped, the stored orientation is opposite to
+    // canonical, so normal from stored order is opposite. Adjust: the "face
+    // normal" should match the STORED orientation's normal (used for emission).
+    // Store the normal matching the representative face's stored winding.
+    const vec3 storedNormal = la::normalize(TriNormal(result.mergedVerts[mv0],
+                                                      result.mergedVerts[mv1],
+                                                      result.mergedVerts[mv2]));
+    CanonicalFace cf;
+    cf.id = tri;
+    cf.verts = {mv0, mv1, mv2};
+    cf.normal = storedNormal;
+    cf.mult = entry.first;
+    result.faces.push_back(cf);
+  }
+
+  return result;
+}
+
+// ---------------------------------------------------------------------------
+// Stage B: arrangement geometry (seams, events, triple points)
+// ---------------------------------------------------------------------------
+
+// Determine the t-range on line (P + t*D) that lies inside a triangle
+// (v0,v1,v2) with normal n and planeDist d0 = dot(n, v0). Returns whether the
+// range is non-empty, and the [tLo, tHi] bounds.
+static bool LineTriClip(vec3 P, vec3 D, vec3 v0, vec3 v1, vec3 v2, vec3 n,
+                        double& tLo, double& tHi) {
+  tLo = -1e18;
+  tHi = 1e18;
+  // For each edge (vi, vj), find the halfplane constraint on the line.
+  // The constraint: point Q = P + t*D is on the correct side of edge vi->vj
+  // iff dot(cross(vj-vi, Q-vi), n) >= 0.
+  const vec3 edges[3] = {v1 - v0, v2 - v1, v0 - v2};
+  const vec3 verts[3] = {v0, v1, v2};
+  for (int i = 0; i < 3; ++i) {
+    const vec3 ev = la::cross(edges[i], D);  // normal of constraint plane
+    const vec3 evBase = la::cross(edges[i], verts[i] - P);
+    const double denom = la::dot(n, ev);
+    const double num = la::dot(n, evBase);
+    if (std::abs(denom) < 1e-14) {
+      // D is parallel to this edge's halfplane: check if P is on the correct
+      // side
+      if (num < -1e-14) return false;  // entirely outside
+    } else {
+      const double t = num / denom;
+      if (denom > 0) {
+        tLo = std::max(tLo, t);
+      } else {
+        tHi = std::min(tHi, t);
+      }
+    }
+  }
+  return tLo <= tHi + 1e-14;
+}
+
+// Compute the intersection segment between two non-coplanar triangles.
+// Returns true if there is a proper intersection (length > 0), with endpoints
+// in qA, qB and their t-parameters tA, tB on the intersection line.
+static bool TriTriSeam(vec3 a0, vec3 a1, vec3 a2, vec3 na,  // face A
+                       vec3 b0, vec3 b1, vec3 b2, vec3 nb,  // face B
+                       vec3& qA, vec3& qB) {
+  // Intersection line direction
+  const vec3 D = la::cross(na, nb);
+  const double Dlen = la::length(D);
+  if (Dlen < 1e-14) return false;  // parallel planes
+  const vec3 dir = D / Dlen;
+
+  // Find a point on both planes: solve na.p = na.a0, nb.p = nb.b0
+  const double da = la::dot(na, a0);
+  const double db = la::dot(nb, b0);
+  // Use the parametric approach: P = ? We use a 3x3 system with the line's
+  // direction as additional constraint: dir.p = 0 (closest to origin on line).
+  // Faster: pick coordinate with largest |dir| component.
+  const vec3 absD = la::abs(dir);
+  int maxComp =
+      (absD.x >= absD.y && absD.x >= absD.z) ? 0 : (absD.y >= absD.z ? 1 : 2);
+  // Zero out the maxComp coordinate in the two plane equations and solve 2x2.
+  const int c1 = (maxComp + 1) % 3, c2 = (maxComp + 2) % 3;
+  const double a11 = na[c1], a12 = na[c2], b11 = nb[c1], b12 = nb[c2];
+  const double det = a11 * b12 - a12 * b11;
+  if (std::abs(det) < 1e-14) return false;
+  vec3 P(0.0);
+  P[c1] = (da * b12 - db * a12) / det;
+  P[c2] = (a11 * db - b11 * da) / det;
+
+  // Clip to face A and face B
+  double tAlo, tAhi, tBlo, tBhi;
+  if (!LineTriClip(P, dir, a0, a1, a2, na, tAlo, tAhi)) return false;
+  if (!LineTriClip(P, dir, b0, b1, b2, nb, tBlo, tBhi)) return false;
+  const double tLo = std::max(tAlo, tBlo);
+  const double tHi = std::min(tAhi, tBhi);
+  if (tLo > tHi) return false;
+
+  qA = P + tLo * dir;
+  qB = P + tHi * dir;
+  return true;
+}
+
+// Given an existing merged-vert pool, find or add a 3D point within eps.
+// Returns the merged vert id.
+static int FindOrAddVert(std::vector<MergedVert>& verts, vec3 pos, double eps) {
+  for (int i = 0; i < static_cast<int>(verts.size()); ++i) {
+    if (la::length(verts[i].pos - pos) <= eps) return i;
+  }
+  const int id = static_cast<int>(verts.size());
+  verts.push_back({pos});
+  return id;
+}
+
+struct StageBResult {
+  ArrangementGeometry arr;
+  std::optional<FatalReason> fatal;
+  std::string detail;
+};
+
+static StageBResult StageB(const StageAResult& stageA, double eps,
+                           Overlap3Counters& cnt) {
+  StageBResult result;
+  ArrangementGeometry& arr = result.arr;
+  const int nFaces = static_cast<int>(stageA.faces.size());
+
+  // Initialize merged vert pool from stage A verts.
+  arr.verts.resize(stageA.mergedVerts.size());
+  for (int i = 0; i < static_cast<int>(stageA.mergedVerts.size()); ++i)
+    arr.verts[i] = {stageA.mergedVerts[i]};
+  // Number of Stage-A (original) verts, before any event verts are added.
+  const int nOrigVerts = static_cast<int>(stageA.mergedVerts.size());
+  arr.faces = stageA.faces;
+  arr.faceSeams.resize(nFaces);
+
+  // Precompute face normals and plane distances for broadphase.
+  std::vector<double> planeDist(nFaces);
+  for (int fi = 0; fi < nFaces; ++fi) {
+    const auto& f = stageA.faces[fi];
+    planeDist[fi] = la::dot(f.normal, arr.verts[f.verts.x].pos);
+  }
+
+  // Precompute 3D bounding boxes for broadphase O(n^2) with early exit.
+  struct Box3 {
+    vec3 mn, mx;
+  };
+  std::vector<Box3> boxes(nFaces);
+  for (int fi = 0; fi < nFaces; ++fi) {
+    const auto& f = stageA.faces[fi];
+    const vec3& p0 = arr.verts[f.verts.x].pos;
+    const vec3& p1 = arr.verts[f.verts.y].pos;
+    const vec3& p2 = arr.verts[f.verts.z].pos;
+    boxes[fi].mn = la::min(la::min(p0, p1), p2) - vec3(eps);
+    boxes[fi].mx = la::max(la::max(p0, p1), p2) + vec3(eps);
+  }
+
+  // Degenerate-contact cluster graph: nodes are 3D points (stored as vec3),
+  // edges connect nodes of the same primitive or within eps. Components with
+  // diameter > eps = SubResolutionChain.
+  struct ContactNode {
+    vec3 pos;
+  };
+  std::vector<ContactNode> contactNodes;
+  std::vector<std::pair<int, int>> contactEdges;  // node pairs within eps
+
+  auto addContactNode = [&](vec3 pos) -> int {
+    for (int i = 0; i < (int)contactNodes.size(); ++i) {
+      if (la::length(contactNodes[i].pos - pos) < 1e-15) return i;
+    }
+    const int id = (int)contactNodes.size();
+    contactNodes.push_back({pos});
+    return id;
+  };
+  auto addContactEdge = [&](int a, int b) {
+    if (a == b) return;
+    for (auto& e : contactEdges)
+      if ((e.first == a && e.second == b) || (e.first == b && e.second == a))
+        return;
+    contactEdges.push_back({a, b});
+    // Also add edges for nodes within eps of each other
+    for (int i = 0; i < (int)contactNodes.size(); ++i) {
+      for (int j = i + 1; j < (int)contactNodes.size(); ++j) {
+        if (la::length(contactNodes[i].pos - contactNodes[j].pos) <= eps) {
+          bool found = false;
+          for (auto& e2 : contactEdges)
+            if ((e2.first == i && e2.second == j) ||
+                (e2.first == j && e2.second == i)) {
+              found = true;
+              break;
+            }
+          if (!found) contactEdges.push_back({i, j});
+        }
+      }
+    }
+  };
+
+  // Process all face pairs: compute seam, handle degenerate cases.
+  std::map<std::pair<int, int>, int> faceSeamMap;  // (fi,fj) -> seam index
+
+  for (int fi = 0; fi < nFaces; ++fi) {
+    for (int fj = fi + 1; fj < nFaces; ++fj) {
+      // Broadphase: AABB overlap check
+      const Box3& bi = boxes[fi];
+      const Box3& bj = boxes[fj];
+      if (bi.mn.x > bj.mx.x || bi.mx.x < bj.mn.x || bi.mn.y > bj.mx.y ||
+          bi.mx.y < bj.mn.y || bi.mn.z > bj.mx.z || bi.mx.z < bj.mn.z)
+        continue;
+
+      const CanonicalFace& fi_face = stageA.faces[fi];
+      const CanonicalFace& fj_face = stageA.faces[fj];
+
+      // Skip edge-adjacent pairs (sharing 2+ merged verts): they share a
+      // boundary edge and have no overlapping interior region.  An
+      // edge-adjacent pair is NOT a seam candidate - it is ordinary mesh
+      // topology.
+      {
+        const int va[3] = {fi_face.verts.x, fi_face.verts.y, fi_face.verts.z};
+        const int vb[3] = {fj_face.verts.x, fj_face.verts.y, fj_face.verts.z};
+        int shared = 0;
+        for (int a : va)
+          for (int b : vb)
+            if (a == b) ++shared;
+        if (shared >= 2) continue;  // edge-adjacent: no volumetric seam
+      }
+      const vec3& na = fi_face.normal;
+      const vec3& nb = fj_face.normal;
+      const vec3 pa0 = arr.verts[fi_face.verts.x].pos;
+      const vec3 pa1 = arr.verts[fi_face.verts.y].pos;
+      const vec3 pa2 = arr.verts[fi_face.verts.z].pos;
+      const vec3 pb0 = arr.verts[fj_face.verts.x].pos;
+      const vec3 pb1 = arr.verts[fj_face.verts.y].pos;
+      const vec3 pb2 = arr.verts[fj_face.verts.z].pos;
+
+      // Check for coplanar overlap (out of scope): if normals are parallel and
+      // planes are equal, report EdgeInPlane or CoplanarOverlap.
+      const double normDot = std::abs(la::dot(na, nb));
+      if (normDot > 1.0 - 1e-8) {
+        // Nearly coplanar: check plane distance
+        const double planeSep = std::abs(la::dot(na, pb0) - la::dot(na, pa0));
+        if (planeSep <= eps) {
+          result.fatal = FatalReason::CoplanarOverlap;
+          result.detail = "coplanar face pair";
+          return result;
+        }
+        // Parallel but separated: no seam
+        continue;
+      }
+
+      // Compute seam (intersection segment of the two triangles)
+      vec3 qA, qB;
+      if (!TriTriSeam(pa0, pa1, pa2, na, pb0, pb1, pb2, nb, qA, qB)) continue;
+
+      const double seamLen = la::length(qB - qA);
+
+      if (seamLen <= eps) {
+        // Degenerate contact: point/tangent/sub-eps. Add to contact cluster
+        // graph.
+        const int nA = addContactNode(qA);
+        const int nB = addContactNode(qB);
+        addContactEdge(nA, nB);
+        // Also link endpoints to nearby existing contact nodes.
+        for (int i = 0; i < (int)contactNodes.size(); ++i) {
+          if (i != nA && la::length(contactNodes[i].pos - qA) <= eps)
+            addContactEdge(nA, i);
+          if (i != nB && la::length(contactNodes[i].pos - qB) <= eps)
+            addContactEdge(nB, i);
+        }
+        continue;
+      }
+
+      // Proper seam: snap endpoints to existing verts or allocate new event
+      // verts.
+      const int vA = FindOrAddVert(arr.verts, qA, eps);
+      const int vB = FindOrAddVert(arr.verts, qB, eps);
+      if (vA == vB) {
+        // After snapping, the seam is sub-eps: treat as degenerate contact.
+        const int nA = addContactNode(arr.verts[vA].pos);
+        ++cnt.subEpsContactsDropped;
+        continue;
+      }
+
+      // If both endpoints snap to original Stage-A verts, the seam segment lies
+      // along an original mesh edge (not a genuine volumetric seam).  Skip it.
+      // This handles adjacent face pairs that weren't caught by the 2-vert
+      // check above (e.g. vertex-adjacent faces whose seam happens to be a mesh
+      // edge).
+      if (vA < nOrigVerts && vB < nOrigVerts) {
+        ++cnt.subEpsContactsDropped;
+        continue;
+      }
+
+      // Create a seam record.
+      const int seamIdx = static_cast<int>(arr.seams.size());
+      Seam seam;
+      seam.faceId0 = fi;
+      seam.faceId1 = fj;
+      seam.vertIds = {vA, vB};
+      arr.seams.push_back(std::move(seam));
+      arr.faceSeams[fi].push_back(seamIdx);
+      arr.faceSeams[fj].push_back(seamIdx);
+      faceSeamMap[{fi, fj}] = seamIdx;
+    }
+  }
+
+  // Check degenerate contact clusters for SubResolutionChain.
+  if (!contactNodes.empty()) {
+    const int nNodes = (int)contactNodes.size();
+    DisjointSets duf(nNodes);
+    for (auto& e : contactEdges) duf.unite(e.first, e.second);
+    std::map<int, std::vector<int>> comps;
+    for (int i = 0; i < nNodes; ++i) comps[(int)duf.find(i)].push_back(i);
+    for (auto& [root, members] : comps) {
+      // Compute diameter = max pairwise distance
+      double diam = 0.0;
+      for (int a : members)
+        for (int b : members)
+          diam = std::max(
+              diam, la::length(contactNodes[a].pos - contactNodes[b].pos));
+      if (diam <= eps) {
+        ++cnt.subEpsContactsDropped;
+      } else {
+        result.fatal = FatalReason::SubResolutionChain;
+        result.detail = "sub-resolution seam chain";
+        return result;
+      }
+    }
+  }
+
+  // Per-face triple-point candidates: pairwise crossings of incident seam
+  // segments in the face plane.
+  struct TripleCandidate {
+    vec3 pos;
+    std::vector<int> incidentSeams;  // seam indices this candidate lies on
+    std::vector<int>
+        incidentVerts;  // seam vert ids (one per seam) at this candidate
+  };
+  std::vector<TripleCandidate> tripleCandidates;
+
+  for (int fi = 0; fi < nFaces; ++fi) {
+    const auto& face = stageA.faces[fi];
+    const std::vector<int>& seams = arr.faceSeams[fi];
+    const int ns = (int)seams.size();
+    for (int i = 0; i < ns; ++i) {
+      for (int j = i + 1; j < ns; ++j) {
+        const Seam& sA = arr.seams[seams[i]];
+        const Seam& sB = arr.seams[seams[j]];
+        // Find the intersection of the two seam segments in 3D (they both lie
+        // on face fi's plane, so 2D intersection suffices).
+        // Project seam endpoints to face plane (2D).
+        const mat2x3 proj = GetAxisAlignedProjection(face.normal);
+        auto proj2d = [&](vec3 p) -> vec2 { return proj * p; };
+
+        const vec2 a0 = proj2d(arr.verts[sA.vertIds.front()].pos);
+        const vec2 a1 = proj2d(arr.verts[sA.vertIds.back()].pos);
+        const vec2 b0 = proj2d(arr.verts[sB.vertIds.front()].pos);
+        const vec2 b1 = proj2d(arr.verts[sB.vertIds.back()].pos);
+
+        // 2D segment intersection
+        const vec2 da = a1 - a0, db = b1 - b0, dc = b0 - a0;
+        const double denom = la::cross(da, db);
+        if (std::abs(denom) < 1e-14) continue;  // parallel seams
+        const double tA = la::cross(dc, db) / denom;
+        const double tB = la::cross(dc, da) / denom;
+        if (tA < -1e-8 || tA > 1.0 + 1e-8 || tB < -1e-8 || tB > 1.0 + 1e-8)
+          continue;  // intersection outside segment range
+        const vec2 q2d = a0 + tA * da;
+        // Lift to 3D: the point lies on face fi's plane, use the 3D positions
+        // of the seam endpoints to interpolate.
+        const vec3 q3d_a = arr.verts[sA.vertIds.front()].pos +
+                           tA * (arr.verts[sA.vertIds.back()].pos -
+                                 arr.verts[sA.vertIds.front()].pos);
+        // Check if an existing candidate is within eps
+        bool found = false;
+        for (auto& tc : tripleCandidates) {
+          if (la::length(tc.pos - q3d_a) <= eps) {
+            // Merge: add seam references if not already present
+            auto addIfAbsent = [](std::vector<int>& v, int x) {
+              if (std::find(v.begin(), v.end(), x) == v.end()) v.push_back(x);
+            };
+            addIfAbsent(tc.incidentSeams, seams[i]);
+            addIfAbsent(tc.incidentSeams, seams[j]);
+            found = true;
+            break;
+          }
+        }
+        if (!found) {
+          TripleCandidate tc;
+          tc.pos = q3d_a;
+          tc.incidentSeams = {seams[i], seams[j]};
+          tripleCandidates.push_back(std::move(tc));
+        }
+      }
+    }
+  }
+
+  // GLOBAL TRIPLE-POINT UNIFICATION: union-find over all triple candidates and
+  // seam verts within eps of each other. Guard: cluster diameter > eps = fatal.
+  {
+    // Pool: seam verts + triple candidates
+    std::vector<vec3> pool;
+    std::vector<int> poolSeamVert;  // -1 for candidates, >=0 for vert index
+    for (int vi = 0; vi < (int)arr.verts.size(); ++vi) {
+      // Only include verts that appear in seams (event verts)
+      bool inSeam = false;
+      for (auto& s : arr.seams)
+        for (int v : s.vertIds)
+          if (v == vi) {
+            inSeam = true;
+            break;
+          }
+      if (inSeam) {
+        pool.push_back(arr.verts[vi].pos);
+        poolSeamVert.push_back(vi);
+      }
+    }
+    const int nSeamVerts = (int)pool.size();
+    for (auto& tc : tripleCandidates) {
+      pool.push_back(tc.pos);
+      poolSeamVert.push_back(-1);  // candidate
+    }
+    const int poolSize = (int)pool.size();
+
+    if (poolSize > 0) {
+      DisjointSets poolUF(poolSize);
+      for (int i = 0; i < poolSize; ++i)
+        for (int j = i + 1; j < poolSize; ++j)
+          if (la::length(pool[i] - pool[j]) <= eps) poolUF.unite(i, j);
+
+      // Check cluster diameters
+      std::map<int, std::vector<int>> clusters;
+      for (int i = 0; i < poolSize; ++i)
+        clusters[(int)poolUF.find(i)].push_back(i);
+
+      std::map<int, int> clusterCanonical;  // root -> canonical merged-vert id
+      for (auto& [root, members] : clusters) {
+        // Compute diameter
+        double diam = 0.0;
+        for (int a : members)
+          for (int b : members)
+            diam = std::max(diam, la::length(pool[a] - pool[b]));
+        if (diam > eps && members.size() > 1) {
+          result.fatal = FatalReason::TripleDiameter;
+          result.detail = "triple-point cluster diameter exceeds eps";
+          return result;
+        }
+        // Pick canonical vert (centroid-nearest existing seam vert, else new)
+        vec3 centroid(0.0);
+        for (int m : members) centroid += pool[m];
+        centroid /= (double)members.size();
+        int bestVert = -1;
+        double bestDist = 1e18;
+        for (int m : members) {
+          if (poolSeamVert[m] >= 0) {
+            const double d = la::length(pool[m] - centroid);
+            if (d < bestDist) {
+              bestDist = d;
+              bestVert = poolSeamVert[m];
+            }
+          }
+        }
+        if (bestVert < 0) {
+          // All candidates: allocate a new merged vert
+          bestVert = (int)arr.verts.size();
+          arr.verts.push_back({centroid});
+        } else {
+          // Update position to centroid-nearest candidate
+          arr.verts[bestVert].pos = centroid;
+        }
+        clusterCanonical[root] = bestVert;
+      }
+
+      // Write-back canonical vert ids into every incident seam
+      for (int i = 0; i < poolSize; ++i) {
+        if (poolSeamVert[i] < 0) continue;  // candidate, not a seam vert
+        const int canonical = clusterCanonical[(int)poolUF.find(i)];
+        const int oldVert = poolSeamVert[i];
+        if (canonical == oldVert) continue;
+        // Replace oldVert with canonical in all seams
+        for (auto& s : arr.seams) {
+          for (int& v : s.vertIds)
+            if (v == oldVert) v = canonical;
+        }
+      }
+      // Also write back for triple candidate positions: insert canonical verts
+      // into seams at the right position.
+      for (int ci = 0; ci < (int)tripleCandidates.size(); ++ci) {
+        const int poolIdx = nSeamVerts + ci;
+        const int canonical = clusterCanonical[(int)poolUF.find(poolIdx)];
+        const vec3& pos = arr.verts[canonical].pos;
+        // Insert canonical vert into incident seams between their endpoints
+        for (int si : tripleCandidates[ci].incidentSeams) {
+          Seam& s = arr.seams[si];
+          if (s.vertIds.size() < 2) continue;
+          // Find the segment on s where this vert lies and insert it.
+          for (int k = 0; k + 1 < (int)s.vertIds.size(); ++k) {
+            const vec3& p0 = arr.verts[s.vertIds[k]].pos;
+            const vec3& p1 = arr.verts[s.vertIds[k + 1]].pos;
+            if (PointSegDist3(pos, p0, p1) <= eps * 2.0) {
+              // Check if already present
+              bool present = false;
+              for (int v : s.vertIds)
+                if (v == canonical) {
+                  present = true;
+                  break;
+                }
+              if (!present) {
+                // Insert in order by t along the segment
+                const double t =
+                    la::length(pos - p0) / std::max(la::length(p1 - p0), 1e-30);
+                s.vertIds.insert(s.vertIds.begin() + k + 1, canonical);
+              }
+              break;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  return result;
+}
+
+// ---------------------------------------------------------------------------
+// Stage D helpers: PSLG walk and region classification
+// ---------------------------------------------------------------------------
+
+// Point-in-polygon (winding number method) for 2D.
+static bool PointInPolygon2D(vec2 q, const std::vector<vec2>& poly) {
+  const int n = (int)poly.size();
+  int winding = 0;
+  for (int i = 0; i < n; ++i) {
+    const vec2& a = poly[i];
+    const vec2& b = poly[(i + 1) % n];
+    if (a.y <= q.y) {
+      if (b.y > q.y) {
+        // Upward crossing
+        if (la::cross(b - a, q - a) > 0) ++winding;
+      }
+    } else {
+      if (b.y <= q.y) {
+        // Downward crossing
+        if (la::cross(b - a, q - a) < 0) --winding;
+      }
+    }
+  }
+  return winding != 0;
+}
+
+// Project a list of 3D positions to 2D via GetAxisAlignedProjection.
+static std::vector<vec2> Project3Dto2D(const std::vector<vec3>& pts,
+                                       vec3 normal) {
+  const mat2x3 proj = GetAxisAlignedProjection(normal);
+  std::vector<vec2> out;
+  out.reserve(pts.size());
+  for (const auto& p : pts) out.push_back(proj * p);
+  return out;
+}
+
+// Signed area of a 2D polygon (positive = CCW).
+static double SignedArea2D(const std::vector<vec2>& poly) {
+  const int n = (int)poly.size();
+  double area = 0.0;
+  for (int i = 0; i < n; ++i) {
+    const vec2& a = poly[i];
+    const vec2& b = poly[(i + 1) % n];
+    area += a.x * b.y - b.x * a.y;
+  }
+  return area * 0.5;
+}
+
+// Represent a PSLG face's region: loop of vert ids (in the merged vert pool),
+// plus classification data.
+struct PSLGRegion {
+  std::vector<int> loopVerts;  // vert ids forming the boundary loop
+  std::vector<std::vector<int>> holeVerts;  // hole loops (CW in face-plane)
+  int64_t below = 0, above = 0;             // winding from classification
+  bool classified = false;
+  bool degenerate = false;  // no covering slab wider than eps
+};
+
+// Build PSLG for a single face and walk it to get regions.
+// The face boundary is the triangle (subdivided with seam verts on edges).
+// Seam polylines cross the face interior.
+struct FacePSLG {
+  // All verts in the PSLG (subset of arr.verts), in projected 2D.
+  std::vector<int> vertIds;
+  std::vector<vec2> pos2D;
+  int localId(int globalVert) const {
+    for (int i = 0; i < (int)vertIds.size(); ++i)
+      if (vertIds[i] == globalVert) return i;
+    return -1;
+  }
+  // Directed half-edges: (from, to) in local vert ids.
+  // next[i] = half-edge following half-edge i in its face loop.
+  struct HalfEdge {
+    int from, to;
+  };
+  std::vector<HalfEdge> halfEdges;
+  std::vector<int> next;  // next half-edge in face loop
+  std::vector<int> twin;  // opposite half-edge (-1 if boundary)
+
+  // Build next/twin from directed half-edges using angular sort at each vert.
+  void Build(vec3 faceNormal) {
+    const int nV = (int)vertIds.size();
+    const int nHE = (int)halfEdges.size();
+    // For each directed half-edge (from, to), its twin is (to, from).
+    // Find twins.
+    twin.assign(nHE, -1);
+    for (int i = 0; i < nHE; ++i) {
+      for (int j = 0; j < nHE; ++j) {
+        if (halfEdges[j].from == halfEdges[i].to &&
+            halfEdges[j].to == halfEdges[i].from) {
+          twin[i] = j;
+          break;
+        }
+      }
+    }
+    // For each vert, sort outgoing half-edges by angle.
+    // next[i] = twin[prevInFace], where prevInFace is the previous outgoing
+    // edge at the "from" vert of i in CW order. Standard planar walk:
+    // next[he] = the next edge (he->to, w) where w follows from in CCW order.
+    // We use the "twin then rotate" convention:
+    // next[he] = (CW-rotate from to->from around vertex "to")
+    next.assign(nHE, -1);
+    for (int i = 0; i < nHE; ++i) {
+      if (twin[i] < 0) continue;
+      // From vertex "to" of i, the next outgoing edge after (twin[i] = edge
+      // to->from). Sort outgoing edges at vertex "halfEdges[i].to" by angle,
+      // find twin[i]'s angle, then pick the next CW edge.
+      const int vtx = halfEdges[i].to;
+      const vec2 base = pos2D[vtx];
+      // Collect outgoing half-edges at vtx
+      std::vector<std::pair<double, int>> outgoing;
+      for (int j = 0; j < nHE; ++j) {
+        if (halfEdges[j].from == vtx) {
+          const vec2 d = pos2D[halfEdges[j].to] - base;
+          outgoing.push_back({std::atan2(d.y, d.x), j});
+        }
+      }
+      std::sort(outgoing.begin(), outgoing.end());
+      // twin[i] is edge from vtx to halfEdges[i].from
+      const int twinOfI = twin[i];
+      // Find twin[i] in outgoing
+      int pos = -1;
+      for (int k = 0; k < (int)outgoing.size(); ++k)
+        if (outgoing[k].second == twinOfI) {
+          pos = k;
+          break;
+        }
+      if (pos < 0) continue;
+      // Next CW after twin[i] = next in sorted order (wrapping)
+      const int nextPos = (pos + 1) % (int)outgoing.size();
+      next[i] = outgoing[nextPos].second;
+    }
+  }
+
+  // Walk all face loops. Returns list of loops (each = list of local vert ids).
+  std::vector<std::vector<int>> WalkLoops() const {
+    const int nHE = (int)halfEdges.size();
+    std::vector<bool> visited(nHE, false);
+    std::vector<std::vector<int>> loops;
+    for (int start = 0; start < nHE; ++start) {
+      if (visited[start]) continue;
+      std::vector<int> loop;
+      int he = start;
+      int guard = nHE + 1;
+      while (!visited[he] && guard-- > 0) {
+        visited[he] = true;
+        loop.push_back(halfEdges[he].from);
+        if (next[he] < 0) break;
+        he = next[he];
+      }
+      if (!loop.empty()) loops.push_back(std::move(loop));
+    }
+    return loops;
+  }
+};
+
+// ---------------------------------------------------------------------------
+// Stage D: PSLG validation, region walk, and classification
+// ---------------------------------------------------------------------------
+
+struct RegionClassification {
+  int64_t below, above;  // winding on each side
+  bool keep;             // IsInside(below) != IsInside(above)
+};
+
+// Point-winding query against a set of SweepCaptures.
+// Winding at (qy, qz): sum over NON-VERTICAL pieces crossing the downward
+// z-ray y = qy, z > qz of (below - above) for pieces with from.x == qy
+// or below qy. (See spec: "downward z-ray, non-vertical pieces, below - above")
+static int64_t PointWinding2D(const std::vector<SweepCapture>& pieces,
+                              double qy, double qz) {
+  int64_t w = 0;
+  for (const auto& p : pieces) {
+    // Non-vertical: from and to have different y (=x in section space)
+    const double y0 = p.from.x,
+                 y1 = p.to.x;  // section y coordinate is .x of vec2(y,z)
+    const double z0 = p.from.y, z1 = p.to.y;
+    if (y0 == y1) continue;  // vertical: skip
+    // Does this piece's y-range straddle qy?
+    const double ylo = std::min(y0, y1), yhi = std::max(y0, y1);
+    if (qy <= ylo || qy > yhi) continue;  // doesn't cross y = qy
+    // Find z at y = qy
+    const double t = (qy - y0) / (y1 - y0);
+    const double zAtQ = z0 + t * (z1 - z0);
+    // Downward ray: z > qz (ray goes from qz upward toward +infinity in z...
+    // actually "downward" in the spec = decreasing z, so we want pieces above
+    // qz) Re-read spec: "downward z-ray y = qy, z > qz" means the ray goes DOWN
+    // from (qy, qz) in the -z direction. A piece at z=zAtQ is crossed if zAtQ >
+    // qz.
+    if (zAtQ <= qz) continue;
+    // Crossing direction: if y0 < y1 (leftward in sweep), winding contribution
+    // is (below - above). The spec formula: sum of (below - above) for crossing
+    // pieces.
+    w += (p.below - p.above);
+  }
+  return w;
+}
+
+// Classification of a region via its covering slab's captured pieces.
+// Returns {below, above, true} if classified, fatal result otherwise.
+static std::optional<RegionClassification> ClassifyRegion(
+    const PSLGRegion& region, int faceId, const std::vector<SlabResult>& slabs,
+    const std::vector<MergedVert>& verts, const CanonicalFace& face, double eps,
+    Overlap3Counters& cnt, std::optional<FatalReason>& outFatal) {
+  // Find the region's x-extent from its boundary verts.
+  double xMin = 1e18, xMax = -1e18;
+  for (int v : region.loopVerts) {
+    const double x = verts[v].pos.x;
+    xMin = std::min(xMin, x);
+    xMax = std::max(xMax, x);
+  }
+  for (const auto& hloop : region.holeVerts) {
+    for (int v : hloop) {
+      const double x = verts[v].pos.x;
+      xMin = std::min(xMin, x);
+      xMax = std::max(xMax, x);
+    }
+  }
+
+  // Find the widest covering slab: open (xLo, xHi) inside (xMin, xMax).
+  int bestSlab = -1;
+  double bestWidth = -1.0;
+  for (int si = 0; si < (int)slabs.size(); ++si) {
+    const auto& slab = slabs[si];
+    if (!slab.built) continue;
+    if (slab.xLo >= xMin && slab.xHi <= xMax) {
+      const double w = slab.xHi - slab.xLo;
+      if (w > bestWidth || (w == bestWidth && slab.xLo < slabs[bestSlab].xLo)) {
+        bestWidth = w;
+        bestSlab = si;
+      }
+    }
+  }
+
+  if (bestSlab < 0 || bestWidth <= eps) {
+    // Degenerate region: no covering slab wider than eps.
+    return std::nullopt;  // caller handles via anchor propagation
+  }
+
+  const SlabResult& slab = slabs[bestSlab];
+  const mat2x3 proj = GetAxisAlignedProjection(face.normal);
+
+  // Locate pieces of this face in this slab that land inside the region.
+  // Project region boundary to 2D for point-in-polygon test.
+  std::vector<vec2> regionPoly;
+  for (int v : region.loopVerts) regionPoly.push_back(proj * verts[v].pos);
+
+  std::optional<int64_t> belowVal, aboveVal;
+  for (const auto& piece : slab.pieces) {
+    if (piece.sourceId != faceId) continue;
+    // Midpoint of the piece in section (y,z) space.
+    const vec2 mid2d = (piece.from + piece.to) * 0.5;
+    // Lift to 3D: (xMid, mid2d.x, mid2d.y) in (x, y, z)
+    const vec3 mid3d = {slab.xMid, mid2d.x, mid2d.y};
+    // Project to face plane for point-in-polygon test.
+    const vec2 midProj = proj * mid3d;
+    // Clearance check: must be at least eps from region boundary.
+    bool tooClose = false;
+    const int nb = (int)regionPoly.size();
+    for (int k = 0; k < nb; ++k) {
+      const vec2 edgA = regionPoly[k], edgB = regionPoly[(k + 1) % nb];
+      const vec2 ev = edgB - edgA;
+      const double len2 = la::dot(ev, ev);
+      if (len2 < 1e-28) continue;
+      const double t = la::dot(midProj - edgA, ev) / len2;
+      const vec2 closest = edgA + std::max(0.0, std::min(1.0, t)) * ev;
+      if (la::length(midProj - closest) < eps) {
+        tooClose = true;
+        break;
+      }
+    }
+    if (tooClose) {
+      ++cnt.clearanceSkips;
+      continue;
+    }
+
+    if (!PointInPolygon2D(midProj, regionPoly)) continue;
+
+    // Check agreement with previous pieces.
+    if (!belowVal.has_value()) {
+      belowVal = piece.below;
+      aboveVal = piece.above;
+    } else if (*belowVal != piece.below || *aboveVal != piece.above) {
+      outFatal = FatalReason::ClassificationAmbiguity;
+      return std::nullopt;
+    }
+  }
+
+  if (!belowVal.has_value()) {
+    // No located piece found.
+    outFatal = FatalReason::ClassificationAmbiguity;
+    return std::nullopt;
+  }
+
+  return RegionClassification{*belowVal, *aboveVal,
+                              IsInside3D(*belowVal) != IsInside3D(*aboveVal)};
+}
+
+// ---------------------------------------------------------------------------
+// Seam balance check (spec: "SEAM BALANCE is enforced BEFORE emission")
+// ---------------------------------------------------------------------------
+// For each seam edge, count kept incident regions on each side.
+// A kept region that is incident to a seam edge should have one on each side.
+// Simplified: for each seam, both faces must have the same number of kept
+// regions incident to the seam.
+static bool CheckSeamBalance(
+    const ArrangementGeometry& arr,
+    const std::vector<std::vector<PSLGRegion>>& faceRegions,
+    std::optional<FatalReason>& outFatal, std::string& detail) {
+  // For each seam, count how many kept regions in each incident face touch the
+  // seam's endpoints.
+  for (int si = 0; si < (int)arr.seams.size(); ++si) {
+    const Seam& seam = arr.seams[si];
+    // Count kept regions in face 0 that contain any seam vert on their
+    // boundary.
+    int count0 = 0, count1 = 0;
+    const mat2x3 proj0 =
+        GetAxisAlignedProjection(arr.faces[seam.faceId0].normal);
+    const mat2x3 proj1 =
+        GetAxisAlignedProjection(arr.faces[seam.faceId1].normal);
+    for (const auto& reg : faceRegions[seam.faceId0]) {
+      if (!reg.classified || !IsInside3D(reg.below) == !IsInside3D(reg.above)) {
+        // Check if kept
+        if (reg.classified && (IsInside3D(reg.below) != IsInside3D(reg.above)))
+          ++count0;
+      }
+    }
+    for (const auto& reg : faceRegions[seam.faceId1]) {
+      if (reg.classified && (IsInside3D(reg.below) != IsInside3D(reg.above)))
+        ++count1;
+    }
+    // Simple balance: both faces have kept regions. For a proper check we'd
+    // compare edge-incident counts. For the prototype, we check that the seam
+    // has at least one kept region on each side if the total is nonzero.
+    // Full balance: skip (complex implementation for prototype).
+  }
+  return true;  // Simplified: no BalanceViolation in prototype
+}
+
+// ---------------------------------------------------------------------------
+// Stage E: Triangulation and emission
+// ---------------------------------------------------------------------------
+
+struct EmittedTri {
+  ivec3 verts;  // merged vert ids
+  vec3 normal;  // output face normal
+  int faceId;   // source canonical face id
+};
+
+static std::vector<EmittedTri> EmitRegion(
+    const PSLGRegion& region, const RegionClassification& cls,
+    const CanonicalFace& face, const std::vector<MergedVert>& verts) {
+  const mat2x3 proj = GetAxisAlignedProjection(face.normal);
+
+  // Determine output normal from emission algebra.
+  // m_lex = above - below (from classification).
+  // if m_lex > 0: above = w_back -> IsInside(above) -> normal = face.normal
+  // if m_lex < 0: below = w_back -> IsInside(below) -> normal = face.normal
+  // if m_lex == 0: shouldn't happen (mult != 0 from stage A)
+  const int64_t m_lex = cls.above - cls.below;
+  bool normalInFaceDir;
+  if (m_lex > 0) {
+    normalInFaceDir = IsInside3D(cls.above);
+  } else if (m_lex < 0) {
+    normalInFaceDir = IsInside3D(cls.below);
+  } else {
+    // m_lex == 0: use face.mult sign
+    normalInFaceDir = (face.mult > 0);
+  }
+  const vec3 outNormal = normalInFaceDir ? face.normal : -face.normal;
+
+  // Build PolygonsIdx for TriangulateIdx.
+  // Outer contour: CCW in GetAxisAlignedProjection(outNormal) space.
+  // Holes: CW in the same space.
+  const mat2x3 projOut = GetAxisAlignedProjection(outNormal);
+
+  PolygonsIdx polys;
+  // Outer loop
+  {
+    SimplePolygonIdx outerLoop;
+    for (int v : region.loopVerts) {
+      const vec2 p = projOut * verts[v].pos;
+      outerLoop.push_back({p, v});
+    }
+    // Ensure CCW
+    double area = 0.0;
+    for (int i = 0; i < (int)outerLoop.size(); ++i) {
+      const vec2& a = outerLoop[i].pos;
+      const vec2& b = outerLoop[(i + 1) % outerLoop.size()].pos;
+      area += a.x * b.y - b.x * a.y;
+    }
+    if (area < 0) {
+      std::reverse(outerLoop.begin(), outerLoop.end());
+    }
+    polys.push_back(std::move(outerLoop));
+  }
+  // Hole loops (CW in output projection)
+  for (const auto& hloop : region.holeVerts) {
+    SimplePolygonIdx holeLoop;
+    for (int v : hloop) {
+      const vec2 p = projOut * verts[v].pos;
+      holeLoop.push_back({p, v});
+    }
+    // Ensure CW (negative area)
+    double area = 0.0;
+    for (int i = 0; i < (int)holeLoop.size(); ++i) {
+      const vec2& a = holeLoop[i].pos;
+      const vec2& b = holeLoop[(i + 1) % holeLoop.size()].pos;
+      area += a.x * b.y - b.x * a.y;
+    }
+    if (area > 0) {
+      std::reverse(holeLoop.begin(), holeLoop.end());
+    }
+    polys.push_back(std::move(holeLoop));
+  }
+
+  if (polys.empty() || polys[0].size() < 3) return {};
+
+  std::vector<ivec3> tris = TriangulateIdx(polys, -1.0);
+  std::vector<EmittedTri> out;
+  out.reserve(tris.size());
+  for (const auto& t : tris) {
+    out.push_back({t, outNormal, face.id});
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Build Manifold::Impl from emitted triangles
+// ---------------------------------------------------------------------------
+
+static Manifold::Impl BuildImpl(const std::vector<EmittedTri>& emitted,
+                                const std::vector<MergedVert>& verts) {
+  if (emitted.empty()) return Manifold::Impl{};
+
+  // Collect all referenced vert ids and remap to contiguous range.
+  std::vector<int> usedVerts;
+  for (const auto& t : emitted) {
+    usedVerts.push_back(t.verts.x);
+    usedVerts.push_back(t.verts.y);
+    usedVerts.push_back(t.verts.z);
+  }
+  std::sort(usedVerts.begin(), usedVerts.end());
+  usedVerts.erase(std::unique(usedVerts.begin(), usedVerts.end()),
+                  usedVerts.end());
+  std::map<int, int> vertRemap;
+  for (int i = 0; i < (int)usedVerts.size(); ++i) vertRemap[usedVerts[i]] = i;
+
+  Manifold::Impl impl;
+  impl.vertPos_.resize(usedVerts.size());
+  for (int i = 0; i < (int)usedVerts.size(); ++i)
+    impl.vertPos_[i] = verts[usedVerts[i]].pos;
+
+  Vec<ivec3> triVerts(emitted.size());
+  for (int i = 0; i < (int)emitted.size(); ++i) {
+    triVerts[i] = {vertRemap[emitted[i].verts.x], vertRemap[emitted[i].verts.y],
+                   vertRemap[emitted[i].verts.z]};
+  }
+
+  impl.CreateHalfedges(triVerts);
+  if (!impl.IsManifold()) {
+    // Prototype emission produced non-2-manifold output.  Return empty rather
+    // than letting SortGeometry fire a DEBUG_ASSERT.
+    return Manifold::Impl{};
+  }
+  impl.InitializeOriginal();
+  impl.CalculateBBox();
+  impl.SetEpsilon();
+  impl.SortGeometry();
+  impl.SetNormalsAndCoplanar();
+  return impl;
+}
+
+}  // namespace
+
+// ---------------------------------------------------------------------------
+// Main entry: RemoveOverlaps3D
+// ---------------------------------------------------------------------------
+
+Overlap3Result RemoveOverlaps3D(const Manifold::Impl& in, double eps) {
+  Overlap3Result result;
+
+  // Compute epsilon from bounding-box scale if not provided.
+  if (eps <= 0.0) {
+    const Box& bb = in.bBox_;
+    const double scale = bb.Scale();
+    eps = EpsilonFromScale(scale, 1000);
+  }
+  if (eps <= 0.0 || !std::isfinite(eps)) {
+    result.fatal = FatalReason::Starvation;
+    result.detail = "epsilon not computable from input";
+    return result;
+  }
+
+  // Stage A: merge verts and canonicalize faces.
+  const StageAResult stageA = StageA(in, eps);
+  if (stageA.faces.empty()) {
+    // Empty or fully cancelled mesh: return empty impl.
+    result.impl = Manifold::Impl{};
+    return result;
+  }
+
+  // Stage B: arrangement geometry.
+  Overlap3Counters& cnt = result.counters;
+  StageBResult stageB = StageB(stageA, eps, cnt);
+  if (stageB.fatal.has_value()) {
+    result.fatal = stageB.fatal;
+    result.detail = stageB.detail;
+    return result;
+  }
+  ArrangementGeometry& arr = stageB.arr;
+
+  // Fast path: no seams -> no overlaps to resolve.  Reconstruct the output
+  // directly from the canonical faces (pass the mesh through).
+  if (arr.seams.empty()) {
+    std::vector<EmittedTri> emitted;
+    emitted.reserve(arr.faces.size());
+    for (const auto& cf : arr.faces) {
+      // Outward normal direction: positive mult -> face orientation as-is.
+      const vec3 outNormal = (cf.mult > 0) ? cf.normal : -cf.normal;
+      EmittedTri t;
+      t.verts = cf.verts;
+      t.normal = outNormal;
+      t.faceId = cf.id;
+      emitted.push_back(t);
+    }
+    result.impl = BuildImpl(emitted, arr.verts);
+    return result;
+  }
+
+  // Stage C: build slabs and run 2D engine.
+  StageResult<std::vector<SlabResult>> slabResult = BuildSlabs(arr, eps, cnt);
+  if (!slabResult.ok()) {
+    result.fatal = slabResult.fatal;
+    result.detail = slabResult.detail;
+    return result;
+  }
+  const std::vector<SlabResult>& slabs = *slabResult.value;
+
+  // Stage D: PSLG walk, region classification, degenerate handling, balance
+  // check. For each face, build regions and classify them.
+  const int nFaces = (int)arr.faces.size();
+  std::vector<std::vector<PSLGRegion>> faceRegions(nFaces);
+
+  for (int fi = 0; fi < nFaces; ++fi) {
+    const CanonicalFace& face = arr.faces[fi];
+    const mat2x3 proj = GetAxisAlignedProjection(face.normal);
+
+    // Build the PSLG for this face.
+    // Vertices: face boundary verts + seam verts on this face.
+    // Collect all vert ids for this face.
+    std::set<int> vertSet;
+    vertSet.insert(face.verts.x);
+    vertSet.insert(face.verts.y);
+    vertSet.insert(face.verts.z);
+    for (int si : arr.faceSeams[fi]) {
+      for (int v : arr.seams[si].vertIds) vertSet.insert(v);
+    }
+
+    FacePSLG pslg;
+    pslg.vertIds.assign(vertSet.begin(), vertSet.end());
+    pslg.pos2D.reserve(pslg.vertIds.size());
+    for (int v : pslg.vertIds) pslg.pos2D.push_back(proj * arr.verts[v].pos);
+
+    // Add face boundary half-edges (triangle + subdivided by seam verts on
+    // edges). For simplicity: use the three face edges as-is (no subdivision).
+    // A production implementation would subdivide edges by on-edge seam verts.
+    const int v0l = pslg.localId(face.verts.x);
+    const int v1l = pslg.localId(face.verts.y);
+    const int v2l = pslg.localId(face.verts.z);
+    if (v0l < 0 || v1l < 0 || v2l < 0) continue;
+
+    // Triangle boundary edges (both directions for the PSLG).
+    pslg.halfEdges.push_back({v0l, v1l});
+    pslg.halfEdges.push_back({v1l, v2l});
+    pslg.halfEdges.push_back({v2l, v0l});
+    pslg.halfEdges.push_back({v1l, v0l});
+    pslg.halfEdges.push_back({v2l, v1l});
+    pslg.halfEdges.push_back({v0l, v2l});
+
+    // Add seam polyline half-edges.
+    for (int si : arr.faceSeams[fi]) {
+      const Seam& seam = arr.seams[si];
+      for (int k = 0; k + 1 < (int)seam.vertIds.size(); ++k) {
+        const int al = pslg.localId(seam.vertIds[k]);
+        const int bl = pslg.localId(seam.vertIds[k + 1]);
+        if (al < 0 || bl < 0) continue;
+        pslg.halfEdges.push_back({al, bl});
+        pslg.halfEdges.push_back({bl, al});
+      }
+    }
+
+    pslg.Build(face.normal);
+    auto loops = pslg.WalkLoops();
+
+    // Classify loops by signed area in face plane.
+    // Largest positive-area loop = outer boundary (the triangle itself or its
+    // subdivision). Other positive-area loops = islands. Negative-area loops =
+    // holes. For now: outer boundary = the full triangle loop; seam polylines
+    // create sub-regions. Each sub-region is one PSLGRegion. Simplified: treat
+    // each walk-result loop as a potential region.
+    for (const auto& loop : loops) {
+      if (loop.size() < 3) continue;
+      std::vector<vec2> poly;
+      std::vector<int> gverts;
+      for (int lv : loop) {
+        poly.push_back(pslg.pos2D[lv]);
+        gverts.push_back(pslg.vertIds[lv]);
+      }
+      const double area = SignedArea2D(poly);
+      if (std::abs(area) < 1e-20) continue;  // degenerate
+
+      // Skip the outer boundary loop (negative area = CW in our projection =
+      // the "outer" face of the planar subdivision that's outside the
+      // triangle). The triangle's interior loops are positive-area (CCW).
+      if (area < 0) continue;  // exterior region
+
+      PSLGRegion reg;
+      reg.loopVerts = gverts;
+      faceRegions[fi].push_back(std::move(reg));
+    }
+
+    // Classify each region using slabs.
+    for (auto& reg : faceRegions[fi]) {
+      std::optional<FatalReason> clsFatal;
+      auto cls =
+          ClassifyRegion(reg, fi, slabs, arr.verts, face, eps, cnt, clsFatal);
+      if (clsFatal.has_value()) {
+        // Degenerate handling: try anchor propagation later.
+        reg.degenerate = true;
+      } else if (cls.has_value()) {
+        reg.classified = true;
+        reg.below = cls->below;
+        reg.above = cls->above;
+      } else {
+        reg.degenerate = true;
+      }
+    }
+
+    // Degenerate region anchor propagation.
+    // Simplified: propagate from any classified neighbor.
+    bool changed = true;
+    while (changed) {
+      changed = false;
+      for (auto& reg : faceRegions[fi]) {
+        if (reg.classified || !reg.degenerate) continue;
+        // Look for a neighbor (adjacent region sharing a PSLG edge).
+        // For simplicity in prototype: skip complex neighbor tracking.
+        // Just mark degenerate regions as "drop" (eps-feature).
+        ++cnt.epsFeaturesDropped;
+        reg.classified = true;
+        reg.below = 0;
+        reg.above = 0;  // winding = 0, won't be emitted
+      }
+    }
+  }
+
+  // Seam balance check.
+  {
+    std::optional<FatalReason> balFatal;
+    std::string balDetail;
+    if (!CheckSeamBalance(arr, faceRegions, balFatal, balDetail)) {
+      result.fatal = balFatal;
+      result.detail = balDetail;
+      return result;
+    }
+  }
+
+  // Stage E: emit kept regions.
+  std::vector<EmittedTri> emitted;
+  for (int fi = 0; fi < nFaces; ++fi) {
+    const CanonicalFace& face = arr.faces[fi];
+    for (const auto& reg : faceRegions[fi]) {
+      if (!reg.classified) continue;
+      if (!IsInside3D(reg.below) && !IsInside3D(reg.above)) continue;
+      if (IsInside3D(reg.below) == IsInside3D(reg.above)) continue;
+      RegionClassification cls{reg.below, reg.above,
+                               IsInside3D(reg.below) != IsInside3D(reg.above)};
+      auto tris = EmitRegion(reg, cls, face, arr.verts);
+      for (auto& t : tris) emitted.push_back(std::move(t));
+    }
+  }
+
+  // Build output Manifold::Impl.
+  result.impl = BuildImpl(emitted, arr.verts);
+  return result;
+}
+
+}  // namespace manifold

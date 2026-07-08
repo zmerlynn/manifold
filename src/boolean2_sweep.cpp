@@ -19,6 +19,15 @@
 // boundary. Smith's 7.6.2 block rule drives both: at each event p it splits
 // every status edge bracketing p through p, collapsing a dense near-concurrence
 // to one shared vertex and forcing any sub-eps residual crossing onto it.
+//
+// Engine extension (3D overlap-removal): PolySet2's value carries {m, srcId}
+// so that each piece in the winding pass can be attributed to its source face.
+// MergeVerticals1D performs per-interval active-contributor tracking (7.6.1
+// footnote 9 rewrite): each emitted vertical interval carries the id of its
+// unique contributor; multi-source intervals record a conflict (srcId=-1, count
+// incremented). SweepWinding accepts an optional capture out-channel and an
+// optional conflict-count out-pointer; default-null makes existing 2D callers
+// unchanged.
 
 #include <algorithm>
 #include <cmath>
@@ -26,6 +35,7 @@
 #include <cstdlib>
 #include <map>
 #include <set>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -89,9 +99,18 @@ bool IsInside(WindRule rule, int64_t w) {
   return false;
 }
 
-// Lex-normalized directed-edge key with signed multiplicity: the PolySet2 of
-// Smith 7.1.2 / 6.5 (reversal negates m, exact-coincident edges sum, zero-mult
-// and zero-length annihilate). Keyed by (lo, hi) in lexicographic point order.
+// Multiplicity + source-id pair. The PolySet2 mapped value (engine extension):
+// m is the signed net multiplicity in lex-normalized direction; srcId is the
+// face id from the 3D caller (0 = unattributed, -1 = conflicted).
+struct PolyVal {
+  int64_t m = 0;
+  int32_t srcId = 0;
+};
+
+// Lex-normalized directed-edge key with PolyVal: the PolySet2 of Smith
+// 7.1.2 / 6.5 (reversal negates m, srcId unchanged; exact-coincident edges
+// sum m and merge srcIds per the conflict rule; zero-mult and zero-length
+// annihilate). Keyed by (lo, hi) in lexicographic point order.
 struct PairLexLess {
   bool operator()(const std::pair<vec2, vec2>& a,
                   const std::pair<vec2, vec2>& b) const {
@@ -100,56 +119,115 @@ struct PairLexLess {
     return kLexLess(a.second, b.second);
   }
 };
-using PolySet2 = std::map<std::pair<vec2, vec2>, int64_t, PairLexLess>;
+using PolySet2 = std::map<std::pair<vec2, vec2>, PolyVal, PairLexLess>;
 
-// Add the directed edge a->b with multiplicity m: normalize the key to lex
-// order (negating m on reversal) and erase zero-length or zero-sum entries.
-void PolySetAdd(PolySet2& ps, vec2 a, vec2 b, int64_t m) {
-  if (a == b || m == 0) return;  // zero-length / zero-mult discarded (6.5)
-  if (kLexLess(b, a)) {
-    std::swap(a, b);
-    m = -m;
+// Merge two srcIds under the conflict rule: same id or one is already -1 ->
+// propagate (no new conflict); two distinct valid ids -> conflict (-1), return
+// true to signal a new conflict event.
+static bool MergeSrcId(int32_t& existing, int32_t incoming) {
+  if (existing == incoming) return false;
+  if (existing == -1 || incoming == -1) {
+    existing = -1;
+    return false;  // conflict already recorded upstream
   }
-  auto it = ps.find({a, b});
-  if (it == ps.end())
-    ps.emplace(std::make_pair(a, b), m);
-  else if ((it->second += m) == 0)
-    ps.erase(it);
+  existing = -1;
+  return true;  // new conflict
 }
 
-// 7.6.1 footnote 9: resolve each x-group of coincident/overlapping vertical
-// edges into signed-coverage segments between consecutive breakpoints, summing
-// overlaps and cancelling opposing edges. Every input breakpoint is preserved -
-// construction uses eps only and does not decimate collinear verts; Simplify
-// owns that.
-void MergeVerticals1D(PolySet2& ps) {
-  std::map<double, std::vector<std::pair<std::pair<double, double>, int64_t>>>
-      groups;
+// Add the directed edge a->b with PolyVal pv into ps. Normalizes to lex order
+// (negating m on reversal, srcId unchanged). On an exact-coincident key: sums
+// m (erasing if zero); updates srcId via MergeSrcId; returns true if a new
+// conflict was recorded.
+bool PolySetAdd(PolySet2& ps, vec2 a, vec2 b, PolyVal pv) {
+  if (a == b || pv.m == 0) return false;
+  if (kLexLess(b, a)) {
+    std::swap(a, b);
+    pv.m = -pv.m;
+  }
+  auto it = ps.find({a, b});
+  if (it == ps.end()) {
+    ps.emplace(std::make_pair(a, b), pv);
+    return false;
+  }
+  const int64_t newM = it->second.m + pv.m;
+  if (newM == 0) {
+    ps.erase(it);
+    return false;
+  }
+  const bool conflict = MergeSrcId(it->second.srcId, pv.srcId);
+  it->second.m = newM;
+  return conflict;
+}
+
+// 7.6.1 footnote 9 (rewritten for per-interval contributor tracking): resolve
+// each x-group of coincident/overlapping vertical edges into signed-coverage
+// segments between consecutive breakpoints. Each emitted interval carries the
+// srcId of its unique active contributor; if multiple distinct srcIds are
+// active in an interval, srcId = -1 and *conflicts is incremented (if
+// non-null). Adjacent same-plane triangles making multi-source vertical groups
+// is ordinary in the 3D use-case, not a corner case. All input breakpoints are
+// preserved.
+void MergeVerticals1D(PolySet2& ps, int* conflicts = nullptr) {
+  using SegEntry = std::tuple<double, double, int64_t, int32_t>;
+  std::map<double, std::vector<SegEntry>> groups;
   std::vector<std::pair<vec2, vec2>> toErase;
   for (const auto& kv : ps) {
     if (kv.first.first.x == kv.first.second.x) {
-      groups[kv.first.first.x].push_back(
-          {{kv.first.first.y, kv.first.second.y}, kv.second});
+      // PolySet2 lex-normalizes so kv.first.first.y <= kv.first.second.y
+      groups[kv.first.first.x].emplace_back(kv.first.first.y, kv.first.second.y,
+                                            kv.second.m, kv.second.srcId);
       toErase.push_back(kv.first);
     }
   }
   for (const auto& k : toErase) ps.erase(k);
+
   for (const auto& g : groups) {
-    std::map<double, int64_t> delta;  // coverage change at y
+    const double x = g.first;
+    // Build delta events: at each y-breakpoint record (delta_m, srcId)
+    std::map<double, std::vector<std::pair<int64_t, int32_t>>> events;
     for (const auto& seg : g.second) {
-      delta[seg.first.first] += seg.second;
-      delta[seg.first.second] -= seg.second;
+      double yLo, yHi;
+      int64_t m;
+      int32_t srcId;
+      std::tie(yLo, yHi, m, srcId) = seg;
+      events[yLo].emplace_back(m, srcId);
+      events[yHi].emplace_back(-m, srcId);
     }
-    // Emit a segment for each consecutive breakpoint gap with the running
-    // coverage, preserving every input vertex on the vertical.
-    int64_t cover = 0;
-    double prevY = 0;
+    // Active contributors: srcId -> net coverage contribution
+    std::map<int32_t, int64_t> activeSrcs;
+    int64_t totalCover = 0;
+    double prevY = 0.0;
     bool have = false;
-    for (const auto& d : delta) {
-      if (have && cover != 0)
-        PolySetAdd(ps, {g.first, prevY}, {g.first, d.first}, cover);
-      cover += d.second;
-      prevY = d.first;
+    for (const auto& ev : events) {
+      if (have && totalCover != 0) {
+        // Determine srcId for this (prevY, ev.first) interval
+        int32_t resolvedId = -2;  // -2 = unset sentinel
+        bool multi = false;
+        for (const auto& as : activeSrcs) {
+          if (as.second != 0) {
+            if (resolvedId == -2) {
+              resolvedId = as.first;
+            } else {
+              multi = true;
+              break;
+            }
+          }
+        }
+        if (multi) {
+          resolvedId = -1;
+          if (conflicts) ++(*conflicts);
+        } else if (resolvedId == -2) {
+          resolvedId = 0;  // all net-zero: shouldn't occur if totalCover != 0
+        }
+        PolySetAdd(ps, {x, prevY}, {x, ev.first}, {totalCover, resolvedId});
+      }
+      // Apply the delta events at ev.first
+      for (const auto& e : ev.second) {
+        activeSrcs[e.second] += e.first;
+        if (activeSrcs[e.second] == 0) activeSrcs.erase(e.second);
+        totalCover += e.first;
+      }
+      prevY = ev.first;
       have = true;
     }
   }
@@ -157,10 +235,11 @@ void MergeVerticals1D(PolySet2& ps) {
 
 // A live sweep edge. Roles (7.6.1): l = processed end, r = pending end. `m` is
 // the winding increment crossing l->r; LexMultiplicity normalizes it to lex
-// direction.
+// direction. `srcId` is the face attribution carried through splits.
 struct SweepEdge {
   vec2 l, r;
   int64_t m;
+  int32_t srcId;
   uint64_t seq;
 };
 
@@ -173,15 +252,13 @@ enum class SweepMode { Arrangement, Winding };
 
 class SweepPass {
  public:
-  SweepPass(WindRule rule, SweepMode mode) : rule_(rule), mode_(mode) {}
+  SweepPass(WindRule rule, SweepMode mode,
+            std::vector<SweepCapture>* capture = nullptr)
+      : rule_(rule), mode_(mode), capture_(capture) {}
 
-  void Seed(vec2 a, vec2 b, int64_t m) { PendingAdd(a, b, m); }
+  void Seed(vec2 a, vec2 b, PolyVal pv) { PendingAdd(a, b, pv); }
 
-  // `mergeVerticalOutput` runs the footnote-9 vertical resolve on the result:
-  // coincident and overlapping vertical edges are summed into signed-coverage
-  // segments (input breakpoints preserved). The arrangement pass needs it to
-  // order coincident verticals the sweep status cannot; the measure pass emits
-  // the already-resolved boundary and skips it.
+  // `mergeVerticalOutput` runs the footnote-9 vertical resolve on the result.
   void Run(bool mergeVerticalOutput = true) {
     while (!events_.empty()) {
       const vec2 p = *events_.begin();
@@ -190,28 +267,36 @@ class SweepPass {
     }
     DEBUG_ASSERT(status_.empty() && pending_.empty(), logicErr,
                  "Boolean2 sweep left live edges after draining");
-    if (mergeVerticalOutput) MergeVerticals1D(out_);
+    if (mergeVerticalOutput) MergeVerticals1D(out_, &conflictCount_);
   }
 
   PolySet2& Out() { return out_; }
+  int ConflictCount() const { return conflictCount_; }
 
  private:
   int64_t LexMultiplicity(const SweepEdge& e) const {
     return kLexLess(e.l, e.r) ? e.m : -e.m;
   }
 
-  void PendingAdd(vec2 a, vec2 b, int64_t m) {
-    if (a == b || m == 0) return;
+  void PendingAdd(vec2 a, vec2 b, PolyVal pv) {
+    if (a == b || pv.m == 0) return;
     if (kLexLess(b, a)) {
       std::swap(a, b);
-      m = -m;
+      pv.m = -pv.m;
     }
     auto& inner = pending_[a];
     auto it = inner.find(b);
-    if (it == inner.end())
-      inner.emplace(b, m);
-    else if ((it->second += m) == 0)
-      inner.erase(it);
+    if (it == inner.end()) {
+      inner.emplace(b, pv);
+    } else {
+      const int64_t newM = it->second.m + pv.m;
+      if (newM == 0) {
+        inner.erase(it);
+      } else {
+        if (MergeSrcId(it->second.srcId, pv.srcId)) ++conflictCount_;
+        it->second.m = newM;
+      }
+    }
     if (inner.empty()) pending_.erase(a);
     events_.insert(a);
     events_.insert(b);
@@ -249,23 +334,31 @@ class SweepPass {
     return a.seq < b.seq;
   }
 
-  // 7.4.3 (+collect override): in collect mode the piece goes to `out` with its
-  // role multiplicity (building the arrangement). In measure mode emit iff the
-  // fill below/above differs, oriented interior-on-left.
+  // 7.4.3 (+collect override): in arrangement mode the piece goes to `out_`
+  // with its role PolyVal. In winding mode emit iff the fill (IsInside) differs
+  // across it, oriented interior-on-left; capture into `capture_` if non-null.
   void EmitBoundary(const vec2& from, const vec2& to, int64_t m, int64_t below,
-                    int64_t above) {
+                    int64_t above, int32_t srcId) {
     if (from == to) return;
     if (mode_ == SweepMode::Arrangement) {
-      PolySetAdd(out_, from, to, m);
+      if (PolySetAdd(out_, from, to, {m, srcId})) ++conflictCount_;
       return;
     }
     const bool insB = IsInside(rule_, below);
     const bool insA = IsInside(rule_, above);
     if (insB == insA) return;
+    if (capture_) {
+      // Store in lex-forward direction (from < to lex).
+      const vec2 capFrom = kLexLess(from, to) ? from : to;
+      const vec2 capTo = kLexLess(from, to) ? to : from;
+      capture_->push_back({capFrom, capTo, srcId, below, above});
+    }
     // above inside -> lex-forward; below inside -> lex-backward.
-    PolySetAdd(
-        out_, from, to,
-        insA ? (kLexLess(from, to) ? 1 : -1) : (kLexLess(from, to) ? -1 : 1));
+    if (PolySetAdd(out_, from, to,
+                   {insA ? (kLexLess(from, to) ? 1 : -1)
+                         : (kLexLess(from, to) ? -1 : 1),
+                    srcId}))
+      ++conflictCount_;
   }
 
   // 7.4.1: split status edge idx at q; shorten in place, requeue the remainder.
@@ -274,11 +367,11 @@ class SweepPass {
     if (q == e.r) return;
     if (q == e.l) {
       status_.erase(status_.begin() + idx);
-      PendingAdd(q, e.r, e.m);
+      PendingAdd(q, e.r, {e.m, e.srcId});
       return;
     }
     status_[idx].r = q;
-    PendingAdd(q, e.r, e.m);
+    PendingAdd(q, e.r, {e.m, e.srcId});
     events_.insert(q);
   }
 
@@ -345,10 +438,10 @@ class SweepPass {
       const int64_t below = w, above = w + lm;
       w = above;
       if (cls[i] == Side::ENDS) {
-        EmitBoundary(e.l, e.r, e.m, below, above);
+        EmitBoundary(e.l, e.r, e.m, below, above, e.srcId);
       } else {  // forced through p (7.6.2): commit [e.l, p], re-enter [p, e.r]
-        if (e.l != p) EmitBoundary(e.l, p, e.m, below, above);
-        reinsert.push_back({p, e.r, e.m, seqCounter_++});
+        if (e.l != p) EmitBoundary(e.l, p, e.m, below, above, e.srcId);
+        reinsert.push_back({p, e.r, e.m, e.srcId, seqCounter_++});
       }
     }
     const bool removedAny = hi > lo;
@@ -356,7 +449,8 @@ class SweepPass {
     auto pit = pending_.find(p);
     if (pit != pending_.end()) {
       for (const auto& kv : pit->second)
-        reinsert.push_back({p, kv.first, kv.second, seqCounter_++});
+        reinsert.push_back(
+            {p, kv.first, kv.second.m, kv.second.srcId, seqCounter_++});
       pending_.erase(pit);
     }
     std::stable_sort(reinsert.begin(), reinsert.end(), GradientLess);
@@ -376,33 +470,42 @@ class SweepPass {
 
   WindRule rule_;
   SweepMode mode_;
+  std::vector<SweepCapture>* capture_;
   std::set<vec2, LexLess> events_;
-  std::map<vec2, std::map<vec2, int64_t, LexLess>, LexLess> pending_;
+  std::map<vec2, std::map<vec2, PolyVal, LexLess>, LexLess> pending_;
   std::vector<SweepEdge> status_;
   PolySet2 out_;
   uint64_t seqCounter_ = 0;
+  int conflictCount_ = 0;
 };
 
-// Arrangement pass: the collect sweep discovers crossings (testPair), resolves
+// Arrangement pass: the collect sweep discovers crossings (TestPair), resolves
 // near-concurrences with the block rule, merges coincident verticals, and emits
 // every finalized piece. The result is a true arrangement - every crossing is a
 // shared vertex, no two pieces cross.
-// The arrangement pass over the seeded PolySet2.
-PolySet2 CollectArrangement(PolySet2 arr, WindRule rule) {
+PolySet2 CollectArrangement(PolySet2 arr, WindRule rule,
+                            int* conflicts = nullptr) {
   SweepPass collect(rule, SweepMode::Arrangement);
   for (const auto& kv : arr)
     collect.Seed(kv.first.first, kv.first.second, kv.second);
   collect.Run();
+  if (conflicts) *conflicts += collect.ConflictCount();
   return std::move(collect.Out());
 }
 
-// Arrangement then winding over the resulting true arrangement.
-PolySet2 CollectThenMeasure(PolySet2 arr, WindRule rule) {
-  PolySet2 clean = CollectArrangement(std::move(arr), rule);
-  SweepPass measure(rule, SweepMode::Winding);
+// Arrangement then winding over the resulting true arrangement. The optional
+// `capture` receives one SweepCapture per retained boundary piece in the
+// winding pass. `conflicts` is incremented by the total number of attribution
+// conflicts.
+PolySet2 CollectThenMeasure(PolySet2 arr, WindRule rule,
+                            std::vector<SweepCapture>* capture = nullptr,
+                            int* conflicts = nullptr) {
+  PolySet2 clean = CollectArrangement(std::move(arr), rule, conflicts);
+  SweepPass measure(rule, SweepMode::Winding, capture);
   for (const auto& kv : clean)
     measure.Seed(kv.first.first, kv.first.second, kv.second);
   measure.Run(/*mergeVerticalOutput=*/false);  // preserve T-junction verts
+  if (conflicts) *conflicts += measure.ConflictCount();
   return std::move(measure.Out());
 }
 
@@ -411,8 +514,14 @@ PolySet2 CollectThenMeasure(PolySet2 arr, WindRule rule) {
 // Arranges `edges` (referencing `verts`) and returns the retained boundary as
 // directed OutEdges under `rule`. `verts` is in/out: the constructed crossing
 // vertices the returned edges reference are appended to it.
+// If `capture` is non-null, appends one SweepCapture per retained winding-pass
+// piece (see SweepCapture definition in boolean2.h).
+// If `conflictCount` is non-null, *conflictCount receives the total number of
+// source-id attribution conflicts; 2D callers pass nullptr for both.
 std::vector<OutEdge> SweepWinding(const std::vector<EdgeM>& edges,
-                                  std::vector<vec2>& verts, WindRule rule) {
+                                  std::vector<vec2>& verts, WindRule rule,
+                                  std::vector<SweepCapture>* capture,
+                                  int* conflictCount) {
   std::map<std::pair<double, double>, int> vertId;
   for (int v = 0; v < static_cast<int>(verts.size()); ++v)
     vertId.emplace(std::make_pair(verts[v].x, verts[v].y), v);
@@ -434,17 +543,20 @@ std::vector<OutEdge> SweepWinding(const std::vector<EdgeM>& edges,
   PolySet2 arr;
   for (const auto& e : edges) {
     if (e.v0 == e.v1) continue;
-    PolySetAdd(arr, verts[e.v0], verts[e.v1], e.mult);
+    PolySetAdd(arr, verts[e.v0], verts[e.v1], {e.mult, e.srcId});
   }
-  MergeVerticals1D(arr);
+  int conflicts = 0;
+  MergeVerticals1D(arr, &conflicts);
 
-  const PolySet2 out = CollectThenMeasure(std::move(arr), rule);
+  const PolySet2 out =
+      CollectThenMeasure(std::move(arr), rule, capture, &conflicts);
+  if (conflictCount) *conflictCount = conflicts;
 
   // Materialize the retained boundary as directed OutEdges. A key stores the
   // lex-min/lex-max endpoints with signed multiplicity: positive runs lo->hi.
   std::vector<OutEdge> result;
   for (const auto& kv : out) {
-    const int64_t m = kv.second;
+    const int64_t m = kv.second.m;
     if (m == 0) continue;
     const int loId = getId(kv.first.first);
     const int hiId = getId(kv.first.second);

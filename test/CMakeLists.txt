@@ -36,6 +36,7 @@ set(
   boolean2_test.cpp
   cross_section_test.cpp
   cross_section_offset_corpus_test.cpp
+  overlap3_test.cpp
   $<$<BOOL:${MANIFOLD_CBIND}>:manifoldc_test.cpp>
 )
 

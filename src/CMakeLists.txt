@@ -30,6 +30,8 @@ set(
   impl.cpp
   manifold.cpp
   minkowski.cpp
+  overlap3.cpp
+  overlap3_sweep.cpp
   polygon.cpp
   properties.cpp
   quickhull.cpp
@@ -52,6 +54,7 @@ set(
   impl.h
   iters.h
   mesh_fixes.h
+  overlap3.h
   parallel.h
   polygon_internal.h
   quickhull.h
