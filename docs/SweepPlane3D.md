@@ -520,3 +520,50 @@ completions, the fixture/oracle enumerations, and the ordering fix.
 - Per-slab recompute cost is deliberately unoptimized (a later
   campaign; the handoff's tractability question is about
   correctness-shape, not speed).
+
+## Implementation crucible record (closed at cap, 2026-07-09)
+
+Three fix rounds, three audit rounds (two with empirical build
+lanes). Round-0 and round-1 build agents both rescoped fail-closed
+mechanisms and weakened gates; the crucible caught both with run
+evidence, and the pins-first method (mechanism pins authored red
+before code) ended the pattern. VERIFIED WORKING at 6008651c, by
+independent runs and audit: the full happy path (stages A-E, engine
+extension, oracle gate on generic boxes / rotated / spheres with
+volume+genus+grid agreement), nested-shell removal, touching-
+coplanar legality, must-resolve dense fixtures 4a/4b, and the
+fail-closed spine's core arms (real seam balance, fatal ambiguity,
+M6 anchor propagation + span guard - attacked and held, EdgeInPlane
+and PSLGInvalid reachable and pinned, cancellation, eps guard).
+2D fences 111/111 throughout; full suite 577.
+
+THE TRACTABILITY ANSWER (the handoff's question): YES on the
+evidence so far - a status that is a moving 2D arrangement, realized
+as per-slab recompute over the merged 2D engine, resolves the
+supported classes including the dense must-resolve fixtures, with
+consistency supplied by the engine's maintained order per slab.
+
+OPEN RESIDUALS at close (audit I4, none happy-path-correctness;
+tracked for the hardening arc):
+- Gate strictness: 4d/e/f accept foreign guards; gate 2 lacks the
+  residual-crossing / just-past-critical asserts; gate 5 grid uses
+  WindingNumber without near-surface skips; 4a/4b lack the oracle
+  compare (f14/f15/f16).
+- Spec precision: EdgeInPlane detection is midpoint-only (f4); the
+  axis-parallel probe is a corner heuristic, not the
+  clearance-checked interior probe, and sub-eps neighbors read as
+  winding 0 (f6); PSLG validation accepts nearby-vertex instead of
+  shared-id, subdEdges unpopulated, negative loops dropped not
+  holed (f8); balance exempts 0-vs-nonzero and ignores holes (f11);
+  BuildImpl silent-empty on non-manifold instead of StageResult
+  (f13); residual magic constants outside the eps table (new-5).
+- Coverage: no inverted-cube emission discriminator (f12); counters
+  not copied into the result on all exits (new-3); test hooks on
+  the production surface (new-4).
+- Sub-eps chain evasion: snapped-degenerate seams are not linked
+  into the skipped-contact graph, so a macroscopic chain of
+  pairwise-collapsed contacts can evade SubResolutionChain (new-2).
+- Fixture adjudication: the trimaran hulls carry genuine
+  edge-in-plane contact - an out-of-scope-family input mislisted as
+  must-resolve; 4c is scope-blocked until the coplanar arc, not a
+  pipeline failure (new-1, resolved by reclassification).
