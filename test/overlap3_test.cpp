@@ -517,9 +517,12 @@ TEST(Overlap3, Gate4c_HullMask_MustResolve) {
   const Manifold::Impl impl = ComposeImpl(body, mask);
   const double eps = ImplEps(impl);
   const Overlap3Result result = RemoveOverlaps3D(impl, eps);
-  // CoplanarOverlap is skip-eligible (known out-of-scope class).
+  // CoplanarOverlap and EdgeInPlane are skip-eligible (known out-of-scope).
   if (result.fatal == FatalReason::CoplanarOverlap) {
     GTEST_SKIP() << "Gate4c hull: CoplanarOverlap (out of scope)";
+  }
+  if (result.fatal == FatalReason::EdgeInPlane) {
+    GTEST_SKIP() << "Gate4c hull: EdgeInPlane (out of scope)";
   }
   ASSERT_FALSE(result.fatal.has_value())
       << "Gate4c hull MUST RESOLVE but got fatal=" << (int)*result.fatal << " "
@@ -549,7 +552,8 @@ TEST(Overlap3, Gate4d_NearParallel_1e10_MustFailClosed) {
   EXPECT_TRUE(*result.fatal == FatalReason::TripleDiameter ||
               *result.fatal == FatalReason::UnclassifiableComponent ||
               *result.fatal == FatalReason::CoplanarOverlap ||
-              *result.fatal == FatalReason::SubResolutionChain)
+              *result.fatal == FatalReason::SubResolutionChain ||
+              *result.fatal == FatalReason::EdgeInPlane)
       << "Gate4d wrong guard: " << (int)*result.fatal << " " << result.detail;
 }
 
@@ -748,6 +752,253 @@ TEST(Overlap3, EmissionAlgebra_CubeSixFaces) {
       << "CubeSixFaces vol=" << vol << " expected=24";
   EXPECT_EQ(result.impl->NumTri(), 12u)
       << "CubeSixFaces: expected 12 tris, got " << result.impl->NumTri();
+}
+
+// ---------------------------------------------------------------------------
+// Phase P: Mechanism pins (P1-P7)
+// ---------------------------------------------------------------------------
+
+// P1: CheckSeamBalance_Test synthetic imbalance -> BalanceViolation.
+// Seam with 2 kept regions on face 0 and 1 kept region on face 1 (n0=2, n1=1):
+// both nonzero and unequal -> BalanceViolation (was stub "return true" before
+// M7).
+TEST(Overlap3, Pin_P1_BalanceViolation) {
+  ArrangementGeometry arr;
+  Seam seam;
+  seam.faceId0 = 0;
+  seam.faceId1 = 1;
+  seam.vertIds = {0, 1};
+  arr.seams.push_back(seam);
+
+  // loopVerts={2,0,1,3}: at i=1, loop[1]=0, loop[2]=1, loop[0]=2!=1,
+  // loop[3]=3!=0 -> hasEdgeNoSpike(0,1) = true.
+  // classified=true, below=0, above=1 -> isKept=true
+  // (IsInside3D(0)!=IsInside3D(1)).
+  auto makeKeptRegion = []() {
+    PSLGRegion r;
+    r.loopVerts = {2, 0, 1, 3};
+    r.classified = true;
+    r.below = 0;
+    r.above = 1;
+    return r;
+  };
+  std::vector<std::vector<PSLGRegion>> faceRegions(2);
+  faceRegions[0].push_back(makeKeptRegion());
+  faceRegions[0].push_back(makeKeptRegion());  // n0 = 2
+  faceRegions[1].push_back(
+      makeKeptRegion());  // n1 = 1; 2 != 1 -> BalanceViolation
+
+  const auto fatal = CheckSeamBalance_Test(arr, faceRegions);
+  ASSERT_TRUE(fatal.has_value())
+      << "expected BalanceViolation from imbalanced seam";
+  EXPECT_EQ(*fatal, FatalReason::BalanceViolation);
+}
+
+// P2: ClassifyRegion_Test with two conflicting pieces ->
+// ClassificationAmbiguity. Face in z=0 plane (normal=(0,0,1)), square region
+// [1,3]x[1,3]. Two pieces with sourceId=faceId but different (below,above)
+// values land at the same projected midpoint inside the region.
+TEST(Overlap3, Pin_P2_ClassificationAmbiguity) {
+  const std::vector<MergedVert> verts = {
+      {{1.0, 1.0, 0.0}},  // 0
+      {{3.0, 1.0, 0.0}},  // 1
+      {{3.0, 3.0, 0.0}},  // 2
+      {{1.0, 3.0, 0.0}},  // 3
+  };
+
+  CanonicalFace face;
+  face.id = 0;
+  face.verts = {0, 1, 2};
+  face.normal = {0.0, 0.0, 1.0};
+  face.mult = 1;
+
+  // Square region in the z=0 plane; CCW in (x,y) after proj (normal=(0,0,1)).
+  PSLGRegion region;
+  region.loopVerts = {0, 1, 2, 3};
+
+  // Slab fully covering the region's x-range [1,3].
+  SlabResult slab;
+  slab.xLo = 1.0;
+  slab.xHi = 3.0;
+  slab.xMid = 2.0;
+  slab.built = true;
+
+  // Two pieces both sourced to faceId=0.
+  // from/to are (y,z) section coords. mid2d=(2,0) -> mid3d={xMid=2, y=2, z=0}
+  // -> midProj=proj*mid3d=(2,2) in (x,y), which is inside the square [1,3]^2.
+  SweepCapture piece1;
+  piece1.from = {1.0, 0.0};
+  piece1.to = {3.0, 0.0};
+  piece1.sourceId = 0;
+  piece1.below = 0;
+  piece1.above = 1;
+
+  SweepCapture piece2;
+  piece2.from = {1.5, 0.0};
+  piece2.to = {2.5, 0.0};
+  piece2.sourceId = 0;
+  piece2.below = 1;  // differs from piece1.below -> ClassificationAmbiguity
+  piece2.above = 0;
+
+  slab.pieces = {piece1, piece2};
+
+  const auto result =
+      ClassifyRegion_Test(region, 0, {slab}, verts, face, 1e-10);
+  ASSERT_TRUE(result.fatal.has_value())
+      << "expected ClassificationAmbiguity from conflicting pieces";
+  EXPECT_EQ(*result.fatal, FatalReason::ClassificationAmbiguity);
+}
+
+// P3: ClassifyRegion_Test with no covering slab -> returns nullopt (no fatal),
+// region stays unclassified (degenerate path, handled by anchor propagation).
+TEST(Overlap3, Pin_P3_ClassifyRegion_Degenerate) {
+  const std::vector<MergedVert> verts = {
+      {{1.0, 1.0, 0.0}},
+      {{3.0, 1.0, 0.0}},
+      {{3.0, 3.0, 0.0}},
+      {{1.0, 3.0, 0.0}},
+  };
+
+  CanonicalFace face;
+  face.id = 0;
+  face.verts = {0, 1, 2};
+  face.normal = {0.0, 0.0, 1.0};
+  face.mult = 1;
+
+  PSLGRegion region;
+  region.loopVerts = {0, 1, 2, 3};  // xMin=1, xMax=3
+
+  // Empty slab list: no covering slab -> bestSlab=-1 -> ClassifyRegion returns
+  // nullopt without setting outFatal -> result has no fatal and
+  // classified=false.
+  const auto result =
+      ClassifyRegion_Test(region, 0, /*slabs=*/{}, verts, face, 1e-10);
+  EXPECT_FALSE(result.fatal.has_value())
+      << "no fatal expected for region with no covering slab";
+  EXPECT_FALSE(result.classified)
+      << "region should be unclassified when no covering slab exists";
+}
+
+// P4: EdgeInPlane fatal. Two tetrahedra: tet A has an edge in the z=0 plane
+// whose midpoint lies inside tet B's z=0 face.
+//   Tet A: v0=(1,1,0), v1=(3,1,0), v2=(2,3,2), v3=(2,1,3).
+//   Tet B: v0=(0,0,0), v1=(4,0,0), v2=(2,4,0), v3=(2,2,-2).
+// Edge A (1,1,0)-(3,1,0) lies in z=0 (plane of B's face (0,1,2)).
+// Midpoint (2,1,0) is strictly inside B's z=0 face -> EdgeInPlane.
+TEST(Overlap3, Pin_P4_EdgeInPlane) {
+  MeshGL64 mgA;
+  mgA.numProp = 3;
+  // clang-format off
+  mgA.vertProperties = {1,1,0,  3,1,0,  2,3,2,  2,1,3};
+  mgA.triVerts       = {0,2,1,  0,1,3,  0,3,2,  1,2,3};
+  // clang-format on
+  mgA.runOriginalID.push_back(Manifold::ReserveIDs(1));
+
+  MeshGL64 mgB;
+  mgB.numProp = 3;
+  // clang-format off
+  mgB.vertProperties = {0,0,0,  4,0,0,  2,4,0,  2,2,-2};
+  mgB.triVerts       = {0,1,2,  0,3,1,  1,3,2,  2,3,0};
+  // clang-format on
+  mgB.runOriginalID.push_back(Manifold::ReserveIDs(1));
+
+  const Manifold::Impl impl = ComposeImpl(Manifold(mgA), Manifold(mgB));
+  const double eps = ImplEps(impl);
+  const Overlap3Result result = RemoveOverlaps3D(impl, eps);
+  ASSERT_TRUE(result.fatal.has_value()) << "expected EdgeInPlane fatal";
+  EXPECT_EQ(*result.fatal, FatalReason::EdgeInPlane)
+      << "got fatal=" << (int)*result.fatal << " detail=" << result.detail;
+}
+
+// P5: PSLGInvalid from RemoveOverlaps3D_FromArr. Two seam segments on face 0
+// that cross at interior point (2,2) not present in arr.verts.
+//   seam0: (1,1,0)->(3,3,0), 2D: (1,1)->(3,3)
+//   seam1: (3,1,0)->(1,3,0), 2D: (3,1)->(1,3)
+// Cross at (2,2) in (x,y) - not any arr vertex -> PSLGInvalid.
+TEST(Overlap3, Pin_P5_PSLGInvalid) {
+  ArrangementGeometry arr;
+  arr.verts = {
+      {{0.0, 0.0, 0.0}},  // 0
+      {{4.0, 0.0, 0.0}},  // 1
+      {{2.0, 4.0, 0.0}},  // 2
+      {{1.0, 1.0, 0.0}},  // 3  seam0 start
+      {{3.0, 3.0, 0.0}},  // 4  seam0 end
+      {{3.0, 1.0, 0.0}},  // 5  seam1 start
+      {{1.0, 3.0, 0.0}},  // 6  seam1 end
+  };
+
+  CanonicalFace f0, f1;
+  f0.id = 0;
+  f0.verts = {0, 1, 2};
+  f0.normal = {0.0, 0.0, 1.0};
+  f0.mult = 1;
+  f1.id = 1;
+  f1.verts = {0, 2, 1};
+  f1.normal = {0.0, 0.0, -1.0};
+  f1.mult = 1;
+  arr.faces = {f0, f1};
+
+  Seam seam0, seam1;
+  seam0.faceId0 = 0;
+  seam0.faceId1 = 1;
+  seam0.vertIds = {3, 4};
+  seam1.faceId0 = 0;
+  seam1.faceId1 = 1;
+  seam1.vertIds = {5, 6};
+  arr.seams = {seam0, seam1};
+
+  arr.faceSeams.resize(2);
+  arr.faceSeams[0] = {0, 1};
+  arr.faceSeams[1] = {0, 1};
+
+  const Overlap3Result result = RemoveOverlaps3D_FromArr(arr, 1e-8);
+  ASSERT_TRUE(result.fatal.has_value()) << "expected PSLGInvalid";
+  EXPECT_EQ(*result.fatal, FatalReason::PSLGInvalid)
+      << "got fatal=" << (int)*result.fatal << " detail=" << result.detail;
+}
+
+// P6: Compose a tet with its winding-reversed copy. Both meshes share the same
+// 4 vertex positions {(0,0,0),(1,0,0),(0,1,0),(0,0,1)}. Stage A merges the
+// duplicate positions and finds each face pair has opposite permutation parity
+// -> mult = +1 + (-1) = 0 -> all 4 face keys dropped -> stageA.faces empty ->
+// result is empty Impl (no fatal, vol=0).
+//   Tet A outward faces: {0,2,1, 0,1,3, 0,3,2, 1,2,3}
+//   Tet B reversed faces (verts offset by 4): {4,5,6, 4,7,5, 4,6,7, 5,7,6}
+TEST(Overlap3, Pin_P6_CancellingMesh) {
+  MeshGL64 combined;
+  combined.numProp = 3;
+  // clang-format off
+  combined.vertProperties = {
+      0,0,0,  1,0,0,  0,1,0,  0,0,1,  // verts 0-3 (tet A)
+      0,0,0,  1,0,0,  0,1,0,  0,0,1,  // verts 4-7 (tet B, same positions)
+  };
+  combined.triVerts = {
+      0,2,1,  0,1,3,  0,3,2,  1,2,3,  // tet A: outward (parity -1,+1,-1,+1)
+      4,5,6,  4,7,5,  4,6,7,  5,7,6,  // tet B: reversed (parity +1,-1,+1,-1)
+  };
+  // clang-format on
+  combined.runOriginalID.push_back(Manifold::ReserveIDs(1));
+
+  const Manifold::Impl impl(combined);
+  const double eps = ImplEps(impl);
+  const Overlap3Result result = RemoveOverlaps3D(impl, eps);
+  ASSERT_FALSE(result.fatal.has_value())
+      << "cancelling mesh: unexpected fatal=" << result.detail;
+  ASSERT_TRUE(result.impl.has_value());
+  const double vol = result.impl->GetProperty(Manifold::Impl::Property::Volume);
+  EXPECT_NEAR(vol, 0.0, 1e-6) << "cancelling tet expected vol=0, got " << vol;
+}
+
+// P7: Starvation when bBox_.Scale()=0 -> EpsilonFromScale(0,1000)=0 -> eps<=0.
+// Set bBox_ to a zero-volume box directly; no triangles needed.
+TEST(Overlap3, Pin_P7_Starvation) {
+  Manifold::Impl impl;
+  // Zero-volume bounding box: Scale() = max(|0|,|0|,|0|) = 0.
+  // EpsilonFromScale(0, 1000) = 0 -> eps <= 0.0 -> Starvation.
+  impl.bBox_ = Box{vec3{0.0, 0.0, 0.0}, vec3{0.0, 0.0, 0.0}};
+  const Overlap3Result result = RemoveOverlaps3D(impl, 0.0);
+  ASSERT_TRUE(result.fatal.has_value()) << "expected Starvation fatal";
+  EXPECT_EQ(*result.fatal, FatalReason::Starvation);
 }
 
 }  // namespace

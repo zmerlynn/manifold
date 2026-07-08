@@ -196,4 +196,44 @@ struct Overlap3Internals {
 Overlap3Internals RemoveOverlaps3D_TestHooks(const Manifold::Impl& in,
                                              double eps = 0.0);
 
+// ---------------------------------------------------------------------------
+// White-box test types and wrappers (overlap3_test.cpp only)
+// ---------------------------------------------------------------------------
+
+// A region in the face PSLG, exposed for white-box balance and classification
+// pins.  Stage D builds these internally; they are exposed here so test code
+// can synthesize inputs for CheckSeamBalance_Test and ClassifyRegion_Test.
+struct PSLGRegion {
+  std::vector<int> loopVerts;               // boundary vert ids (CCW)
+  std::vector<std::vector<int>> holeVerts;  // hole loops
+  int64_t below = 0, above = 0;             // status-order windings
+  bool classified = false;
+  bool degenerate = false;  // no covering slab > eps
+};
+
+// Return value from ClassifyRegion_Test.
+struct ClassifyRegionResult {
+  std::optional<FatalReason> fatal;
+  int64_t below = 0, above = 0;
+  bool classified = false;
+};
+
+// White-box: call the seam-balance check on synthetic region data.  Returns
+// the FatalReason if balance is violated, nullopt if the check passes.
+std::optional<FatalReason> CheckSeamBalance_Test(
+    const ArrangementGeometry& arr,
+    const std::vector<std::vector<PSLGRegion>>& faceRegions);
+
+// White-box: call ClassifyRegion on a single synthetic PSLGRegion with the
+// given slab data.
+ClassifyRegionResult ClassifyRegion_Test(const PSLGRegion& region, int faceId,
+                                         const std::vector<SlabResult>& slabs,
+                                         const std::vector<MergedVert>& verts,
+                                         const CanonicalFace& face, double eps);
+
+// Run stages C+D+E starting from a pre-built ArrangementGeometry.  Used by
+// PSLGInvalid pin (P5) to inject synthetic bad-seam data.
+Overlap3Result RemoveOverlaps3D_FromArr(const ArrangementGeometry& arr,
+                                        double eps);
+
 }  // namespace manifold

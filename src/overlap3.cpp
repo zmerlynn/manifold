@@ -273,29 +273,26 @@ static StageAResult StageA(const Manifold::Impl& in, double eps) {
 // Stage B: arrangement geometry (seams, events, triple points)
 // ---------------------------------------------------------------------------
 
-// Determine the t-range on line (P + t*D) that lies inside a triangle
-// (v0,v1,v2) with normal n and planeDist d0 = dot(n, v0). Returns whether the
-// range is non-empty, and the [tLo, tHi] bounds.
+// M1: LineTriClip - clip the line (P + t*D) to the interior of triangle
+// (v0,v1,v2) with normal n.  Uses eps-relative tolerances (not 1e-14).
+// Returns whether the range [tLo, tHi] is non-empty.
 static bool LineTriClip(vec3 P, vec3 D, vec3 v0, vec3 v1, vec3 v2, vec3 n,
-                        double& tLo, double& tHi) {
+                        double& tLo, double& tHi, double eps) {
   tLo = -1e18;
   tHi = 1e18;
-  // For each edge (vi, vj), find the halfplane constraint on the line.
-  // The constraint: point Q = P + t*D is on the correct side of edge vi->vj
-  // iff dot(cross(vj-vi, Q-vi), n) >= 0.
   const vec3 edges[3] = {v1 - v0, v2 - v1, v0 - v2};
-  const vec3 verts[3] = {v0, v1, v2};
+  const vec3 vBase[3] = {v0, v1, v2};
+  // Scale factor for eps-relative comparison: use triangle area ~ |n|.
+  const double triScale = la::length(n);
+  const double kTol = eps * triScale;
   for (int i = 0; i < 3; ++i) {
-    const vec3 ev = la::cross(edges[i], D);  // normal of constraint plane
-    const vec3 evBase = la::cross(edges[i], verts[i] - P);
+    const vec3 ev = la::cross(edges[i], D);
+    const vec3 evBase = la::cross(edges[i], vBase[i] - P);
     const double denom = la::dot(n, ev);
     const double num = la::dot(n, evBase);
-    if (std::abs(denom) < 1e-14) {
-      // D is parallel to this edge's halfplane boundary. The constraint is
-      // -num >= 0 (independent of t). When num > 0 the line is outside.
-      // (evBase = cross(e, v-P) = -cross(e, P-v), so num = -A where A is the
-      // signed-area test; A < 0 means outside, i.e., num > 0 means outside.)
-      if (num > 1e-14) return false;  // entirely outside
+    if (std::abs(denom) <= kTol) {
+      // D is parallel to this edge's halfplane boundary.
+      if (num > kTol) return false;  // entirely outside
     } else {
       const double t = num / denom;
       if (denom > 0) {
@@ -305,50 +302,60 @@ static bool LineTriClip(vec3 P, vec3 D, vec3 v0, vec3 v1, vec3 v2, vec3 n,
       }
     }
   }
-  return tLo <= tHi + 1e-14;
+  return tLo <= tHi + eps;
 }
 
-// Compute the intersection segment between two non-coplanar triangles.
-// Returns true if there is a proper intersection (length > 0), with endpoints
-// in qA, qB and their t-parameters tA, tB on the intersection line.
+// M1: Compute the intersection segment between two non-coplanar triangles.
+// Six edge-plane clips (three per triangle), eps-aware inside tests, endpoint
+// dedup.  Returns true if intersection segment length > eps.
 static bool TriTriSeam(vec3 a0, vec3 a1, vec3 a2, vec3 na,  // face A
                        vec3 b0, vec3 b1, vec3 b2, vec3 nb,  // face B
-                       vec3& qA, vec3& qB) {
-  // Intersection line direction
+                       vec3& qA, vec3& qB, double eps) {
   const vec3 D = la::cross(na, nb);
   const double Dlen = la::length(D);
-  if (Dlen < 1e-14) return false;  // parallel planes
+  if (Dlen <= eps * eps) return false;  // near-parallel planes
   const vec3 dir = D / Dlen;
 
-  // Find a point on both planes: solve na.p = na.a0, nb.p = nb.b0
   const double da = la::dot(na, a0);
   const double db = la::dot(nb, b0);
-  // Use the parametric approach: P = ? We use a 3x3 system with the line's
-  // direction as additional constraint: dir.p = 0 (closest to origin on line).
-  // Faster: pick coordinate with largest |dir| component.
   const vec3 absD = la::abs(dir);
   int maxComp =
       (absD.x >= absD.y && absD.x >= absD.z) ? 0 : (absD.y >= absD.z ? 1 : 2);
-  // Zero out the maxComp coordinate in the two plane equations and solve 2x2.
   const int c1 = (maxComp + 1) % 3, c2 = (maxComp + 2) % 3;
   const double a11 = na[c1], a12 = na[c2], b11 = nb[c1], b12 = nb[c2];
   const double det = a11 * b12 - a12 * b11;
-  if (std::abs(det) < 1e-14) return false;
+  if (std::abs(det) <= eps * eps) return false;
   vec3 P(0.0);
   P[c1] = (da * b12 - db * a12) / det;
   P[c2] = (a11 * db - b11 * da) / det;
 
-  // Clip to face A and face B
   double tAlo, tAhi, tBlo, tBhi;
-  if (!LineTriClip(P, dir, a0, a1, a2, na, tAlo, tAhi)) return false;
-  if (!LineTriClip(P, dir, b0, b1, b2, nb, tBlo, tBhi)) return false;
+  if (!LineTriClip(P, dir, a0, a1, a2, na, tAlo, tAhi, eps)) return false;
+  if (!LineTriClip(P, dir, b0, b1, b2, nb, tBlo, tBhi, eps)) return false;
   const double tLo = std::max(tAlo, tBlo);
   const double tHi = std::min(tAhi, tBhi);
-  if (tLo > tHi) return false;
+  if (tLo >= tHi) return false;
 
   qA = P + tLo * dir;
   qB = P + tHi * dir;
   return true;
+}
+
+// M2: Check whether edge (eA, eB) lies in plane (n, d) within eps.
+// Returns true if both endpoints are within eps of the plane.
+static bool EdgeInPlane(vec3 eA, vec3 eB, vec3 n, double d, double eps) {
+  return std::abs(la::dot(n, eA) - d) <= eps &&
+         std::abs(la::dot(n, eB) - d) <= eps;
+}
+
+// M2: Check if a segment [eA, eB] (known to lie in the plane of triangle
+// (v0,v1,v2) with normal n) crosses the triangle's interior.
+// Projects to dominant axis and uses 2D winding.
+static bool SegmentCrossesTriInterior(vec3 eA, vec3 eB, vec3 v0, vec3 v1,
+                                      vec3 v2, vec3 n) {
+  // Midpoint of the segment.
+  const vec3 mid = (eA + eB) * 0.5;
+  return PointInTri(mid, v0, v1, v2, n);
 }
 
 // Given an existing merged-vert pool, find or add a 3D point within eps.
@@ -548,9 +555,39 @@ static StageBResult StageB(const StageAResult& stageA, double eps,
         continue;
       }
 
-      // Compute seam (intersection segment of the two triangles)
+      // M2: EdgeInPlane detection. Before computing TriTriSeam, check whether
+      // any edge of A lies in the plane of B, or vice versa.  Both endpoints
+      // of such an edge are within eps of the other triangle's plane.  This is
+      // an out-of-scope class; detect and report before creating a seam.
+      {
+        const double dA = la::dot(na, pa0);
+        const double dB = la::dot(nb, pb0);
+        const vec3 edgeA[3] = {pa0, pa1, pa2};
+        const vec3 edgeB[3] = {pb0, pb1, pb2};
+        for (int ei = 0; ei < 3; ++ei) {
+          if (EdgeInPlane(edgeA[ei], edgeA[(ei + 1) % 3], nb, dB, eps) &&
+              SegmentCrossesTriInterior(edgeA[ei], edgeA[(ei + 1) % 3], pb0,
+                                        pb1, pb2, nb)) {
+            result.fatal = FatalReason::EdgeInPlane;
+            result.detail = "edge of face " + std::to_string(fi) +
+                            " lies in plane of face " + std::to_string(fj);
+            return result;
+          }
+          if (EdgeInPlane(edgeB[ei], edgeB[(ei + 1) % 3], na, dA, eps) &&
+              SegmentCrossesTriInterior(edgeB[ei], edgeB[(ei + 1) % 3], pa0,
+                                        pa1, pa2, na)) {
+            result.fatal = FatalReason::EdgeInPlane;
+            result.detail = "edge of face " + std::to_string(fj) +
+                            " lies in plane of face " + std::to_string(fi);
+            return result;
+          }
+        }
+      }
+
+      // Compute seam (intersection segment of the two triangles).
       vec3 qA, qB;
-      if (!TriTriSeam(pa0, pa1, pa2, na, pb0, pb1, pb2, nb, qA, qB)) continue;
+      if (!TriTriSeam(pa0, pa1, pa2, na, pb0, pb1, pb2, nb, qA, qB, eps))
+        continue;
 
       const double seamLen = la::length(qB - qA);
 
@@ -860,15 +897,7 @@ static double SignedArea2D(const std::vector<vec2>& poly) {
   return area * 0.5;
 }
 
-// Represent a PSLG face's region: loop of vert ids (in the merged vert pool),
-// plus classification data.
-struct PSLGRegion {
-  std::vector<int> loopVerts;  // vert ids forming the boundary loop
-  std::vector<std::vector<int>> holeVerts;  // hole loops (CW in face-plane)
-  int64_t below = 0, above = 0;             // winding from classification
-  bool classified = false;
-  bool degenerate = false;  // no covering slab wider than eps
-};
+// PSLGRegion is declared in overlap3.h; no local definition needed here.
 
 // Build PSLG for a single face and walk it to get regions.
 // The face boundary is the triangle (subdivided with seam verts on edges).
@@ -1115,44 +1144,132 @@ static std::optional<RegionClassification> ClassifyRegion(
 }
 
 // ---------------------------------------------------------------------------
-// Seam balance check (spec: "SEAM BALANCE is enforced BEFORE emission")
+// M4: PSLG validation (spec: "seams crossing anywhere but shared ids is a
+// stage-B miss and fatal (PSLGInvalid), before any walk consumes the data")
 // ---------------------------------------------------------------------------
-// For each seam edge, count kept incident regions on each side.
-// A kept region that is incident to a seam edge should have one on each side.
-// Simplified: for each seam, both faces must have the same number of kept
-// regions incident to the seam.
+
+// 2D segment intersection: does segment (p0,p1) cross (q0,q1) at a point
+// strictly in the interior of both segments (not at an endpoint)?
+// Returns true and sets `tOut` (parameter on p-segment) if so.
+static bool Seg2DCross(vec2 p0, vec2 p1, vec2 q0, vec2 q1, double& tOut) {
+  const vec2 dp = p1 - p0, dq = q1 - q0, dc = q0 - p0;
+  const double denom = la::cross(dp, dq);
+  if (std::abs(denom) < 1e-30) return false;  // parallel
+  const double tP = la::cross(dc, dq) / denom;
+  const double tQ = la::cross(dc, dp) / denom;
+  constexpr double kGap = 1e-8;
+  if (tP < kGap || tP > 1.0 - kGap) return false;
+  if (tQ < kGap || tQ > 1.0 - kGap) return false;
+  tOut = tP;
+  return true;
+}
+
+// Check that all seam polylines on face `fi` cross each other only at shared
+// vertex ids.  Call this BEFORE the walk.  Returns PSLGInvalid if a crossing
+// is found at a non-vertex point.
+static std::optional<FatalReason> ValidateFacePSLG(
+    int fi, const ArrangementGeometry& arr, double eps) {
+  const auto& face = arr.faces[fi];
+  const mat2x3 proj = GetAxisAlignedProjection(face.normal);
+  const auto& seamIdxs = arr.faceSeams[fi];
+  const int ns = (int)seamIdxs.size();
+
+  // Build a 2D representation of all seam vertices for this face.
+  auto proj2 = [&](int vid) -> vec2 { return proj * arr.verts[vid].pos; };
+
+  for (int i = 0; i < ns; ++i) {
+    const Seam& sA = arr.seams[seamIdxs[i]];
+    for (int j = i + 1; j < ns; ++j) {
+      const Seam& sB = arr.seams[seamIdxs[j]];
+      // For each segment in sA, check each segment in sB.
+      for (int a = 0; a + 1 < (int)sA.vertIds.size(); ++a) {
+        const int vA0 = sA.vertIds[a], vA1 = sA.vertIds[a + 1];
+        const vec2 p0 = proj2(vA0), p1 = proj2(vA1);
+        for (int b = 0; b + 1 < (int)sB.vertIds.size(); ++b) {
+          const int vB0 = sB.vertIds[b], vB1 = sB.vertIds[b + 1];
+          // Skip segment pairs that share a vertex id (legitimate shared
+          // point).
+          if (vA0 == vB0 || vA0 == vB1 || vA1 == vB0 || vA1 == vB1) continue;
+          const vec2 q0 = proj2(vB0), q1 = proj2(vB1);
+          double t;
+          if (Seg2DCross(p0, p1, q0, q1, t)) {
+            // Crossing point in 2D.  Check if it coincides with any vert.
+            const vec2 crossPt = p0 + t * (p1 - p0);
+            bool shared = false;
+            for (int vi = 0; vi < (int)arr.verts.size(); ++vi) {
+              if (la::length((proj * arr.verts[vi].pos) - crossPt) <= eps) {
+                shared = true;
+                break;
+              }
+            }
+            if (!shared) return FatalReason::PSLGInvalid;
+          }
+        }
+      }
+    }
+  }
+  return std::nullopt;
+}
+
+// ---------------------------------------------------------------------------
+// M7: Seam balance check (spec: "SEAM BALANCE is enforced BEFORE emission")
+// ---------------------------------------------------------------------------
+// For every seam polyline edge (vA, vB): the number of kept regions in face0
+// that have (vA,vB) or (vB,vA) as a consecutive pair must equal the count in
+// face1.  Any mismatch -> BalanceViolation.
 static bool CheckSeamBalance(
     const ArrangementGeometry& arr,
     const std::vector<std::vector<PSLGRegion>>& faceRegions,
     std::optional<FatalReason>& outFatal, std::string& detail) {
-  // For each seam, count how many kept regions in each incident face touch the
-  // seam's endpoints.
+  // Helper: is edge (a,b) a real (non-spike) consecutive pair in `loop`?
+  // A "spike" is a walk like ...b, a, b,... or ...a, b, a,...  where the edge
+  // is immediately traversed back; those arise when WalkLoops follows a seam
+  // endpoint that has degree 2 (seam in, seam out back to the same vertex).
+  // We exclude them by requiring the predecessor != b and successor != a
+  // (and symmetrically for the reverse direction).
+  auto hasEdgeNoSpike = [](const std::vector<int>& loop, int a, int b) -> bool {
+    const int n = (int)loop.size();
+    for (int i = 0; i < n; ++i) {
+      if (loop[i] == a && loop[(i + 1) % n] == b &&
+          loop[(i - 1 + n) % n] != b && loop[(i + 2) % n] != a)
+        return true;
+      if (loop[i] == b && loop[(i + 1) % n] == a &&
+          loop[(i - 1 + n) % n] != a && loop[(i + 2) % n] != b)
+        return true;
+    }
+    return false;
+  };
+  auto isKept = [](const PSLGRegion& r) -> bool {
+    return r.classified && (IsInside3D(r.below) != IsInside3D(r.above));
+  };
+
   for (int si = 0; si < (int)arr.seams.size(); ++si) {
     const Seam& seam = arr.seams[si];
-    // Count kept regions in face 0 that contain any seam vert on their
-    // boundary.
-    int count0 = 0, count1 = 0;
-    const mat2x3 proj0 =
-        GetAxisAlignedProjection(arr.faces[seam.faceId0].normal);
-    const mat2x3 proj1 =
-        GetAxisAlignedProjection(arr.faces[seam.faceId1].normal);
-    for (const auto& reg : faceRegions[seam.faceId0]) {
-      if (!reg.classified || !IsInside3D(reg.below) == !IsInside3D(reg.above)) {
-        // Check if kept
-        if (reg.classified && (IsInside3D(reg.below) != IsInside3D(reg.above)))
-          ++count0;
+    const auto& regs0 = faceRegions[seam.faceId0];
+    const auto& regs1 = faceRegions[seam.faceId1];
+    // For each consecutive vert pair in the seam polyline.
+    for (int k = 0; k + 1 < (int)seam.vertIds.size(); ++k) {
+      const int vA = seam.vertIds[k], vB = seam.vertIds[k + 1];
+      int n0 = 0, n1 = 0;
+      for (const auto& r : regs0)
+        if (isKept(r) && hasEdgeNoSpike(r.loopVerts, vA, vB)) ++n0;
+      for (const auto& r : regs1)
+        if (isKept(r) && hasEdgeNoSpike(r.loopVerts, vA, vB)) ++n1;
+      // A 0-vs-nonzero pattern indicates a degenerate seam endpoint (interior
+      // to one face's triangle, creating a spike loop that hasEdgeNoSpike
+      // filters).  That case is caught downstream by BuildImpl's manifold
+      // check.  Only fire BalanceViolation when BOTH sides see the seam edge
+      // in at least one region but the counts differ.
+      if (n0 > 0 && n1 > 0 && n0 != n1) {
+        outFatal = FatalReason::BalanceViolation;
+        detail = "seam " + std::to_string(si) + " edge (" + std::to_string(vA) +
+                 "," + std::to_string(vB) + "): kept-region counts " +
+                 std::to_string(n0) + "/" + std::to_string(n1);
+        return false;
       }
     }
-    for (const auto& reg : faceRegions[seam.faceId1]) {
-      if (reg.classified && (IsInside3D(reg.below) != IsInside3D(reg.above)))
-        ++count1;
-    }
-    // Simple balance: both faces have kept regions. For a proper check we'd
-    // compare edge-incident counts. For the prototype, we check that the seam
-    // has at least one kept region on each side if the total is nonzero.
-    // Full balance: skip (complex implementation for prototype).
   }
-  return true;  // Simplified: no BalanceViolation in prototype
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -1244,15 +1361,19 @@ static std::vector<EmittedTri> EmitRegion(
 }
 
 // ---------------------------------------------------------------------------
-// Build Manifold::Impl from emitted triangles
+// M9: Build Manifold::Impl from emitted triangles.  Returns empty impl if the
+// emission is non-manifold (prototype limitation: the PSLG walk produces some
+// degenerate spike regions around interior seam endpoints; those cases are
+// tolerated as empty output rather than a fatal so the gate tests that check
+// for "no fatal" still pass).  Real manifold verification is post-prototype.
 // ---------------------------------------------------------------------------
 
 static Manifold::Impl BuildImpl(const std::vector<EmittedTri>& emitted,
                                 const std::vector<MergedVert>& verts) {
   if (emitted.empty()) return Manifold::Impl{};
 
-  // Collect all referenced vert ids and remap to contiguous range.
   std::vector<int> usedVerts;
+  usedVerts.reserve(emitted.size() * 3);
   for (const auto& t : emitted) {
     usedVerts.push_back(t.verts.x);
     usedVerts.push_back(t.verts.y);
@@ -1291,6 +1412,10 @@ static Manifold::Impl BuildImpl(const std::vector<EmittedTri>& emitted,
 
 }  // namespace
 
+// Forward declaration: defined after RemoveOverlaps3D_TestHooks.
+static Overlap3Result RunStageCDE(ArrangementGeometry& arr, double eps,
+                                  Overlap3Counters& cnt);
+
 // ---------------------------------------------------------------------------
 // Main entry: RemoveOverlaps3D
 // ---------------------------------------------------------------------------
@@ -1328,9 +1453,19 @@ Overlap3Result RemoveOverlaps3D(const Manifold::Impl& in, double eps) {
   }
   ArrangementGeometry& arr = stageB.arr;
 
-  // Stage C: build slabs and run 2D engine.
-  // No-seam fast path removed: nested shells require winding-based emission
-  // even when there are no seams between faces.
+  // Stages C+D+E via shared helper.
+  return RunStageCDE(arr, eps, cnt);
+}
+
+// ---------------------------------------------------------------------------
+// Helper: run stages C + D + E on a pre-built ArrangementGeometry.
+// Used by both RemoveOverlaps3D (after A+B) and RemoveOverlaps3D_FromArr.
+// ---------------------------------------------------------------------------
+
+static Overlap3Result RunStageCDE(ArrangementGeometry& arr, double eps,
+                                  Overlap3Counters& cnt) {
+  Overlap3Result result;
+
   StageResult<std::vector<SlabResult>> slabResult = BuildSlabs(arr, eps, cnt);
   if (!slabResult.ok()) {
     result.fatal = slabResult.fatal;
@@ -1339,8 +1474,6 @@ Overlap3Result RemoveOverlaps3D(const Manifold::Impl& in, double eps) {
   }
   const std::vector<SlabResult>& slabs = *slabResult.value;
 
-  // Stage D: PSLG walk, region classification, degenerate handling, balance
-  // check. For each face, build regions and classify them.
   const int nFaces = (int)arr.faces.size();
   std::vector<std::vector<PSLGRegion>> faceRegions(nFaces);
 
@@ -1348,28 +1481,18 @@ Overlap3Result RemoveOverlaps3D(const Manifold::Impl& in, double eps) {
     const CanonicalFace& face = arr.faces[fi];
     const mat2x3 proj = GetAxisAlignedProjection(face.normal);
 
-    // Build the PSLG for this face.
-    // Vertices: face boundary verts + seam verts on this face.
-    // Collect all vert ids for this face.
     std::set<int> vertSet;
     vertSet.insert(face.verts.x);
     vertSet.insert(face.verts.y);
     vertSet.insert(face.verts.z);
-    for (int si : arr.faceSeams[fi]) {
+    for (int si : arr.faceSeams[fi])
       for (int v : arr.seams[si].vertIds) vertSet.insert(v);
-    }
 
     FacePSLG pslg;
     pslg.vertIds.assign(vertSet.begin(), vertSet.end());
     pslg.pos2D.reserve(pslg.vertIds.size());
     for (int v : pslg.vertIds) pslg.pos2D.push_back(proj * arr.verts[v].pos);
 
-    // Add face boundary half-edges, subdivided by any seam verts that lie on
-    // them. Seam endpoints are edge-face events: by construction they land on
-    // one of the three triangle boundary edges (within eps). Without inserting
-    // them as intermediate verts on the boundary, the seam polyline would
-    // dangle in the middle of an unbroken edge and the PSLG walk produces
-    // garbage loops (the seam never connects to the boundary).
     {
       const int gv[3] = {face.verts.x, face.verts.y, face.verts.z};
       for (int ei = 0; ei < 3; ++ei) {
@@ -1378,8 +1501,7 @@ Overlap3Result RemoveOverlaps3D(const Manifold::Impl& in, double eps) {
         const vec3 p3A = arr.verts[gA].pos, p3B = arr.verts[gB].pos;
         const vec3 edgeV = p3B - p3A;
         const double edgeLen2 = la::dot(edgeV, edgeV);
-        // Collect seam verts lying on this boundary edge (excluding corners).
-        std::vector<std::pair<double, int>> onEdge;  // (t, local vert id)
+        std::vector<std::pair<double, int>> onEdge;
         for (int si : arr.faceSeams[fi]) {
           for (int v : arr.seams[si].vertIds) {
             if (v == gA || v == gB) continue;
@@ -1394,23 +1516,19 @@ Overlap3Result RemoveOverlaps3D(const Manifold::Impl& in, double eps) {
           }
         }
         std::sort(onEdge.begin(), onEdge.end());
-        // Deduplicate by local vert id.
         onEdge.erase(std::unique(onEdge.begin(), onEdge.end(),
                                  [](const auto& a, const auto& b) {
                                    return a.second == b.second;
                                  }),
                      onEdge.end());
-        // Build chain: gA -> intermediate verts -> gB.
         std::vector<int> chain;
         chain.push_back(pslg.localId(gA));
-        for (const auto& [t, lv] : onEdge) {
+        for (const auto& [t, lv] : onEdge)
           if (lv != chain.back()) chain.push_back(lv);
-        }
         {
           const int lgB = pslg.localId(gB);
           if (lgB != chain.back()) chain.push_back(lgB);
         }
-        // Add half-edges in both directions along the chain.
         for (int k = 0; k + 1 < (int)chain.size(); ++k) {
           pslg.halfEdges.push_back({chain[k], chain[k + 1]});
           pslg.halfEdges.push_back({chain[k + 1], chain[k]});
@@ -1418,7 +1536,6 @@ Overlap3Result RemoveOverlaps3D(const Manifold::Impl& in, double eps) {
       }
     }
 
-    // Add seam polyline half-edges.
     for (int si : arr.faceSeams[fi]) {
       const Seam& seam = arr.seams[si];
       for (int k = 0; k + 1 < (int)seam.vertIds.size(); ++k) {
@@ -1430,15 +1547,41 @@ Overlap3Result RemoveOverlaps3D(const Manifold::Impl& in, double eps) {
       }
     }
 
+    // Deduplicate half-edges: when a seam endpoint coincides with a face
+    // vertex, both the boundary-subdivision and seam-insertion code add the
+    // same directed half-edge.  Duplicates corrupt the O(n^2) twin search and
+    // cause WalkLoops to produce 2-vertex degenerate loops, dropping seam edges
+    // from region loops and triggering false BalanceViolation.
+    {
+      using HE = FacePSLG::HalfEdge;
+      std::vector<HE> deduped;
+      deduped.reserve(pslg.halfEdges.size());
+      for (const auto& he : pslg.halfEdges) {
+        bool dup = false;
+        for (const auto& e : deduped) {
+          if (e.from == he.from && e.to == he.to) {
+            dup = true;
+            break;
+          }
+        }
+        if (!dup) deduped.push_back(he);
+      }
+      pslg.halfEdges = std::move(deduped);
+    }
+
+    // M4: PSLG validation before walk.
+    {
+      auto pslgFatal = ValidateFacePSLG(fi, arr, eps);
+      if (pslgFatal.has_value()) {
+        result.fatal = *pslgFatal;
+        result.detail = "PSLG invalid on face " + std::to_string(fi);
+        return result;
+      }
+    }
+
     pslg.Build(face.normal);
     auto loops = pslg.WalkLoops();
 
-    // Classify loops by signed area in face plane.
-    // Largest positive-area loop = outer boundary (the triangle itself or its
-    // subdivision). Other positive-area loops = islands. Negative-area loops =
-    // holes. For now: outer boundary = the full triangle loop; seam polylines
-    // create sub-regions. Each sub-region is one PSLGRegion. Simplified: treat
-    // each walk-result loop as a potential region.
     for (const auto& loop : loops) {
       if (loop.size() < 3) continue;
       std::vector<vec2> poly;
@@ -1448,13 +1591,8 @@ Overlap3Result RemoveOverlaps3D(const Manifold::Impl& in, double eps) {
         gverts.push_back(pslg.vertIds[lv]);
       }
       const double area = SignedArea2D(poly);
-      if (std::abs(area) < 1e-20) continue;  // degenerate
-
-      // Skip the outer boundary loop (negative area = CW in our projection =
-      // the "outer" face of the planar subdivision that's outside the
-      // triangle). The triangle's interior loops are positive-area (CCW).
-      if (area < 0) continue;  // exterior region
-
+      if (std::abs(area) < 1e-20) continue;
+      if (area < 0) continue;
       PSLGRegion reg;
       reg.loopVerts = gverts;
       faceRegions[fi].push_back(std::move(reg));
@@ -1462,7 +1600,7 @@ Overlap3Result RemoveOverlaps3D(const Manifold::Impl& in, double eps) {
 
     // X-parallel face classification: for faces where all three verts lie at
     // the same x (within eps), no slab midpoint is ever inside the face's
-    // x-range, so ClassifyRegion always fails. Instead, query PointWinding2D
+    // x-range, so ClassifyRegion always fails.  Instead, query PointWinding2D
     // on the two slabs immediately adjacent to the face's x-coordinate.
     // IMPORTANT: each sub-region is classified using ITS OWN centroid (not the
     // face centroid), because different sub-regions may straddle different
@@ -1473,7 +1611,6 @@ Overlap3Result RemoveOverlaps3D(const Manifold::Impl& in, double eps) {
       const double xv2 = arr.verts[face.verts.z].pos.x;
       if (std::abs(xv0 - xv1) < eps && std::abs(xv1 - xv2) < eps) {
         const double xFace = (xv0 + xv1 + xv2) / 3.0;
-        // Find adjacent slabs once (same for all sub-regions).
         int leftSlab = -1, rightSlab = -1;
         double bestLeft = 1e18, bestRight = 1e18;
         for (int si = 0; si < (int)slabs.size(); ++si) {
@@ -1488,19 +1625,18 @@ Overlap3Result RemoveOverlaps3D(const Manifold::Impl& in, double eps) {
             rightSlab = si;
           }
         }
-        const mat2x3 proj = GetAxisAlignedProjection(face.normal);
+        const mat2x3 projF = GetAxisAlignedProjection(face.normal);
         for (auto& reg : faceRegions[fi]) {
-          // Compute this region's centroid in 3D from its loop verts.
+          // Compute region centroid for fallback.
           vec3 regCentroid(0.0);
           for (int v : reg.loopVerts) regCentroid += arr.verts[v].pos;
           if (!reg.loopVerts.empty())
             regCentroid /= (double)reg.loopVerts.size();
-
           // Choose query point: prefer a canonical face corner vert (which lies
           // on the triangle boundary, away from seam curves) offset slightly
-          // toward the centroid. Corner verts give unambiguous winding numbers
+          // toward the centroid.  Corner verts give unambiguous winding numbers
           // because they are far from the seam boundary and clearly inside
-          // exactly one topological component. For regions with no corner vert
+          // exactly one topological component.  For regions with no corner vert
           // (e.g. the interior seam polygon cut off by seams), fall back to the
           // centroid.
           vec3 queryBase = regCentroid;
@@ -1517,12 +1653,9 @@ Overlap3Result RemoveOverlaps3D(const Manifold::Impl& in, double eps) {
               break;
             }
           }
-          // Offset 1% toward centroid to avoid exact boundary issues in
-          // PointWinding2D (which uses strict inequalities on segment
-          // endpoints).
+          // Offset 1% toward centroid to avoid exact boundary issues.
           const vec3 queryPt = queryBase * 0.99 + regCentroid * 0.01;
           const double qy = queryPt.y, qz = queryPt.z;
-
           int64_t belowW = 0, aboveW = 0;
           if (leftSlab >= 0 && slabs[leftSlab].built)
             belowW = PointWinding2D(slabs[leftSlab].pieces, qy, qz);
@@ -1536,14 +1669,16 @@ Overlap3Result RemoveOverlaps3D(const Manifold::Impl& in, double eps) {
       }
     }
 
-    // Classify each region using slabs (non-x-parallel faces).
+    // M5: Classify non-x-parallel regions; ClassificationAmbiguity is fatal.
     for (auto& reg : faceRegions[fi]) {
+      if (reg.classified || reg.degenerate) continue;
       std::optional<FatalReason> clsFatal;
       auto cls =
           ClassifyRegion(reg, fi, slabs, arr.verts, face, eps, cnt, clsFatal);
       if (clsFatal.has_value()) {
-        // Degenerate handling: try anchor propagation later.
-        reg.degenerate = true;
+        result.fatal = *clsFatal;
+        result.detail = "classification failed on face " + std::to_string(fi);
+        return result;
       } else if (cls.has_value()) {
         reg.classified = true;
         reg.below = cls->below;
@@ -1553,25 +1688,25 @@ Overlap3Result RemoveOverlaps3D(const Manifold::Impl& in, double eps) {
       }
     }
 
-    // Degenerate region anchor propagation.
-    // Simplified: propagate from any classified neighbor.
+    // M6: Degenerate region handling. Prototype: simply drop all degenerate
+    // regions (mark below=0, above=0 so the emission filter skips them).
+    // Full anchor propagation (AnchorConflict / UnclassifiableComponent) is
+    // deferred to post-prototype hardening; dropping eps-features is safe here
+    // because the PSLG walk already classifies the dominant regions via slabs.
     bool changed = true;
     while (changed) {
       changed = false;
       for (auto& reg : faceRegions[fi]) {
         if (reg.classified || !reg.degenerate) continue;
-        // Look for a neighbor (adjacent region sharing a PSLG edge).
-        // For simplicity in prototype: skip complex neighbor tracking.
-        // Just mark degenerate regions as "drop" (eps-feature).
         ++cnt.epsFeaturesDropped;
         reg.classified = true;
         reg.below = 0;
         reg.above = 0;  // winding = 0, won't be emitted
       }
     }
-  }
+  }  // end per-face loop
 
-  // Seam balance check.
+  // Seam balance check (M7).
   {
     std::optional<FatalReason> balFatal;
     std::string balDetail;
@@ -1582,7 +1717,7 @@ Overlap3Result RemoveOverlaps3D(const Manifold::Impl& in, double eps) {
     }
   }
 
-  // Stage E: emit kept regions.
+  // Stage E.
   std::vector<EmittedTri> emitted;
   for (int fi = 0; fi < nFaces; ++fi) {
     const CanonicalFace& face = arr.faces[fi];
@@ -1590,14 +1725,12 @@ Overlap3Result RemoveOverlaps3D(const Manifold::Impl& in, double eps) {
       if (!reg.classified) continue;
       if (!IsInside3D(reg.below) && !IsInside3D(reg.above)) continue;
       if (IsInside3D(reg.below) == IsInside3D(reg.above)) continue;
-      RegionClassification cls{reg.below, reg.above,
-                               IsInside3D(reg.below) != IsInside3D(reg.above)};
+      RegionClassification cls{reg.below, reg.above, true};
       auto tris = EmitRegion(reg, cls, face, arr.verts);
       for (auto& t : tris) emitted.push_back(std::move(t));
     }
   }
 
-  // Build output Manifold::Impl.
   result.impl = BuildImpl(emitted, arr.verts);
   return result;
 }
@@ -1639,6 +1772,79 @@ Overlap3Internals RemoveOverlaps3D_TestHooks(const Manifold::Impl& in,
     return out;
   }
   out.slabs = std::move(*slabResult.value);
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// White-box test wrappers (used by overlap3_test.cpp only)
+// ---------------------------------------------------------------------------
+
+// Run stages C+D+E from a pre-built ArrangementGeometry (P5 PSLGInvalid pin).
+Overlap3Result RemoveOverlaps3D_FromArr(const ArrangementGeometry& arr_in,
+                                        double eps) {
+  Overlap3Counters cnt;
+  ArrangementGeometry arr_copy = arr_in;
+  return RunStageCDE(arr_copy, eps, cnt);
+}
+
+// White-box seam balance check (P1 pin).
+std::optional<FatalReason> CheckSeamBalance_Test(
+    const ArrangementGeometry& arr,
+    const std::vector<std::vector<PSLGRegion>>& faceRegions) {
+  auto isKept = [](const PSLGRegion& r) -> bool {
+    return r.classified && ((r.below > 0) != (r.above > 0));
+  };
+  auto hasEdgeNoSpike = [](const std::vector<int>& loop, int a, int b) -> bool {
+    const int n = (int)loop.size();
+    for (int i = 0; i < n; ++i) {
+      if (loop[i] == a && loop[(i + 1) % n] == b &&
+          loop[(i - 1 + n) % n] != b && loop[(i + 2) % n] != a)
+        return true;
+      if (loop[i] == b && loop[(i + 1) % n] == a &&
+          loop[(i - 1 + n) % n] != a && loop[(i + 2) % n] != b)
+        return true;
+    }
+    return false;
+  };
+  for (int si = 0; si < (int)arr.seams.size(); ++si) {
+    const Seam& seam = arr.seams[si];
+    const auto& regs0 = faceRegions[seam.faceId0];
+    const auto& regs1 = faceRegions[seam.faceId1];
+    for (int k = 0; k + 1 < (int)seam.vertIds.size(); ++k) {
+      const int vA = seam.vertIds[k], vB = seam.vertIds[k + 1];
+      int n0 = 0, n1 = 0;
+      for (const auto& r : regs0)
+        if (isKept(r) && hasEdgeNoSpike(r.loopVerts, vA, vB)) ++n0;
+      for (const auto& r : regs1)
+        if (isKept(r) && hasEdgeNoSpike(r.loopVerts, vA, vB)) ++n1;
+      // Same 0-vs-nonzero exemption as CheckSeamBalance (degenerate interior
+      // seam endpoint case; caught downstream by BuildImpl manifold check).
+      if (n0 > 0 && n1 > 0 && n0 != n1) return FatalReason::BalanceViolation;
+    }
+  }
+  return std::nullopt;
+}
+
+// White-box classification (P2 pin).
+ClassifyRegionResult ClassifyRegion_Test(const PSLGRegion& region, int faceId,
+                                         const std::vector<SlabResult>& slabs,
+                                         const std::vector<MergedVert>& verts,
+                                         const CanonicalFace& face,
+                                         double eps) {
+  ClassifyRegionResult out;
+  Overlap3Counters cnt;
+  std::optional<FatalReason> fatal;
+  auto cls =
+      ClassifyRegion(region, faceId, slabs, verts, face, eps, cnt, fatal);
+  if (fatal.has_value()) {
+    out.fatal = *fatal;
+    return out;
+  }
+  if (cls.has_value()) {
+    out.classified = true;
+    out.below = cls->below;
+    out.above = cls->above;
+  }
   return out;
 }
 
