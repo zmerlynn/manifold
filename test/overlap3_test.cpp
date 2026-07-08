@@ -910,6 +910,41 @@ TEST(Overlap3, Pin_P4_EdgeInPlane) {
       << "got fatal=" << (int)*result.fatal << " detail=" << result.detail;
 }
 
+// P4b: EdgeInPlane - off-midpoint configuration that the midpoint heuristic
+// misses but the clip-based detector catches.
+//   Tet A: v0=(1,1,0), v1=(9,1,0), v2=(2,3,2), v3=(2,1,3).
+//   Tet B: v0=(0,0,0), v1=(4,0,0), v2=(2,4,0), v3=(2,2,-2). (same as P4)
+// Edge A (1,1,0)-(9,1,0) lies in z=0 (plane of B's face (0,1,2)).
+// At y=1: B's face spans x in [0.5, 3.5].  Entry point (1,1,0) is inside
+// (x=1 in [0.5,3.5]), midpoint (5,1,0) is OUTSIDE (x=5 > 3.5).
+// Old midpoint check: PointInTri((5,1,0),...) = false -> MISSES.
+// New clip check: clipped segment [(1,1)-(3.5,1)] has length 2.5 >> eps ->
+// FIRES.
+TEST(Overlap3, Pin_P4b_EdgeInPlane_OffMidpoint) {
+  MeshGL64 mgA;
+  mgA.numProp = 3;
+  // clang-format off
+  mgA.vertProperties = {1,1,0,  9,1,0,  2,3,2,  2,1,3};
+  mgA.triVerts       = {0,2,1,  0,1,3,  0,3,2,  1,2,3};
+  // clang-format on
+  mgA.runOriginalID.push_back(Manifold::ReserveIDs(1));
+
+  MeshGL64 mgB;
+  mgB.numProp = 3;
+  // clang-format off
+  mgB.vertProperties = {0,0,0,  4,0,0,  2,4,0,  2,2,-2};
+  mgB.triVerts       = {0,1,2,  0,3,1,  1,3,2,  2,3,0};
+  // clang-format on
+  mgB.runOriginalID.push_back(Manifold::ReserveIDs(1));
+
+  const Manifold::Impl impl = ComposeImpl(Manifold(mgA), Manifold(mgB));
+  const double eps = ImplEps(impl);
+  const Overlap3Result result = RemoveOverlaps3D(impl, eps);
+  ASSERT_TRUE(result.fatal.has_value()) << "expected EdgeInPlane fatal";
+  EXPECT_EQ(*result.fatal, FatalReason::EdgeInPlane)
+      << "got fatal=" << (int)*result.fatal << " detail=" << result.detail;
+}
+
 // P5: PSLGInvalid from RemoveOverlaps3D_FromArr. Two seam segments on face 0
 // that cross at interior point (2,2) not present in arr.verts.
 //   seam0: (1,1,0)->(3,3,0), 2D: (1,1)->(3,3)

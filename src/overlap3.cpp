@@ -83,51 +83,6 @@ static bool SegStraddlesPlane(vec3 a, vec3 b, vec3 n, double d, double& tOut,
   return true;
 }
 
-// Barycentric coordinates of point p in triangle (v0,v1,v2).
-// Returns true if p is inside (all coords >= 0 and sum <= 1).
-static bool PointInTri(vec3 p, vec3 v0, vec3 v1, vec3 v2, vec3 n) {
-  // Use the dominant-axis projection to avoid degeneracy
-  const vec3 absN = la::abs(n);
-  int ax0, ax1;
-  if (absN.x >= absN.y && absN.x >= absN.z) {
-    ax0 = 1;
-    ax1 = 2;
-  } else if (absN.y >= absN.z) {
-    ax0 = 0;
-    ax1 = 2;
-  } else {
-    ax0 = 0;
-    ax1 = 1;
-  }
-  auto proj2 = [&](vec3 v) -> vec2 { return {v[ax0], v[ax1]}; };
-  const vec2 a = proj2(v0), b = proj2(v1), c = proj2(v2), q = proj2(p);
-  // Cross products for barycentric check
-  auto cross2 = [](vec2 u, vec2 v) { return u.x * v.y - u.y * v.x; };
-  const double areaABC = cross2(b - a, c - a);
-  if (areaABC == 0.0) return false;
-  const double u = cross2(b - q, c - q) / areaABC;
-  const double v = cross2(c - q, a - q) / areaABC;
-  const double w = 1.0 - u - v;
-  // kEps guards the dimensionless barycentric ratio, not coordinate space;
-  // no metric-table entry (FP stability on unit-normalized ratios).
-  constexpr double kEps = 1e-10;
-  return u >= -kEps && v >= -kEps && w >= -kEps;
-}
-
-// Compute the intersection of segment AB with triangle (v0,v1,v2) (plane +
-// interior). Returns true if there is an intersection at q with parameter t.
-static bool SegTriIntersect(vec3 a, vec3 b, vec3 v0, vec3 v1, vec3 v2, vec3 n,
-                            double planeDist0, double& t, vec3& q) {
-  const double da = la::dot(n, a) - planeDist0;
-  const double db = la::dot(n, b) - planeDist0;
-  if (da * db >= 0) return false;
-  const double denom = da - db;
-  if (denom == 0.0) return false;
-  t = da / denom;
-  q = a + t * (b - a);
-  return PointInTri(q, v0, v1, v2, n);
-}
-
 // ---------------------------------------------------------------------------
 // Stage A: merge verts and canonicalize faces
 // ---------------------------------------------------------------------------
@@ -350,14 +305,63 @@ static bool EdgeInPlane(vec3 eA, vec3 eB, vec3 n, double d, double eps) {
          std::abs(la::dot(n, eB) - d) <= eps;
 }
 
-// M2: Check if a segment [eA, eB] (known to lie in the plane of triangle
-// (v0,v1,v2) with normal n) crosses the triangle's interior.
-// Projects to dominant axis and uses 2D winding.
-static bool SegmentCrossesTriInterior(vec3 eA, vec3 eB, vec3 v0, vec3 v1,
-                                      vec3 v2, vec3 n) {
-  // Midpoint of the segment.
-  const vec3 mid = (eA + eB) * 0.5;
-  return PointInTri(mid, v0, v1, v2, n);
+// M2: Sutherland-Hodgman clip of convex polygon by one halfplane (left of
+// directed edge eA->eB). Same 1e-14 stability guard as the coplanar test.
+static std::vector<vec2> ClipPolyByHalfplane2D(std::vector<vec2> poly, vec2 eA,
+                                               vec2 eB) {
+  std::vector<vec2> out;
+  const int n = (int)poly.size();
+  const vec2 e = eB - eA;
+  for (int k = 0; k < n; ++k) {
+    const vec2& cur = poly[k];
+    const vec2& nxt = poly[(k + 1) % n];
+    // Inside = left of eA->eB: e cross (p - eA) >= 0.
+    const bool curIn = e.x * (cur.y - eA.y) - e.y * (cur.x - eA.x) >= 0.0;
+    const bool nxtIn = e.x * (nxt.y - eA.y) - e.y * (nxt.x - eA.x) >= 0.0;
+    if (curIn) out.push_back(cur);
+    if (curIn != nxtIn) {
+      const vec2 d1 = nxt - cur, d2 = e;
+      const double denom2 = d1.x * d2.y - d1.y * d2.x;
+      // Stability guard: same 1e-14 bound as the coplanar area check below.
+      if (std::abs(denom2) > 1e-14) {
+        const vec2 dc = eA - cur;
+        const double t2 = (dc.x * d2.y - dc.y * d2.x) / denom2;
+        out.push_back(cur + t2 * d1);
+      }
+    }
+  }
+  return out;
+}
+
+// M2: Clip segment [sA, sB] against the interior of triangle (t0,t1,t2) in 2D.
+// Uses the same halfplane sign convention as ClipPolyByHalfplane2D.
+// Returns the length of the clipped sub-segment; 0 if the segment has no
+// interior overlap with the triangle. Length > eps is the EdgeInPlane test.
+static double SegTriInteriorLength2D(vec2 sA, vec2 sB, vec2 t0, vec2 t1,
+                                     vec2 t2) {
+  double tLo = 0.0, tHi = 1.0;
+  const vec2 triV[3] = {t0, t1, t2};
+  const vec2 segD = sB - sA;
+  for (int i = 0; i < 3; ++i) {
+    const vec2 eA = triV[i], eB = triV[(i + 1) % 3];
+    const vec2 e = eB - eA;
+    // f(t) = e cross (sA + t*segD - eA); positive = inside this halfplane.
+    const double f0 = e.x * (sA.y - eA.y) - e.y * (sA.x - eA.x);
+    const double f1 = e.x * (sB.y - eA.y) - e.y * (sB.x - eA.x);
+    const double fd = f1 - f0;
+    // Same 1e-14 stability guard used in ClipPolyByHalfplane2D.
+    if (std::abs(fd) <= 1e-14) {
+      if (f0 < 0.0) return 0.0;  // parallel to edge, outside halfplane
+    } else {
+      const double tc = -f0 / fd;
+      if (fd < 0.0)
+        tHi = std::min(tHi, tc);  // exiting: f decreasing
+      else
+        tLo = std::max(tLo, tc);  // entering: f increasing
+    }
+    if (tLo > tHi) return 0.0;
+  }
+  return (tHi - tLo) * la::length(segD);
 }
 
 // Given an existing merged-vert pool, find or add a 3D point within eps.
@@ -510,42 +514,9 @@ static StageBResult StageB(const StageAResult& stageA, double eps,
         const vec2 b2[3] = {proj * pb0, proj * pb1, proj * pb2};
         // Sutherland-Hodgman clip of B against A to get intersection polygon.
         // If resulting polygon has area > eps^2, it's a real overlap.
-        auto clipPoly = [&](std::vector<vec2> poly, vec2 edgeA, vec2 edgeB) {
-          std::vector<vec2> out;
-          const int n = (int)poly.size();
-          for (int k = 0; k < n; ++k) {
-            const vec2& cur = poly[k];
-            const vec2& nxt = poly[(k + 1) % n];
-            // Inside = left of edge (edgeA->edgeB) as seen from normal side
-            auto inside = [&](vec2 p) {
-              return (edgeB.x - edgeA.x) * (p.y - edgeA.y) -
-                         (edgeB.y - edgeA.y) * (p.x - edgeA.x) >=
-                     0.0;
-            };
-            const bool curIn = inside(cur), nxtIn = inside(nxt);
-            if (curIn) out.push_back(cur);
-            if (curIn != nxtIn) {
-              // Edge intersects clip boundary
-              const vec2 d1 = nxt - cur;
-              const vec2 d2 = edgeB - edgeA;
-              const double denom2 = d1.x * d2.y - d1.y * d2.x;
-              // Stability guard for 2D face-plane cross-product: exact ==0
-              // would generate huge clip-poly coords from near-parallel
-              // projected edges, overflowing the area check and giving a false
-              // CoplanarOverlap.
-              if (std::abs(denom2) > 1e-14) {
-                const vec2 dc = edgeA - cur;
-                const double t2 = (dc.x * d2.y - dc.y * d2.x) / denom2;
-                out.push_back(cur + t2 * d1);
-              }
-            }
-          }
-          return out;
-        };
-        // Start with triangle B as polygon, clip by each edge of A.
         std::vector<vec2> poly = {b2[0], b2[1], b2[2]};
         for (int k = 0; k < 3 && !poly.empty(); ++k)
-          poly = clipPoly(poly, a2[k], a2[(k + 1) % 3]);
+          poly = ClipPolyByHalfplane2D(poly, a2[k], a2[(k + 1) % 3]);
         // Compute signed area of clipped polygon.
         double clipArea = 0.0;
         for (int k = 0; k < (int)poly.size(); ++k) {
@@ -567,23 +538,32 @@ static StageBResult StageB(const StageAResult& stageA, double eps,
       // any edge of A lies in the plane of B, or vice versa.  Both endpoints
       // of such an edge are within eps of the other triangle's plane.  This is
       // an out-of-scope class; detect and report before creating a seam.
+      // Uses SegTriInteriorLength2D (clip-based): fires iff the clipped
+      // sub-segment has length > eps (not just midpoint inside the triangle).
       {
         const double dA = la::dot(na, pa0);
         const double dB = la::dot(nb, pb0);
         const vec3 edgeA[3] = {pa0, pa1, pa2};
         const vec3 edgeB[3] = {pb0, pb1, pb2};
+        // Project triangles once into each other's planes.
+        const mat2x3 projB = GetAxisAlignedProjection(nb);
+        const vec2 pb02 = projB * pb0, pb12 = projB * pb1, pb22 = projB * pb2;
+        const mat2x3 projA = GetAxisAlignedProjection(na);
+        const vec2 pa02 = projA * pa0, pa12 = projA * pa1, pa22 = projA * pa2;
         for (int ei = 0; ei < 3; ++ei) {
           if (EdgeInPlane(edgeA[ei], edgeA[(ei + 1) % 3], nb, dB, eps) &&
-              SegmentCrossesTriInterior(edgeA[ei], edgeA[(ei + 1) % 3], pb0,
-                                        pb1, pb2, nb)) {
+              SegTriInteriorLength2D(projB * edgeA[ei],
+                                     projB * edgeA[(ei + 1) % 3], pb02, pb12,
+                                     pb22) > eps) {
             result.fatal = FatalReason::EdgeInPlane;
             result.detail = "edge of face " + std::to_string(fi) +
                             " lies in plane of face " + std::to_string(fj);
             return result;
           }
           if (EdgeInPlane(edgeB[ei], edgeB[(ei + 1) % 3], na, dA, eps) &&
-              SegmentCrossesTriInterior(edgeB[ei], edgeB[(ei + 1) % 3], pa0,
-                                        pa1, pa2, na)) {
+              SegTriInteriorLength2D(projA * edgeB[ei],
+                                     projA * edgeB[(ei + 1) % 3], pa02, pa12,
+                                     pa22) > eps) {
             result.fatal = FatalReason::EdgeInPlane;
             result.detail = "edge of face " + std::to_string(fj) +
                             " lies in plane of face " + std::to_string(fi);
