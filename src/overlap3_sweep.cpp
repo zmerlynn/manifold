@@ -12,15 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Stage C of the 3D sweep-plane overlap-removal prototype: x-criticals,
-// per-slab section build, engine calls with capture, and the point-winding
-// query helper. Design: docs/SweepPlane3D.md.
+// Stage C of the 3D sweep-plane overlap-removal prototype.
+// Design: docs/SweepPlane3D.md, section "Stage C - the sweep".
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <map>
-#include <utility>
 #include <vector>
 
 #include "boolean2.h"
@@ -34,66 +32,48 @@ namespace {
 // Section (y,z) coordinates of a 3D point.
 static vec2 SectionYZ(vec3 p) { return {p.y, p.z}; }
 
-// Directed section segment for face `fi` at x = xMid. The segment endpoints
-// are computed by interpolating the face edges at xMid. The direction is chosen
-// so that dot(p1-p0, yz(cross(+x, face.normal))) > 0.
-// Returns false if the face does not straddle xMid (both endpoints same side).
+// Compute the directed section segment for `face` at x = xMid.
+// Direction: dot(p1-p0, yz(cross(+x, face.normal))) > 0
+// (spec "ORIENTATION AND SIGN CONVENTIONS").
+// Returns false if the face does not straddle xMid.
 static bool ComputeSectionSegment(const CanonicalFace& face,
                                   const std::vector<MergedVert>& verts,
-                                  double xMid, SectionFaceSegment& seg) {
-  // The three face edges. We need the two that straddle xMid.
-  const int vs[3] = {face.verts.x, face.verts.y, face.verts.z};
-  const vec3 p[3] = {verts[vs[0]].pos, verts[vs[1]].pos, verts[vs[2]].pos};
-  const double x[3] = {p[0].x, p[1].x, p[2].x};
+                                  double xMid, SectionFaceSegment& out) {
+  const int v[3] = {face.verts.x, face.verts.y, face.verts.z};
+  const vec3 p[3] = {verts[v[0]].pos, verts[v[1]].pos, verts[v[2]].pos};
 
-  // Find the two edges of the triangle that straddle xMid.
-  // A face straddles xMid if at least one vert is < xMid and at least one is >
-  // xMid.
-  vec3 qA, qB;
-  bool foundA = false, foundB = false;
-  for (int i = 0; i < 3; ++i) {
+  // Collect the two edge-crossings at xMid.
+  vec2 pts[2];
+  int found = 0;
+  for (int i = 0; i < 3 && found < 2; ++i) {
     const int j = (i + 1) % 3;
-    const double xi = x[i], xj = x[j];
-    if ((xi <= xMid && xj >= xMid) || (xi >= xMid && xj <= xMid)) {
-      if (xi == xj) continue;  // degenerate edge at xMid
-      // Interpolate to get section point
-      const vec2 yz = Interpolate(p[i], p[j], xMid);
-      const vec3 q = {xMid, yz.x, yz.y};
-      if (!foundA) {
-        qA = q;
-        foundA = true;
-      } else if (!foundB && (q.y != qA.y || q.z != qA.z)) {
-        qB = q;
-        foundB = true;
-      }
+    const double xi = p[i].x, xj = p[j].x;
+    if (xi == xj) continue;                       // edge parallel to section
+    if ((xi - xMid) * (xj - xMid) > 0) continue;  // same side
+    const vec2 yz = Interpolate(p[i], p[j], xMid);
+    if (found == 0 || yz.x != pts[0].x || yz.y != pts[0].y) {
+      pts[found++] = yz;
     }
   }
-  if (!foundA || !foundB) return false;
+  if (found < 2) return false;
 
-  // Determine direction: dot(p1-p0, yz(cross(+x, face.normal))) > 0.
-  // cross(+x, face.normal) = cross((1,0,0), face.normal)
-  // = (0*nz - 0*ny, 0*nx - 1*nz, 1*ny - 0*nx)
-  // = (0, -nz, ny) ... that is the cross product formula:
-  // cross([1,0,0], [nx,ny,nz]) = [0*nz-0*ny, 0*nx-1*nz, 1*ny-0*nx] = [0,-nz,ny]
-  // yz of that = (-nz, ny) in (y,z) section space.
-  const vec2 refDir = {-face.normal.z,
-                       face.normal.y};  // yz(cross(+x, face.normal))
-  const vec2 dir = SectionYZ(qB) - SectionYZ(qA);
-  if (la::dot(dir, refDir) < 0) {
-    std::swap(qA, qB);
-  }
+  // Orient: dot(p1-p0, yz(cross(+x, face.normal))) > 0.
+  // cross((1,0,0), (nx,ny,nz)) = (0,-nz,ny), yz-projection = (-nz, ny).
+  const vec2 refDir = {-face.normal.z, face.normal.y};
+  const vec2 d = pts[1] - pts[0];
+  if (la::dot(d, refDir) < 0) std::swap(pts[0], pts[1]);
 
-  seg.faceId = -1;  // Will be set by caller
-  seg.p0 = SectionYZ(qA);
-  seg.p1 = SectionYZ(qB);
-  seg.mult = face.mult;
+  out.faceId = -1;  // set by caller
+  out.p0 = pts[0];
+  out.p1 = pts[1];
+  out.mult = face.mult;
   return true;
 }
 
 }  // namespace
 
 // ---------------------------------------------------------------------------
-// Stage C: build all slab results
+// Stage C: x-criticals, per-slab sections, engine calls.
 // ---------------------------------------------------------------------------
 
 StageResult<std::vector<SlabResult>> BuildSlabs(const ArrangementGeometry& arr,
@@ -101,30 +81,26 @@ StageResult<std::vector<SlabResult>> BuildSlabs(const ArrangementGeometry& arr,
                                                 Overlap3Counters& cnt) {
   const int nFaces = (int)arr.faces.size();
 
-  // Collect x-criticals: all vert x-coordinates (stage-A verts + event verts
-  // + triple-point verts = all verts in arr.verts).
+  // Collect x-criticals from all verts (stage-A + event + triple-point).
   std::vector<double> crits;
   crits.reserve(arr.verts.size());
   for (const auto& v : arr.verts) crits.push_back(v.pos.x);
   std::sort(crits.begin(), crits.end());
   crits.erase(std::unique(crits.begin(), crits.end()), crits.end());
 
-  if (crits.empty()) {
-    return StageResult<std::vector<SlabResult>>::Ok({});
-  }
+  if (crits.empty()) return StageResult<std::vector<SlabResult>>::Ok({});
 
-  // Add exterior sentinels (before min-x and after max-x).
+  // Exterior sentinel slabs (spec "BRACKETED by two exterior sentinel slabs").
+  // Width = 2*eps > eps so they pass the slab-width gate and are built.
+  // No face vertex lies in these x-ranges, so no face straddles them:
+  // the engine produces empty capture => winding 0 everywhere (correct
+  // exterior).
   const double xMin = crits.front();
   const double xMax = crits.back();
-  // eps*10 > eps: sentinel slabs stay built (xHi-xLo > eps); metric table:
-  // "scalar xHi-xLo > eps for slab width".
-  const double margin = eps * 10.0;
-  // Insert sentinels as boundary criticals.
-  crits.insert(crits.begin(), xMin - margin);
-  crits.push_back(xMax + margin);
+  const double sentW = 2.0 * eps;
+  crits.insert(crits.begin(), xMin - sentW);
+  crits.push_back(xMax + sentW);
 
-  // Build one slab per consecutive pair of criticals.
-  // Slab i: (crits[i], crits[i+1]).
   const int nSlabs = (int)crits.size() - 1;
   std::vector<SlabResult> slabs(nSlabs);
 
@@ -135,37 +111,35 @@ StageResult<std::vector<SlabResult>> BuildSlabs(const ArrangementGeometry& arr,
     slab.xMid = (slab.xLo + slab.xHi) * 0.5;
 
     if (slab.xHi - slab.xLo <= eps) {
-      slab.built = false;  // sub-eps slab: skip
+      slab.built = false;
       continue;
     }
     slab.built = true;
 
-    // Find all faces that straddle xMid (strictly between xLo and xHi).
-    // A face straddles if NOT all verts are on one side.
+    // Collect section verts and edges for all straddling faces.
     std::vector<EdgeM> edges;
-    std::vector<vec2> sectionVerts;
-    std::map<std::pair<double, double>, int> vertId;
+    std::vector<vec2> secVerts;
+    std::map<std::pair<double, double>, int> vertIdx;
 
-    auto getVertId = [&](vec2 p) -> int {
-      const auto key = std::make_pair(p.x, p.y);
-      auto it = vertId.find(key);
-      if (it != vertId.end()) return it->second;
-      const int id = (int)sectionVerts.size();
-      sectionVerts.push_back(p);
-      vertId.emplace(key, id);
+    auto getVid = [&](vec2 p) -> int {
+      auto key = std::make_pair(p.x, p.y);
+      auto it = vertIdx.find(key);
+      if (it != vertIdx.end()) return it->second;
+      const int id = (int)secVerts.size();
+      secVerts.push_back(p);
+      vertIdx.emplace(key, id);
       return id;
     };
 
     for (int fi = 0; fi < nFaces; ++fi) {
       const CanonicalFace& face = arr.faces[fi];
       const int vs[3] = {face.verts.x, face.verts.y, face.verts.z};
-      const double xv[3] = {arr.verts[vs[0]].pos.x, arr.verts[vs[1]].pos.x,
-                            arr.verts[vs[2]].pos.x};
-      const double xFaceMin = std::min({xv[0], xv[1], xv[2]});
-      const double xFaceMax = std::max({xv[0], xv[1], xv[2]});
-
-      // Face straddles xMid if xFaceMin < xMid < xFaceMax
-      // (strictly: not all on one side, and not all at xMid).
+      const double xFaceMin =
+          std::min({arr.verts[vs[0]].pos.x, arr.verts[vs[1]].pos.x,
+                    arr.verts[vs[2]].pos.x});
+      const double xFaceMax =
+          std::max({arr.verts[vs[0]].pos.x, arr.verts[vs[1]].pos.x,
+                    arr.verts[vs[2]].pos.x});
       if (xFaceMax <= slab.xMid || xFaceMin >= slab.xMid) continue;
 
       SectionFaceSegment seg;
@@ -173,23 +147,20 @@ StageResult<std::vector<SlabResult>> BuildSlabs(const ArrangementGeometry& arr,
       seg.faceId = fi;
       slab.segments.push_back(seg);
 
-      // Add edge to the 2D engine input.
-      const int v0id = getVertId(seg.p0);
-      const int v1id = getVertId(seg.p1);
-      if (v0id == v1id) continue;
-      edges.push_back({v0id, v1id, (int)face.mult, fi});
+      const int v0 = getVid(seg.p0);
+      const int v1 = getVid(seg.p1);
+      if (v0 == v1) continue;
+      edges.push_back({v0, v1, (int)face.mult, fi});
     }
 
-    if (edges.empty()) continue;  // no straddling faces
-
-    // Save raw section data for gate-2 test-hook checks.
+    // Save raw section data for gate-2 test hooks.
     slab.sectionEdges = edges;
-    slab.sectionVerts = sectionVerts;
+    slab.sectionVerts = secVerts;
 
-    // Run the 2D engine.
+    if (edges.empty()) continue;
+
     int conflictCount = 0;
-    SweepWinding(edges, sectionVerts, WindRule::Add, &slab.pieces,
-                 &conflictCount);
+    SweepWinding(edges, secVerts, WindRule::Add, &slab.pieces, &conflictCount);
 
     if (conflictCount > 0) {
       cnt.engineIdConflicts += conflictCount;

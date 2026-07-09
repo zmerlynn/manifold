@@ -12,9 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// 3D overlap removal by sweep-plane classification, prototype implementation.
-// Design: docs/SweepPlane3D.md (crucible round 3).
-// Internal seam (`RemoveOverlaps3D`) only; public wiring is post-prototype.
+// 3D overlap removal by sweep-plane classification, prototype.
+// Design: docs/SweepPlane3D.md (crucible round 3, impl crucible closed).
+// Internal seam only; public wiring is post-prototype.
 
 #pragma once
 
@@ -30,52 +30,48 @@
 namespace manifold {
 
 // ---------------------------------------------------------------------------
-// Types (spec "Types, constants, and metrics" section)
+// Stage-A output (spec "Types, constants, and metrics").
 // ---------------------------------------------------------------------------
 
-// Stage-A output: one canonical face record per unique triangle after merge.
-// `id` is the face index in the original Impl (the canonical one chosen by
-// centroid-nearest after vert merge). `verts` are the canonical vert ids after
-// merge. `normal` is computed from the stored `verts` order. `mult` is the
-// signed multiplicity (same orientation = +1 per appearance, opposite = -1).
-// Stage A drops records where mult == 0.
+// One canonical face after vert-merge and multiplicity accumulation.
+// `id` is the representative triangle index in the original Impl.
+// `mult == 0` records are dropped before this reaches the pipeline.
 struct CanonicalFace {
-  int id;  // original face index (canonical representative)
-  ivec3 verts;
-  vec3 normal;
-  int64_t mult;
+  int id;        // representative face index
+  ivec3 verts;   // canonical merged-vert ids
+  vec3 normal;   // from stored vert order
+  int64_t mult;  // signed multiplicity (>= 1 or <= -1)
 };
 
 // ---------------------------------------------------------------------------
-// Failure-mode taxonomy (spec "FAILURE CONTRACT")
+// Fatal-reason taxonomy (spec "FAILURE CONTRACT").
 // ---------------------------------------------------------------------------
 
 enum class FatalReason {
   TripleDiameter,           // triple-point cluster diameter > eps
   SubResolutionChain,       // skipped-contact cluster diameter > eps
-  CoplanarOverlap,          // coplanar triangle overlap (out of scope)
-  EdgeInPlane,              // edge lying in another tri's plane (out of scope)
+  CoplanarOverlap,          // coplanar face overlap (out of scope)
+  EdgeInPlane,              // edge lying in another face's plane (out of scope)
   ClassificationAmbiguity,  // no located piece, or pieces disagree
-  AnchorConflict,           // degenerate component with conflicting anchors
-  UnclassifiableComponent,  // degenerate component diameter > eps, no anchors
-  Starvation,               // all slabs for a region are sub-eps wide
-  BalanceViolation,         // seam edge has unbalanced kept-region counts
+  AnchorConflict,           // degenerate component: conflicting anchors
+  UnclassifiableComponent,  // degenerate component: no anchors or span guard
+  Starvation,               // eps <= 0 or no usable slab
+  BalanceViolation,         // seam edge: kept-region counts unequal
   PSLGInvalid,              // seams cross without shared vert ids
   EngineIdConflict,         // 2D engine conflict counter nonzero
   NonManifoldEmission,      // emitted triangulation is not 2-manifold
 };
 
-// Non-fatal counter accumulator (one per pipeline run).
+// Non-fatal counter accumulator.
 struct Overlap3Counters {
   int subEpsContactsDropped = 0;  // point-like skipped contacts
-  int degenerateClassified = 0;   // degenerate components classified by anchor
+  int degenerateClassified = 0;   // degenerate components via anchor
   int epsFeaturesDropped = 0;     // eps-scale degenerate components dropped
   int clearanceSkips = 0;         // pieces skipped for clearance
   int engineIdConflicts = 0;      // total engine id conflict events
 };
 
-// Per-stage result carrying either the product or a fatal reason.
-// Failure stops the pipeline; counters are accumulated throughout.
+// Per-stage result: either a product or a fatal reason.
 template <typename T>
 struct StageResult {
   std::optional<T> value;
@@ -89,81 +85,75 @@ struct StageResult {
     r.value = std::move(v);
     return r;
   }
-  static StageResult<T> Fatal(FatalReason reason, std::string detail = {}) {
+  static StageResult<T> Fatal(FatalReason reason, std::string msg = {}) {
     StageResult<T> r;
     r.fatal = reason;
-    r.detail = std::move(detail);
+    r.detail = std::move(msg);
     return r;
   }
 };
 
 // ---------------------------------------------------------------------------
-// Stage-C types
+// Stage-C types (spec "SlabResult", "SectionFaceSegment").
 // ---------------------------------------------------------------------------
 
-// One section segment for a straddling face in a slab. Directed: the vector
-// p1-p0 has positive dot product with yz(cross(+x, face.normal)), per the
-// orientation spec (section "ORIENTATION AND SIGN CONVENTIONS"). Used by stage
-// E to determine m_lex sign relative to the seeded direction.
+// Directed section segment for one straddling face in a slab.
+// p1 - p0 has positive dot with yz(cross(+x, face.normal)).
 struct SectionFaceSegment {
   int faceId;
-  vec2 p0, p1;   // section (y,z) directed per above convention
-  int64_t mult;  // signed multiplicity (from CanonicalFace)
+  vec2 p0, p1;   // section (y,z) directed as above
+  int64_t mult;  // signed multiplicity from CanonicalFace
 };
 
-// Per-slab result from stage C.
+// Per-slab output.
 struct SlabResult {
   double xLo, xHi, xMid;
-  bool built;  // false = skipped (sub-eps slab)
+  bool built;  // false = sub-eps, skipped
   std::vector<SweepCapture> pieces;
-  std::vector<SectionFaceSegment> segments;  // all straddling faces this slab
-  // Test-hook: raw section edges and verts fed to the 2D engine (before
-  // arrangement). Populated only when running via RemoveOverlaps3D_TestHooks.
+  std::vector<SectionFaceSegment> segments;
+  // Test-hook: raw section edges and verts before arrangement.
   std::vector<EdgeM> sectionEdges;
   std::vector<vec2> sectionVerts;
 };
 
 // ---------------------------------------------------------------------------
-// Stage-B internal types (seam geometry)
+// Stage-B types (seam geometry).
 // ---------------------------------------------------------------------------
 
-// A 3D vert in the merged vert pool (shared by stage A verts + event verts +
-// triple-point verts).
 struct MergedVert {
   vec3 pos;
 };
 
-// A seam between two canonical faces: a sequence of merged-vert ids from one
-// face-face pair. Both faces share this polyline object; vert ids are globally
-// canonical (from the unified triple-point pass).
+// A seam: the intersection segment of two canonical faces.
+// vertIds holds the canonical merged-vert sequence (2 verts for a plain seam,
+// more if triple-point insertion added interior verts).
 struct Seam {
-  int faceId0, faceId1;      // the two faces sharing this seam
-  std::vector<int> vertIds;  // merged-vert ids, in segment order
+  int faceId0, faceId1;
+  std::vector<int> vertIds;
 };
 
-// Per-face subdivided boundary edge: a list of vert ids spanning the original
-// halfedge, including any event/seam/triple verts inserted in stage B.
+// A subdivided boundary edge for one face: the halfedge's vert sequence
+// (including any event/seam verts inserted during stage B).
 struct SubdividedEdge {
   int faceId;
-  int edgeIdx;  // halfedge index in the original mesh (for pairing)
-  std::vector<int> vertIds;  // from start to end, including both endpoints
+  int edgeIdx;               // halfedge index in original mesh
+  std::vector<int> vertIds;  // from start to end, both endpoints included
 };
 
 // ---------------------------------------------------------------------------
-// Full pipeline input (after stage A+B)
+// Arrangement geometry (stage A+B output, stage C+D+E input).
 // ---------------------------------------------------------------------------
 
 struct ArrangementGeometry {
-  std::vector<MergedVert> verts;          // all canonical 3D verts
-  std::vector<CanonicalFace> faces;       // stage-A canonical faces
-  std::vector<Seam> seams;                // face-face seam polylines
-  std::vector<SubdividedEdge> subdEdges;  // per halfedge, with inserted verts
-  // For each face: list of seam indices incident to that face.
-  std::vector<std::vector<int>> faceSeams;
+  std::vector<MergedVert> verts;            // all canonical 3D verts
+  std::vector<CanonicalFace> faces;         // canonical faces
+  std::vector<Seam> seams;                  // face-pair seam polylines
+  std::vector<SubdividedEdge> subdEdges;    // per halfedge, with inserted verts
+  std::vector<std::vector<int>> faceSeams;  // face -> list of seam indices
 };
 
 // ---------------------------------------------------------------------------
-// Public seam
+// Public entry point.
 // ---------------------------------------------------------------------------
 
 struct Overlap3Result {
@@ -173,69 +163,57 @@ struct Overlap3Result {
   std::string detail;
 };
 
-// Main entry point. `eps` = 0 -> compute from bounding box scale
-// (EpsilonFromScale).
+// eps = 0 -> compute from bounding-box scale.
 Overlap3Result RemoveOverlaps3D(const Manifold::Impl& in, double eps = 0.0);
 
 // ---------------------------------------------------------------------------
-// Test seams (overlap3_test.cpp only)
+// Test seams (overlap3_test.cpp only).
 // ---------------------------------------------------------------------------
 
-// Intermediate pipeline state exposed for gate-2 section validity checks and
-// gate-1 seam parity assertions.
-struct Overlap3Internals {
-  ArrangementGeometry arr;  // after stages A+B
-  std::vector<SlabResult>
-      slabs;  // after stage C (sectionEdges/sectionVerts populated)
-  std::optional<FatalReason> fatal;
-  std::string detail;
-  Overlap3Counters counters;
-};
-
-// Run stages A+B+C and return internals. Slabs include
-// sectionEdges/sectionVerts.
-Overlap3Internals RemoveOverlaps3D_TestHooks(const Manifold::Impl& in,
-                                             double eps = 0.0);
-
-// A region in the face PSLG, exposed for white-box balance and classification
-// pins.  Stage D builds these internally; they are exposed here so test code
-// can synthesize inputs for CheckSeamBalance_Test and ClassifyRegion_Test.
+// PSLGRegion: one face sub-region produced by the PSLG walk.
+// Exposed so tests can synthesise inputs for the white-box functions below.
 struct PSLGRegion {
-  std::vector<int> loopVerts;               // boundary vert ids (CCW)
-  std::vector<std::vector<int>> holeVerts;  // hole loops
+  std::vector<int> loopVerts;               // outer boundary (CCW)
+  std::vector<std::vector<int>> holeVerts;  // interior hole loops
   int64_t below = 0, above = 0;             // status-order windings
   bool classified = false;
-  bool degenerate = false;  // no covering slab > eps
+  bool degenerate = false;  // no covering slab wider than eps
 };
 
-// Return value from ClassifyRegion_Test.
 struct ClassifyRegionResult {
   std::optional<FatalReason> fatal;
   int64_t below = 0, above = 0;
   bool classified = false;
 };
 
-// White-box: call the seam-balance check on synthetic region data.  Returns
-// the FatalReason if balance is violated, nullopt if the check passes.
+struct Overlap3Internals {
+  ArrangementGeometry arr;
+  std::vector<SlabResult> slabs;
+  std::optional<FatalReason> fatal;
+  std::string detail;
+  Overlap3Counters counters;
+};
+
+// Run stages A+B+C; slabs include sectionEdges/sectionVerts for gate-2.
+Overlap3Internals RemoveOverlaps3D_TestHooks(const Manifold::Impl& in,
+                                             double eps = 0.0);
+
+// White-box: seam-balance check on synthetic data (P1/P11 pins).
 std::optional<FatalReason> CheckSeamBalance_Test(
     const ArrangementGeometry& arr,
     const std::vector<std::vector<PSLGRegion>>& faceRegions);
 
-// White-box: call ClassifyRegion on a single synthetic PSLGRegion with the
-// given slab data.
+// White-box: classify one region against given slabs (P2/P3 pins).
 ClassifyRegionResult ClassifyRegion_Test(const PSLGRegion& region, int faceId,
                                          const std::vector<SlabResult>& slabs,
                                          const std::vector<MergedVert>& verts,
                                          const CanonicalFace& face, double eps);
 
-// Run stages C+D+E starting from a pre-built ArrangementGeometry.  Used by
-// PSLGInvalid pin (P5) to inject synthetic bad-seam data.
+// Run stages C+D+E from a pre-built ArrangementGeometry (P5 PSLGInvalid pin).
 Overlap3Result RemoveOverlaps3D_FromArr(const ArrangementGeometry& arr,
                                         double eps);
 
-// White-box M6: run anchor-component propagation on synthetic region data.
-// Returns nullopt on success (faceRegions updated), or a FatalReason on
-// failure (AnchorConflict, UnclassifiableComponent).
+// White-box M6: anchor-component propagation on synthetic data (P8-P10 pins).
 std::optional<FatalReason> PropagateAnchorComponents_Test(
     const ArrangementGeometry& arr,
     std::vector<std::vector<PSLGRegion>>& faceRegions, double eps,
