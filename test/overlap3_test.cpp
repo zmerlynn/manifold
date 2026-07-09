@@ -794,6 +794,56 @@ TEST(Overlap3, Pin_P1_BalanceViolation) {
   EXPECT_EQ(*fatal, FatalReason::BalanceViolation);
 }
 
+// P11: CheckSeamBalance_Test catches a hole-induced imbalance.
+// Face0 has one kept region whose HOLE (not outer loop) carries edge (0,1).
+// The old code only checked loopVerts, so it saw n0=0 and the 0-vs-nonzero
+// guard suppressed the fire.  The new code counts holes too, giving n0=1;
+// with n1=2 from face1's two kept regions, both are nonzero and n0!=n1 ->
+// BalanceViolation.
+TEST(Overlap3, Pin_P11_BalanceViolation_HoleContribution) {
+  ArrangementGeometry arr;
+  Seam seam;
+  seam.faceId0 = 0;
+  seam.faceId1 = 1;
+  seam.vertIds = {0, 1};
+  arr.seams.push_back(seam);
+
+  // Face0: one kept region.  Outer loop {4,5,6,7} has no 0 or 1 -> outer
+  // count=0.  Hole {1,0,2} has edge (1->0) which is (0,1) undirected;
+  // hasEdgeNoSpike({1,0,2},0,1): at i=0, loop[0]=1=b, loop[1]=0=a,
+  // pred=loop[2]=2!=a=0, succ=loop[2]=2!=b=1 -> true.  Hole count=1.
+  // countEdge = 0+1 = 1.  n0=1.
+  // Old code (loopVerts only): n0=0; 0-vs-nonzero guard fires first -> NO
+  // BalanceViolation despite genuine imbalance.
+  PSLGRegion r0;
+  r0.loopVerts = {4, 5, 6, 7};
+  r0.holeVerts = {{1, 0, 2}};
+  r0.classified = true;
+  r0.below = 0;
+  r0.above = 1;
+
+  // Face1: two kept regions, each with edge (0,1) in outer loop -> n1=2.
+  auto makeR1 = [](int extra) {
+    PSLGRegion r;
+    r.loopVerts = {2, 0, 1, extra};
+    r.classified = true;
+    r.below = 0;
+    r.above = 1;
+    return r;
+  };
+
+  std::vector<std::vector<PSLGRegion>> faceRegions(2);
+  faceRegions[0].push_back(r0);
+  faceRegions[1].push_back(makeR1(8));
+  faceRegions[1].push_back(makeR1(9));
+
+  const auto fatal = CheckSeamBalance_Test(arr, faceRegions);
+  ASSERT_TRUE(fatal.has_value())
+      << "expected BalanceViolation: n0=1 (from hole), n1=2; old code missed "
+         "the hole and saw n0=0 (guard suppressed fire)";
+  EXPECT_EQ(*fatal, FatalReason::BalanceViolation);
+}
+
 // P2: ClassifyRegion_Test with two conflicting pieces ->
 // ClassificationAmbiguity. Face in z=0 plane (normal=(0,0,1)), square region
 // [1,3]x[1,3]. Two pieces with sourceId=faceId but different (below,above)

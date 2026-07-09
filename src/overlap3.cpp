@@ -600,9 +600,16 @@ static StageBResult StageB(const StageAResult& stageA, double eps,
       const int vA = FindOrAddVert(arr.verts, qA, eps);
       const int vB = FindOrAddVert(arr.verts, qB, eps);
       if (vA == vB) {
-        // After snapping, the seam is sub-eps: treat as degenerate contact.
-        const int nA = addContactNode(arr.verts[vA].pos);
-        ++cnt.subEpsContactsDropped;
+        // After snapping, the seam collapses to a point: treat as degenerate
+        // contact.  Link to any existing contact node within eps so this node
+        // joins the cluster graph; without this, an isolated node created as
+        // the last event would evade the SubResolutionChain diameter check.
+        const vec3 qNode = arr.verts[vA].pos;
+        const int nA = addContactNode(qNode);
+        for (int i = 0; i < (int)contactNodes.size(); ++i) {
+          if (i != nA && la::length(contactNodes[i].pos - qNode) <= eps)
+            addContactEdge(nA, i);
+        }
         continue;
       }
 
@@ -1211,18 +1218,25 @@ static std::optional<FatalReason> ValidateFacePSLG(
 // M7: Seam balance check (spec: "SEAM BALANCE is enforced BEFORE emission")
 // ---------------------------------------------------------------------------
 // For every seam polyline edge (vA, vB): the number of kept regions in face0
-// that have (vA,vB) or (vB,vA) as a consecutive pair must equal the count in
-// face1.  Any mismatch -> BalanceViolation.
+// that carry this edge must equal the count in face1.  Mismatch -> Violation.
+//
+// "Carry" means: the edge (vA,vB) appears (undirected, spike-filtered) in the
+// region's outer loop OR in any of its hole loops.  Holes matter because
+// EmitRegion emits boundary halfedges for hole loops too.  The old code only
+// checked the outer loop (loopVerts) and silently missed hole contributions.
+//
+// The 0-vs-nonzero guard (only fire when BOTH n0>0 and n1>0) is retained.
+// Removing it would cause false positives in triple-intersection geometry
+// where one seam face legitimately contributes 0 kept regions at the edge
+// while the other contributes nonzero; the pairing is supplied by a third
+// face through a different seam pair.
 static bool CheckSeamBalance(
     const ArrangementGeometry& arr,
     const std::vector<std::vector<PSLGRegion>>& faceRegions,
     std::optional<FatalReason>& outFatal, std::string& detail) {
-  // Helper: is edge (a,b) a real (non-spike) consecutive pair in `loop`?
-  // A "spike" is a walk like ...b, a, b,... or ...a, b, a,...  where the edge
-  // is immediately traversed back; those arise when WalkLoops follows a seam
-  // endpoint that has degree 2 (seam in, seam out back to the same vertex).
-  // We exclude them by requiring the predecessor != b and successor != a
-  // (and symmetrically for the reverse direction).
+  // Is edge (a,b) present in `loop` as a non-spike consecutive pair (either
+  // direction)?  Spikes (A,B,A or B,A,B) arise from degree-2 seam endpoints
+  // and must be excluded to avoid counting degenerate zero-area traversals.
   auto hasEdgeNoSpike = [](const std::vector<int>& loop, int a, int b) -> bool {
     const int n = (int)loop.size();
     for (int i = 0; i < n; ++i) {
@@ -1235,6 +1249,12 @@ static bool CheckSeamBalance(
     }
     return false;
   };
+  // Total occurrences of edge (a,b) in a region: outer loop + all holes.
+  auto countEdge = [&hasEdgeNoSpike](const PSLGRegion& r, int a, int b) -> int {
+    int cnt = hasEdgeNoSpike(r.loopVerts, a, b) ? 1 : 0;
+    for (const auto& h : r.holeVerts) cnt += hasEdgeNoSpike(h, a, b) ? 1 : 0;
+    return cnt;
+  };
   auto isKept = [](const PSLGRegion& r) -> bool {
     return r.classified && (IsInside3D(r.below) != IsInside3D(r.above));
   };
@@ -1243,23 +1263,20 @@ static bool CheckSeamBalance(
     const Seam& seam = arr.seams[si];
     const auto& regs0 = faceRegions[seam.faceId0];
     const auto& regs1 = faceRegions[seam.faceId1];
-    // For each consecutive vert pair in the seam polyline.
     for (int k = 0; k + 1 < (int)seam.vertIds.size(); ++k) {
       const int vA = seam.vertIds[k], vB = seam.vertIds[k + 1];
       int n0 = 0, n1 = 0;
       for (const auto& r : regs0)
-        if (isKept(r) && hasEdgeNoSpike(r.loopVerts, vA, vB)) ++n0;
+        if (isKept(r)) n0 += countEdge(r, vA, vB);
       for (const auto& r : regs1)
-        if (isKept(r) && hasEdgeNoSpike(r.loopVerts, vA, vB)) ++n1;
-      // A 0-vs-nonzero pattern indicates a degenerate seam endpoint (interior
-      // to one face's triangle, creating a spike loop that hasEdgeNoSpike
-      // filters).  That case is caught downstream by BuildImpl's manifold
-      // check.  Only fire BalanceViolation when BOTH sides see the seam edge
-      // in at least one region but the counts differ.
+        if (isKept(r)) n1 += countEdge(r, vA, vB);
+      // Guard: a 0-vs-nonzero imbalance may be resolved by a third face in
+      // triple-intersection geometry; only fire when both sides are nonzero
+      // and unequal (genuine unpaired halfedge with no compensating seam).
       if (n0 > 0 && n1 > 0 && n0 != n1) {
         outFatal = FatalReason::BalanceViolation;
         detail = "seam " + std::to_string(si) + " edge (" + std::to_string(vA) +
-                 "," + std::to_string(vB) + "): kept-region counts " +
+                 "," + std::to_string(vB) + "): kept counts " +
                  std::to_string(n0) + "/" + std::to_string(n1);
         return false;
       }
@@ -1998,13 +2015,11 @@ Overlap3Result RemoveOverlaps3D_FromArr(const ArrangementGeometry& arr_in,
   return RunStageCDE(arr_copy, eps, cnt);
 }
 
-// White-box seam balance check (P1 pin).
+// White-box seam balance check (P1/P11 pins).  Mirrors CheckSeamBalance:
+// undirected per-seam count, outer loop + holes, 0-vs-nonzero guard retained.
 std::optional<FatalReason> CheckSeamBalance_Test(
     const ArrangementGeometry& arr,
     const std::vector<std::vector<PSLGRegion>>& faceRegions) {
-  auto isKept = [](const PSLGRegion& r) -> bool {
-    return r.classified && ((r.below > 0) != (r.above > 0));
-  };
   auto hasEdgeNoSpike = [](const std::vector<int>& loop, int a, int b) -> bool {
     const int n = (int)loop.size();
     for (int i = 0; i < n; ++i) {
@@ -2017,6 +2032,14 @@ std::optional<FatalReason> CheckSeamBalance_Test(
     }
     return false;
   };
+  auto countEdge = [&hasEdgeNoSpike](const PSLGRegion& r, int a, int b) -> int {
+    int cnt = hasEdgeNoSpike(r.loopVerts, a, b) ? 1 : 0;
+    for (const auto& h : r.holeVerts) cnt += hasEdgeNoSpike(h, a, b) ? 1 : 0;
+    return cnt;
+  };
+  auto isKept = [](const PSLGRegion& r) -> bool {
+    return r.classified && ((r.below > 0) != (r.above > 0));
+  };
   for (int si = 0; si < (int)arr.seams.size(); ++si) {
     const Seam& seam = arr.seams[si];
     const auto& regs0 = faceRegions[seam.faceId0];
@@ -2025,11 +2048,9 @@ std::optional<FatalReason> CheckSeamBalance_Test(
       const int vA = seam.vertIds[k], vB = seam.vertIds[k + 1];
       int n0 = 0, n1 = 0;
       for (const auto& r : regs0)
-        if (isKept(r) && hasEdgeNoSpike(r.loopVerts, vA, vB)) ++n0;
+        if (isKept(r)) n0 += countEdge(r, vA, vB);
       for (const auto& r : regs1)
-        if (isKept(r) && hasEdgeNoSpike(r.loopVerts, vA, vB)) ++n1;
-      // Same 0-vs-nonzero exemption as CheckSeamBalance (degenerate interior
-      // seam endpoint case; caught downstream by BuildImpl manifold check).
+        if (isKept(r)) n1 += countEdge(r, vA, vB);
       if (n0 > 0 && n1 > 0 && n0 != n1) return FatalReason::BalanceViolation;
     }
   }
