@@ -159,3 +159,36 @@ merged-cap soundness (two builds' limits within eps but not equal -
 does the cap boolean absorb the eps gap or leak slivers?).
 R4: simplicity audit - is anything here transfer-in-disguise; is
 the failure contract really this small; test-evolution honesty.
+
+## Crucible round 1 record (synthesis; folds pending)
+
+Empirical (L1): bitwise track agreement CONFIRMED (maxULP=0, 100%
+attribution without triples; trackMisses=0 end-to-end on 2-box);
+cap-as-engine-Subtract CONFIRMED (exact area at a born critical;
+signed seeding works with an aboveInside direction flag).
+Convergent fractures to fold in round 2:
+1. FORCED-THROUGH TRACKS (L2 + L1: 16/1544 at triple verts): block
+   welds create endpoints on no linear track. Fold direction: weaken
+   universal bitwise agreement to agreement-up-to-caps - welded
+   mismatch regions are eps-thin limit differences the cap boolean
+   already sees; state the invariant as "strip boundaries match
+   bitwise OR their mismatch is cap-covered", with welded slivers
+   dropped/emitted consistently by the cap's own arithmetic.
+2. SUB-EPS CHAIN GUARD RETURNS (L2 + L3): features entirely interior
+   to a merged critical run appear in neither flanking section and
+   vanish silently. Fold: one explicit named guard - any face whose
+   whole x-extent lies inside a merged run and whose area exceeds
+   the eps band reports SubEpsFeature (fail closed). The dissolution
+   claim was wrong; the guard is small and principled.
+3. ONE SOURCE OF TRUTH PER CRITICAL (L2 + L1: 62.5% naive edge
+   pairing): the cap arrangement's subdivision defines the boundary
+   vertex set for BOTH the cap and the adjacent strips' edges at
+   that critical - no post-hoc welding, engine-native, closure by
+   shared construction.
+Also fold: cap_plus/cap_minus both computed; non-convex cap
+triangulation via Triangulate (not fans); exterior limits at
+first/last criticals explicit; strip orientation stated
+engine-native (L3's transfer-in-disguise note); the retained-output
+API extension specified against the actual engine; test-evolution
+table corrected per L3; L3's implementer-temptation list becomes
+the impl prompt's forbidden list.
