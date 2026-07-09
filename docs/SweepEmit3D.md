@@ -31,9 +31,11 @@ of criticals is harmless (an extra critical = an extra slab = finer
 strips); the diameter guard becomes unnecessary - a fuzzy triple
 cluster yields several nearby criticals and thin slabs, handled
 uniformly below. Degenerate tri-pair contacts (point/tangent/
-sub-eps) contribute their x's as criticals and nothing more; the
-sub-resolution-chain hazard dissolves because nothing is dropped -
-a chain of contacts is a run of criticals.
+sub-eps) contribute their x's as criticals and nothing more. (The
+draft's "the chain hazard dissolves" claim was RETRACTED in round
+1: features interior to a merged critical run are invisible to both
+flanking sections - the explicit SubEpsFeature guard in the
+degenerate-slab rule below owns that hazard.)
 Coplanar face overlap and edge-in-plane remain OUT OF SCOPE
 (detected exactly as today, fail closed): a coplanar pair has no
 transversal section story at their shared plane.
@@ -58,13 +60,13 @@ no linear track. The invariant therefore weakens honestly:
 AGREEMENT-UP-TO-CAPS. Class i/ii endpoints extend by evaluating
 their tracks at xLo/xHi via the shared Interpolate kernel and agree
 BITWISE across the shared critical (empirically confirmed,
-maxULP=0). A forced-through endpoint extends by evaluating ITS
-PIECE's source-face section at the bounding criticals clamped to
-the weld's 2D position lifted along the face plane - an eps-thin
-deviation from the true limit, and the CAP at each bounding
-critical is computed FROM these extended limits, so the weld's
-mismatch region is cap-covered by construction (the cap arithmetic
-sees exactly what the strips emit). Strips are emitted as quads
+maxULP=0). [R2-fold, DEFINED] A forced-through endpoint extends CONSTANT in
+(y, z) across its slab - the weld point does not move. Trivially
+well-defined; the deviation from the true limit is confined to the
+welded slab at the block's eps-scale spread; and BOTH bounding caps
+are computed FROM these constant-extended limits, so the deviation
+region is cap-covered exactly (the cap arithmetic sees exactly what
+the strips emit). Strips are emitted as quads
 (two tris); orientation is ENGINE-NATIVE: the winding pass emits
 retained pieces interior-on-left in section space, which together
 with the sweep direction determines the material side of the strip
@@ -96,7 +98,17 @@ SUB-SEGMENTS of strip edges) - so the cap arrangement's output
 vertex set at c DEFINES the boundary subdivision for BOTH the cap
 triangles and the adjacent strips' edges at c: strips take their
 c-side polyline from the cap arrangement, not from their own
-unsplit extension. Closure is then by shared construction, not
+unsplit extension. [R2-fold, the data flow and lift specified] The
+order is acyclic: (1) both slabs extend their retained pieces to c
+(tracks for class i/ii, constant for welds); (2) ONE cap
+arrangement runs over both extended limits; (3) its output verts -
+2D points (y, z) at the plane x = c, i.e. 3D points (c, y, z), no
+lift ambiguity - subdivide the cap loops AND replace each adjacent
+strip's c-side interval with the arrangement's subdivision of that
+interval. A constructed subdivision vert lies within alpha of its
+host segment (Smith 8.2, the shared kernels), hence within alpha of
+the strip's source-face plane - the standard eps-validity, not a
+new error class. Closure is then by shared construction, not
 assertion. Both cap_plus and cap_minus are computed (one engine
 Subtract each); cap regions triangulate via Triangulate (holes CW
 per its contract - never fans); the exterior limit beyond the
@@ -118,9 +130,12 @@ neither flanking section and would vanish silently - macroscopic
 sub-eps-thin chains are real (the proofed R1'-2 class). ONE guard
 returns, explicit and named: any canonical face whose whole
 x-extent lies inside a merged critical run and whose area exceeds
-the eps band fails closed as SubEpsFeature. Point-like drops within
-the run (area <= the band) drop and are counted, exactly as the eps
-contract allows, consistently on both sides by construction.
+its perimeter * eps fails closed as SubEpsFeature (the house
+dimensionally-correct threshold: area ~ length * eps separates
+band-like sub-resolution geometry, droppable, from macroscopic
+sheets, reportable). Smaller faces drop and are counted, exactly as
+the eps contract allows, consistently on both sides by
+construction.
 
 ## What dies / what is born
 
@@ -132,8 +147,16 @@ triple unification + diameter guard, on-edge subdivision, piece
 taxonomy (ClassificationAmbiguity, AnchorConflict,
 UnclassifiableComponent, Starvation, BalanceViolation, PSLGInvalid).
 Failure contract shrinks to: CoplanarOverlap, EdgeInPlane,
-SubEpsInput (bbox/eps degeneracy), NonManifoldEmission (the output
-gate, kept as the final honesty check).
+SubEpsInput (bbox/eps degeneracy), SubEpsFeature (the merged-run
+guard above), NonManifoldEmission (the output gate, kept as the
+final honesty check).
+[R2-fold] THE ENGINE CONTRACT, stated: SweepWinding gains a
+retained-piece out-channel - for every RETAINED boundary piece,
+(from, to, sourceId) in section coordinates, emission-oriented
+(interior-on-left); this is the existing capture machinery
+restricted to retained pieces (the id plumbing is already built and
+2D-fence-verified); the (below, above) fields are not consumed by
+this design.
 BORN: track extension (Interpolate at two x's per piece endpoint),
 cap construction (one engine Subtract per critical), strip/cap
 assembly. Expected net: a large deletion.
