@@ -344,18 +344,16 @@ class SweepPass {
       if (PolySetAdd(out_, from, to, {m, srcId})) ++conflictCount_;
       return;
     }
-    // Capture EVERY winding-pass piece (before retention filter) so that
-    // stage D can classify all regions, including those where both sides are
-    // inside or both are outside.
+    const bool insB = IsInside(rule_, below);
+    const bool insA = IsInside(rule_, above);
+    if (insB == insA) return;
+    // Retained-piece out-channel: only pieces crossing the fill boundary are
+    // captured (spec engine contract).  Store in lex-forward direction.
     if (capture_) {
-      // Store in lex-forward direction (from < to lex).
       const vec2 capFrom = kLexLess(from, to) ? from : to;
       const vec2 capTo = kLexLess(from, to) ? to : from;
       capture_->push_back({capFrom, capTo, srcId, below, above});
     }
-    const bool insB = IsInside(rule_, below);
-    const bool insA = IsInside(rule_, above);
-    if (insB == insA) return;
     // above inside -> lex-forward; below inside -> lex-backward.
     if (PolySetAdd(out_, from, to,
                    {insA ? (kLexLess(from, to) ? 1 : -1)

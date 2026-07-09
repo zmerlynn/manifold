@@ -13,7 +13,7 @@
 // limitations under the License.
 
 // Overlap3 test suite: contractual validation gates 1-5 for the 3D
-// sweep-plane prototype. Design: docs/SweepPlane3D.md (round 3 spec).
+// sweep-native emission prototype. Design: docs/SweepEmit3D.md (final spec).
 // Every gate asserts the spec; no GTEST_SKIP on fatal paths.
 
 #include "../src/overlap3.h"
@@ -533,10 +533,9 @@ TEST(Overlap3, Gate4c_HullMask_MustResolve) {
 
 // (d) nearParallel with plane-separation inside eps. MUST FAIL-CLOSED with
 // named guard. sep=1e-14 << eps~1.4e-12 for unit-scale geometry: the plane
-// separation is within eps, so stage B detects coplanar interior overlap and
-// fires CoplanarOverlap. (sep=1e-10 >> eps~1.4e-12 was too large - that case
-// was silently resolved because the planeSep > eps check skipped the pair.)
-// Acceptable guards: TripleDiameter, UnclassifiableComponent, CoplanarOverlap.
+// separation is within eps, so stage B' detects coplanar interior overlap and
+// fires CoplanarOverlap.
+// Acceptable guards: CoplanarOverlap, SubEpsFeature, EdgeInPlane.
 TEST(Overlap3, Gate4d_NearParallel_1e10_MustFailClosed) {
   const Manifold plate1 = Manifold::Cube({1.0, 0.001, 1.0}, true);
   const Manifold plate2 =
@@ -549,40 +548,36 @@ TEST(Overlap3, Gate4d_NearParallel_1e10_MustFailClosed) {
   const Overlap3Result result = RemoveOverlaps3D(impl, eps);
   ASSERT_TRUE(result.fatal.has_value())
       << "Gate4d nearParallel(1e-10) MUST FAIL CLOSED but pipeline succeeded";
-  EXPECT_TRUE(*result.fatal == FatalReason::TripleDiameter ||
-              *result.fatal == FatalReason::UnclassifiableComponent ||
-              *result.fatal == FatalReason::CoplanarOverlap ||
-              *result.fatal == FatalReason::SubResolutionChain ||
+  EXPECT_TRUE(*result.fatal == FatalReason::CoplanarOverlap ||
+              *result.fatal == FatalReason::SubEpsFeature ||
               *result.fatal == FatalReason::EdgeInPlane)
       << "Gate4d wrong guard: " << (int)*result.fatal << " " << result.detail;
 }
 
-// (e) SubResolutionChain. MUST fire SubResolutionChain specifically.
+// (e) Degenerate-seam guard. Two boxes with a seam of length ~0.5*eps.
+// If the coplanar check fires first (z=0 faces coplanar and overlapping),
+// CoplanarOverlap is accepted. Otherwise SubEpsFeature must fire.
+// Resolving is also accepted if the box geometry exceeds eps after
+// tessellation.
 TEST(Overlap3, Gate4e_SubResolutionChain_MustFail) {
   const double eps_target = EpsilonFromScale(1.0, 1000);
   const double seamLen = 0.5 * eps_target;
-  // Two very thin boxes with a seam of length ~0.5*eps: sub-resolution.
   const Manifold a = Manifold::Cube({1.0, 1.0, seamLen}, true);
   const Manifold b = Manifold::Cube({1.0, 1.0, seamLen}, true)
                          .Translate({0, 0, seamLen * 0.5});
   const Manifold::Impl impl = ComposeImpl(a, b);
 
   const Overlap3Result result = RemoveOverlaps3D(impl, eps_target);
-  // This fixture is designed to trigger SubResolutionChain. If the coplanar
-  // check fires first (the z=0 faces of a and b are coplanar and overlapping),
-  // CoplanarOverlap is an accepted outcome.
   if (result.fatal.has_value()) {
-    EXPECT_TRUE(*result.fatal == FatalReason::SubResolutionChain ||
-                *result.fatal == FatalReason::CoplanarOverlap ||
-                *result.fatal == FatalReason::TripleDiameter)
+    EXPECT_TRUE(*result.fatal == FatalReason::SubEpsFeature ||
+                *result.fatal == FatalReason::CoplanarOverlap)
         << "Gate4e wrong guard: " << (int)*result.fatal << " " << result.detail;
   }
-  // If it resolves (box geometry happens to be above eps after tessellation),
-  // that's also acceptable - the fixture approximation may not be sub-res.
 }
 
-// (f) kWedges with axis offset ~0.3*eps. MUST fire TripleDiameter or
-// UnclassifiableComponent.
+// (f) kWedges with axis offset ~0.3*eps. Acceptable: SubEpsFeature, or
+// CoplanarOverlap (if face pairs happen to be nearly coplanar at this scale).
+// Resolving is also accepted if the geometry clears eps after tessellation.
 TEST(Overlap3, Gate4f_Wedges_TinyOffset_MustFail) {
   const double eps_target = EpsilonFromScale(1.0, 1000);
   const double axisOffset = 0.3 * eps_target;
@@ -591,14 +586,11 @@ TEST(Overlap3, Gate4f_Wedges_TinyOffset_MustFail) {
 
   const Overlap3Result result = RemoveOverlaps3D(impl, eps);
   if (result.fatal.has_value()) {
-    EXPECT_TRUE(*result.fatal == FatalReason::TripleDiameter ||
-                *result.fatal == FatalReason::UnclassifiableComponent ||
-                *result.fatal == FatalReason::SubResolutionChain ||
-                *result.fatal == FatalReason::BalanceViolation ||
-                *result.fatal == FatalReason::ClassificationAmbiguity)
+    EXPECT_TRUE(*result.fatal == FatalReason::SubEpsFeature ||
+                *result.fatal == FatalReason::CoplanarOverlap ||
+                *result.fatal == FatalReason::EdgeInPlane)
         << "Gate4f wrong guard: " << (int)*result.fatal << " " << result.detail;
   }
-  // If resolves: staggered z-extents may allow it even at tiny offset.
 }
 
 // ---------------------------------------------------------------------------
@@ -681,10 +673,11 @@ TEST(Overlap3, Pin_NestedCubes) {
   EXPECT_NEAR(vol, 27.0, 1e-4)
       << "Nested cubes: expected vol=27 (outer cube only), got " << vol;
 
-  // 12 triangles (the outer 3x3x3 cube has 6 faces x 2 tris = 12).
-  EXPECT_EQ(result.impl->NumTri(), 12u)
-      << "Nested cubes: expected 12 tris (outer cube), got "
-      << result.impl->NumTri();
+  // The strip+cap architecture subdivides each face into per-slab strips and
+  // per-critical caps: output is finer than the original 12 input triangles.
+  // We only check that some triangles are emitted (outer shell is non-empty).
+  EXPECT_GT(result.impl->NumTri(), 0u)
+      << "Nested cubes: expected non-empty output, got 0 tris";
 }
 
 // TOUCHING-disjoint: Cube + Cube.Translate({1,0,0}) -> must NOT fatal,
@@ -755,179 +748,13 @@ TEST(Overlap3, EmissionAlgebra_CubeSixFaces) {
 }
 
 // ---------------------------------------------------------------------------
-// Phase P: Mechanism pins (P1-P7)
+// Phase P: Mechanism pins
 // ---------------------------------------------------------------------------
 
-// P1: CheckSeamBalance_Test synthetic imbalance -> BalanceViolation.
-// Seam with 2 kept regions on face 0 and 1 kept region on face 1 (n0=2, n1=1):
-// both nonzero and unequal -> BalanceViolation (was stub "return true" before
-// M7).
-TEST(Overlap3, Pin_P1_BalanceViolation) {
-  ArrangementGeometry arr;
-  Seam seam;
-  seam.faceId0 = 0;
-  seam.faceId1 = 1;
-  seam.vertIds = {0, 1};
-  arr.seams.push_back(seam);
-
-  // loopVerts={2,0,1,3}: at i=1, loop[1]=0, loop[2]=1, loop[0]=2!=1,
-  // loop[3]=3!=0 -> hasEdgeNoSpike(0,1) = true.
-  // classified=true, below=0, above=1 -> isKept=true
-  // (IsInside3D(0)!=IsInside3D(1)).
-  auto makeKeptRegion = []() {
-    PSLGRegion r;
-    r.loopVerts = {2, 0, 1, 3};
-    r.classified = true;
-    r.below = 0;
-    r.above = 1;
-    return r;
-  };
-  std::vector<std::vector<PSLGRegion>> faceRegions(2);
-  faceRegions[0].push_back(makeKeptRegion());
-  faceRegions[0].push_back(makeKeptRegion());  // n0 = 2
-  faceRegions[1].push_back(
-      makeKeptRegion());  // n1 = 1; 2 != 1 -> BalanceViolation
-
-  const auto fatal = CheckSeamBalance_Test(arr, faceRegions);
-  ASSERT_TRUE(fatal.has_value())
-      << "expected BalanceViolation from imbalanced seam";
-  EXPECT_EQ(*fatal, FatalReason::BalanceViolation);
-}
-
-// P11: CheckSeamBalance_Test catches a hole-induced imbalance.
-// Face0 has one kept region whose HOLE (not outer loop) carries edge (0,1).
-// The old code only checked loopVerts, so it saw n0=0 and the 0-vs-nonzero
-// guard suppressed the fire.  The new code counts holes too, giving n0=1;
-// with n1=2 from face1's two kept regions, both are nonzero and n0!=n1 ->
-// BalanceViolation.
-TEST(Overlap3, Pin_P11_BalanceViolation_HoleContribution) {
-  ArrangementGeometry arr;
-  Seam seam;
-  seam.faceId0 = 0;
-  seam.faceId1 = 1;
-  seam.vertIds = {0, 1};
-  arr.seams.push_back(seam);
-
-  // Face0: one kept region.  Outer loop {4,5,6,7} has no 0 or 1 -> outer
-  // count=0.  Hole {1,0,2} has edge (1->0) which is (0,1) undirected;
-  // hasEdgeNoSpike({1,0,2},0,1): at i=0, loop[0]=1=b, loop[1]=0=a,
-  // pred=loop[2]=2!=a=0, succ=loop[2]=2!=b=1 -> true.  Hole count=1.
-  // countEdge = 0+1 = 1.  n0=1.
-  // Old code (loopVerts only): n0=0; 0-vs-nonzero guard fires first -> NO
-  // BalanceViolation despite genuine imbalance.
-  PSLGRegion r0;
-  r0.loopVerts = {4, 5, 6, 7};
-  r0.holeVerts = {{1, 0, 2}};
-  r0.classified = true;
-  r0.below = 0;
-  r0.above = 1;
-
-  // Face1: two kept regions, each with edge (0,1) in outer loop -> n1=2.
-  auto makeR1 = [](int extra) {
-    PSLGRegion r;
-    r.loopVerts = {2, 0, 1, extra};
-    r.classified = true;
-    r.below = 0;
-    r.above = 1;
-    return r;
-  };
-
-  std::vector<std::vector<PSLGRegion>> faceRegions(2);
-  faceRegions[0].push_back(r0);
-  faceRegions[1].push_back(makeR1(8));
-  faceRegions[1].push_back(makeR1(9));
-
-  const auto fatal = CheckSeamBalance_Test(arr, faceRegions);
-  ASSERT_TRUE(fatal.has_value())
-      << "expected BalanceViolation: n0=1 (from hole), n1=2; old code missed "
-         "the hole and saw n0=0 (guard suppressed fire)";
-  EXPECT_EQ(*fatal, FatalReason::BalanceViolation);
-}
-
-// P2: ClassifyRegion_Test with two conflicting pieces ->
-// ClassificationAmbiguity. Face in z=0 plane (normal=(0,0,1)), square region
-// [1,3]x[1,3]. Two pieces with sourceId=faceId but different (below,above)
-// values land at the same projected midpoint inside the region.
-TEST(Overlap3, Pin_P2_ClassificationAmbiguity) {
-  const std::vector<MergedVert> verts = {
-      {{1.0, 1.0, 0.0}},  // 0
-      {{3.0, 1.0, 0.0}},  // 1
-      {{3.0, 3.0, 0.0}},  // 2
-      {{1.0, 3.0, 0.0}},  // 3
-  };
-
-  CanonicalFace face;
-  face.id = 0;
-  face.verts = {0, 1, 2};
-  face.normal = {0.0, 0.0, 1.0};
-  face.mult = 1;
-
-  // Square region in the z=0 plane; CCW in (x,y) after proj (normal=(0,0,1)).
-  PSLGRegion region;
-  region.loopVerts = {0, 1, 2, 3};
-
-  // Slab fully covering the region's x-range [1,3].
-  SlabResult slab;
-  slab.xLo = 1.0;
-  slab.xHi = 3.0;
-  slab.xMid = 2.0;
-  slab.built = true;
-
-  // Two pieces both sourced to faceId=0.
-  // from/to are (y,z) section coords. mid2d=(2,0) -> mid3d={xMid=2, y=2, z=0}
-  // -> midProj=proj*mid3d=(2,2) in (x,y), which is inside the square [1,3]^2.
-  SweepCapture piece1;
-  piece1.from = {1.0, 0.0};
-  piece1.to = {3.0, 0.0};
-  piece1.sourceId = 0;
-  piece1.below = 0;
-  piece1.above = 1;
-
-  SweepCapture piece2;
-  piece2.from = {1.5, 0.0};
-  piece2.to = {2.5, 0.0};
-  piece2.sourceId = 0;
-  piece2.below = 1;  // differs from piece1.below -> ClassificationAmbiguity
-  piece2.above = 0;
-
-  slab.pieces = {piece1, piece2};
-
-  const auto result =
-      ClassifyRegion_Test(region, 0, {slab}, verts, face, 1e-10);
-  ASSERT_TRUE(result.fatal.has_value())
-      << "expected ClassificationAmbiguity from conflicting pieces";
-  EXPECT_EQ(*result.fatal, FatalReason::ClassificationAmbiguity);
-}
-
-// P3: ClassifyRegion_Test with no covering slab -> returns nullopt (no fatal),
-// region stays unclassified (degenerate path, handled by anchor propagation).
-TEST(Overlap3, Pin_P3_ClassifyRegion_Degenerate) {
-  const std::vector<MergedVert> verts = {
-      {{1.0, 1.0, 0.0}},
-      {{3.0, 1.0, 0.0}},
-      {{3.0, 3.0, 0.0}},
-      {{1.0, 3.0, 0.0}},
-  };
-
-  CanonicalFace face;
-  face.id = 0;
-  face.verts = {0, 1, 2};
-  face.normal = {0.0, 0.0, 1.0};
-  face.mult = 1;
-
-  PSLGRegion region;
-  region.loopVerts = {0, 1, 2, 3};  // xMin=1, xMax=3
-
-  // Empty slab list: no covering slab -> bestSlab=-1 -> ClassifyRegion returns
-  // nullopt without setting outFatal -> result has no fatal and
-  // classified=false.
-  const auto result =
-      ClassifyRegion_Test(region, 0, /*slabs=*/{}, verts, face, 1e-10);
-  EXPECT_FALSE(result.fatal.has_value())
-      << "no fatal expected for region with no covering slab";
-  EXPECT_FALSE(result.classified)
-      << "region should be unclassified when no covering slab exists";
-}
+// Note: P1, P11 (CheckSeamBalance_Test), P2, P3 (ClassifyRegion_Test),
+// P5 (PSLGInvalid/RemoveOverlaps3D_FromArr), P8-P10
+// (PropagateAnchorComponents_Test) are retired - those white-box mechanisms
+// no longer exist in the sweep-native emission architecture.
 
 // P4: EdgeInPlane fatal. Two tetrahedra: tet A has an edge in the z=0 plane
 // whose midpoint lies inside tet B's z=0 face.
@@ -995,53 +822,6 @@ TEST(Overlap3, Pin_P4b_EdgeInPlane_OffMidpoint) {
       << "got fatal=" << (int)*result.fatal << " detail=" << result.detail;
 }
 
-// P5: PSLGInvalid from RemoveOverlaps3D_FromArr. Two seam segments on face 0
-// that cross at interior point (2,2) not present in arr.verts.
-//   seam0: (1,1,0)->(3,3,0), 2D: (1,1)->(3,3)
-//   seam1: (3,1,0)->(1,3,0), 2D: (3,1)->(1,3)
-// Cross at (2,2) in (x,y) - not any arr vertex -> PSLGInvalid.
-TEST(Overlap3, Pin_P5_PSLGInvalid) {
-  ArrangementGeometry arr;
-  arr.verts = {
-      {{0.0, 0.0, 0.0}},  // 0
-      {{4.0, 0.0, 0.0}},  // 1
-      {{2.0, 4.0, 0.0}},  // 2
-      {{1.0, 1.0, 0.0}},  // 3  seam0 start
-      {{3.0, 3.0, 0.0}},  // 4  seam0 end
-      {{3.0, 1.0, 0.0}},  // 5  seam1 start
-      {{1.0, 3.0, 0.0}},  // 6  seam1 end
-  };
-
-  CanonicalFace f0, f1;
-  f0.id = 0;
-  f0.verts = {0, 1, 2};
-  f0.normal = {0.0, 0.0, 1.0};
-  f0.mult = 1;
-  f1.id = 1;
-  f1.verts = {0, 2, 1};
-  f1.normal = {0.0, 0.0, -1.0};
-  f1.mult = 1;
-  arr.faces = {f0, f1};
-
-  Seam seam0, seam1;
-  seam0.faceId0 = 0;
-  seam0.faceId1 = 1;
-  seam0.vertIds = {3, 4};
-  seam1.faceId0 = 0;
-  seam1.faceId1 = 1;
-  seam1.vertIds = {5, 6};
-  arr.seams = {seam0, seam1};
-
-  arr.faceSeams.resize(2);
-  arr.faceSeams[0] = {0, 1};
-  arr.faceSeams[1] = {0, 1};
-
-  const Overlap3Result result = RemoveOverlaps3D_FromArr(arr, 1e-8);
-  ASSERT_TRUE(result.fatal.has_value()) << "expected PSLGInvalid";
-  EXPECT_EQ(*result.fatal, FatalReason::PSLGInvalid)
-      << "got fatal=" << (int)*result.fatal << " detail=" << result.detail;
-}
-
 // P6: Compose a tet with its winding-reversed copy. Both meshes share the same
 // 4 vertex positions {(0,0,0),(1,0,0),(0,1,0),(0,0,1)}. Stage A merges the
 // duplicate positions and finds each face pair has opposite permutation parity
@@ -1074,162 +854,16 @@ TEST(Overlap3, Pin_P6_CancellingMesh) {
   EXPECT_NEAR(vol, 0.0, 1e-6) << "cancelling tet expected vol=0, got " << vol;
 }
 
-// P7: Starvation when bBox_.Scale()=0 -> EpsilonFromScale(0,1000)=0 -> eps<=0.
+// P7: SubEpsInput when bBox_.Scale()=0 -> EpsilonFromScale(0,1000)=0 -> eps<=0.
 // Set bBox_ to a zero-volume box directly; no triangles needed.
-TEST(Overlap3, Pin_P7_Starvation) {
+TEST(Overlap3, Pin_P7_SubEpsInput) {
   Manifold::Impl impl;
   // Zero-volume bounding box: Scale() = max(|0|,|0|,|0|) = 0.
-  // EpsilonFromScale(0, 1000) = 0 -> eps <= 0.0 -> Starvation.
+  // EpsilonFromScale(0, 1000) = 0 -> eps <= 0.0 -> SubEpsInput.
   impl.bBox_ = Box{vec3{0.0, 0.0, 0.0}, vec3{0.0, 0.0, 0.0}};
   const Overlap3Result result = RemoveOverlaps3D(impl, 0.0);
-  ASSERT_TRUE(result.fatal.has_value()) << "expected Starvation fatal";
-  EXPECT_EQ(*result.fatal, FatalReason::Starvation);
-}
-
-// ---------------------------------------------------------------------------
-// Phase P: M6 anchor-component propagation pins (P8-P10)
-// ---------------------------------------------------------------------------
-
-// P8: PropagateAnchorComponents_Test with conflicting anchors ->
-// AnchorConflict. One face (fi=0), three regions, no seams.
-//   R0 (anchor, below=0, above=1): loopVerts=[0,2,3]  edges: 0->2, 2->3, 3->0
-//   R1 (degenerate):                loopVerts=[3,2,4]  edges: 3->2, 2->4, 4->3
-//   R2 (anchor, below=1, above=0): loopVerts=[2,1,4]  edges: 2->1, 1->4, 4->2
-// Adjacency:
-//   R0 has 2->3; R1 has 3->2 -> R0 adjacent to R1 (anchor).
-//   R2 has 4->2; R1 has 2->4 -> R2 adjacent to R1 (anchor).
-// Anchor set = {(0,1),(1,0)} -> size 2 -> AnchorConflict.
-TEST(Overlap3, Pin_P8_AnchorConflict) {
-  ArrangementGeometry arr;
-  arr.verts = {
-      {{0.0, 0.0, 0.0}},  // v0
-      {{2.0, 0.0, 0.0}},  // v1
-      {{1.0, 0.0, 0.0}},  // v2
-      {{0.0, 1.0, 0.0}},  // v3
-      {{2.0, 1.0, 0.0}},  // v4
-  };
-  CanonicalFace face;
-  face.id = 0;
-  face.verts = {0, 1, 2};
-  face.normal = {0.0, 0.0, 1.0};
-  face.mult = 1;
-  arr.faces = {face};
-  arr.seams = {};
-  arr.faceSeams = {{}};  // face 0: no seams
-
-  PSLGRegion r0, r1, r2;
-  r0.loopVerts = {0, 2, 3};
-  r0.classified = true;
-  r0.below = 0;
-  r0.above = 1;
-  r1.loopVerts = {3, 2, 4};
-  r1.degenerate = true;
-  r2.loopVerts = {2, 1, 4};
-  r2.classified = true;
-  r2.below = 1;
-  r2.above = 0;
-
-  std::vector<std::vector<PSLGRegion>> faceRegions = {{r0, r1, r2}};
-  Overlap3Counters cnt;
-  const auto fatal =
-      PropagateAnchorComponents_Test(arr, faceRegions, 1e-8, cnt);
-  ASSERT_TRUE(fatal.has_value())
-      << "expected AnchorConflict from conflicting anchors";
-  EXPECT_EQ(*fatal, FatalReason::AnchorConflict);
-}
-
-// P9: PropagateAnchorComponents_Test with no anchors and diameter > eps ->
-// UnclassifiableComponent.
-// One face (fi=0), one large degenerate region, no classified neighbors.
-//   R0 (degenerate): loopVerts=[0,1,2,3] - large square, diameter ~14.1
-//   No classified regions -> anchors empty -> UnclassifiableComponent.
-TEST(Overlap3, Pin_P9_UnclassifiableComponent) {
-  ArrangementGeometry arr;
-  arr.verts = {
-      {{0.0, 0.0, 0.0}},    // v0
-      {{10.0, 0.0, 0.0}},   // v1
-      {{10.0, 10.0, 0.0}},  // v2
-      {{0.0, 10.0, 0.0}},   // v3
-  };
-  CanonicalFace face;
-  face.id = 0;
-  face.verts = {0, 1, 2};
-  face.normal = {0.0, 0.0, 1.0};
-  face.mult = 1;
-  arr.faces = {face};
-  arr.seams = {};
-  arr.faceSeams = {{}};
-
-  PSLGRegion r0;
-  r0.loopVerts = {0, 1, 2, 3};  // large square, diameter ~ sqrt(200) > eps
-  r0.degenerate = true;
-
-  std::vector<std::vector<PSLGRegion>> faceRegions = {{r0}};
-  Overlap3Counters cnt;
-  const double eps = 1e-8;  // << diameter ~14.1
-  const auto fatal = PropagateAnchorComponents_Test(arr, faceRegions, eps, cnt);
-  ASSERT_TRUE(fatal.has_value())
-      << "expected UnclassifiableComponent: no anchors, diameter > eps";
-  EXPECT_EQ(*fatal, FatalReason::UnclassifiableComponent);
-}
-
-// P10: PropagateAnchorComponents_Test with agreeing anchor + diameter <= eps ->
-// members classified by propagation.
-// One face (fi=0), two regions, no seams.
-//   R0 (anchor, below=0, above=1): loopVerts=[0,1,3,4]  (quad)
-//     edges: 0->1, 1->3, 3->4, 4->0
-//   R1 (degenerate, tiny):         loopVerts=[1,0,2]
-//     edges: 1->0, 0->2, 2->1
-// Adjacency: R0 has 0->1; R1 has 1->0 -> R0 is anchor of R1.
-// R1 verts: v0=(0,0,0), v1=(5e-5,0,0), v2=(2.5e-5,3e-5,0)
-//   diameter = max(|v0-v1|, ...) = 5e-5 < eps=1e-4 -> span guard passes.
-// Anchor set = {(0,1)} -> one entry -> propagate below=0, above=1.
-TEST(Overlap3, Pin_P10_AnchorPropagation_Positive) {
-  ArrangementGeometry arr;
-  arr.verts = {
-      {{0.0, 0.0, 0.0}},      // v0
-      {{5e-5, 0.0, 0.0}},     // v1 (5e-5 from v0)
-      {{2.5e-5, 3e-5, 0.0}},  // v2 (tiny triangle tip for R1)
-      {{1.0, 0.0, 0.0}},      // v3 (anchor far corner)
-      {{0.0, 1.0, 0.0}},      // v4 (anchor far corner)
-  };
-  CanonicalFace face;
-  face.id = 0;
-  face.verts = {0, 1, 2};
-  face.normal = {0.0, 0.0, 1.0};
-  face.mult = 1;
-  arr.faces = {face};
-  arr.seams = {};
-  arr.faceSeams = {{}};
-
-  PSLGRegion r0, r1;
-  // R0: large quad; edge 0->1 is the shared edge.
-  r0.loopVerts = {0, 1, 3, 4};
-  r0.classified = true;
-  r0.below = 0;
-  r0.above = 1;
-  // R1: tiny triangle; edge 1->0 is the reverse of R0's 0->1.
-  r1.loopVerts = {1, 0, 2};
-  r1.degenerate = true;
-
-  std::vector<std::vector<PSLGRegion>> faceRegions = {{r0, r1}};
-  Overlap3Counters cnt;
-  const double eps = 1e-4;  // > diameter (5e-5)
-  const auto fatal = PropagateAnchorComponents_Test(arr, faceRegions, eps, cnt);
-  ASSERT_FALSE(fatal.has_value())
-      << "expected success from agreeing anchor with diameter <= eps";
-  EXPECT_TRUE(faceRegions[0][1].classified)
-      << "R1 should be classified after propagation";
-  EXPECT_EQ(faceRegions[0][1].below, 0)
-      << "R1.below should propagate from anchor";
-  EXPECT_EQ(faceRegions[0][1].above, 1)
-      << "R1.above should propagate from anchor";
-  EXPECT_EQ(cnt.degenerateClassified, 1)
-      << "one component classified by anchor propagation";
-  // IsInside3D(0)=false != IsInside3D(1)=true -> not a drop ->
-  // epsFeaturesDropped=0.
-  EXPECT_EQ(cnt.epsFeaturesDropped, 0)
-      << "not dropped: R1 straddles the material boundary";
+  ASSERT_TRUE(result.fatal.has_value()) << "expected SubEpsInput fatal";
+  EXPECT_EQ(*result.fatal, FatalReason::SubEpsInput);
 }
 
 // ---------------------------------------------------------------------------
@@ -1307,11 +941,9 @@ TEST(Overlap3, Pin_S3b_CubeMinusInverted_OracleSubtract) {
 }  // namespace
 
 TEST(Overlap3, Pin_P12_InteriorIsland_StampThroughFace) {
-  // The design's ISLAND class (Stage D): a stamp piercing a big face's
-  // INTERIOR leaves a closed rectangle of seam segments with no attachment
-  // to the face's outer boundary - an interior island whose hole/island
-  // routing the emission path must handle. Generic offsets: no shared
+  // A stamp piercing a big face's interior. Generic offsets: no shared
   // planes, no shared coordinate values between the two solids.
+  // Oracle: Boolean3 union (volume/genus/winding agreement).
   const Manifold a = Manifold::Cube({4, 4, 1});
   const Manifold b =
       Manifold::Cube({0.9, 1.1, 3.1}).Translate({1.53, 1.71, -0.93});

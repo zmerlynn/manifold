@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Stage C of the 3D sweep-plane overlap-removal prototype.
-// Design: docs/SweepPlane3D.md, section "Stage C - the sweep".
+// Stage C' of the 3D sweep-native emission prototype.
+// Design: docs/SweepEmit3D.md, Stage C'.
 
 #include <algorithm>
 #include <cmath>
@@ -29,51 +29,69 @@ namespace manifold {
 
 namespace {
 
-// Section (y,z) coordinates of a 3D point.
-static vec2 SectionYZ(vec3 p) { return {p.y, p.z}; }
-
-// Compute the directed section segment for `face` at x = xMid.
-// Direction: dot(p1-p0, yz(cross(+x, face.normal))) > 0
-// (spec "ORIENTATION AND SIGN CONVENTIONS").
-// Returns false if the face does not straddle xMid.
+// Compute the directed section segment for `face` at x = xMid, storing the
+// 3D edge-pair origins (va, vb) for each endpoint so stage D' can extend to
+// any x in the slab.
+//
+// Orientation: dot(p1 - p0, yz(cross(+x, face.normal))) > 0.
+// cross((1,0,0),(nx,ny,nz)) = (0, -nz, ny), yz-projection = (-nz, ny).
+//
+// Returns false if the face does not straddle xMid (< 2 distinct crossings).
 static bool ComputeSectionSegment(const CanonicalFace& face,
                                   const std::vector<MergedVert>& verts,
-                                  double xMid, SectionFaceSegment& out) {
-  const int v[3] = {face.verts.x, face.verts.y, face.verts.z};
-  const vec3 p[3] = {verts[v[0]].pos, verts[v[1]].pos, verts[v[2]].pos};
+                                  double xMid, SectionFaceSegment& segOut,
+                                  FaceTrack* trackOut) {
+  const int vi[3] = {face.verts.x, face.verts.y, face.verts.z};
+  const vec3 p[3] = {verts[vi[0]].pos, verts[vi[1]].pos, verts[vi[2]].pos};
 
-  // Collect the two edge-crossings at xMid.
   vec2 pts[2];
+  vec3 ePair[2][2];  // ePair[k] = {va, vb} for pts[k]
   int found = 0;
+
   for (int i = 0; i < 3 && found < 2; ++i) {
     const int j = (i + 1) % 3;
     const double xi = p[i].x, xj = p[j].x;
     if (xi == xj) continue;                       // edge parallel to section
-    if ((xi - xMid) * (xj - xMid) > 0) continue;  // same side
+    if ((xi - xMid) * (xj - xMid) > 0) continue;  // same side of xMid
     const vec2 yz = Interpolate(p[i], p[j], xMid);
     if (found == 0 || yz.x != pts[0].x || yz.y != pts[0].y) {
-      pts[found++] = yz;
+      pts[found] = yz;
+      ePair[found][0] = p[i];
+      ePair[found][1] = p[j];
+      found++;
     }
   }
   if (found < 2) return false;
 
-  // Orient: dot(p1-p0, yz(cross(+x, face.normal))) > 0.
-  // cross((1,0,0), (nx,ny,nz)) = (0,-nz,ny), yz-projection = (-nz, ny).
+  // Orient: dot(p1-p0, refDir) > 0.
   const vec2 refDir = {-face.normal.z, face.normal.y};
   const vec2 d = pts[1] - pts[0];
-  if (la::dot(d, refDir) < 0) std::swap(pts[0], pts[1]);
+  if (la::dot(d, refDir) < 0) {
+    std::swap(pts[0], pts[1]);
+    std::swap(ePair[0], ePair[1]);
+  }
 
-  out.faceId = -1;  // set by caller
-  out.p0 = pts[0];
-  out.p1 = pts[1];
-  out.mult = face.mult;
+  segOut.faceId = -1;  // set by caller
+  segOut.p0 = pts[0];
+  segOut.p1 = pts[1];
+  segOut.mult = face.mult;
+
+  if (trackOut) {
+    trackOut->faceId = -1;  // set by caller
+    trackOut->p0 = pts[0];
+    trackOut->p1 = pts[1];
+    trackOut->va0 = ePair[0][0];
+    trackOut->vb0 = ePair[0][1];
+    trackOut->va1 = ePair[1][0];
+    trackOut->vb1 = ePair[1][1];
+  }
   return true;
 }
 
 }  // namespace
 
 // ---------------------------------------------------------------------------
-// Stage C: x-criticals, per-slab sections, engine calls.
+// Stage C': x-criticals, per-slab sections, engine calls, face tracks.
 // ---------------------------------------------------------------------------
 
 StageResult<std::vector<SlabResult>> BuildSlabs(const ArrangementGeometry& arr,
@@ -81,7 +99,7 @@ StageResult<std::vector<SlabResult>> BuildSlabs(const ArrangementGeometry& arr,
                                                 Overlap3Counters& cnt) {
   const int nFaces = (int)arr.faces.size();
 
-  // Collect x-criticals from all verts (stage-A + event + triple-point).
+  // Collect x-criticals from all verts (stage-A + seam endpoints).
   std::vector<double> crits;
   crits.reserve(arr.verts.size());
   for (const auto& v : arr.verts) crits.push_back(v.pos.x);
@@ -90,11 +108,9 @@ StageResult<std::vector<SlabResult>> BuildSlabs(const ArrangementGeometry& arr,
 
   if (crits.empty()) return StageResult<std::vector<SlabResult>>::Ok({});
 
-  // Exterior sentinel slabs (spec "BRACKETED by two exterior sentinel slabs").
-  // Width = 2*eps > eps so they pass the slab-width gate and are built.
-  // No face vertex lies in these x-ranges, so no face straddles them:
-  // the engine produces empty capture => winding 0 everywhere (correct
-  // exterior).
+  // Sentinel slabs: width = 2*eps > eps so they are built.  No face vertex
+  // lies in these ranges so the engine produces an empty capture (winding 0
+  // everywhere - correct exterior).
   const double xMin = crits.front();
   const double xMax = crits.back();
   const double sentW = 2.0 * eps;
@@ -116,17 +132,16 @@ StageResult<std::vector<SlabResult>> BuildSlabs(const ArrangementGeometry& arr,
     }
     slab.built = true;
 
-    // Collect section verts and edges for all straddling faces.
     std::vector<EdgeM> edges;
     std::vector<vec2> secVerts;
     std::map<std::pair<double, double>, int> vertIdx;
 
-    auto getVid = [&](vec2 p) -> int {
-      auto key = std::make_pair(p.x, p.y);
+    auto getVid = [&](vec2 p_yz) -> int {
+      auto key = std::make_pair(p_yz.x, p_yz.y);
       auto it = vertIdx.find(key);
       if (it != vertIdx.end()) return it->second;
       const int id = (int)secVerts.size();
-      secVerts.push_back(p);
+      secVerts.push_back(p_yz);
       vertIdx.emplace(key, id);
       return id;
     };
@@ -143,9 +158,13 @@ StageResult<std::vector<SlabResult>> BuildSlabs(const ArrangementGeometry& arr,
       if (xFaceMax <= slab.xMid || xFaceMin >= slab.xMid) continue;
 
       SectionFaceSegment seg;
-      if (!ComputeSectionSegment(face, arr.verts, slab.xMid, seg)) continue;
+      FaceTrack track;
+      if (!ComputeSectionSegment(face, arr.verts, slab.xMid, seg, &track))
+        continue;
       seg.faceId = fi;
+      track.faceId = fi;
       slab.segments.push_back(seg);
+      slab.faceTracks.push_back(track);
 
       const int v0 = getVid(seg.p0);
       const int v1 = getVid(seg.p1);
@@ -153,7 +172,6 @@ StageResult<std::vector<SlabResult>> BuildSlabs(const ArrangementGeometry& arr,
       edges.push_back({v0, v1, (int)face.mult, fi});
     }
 
-    // Save raw section data for gate-2 test hooks.
     slab.sectionEdges = edges;
     slab.sectionVerts = secVerts;
 
@@ -166,6 +184,39 @@ StageResult<std::vector<SlabResult>> BuildSlabs(const ArrangementGeometry& arr,
       cnt.engineIdConflicts += conflictCount;
       return StageResult<std::vector<SlabResult>>::Fatal(
           FatalReason::EngineIdConflict, "engine id conflict in slab");
+    }
+  }
+
+  // SubEpsFeature guard: any face whose x-extent has no coverage from a built
+  // slab and whose area > perimeter * eps is a macroscopic feature in a merged
+  // sub-eps critical run - fail closed.
+  for (int fi = 0; fi < nFaces; ++fi) {
+    const CanonicalFace& face = arr.faces[fi];
+    const vec3 p0 = arr.verts[face.verts.x].pos;
+    const vec3 p1 = arr.verts[face.verts.y].pos;
+    const vec3 p2 = arr.verts[face.verts.z].pos;
+    const double xFaceMin = std::min({p0.x, p1.x, p2.x});
+    const double xFaceMax = std::max({p0.x, p1.x, p2.x});
+    if (xFaceMin >= xFaceMax) continue;  // axis-parallel face, OK
+
+    bool hasCoverage = false;
+    for (const auto& slab : slabs) {
+      if (!slab.built) continue;
+      // Built slab covers any part of the face's x-range.
+      if (slab.xLo < xFaceMax && slab.xHi > xFaceMin) {
+        hasCoverage = true;
+        break;
+      }
+    }
+    if (hasCoverage) continue;
+
+    const double area = 0.5 * la::length(la::cross(p1 - p0, p2 - p0));
+    const double perim =
+        la::length(p1 - p0) + la::length(p2 - p1) + la::length(p0 - p2);
+    if (area > perim * eps) {
+      return StageResult<std::vector<SlabResult>>::Fatal(
+          FatalReason::SubEpsFeature,
+          "face in unbuilt x-range with area > perimeter*eps");
     }
   }
 
