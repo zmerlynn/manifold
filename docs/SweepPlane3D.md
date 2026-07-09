@@ -567,3 +567,27 @@ tracked for the hardening arc):
   edge-in-plane contact - an out-of-scope-family input mislisted as
   must-resolve; 4c is scope-blocked until the coplanar arc, not a
   pipeline failure (new-1, resolved by reclassification).
+
+## Residuals crucible close (2026-07-09, 31d1fcd3)
+
+Five narrow lanes landed: constants rationalized, counters, seam
+hygiene, inverted-cube pins, ONE clip core (net -19 LOC, midpoint
+heuristic deleted), balance hole-counting + the derived third-face
+argument for the 0-vs-nonzero guard, the chain-graph link, strict
+PSLG ids, the unbuilt-slab classifier bug root-caused (the masked
+"spike" defect), NonManifoldEmission ENABLED, interior islands
+routed and oracle-pinned (P12). Suite: 36 green + 1 scope skip;
+fences 111; every fix oracle- or pin-verified.
+
+CLOSING VERDICTS: resolution audit NEED-CHANGE (f6 probe heuristic
+and gate-strictness items remain open, recorded); SIMPLICITY JUDGE
+BREAK - 21 unspecified special cases, none spec-demanded; the
+implementation reads as patch strata from three fix-agent
+generations, not one design. Per the owner's stated bar, this makes
+overlap3.{cpp,h}/overlap3_sweep.cpp a REWRITE CANDIDATE. What
+survives a rewrite untouched: this design doc (crucible-proofed),
+the 2D engine extension (audited faithful, fences green), and the
+40-test contractual gate ladder with its oracle anchors - a rewrite
+is a re-implementation against a frozen spec and a frozen test
+suite, a far smaller task than the original build. The tractability
+answer (YES) stands on the green oracle gates regardless.
