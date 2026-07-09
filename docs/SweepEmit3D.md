@@ -237,3 +237,31 @@ engine-native (L3's transfer-in-disguise note); the retained-output
 API extension specified against the actual engine; test-evolution
 table corrected per L3; L3's implementer-temptation list becomes
 the impl prompt's forbidden list.
+
+## Crucible close (round-3 cap, 2026-07-10)
+
+Three rounds, five lanes (one empirical build). SURVIVED with
+empirical validation: the architecture's core - per-slab sections
+through the engine, class-i/ii track extension (bitwise, maxULP=0),
+cap-as-engine-Subtract (exact area), zero track misses end-to-end
+on 2-box, acyclic cap dataflow, the (c,y,z) lift, the weld
+extension's closure story including neighbor-disappearance and
+first/last-slab cases (all HELD on re-attack). OPEN AT CLOSE (the
+round-3 list, all bounded):
+1. Weld strips are NOT on-face (constant-(y,z) extension); the
+   on-face claim must weaken to within-block-spread eps-validity at
+   welds, everywhere the doc asserts it.
+2. The merged-run rule's "criticals all within eps" is false for
+   chained runs (gaps <= eps, span unbounded); needs per-critical
+   caps inside runs or an explicit run-span bound feeding
+   SubEpsFeature.
+3. One-source-per-critical prose still has one both-directions
+   sentence to make unambiguous.
+4. The engine contract needs conflictCount semantics.
+5. Strip quad vertex order unstated.
+RECOMMENDATION recorded for the owner: fold these five (half-day),
+skip a fourth review round - design review has reached diminishing
+returns relative to the oracle-anchored implementation gates, which
+are the stronger fence and already exist. Then implementation
+crucible on this branch, with the L3 implementer-temptation list as
+the forbidden catalog.
