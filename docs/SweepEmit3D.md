@@ -51,20 +51,24 @@ piece endpoints are (i) face-edge crossings of the section plane -
 tracking the input EDGE - or (ii) crossings of two faces' section
 segments - tracking the SEAM (both faces' planes contain the seam;
 the section crossing at any x IS the seam's point at x). The
-enumeration is exhaustive: the engine constructs 2D verts only at
-input-segment endpoints (class i) and pairwise crossings (class
-ii); block-rule forced-through verts land on existing event points
-(class i or ii). Therefore each retained piece extends linearly to
-the slab's bounding criticals by evaluating its endpoint TRACKS at
-xLo and xHi via the shared Interpolate kernel - sweeping a planar
-STRIP that lies on its source face (faces are planar; the strip is
-the face's retained band across the slab). BITWISE AGREEMENT: the
-strip boundary at a shared critical is computed from the same
-tracks with the same kernel at the same x from both sides, so
-adjacent strips share boundary verts exactly. Strips are emitted as
-quads (two tris), oriented by the source face normal and the
-retained side (the engine's interior-on-left convention gives the
-material side directly).
+enumeration covers classes (i) and (ii); [R1-fold] BLOCK-RULE
+FORCED-THROUGH verts are a confirmed THIRD class (empirical: 1% of
+endpoints on a triple-point fixture) - a weld places an endpoint on
+no linear track. The invariant therefore weakens honestly:
+AGREEMENT-UP-TO-CAPS. Class i/ii endpoints extend by evaluating
+their tracks at xLo/xHi via the shared Interpolate kernel and agree
+BITWISE across the shared critical (empirically confirmed,
+maxULP=0). A forced-through endpoint extends by evaluating ITS
+PIECE's source-face section at the bounding criticals clamped to
+the weld's 2D position lifted along the face plane - an eps-thin
+deviation from the true limit, and the CAP at each bounding
+critical is computed FROM these extended limits, so the weld's
+mismatch region is cap-covered by construction (the cap arithmetic
+sees exactly what the strips emit). Strips are emitted as quads
+(two tris); orientation is ENGINE-NATIVE: the winding pass emits
+retained pieces interior-on-left in section space, which together
+with the sweep direction determines the material side of the strip
+- no per-face re-derivation (transfer-in-disguise is forbidden).
 
 E' - CAPS. At each critical x = c, the retained REGIONS of the two
 adjacent slabs' sections (each a set of closed 2D loops - the
@@ -84,9 +88,20 @@ special path. Closure argument: across slab i's interior the
 retained boundary sweeps the strips; at c the symmetric difference
 of the two limits is exactly covered by the caps; hence every
 strip edge at c is either shared with the neighbor strip (equal
-limit locally) or bounded by cap boundary (differing limit), and
-cap boundaries are strip edges by construction - the surface
-closes. (The crucible's empirical lane pressures this argument.)
+limit locally) or bounded by cap boundary (differing limit).
+[R1-fold, ONE SOURCE OF TRUTH PER CRITICAL] The cap's arrangement
+pass subdivides the extended limits at their mutual crossings
+(empirical: naive edge pairing was 5/8 because cap boundaries are
+SUB-SEGMENTS of strip edges) - so the cap arrangement's output
+vertex set at c DEFINES the boundary subdivision for BOTH the cap
+triangles and the adjacent strips' edges at c: strips take their
+c-side polyline from the cap arrangement, not from their own
+unsplit extension. Closure is then by shared construction, not
+assertion. Both cap_plus and cap_minus are computed (one engine
+Subtract each); cap regions triangulate via Triangulate (holes CW
+per its contract - never fans); the exterior limit beyond the
+first/last critical is the empty region, making the outermost caps
+ordinary.
 
 DEGENERATE SLABS (width <= eps): no section is built; the slab
 contributes no strips; the caps at its two bounding criticals are
@@ -97,8 +112,15 @@ built slab between them merge into one cap plane evaluated once
 other; positions within eps are one eps-valid plane). One rule, no
 anchor propagation, no span guard, no starvation class: a dense
 cluster of criticals = one merged cap between its flanking built
-slabs. Sub-eps FEATURES thereby drop exactly as the eps contract
-allows, consistently on both sides by construction.
+slabs. [R1-fold - the dissolution claim was WRONG, convergent
+finding] A feature living ENTIRELY inside a merged run appears in
+neither flanking section and would vanish silently - macroscopic
+sub-eps-thin chains are real (the proofed R1'-2 class). ONE guard
+returns, explicit and named: any canonical face whose whole
+x-extent lies inside a merged critical run and whose area exceeds
+the eps band fails closed as SubEpsFeature. Point-like drops within
+the run (area <= the band) drop and are counted, exactly as the eps
+contract allows, consistently on both sides by construction.
 
 ## What dies / what is born
 
