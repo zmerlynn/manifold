@@ -66,8 +66,11 @@ well-defined; the deviation from the true limit is confined to the
 welded slab at the block's eps-scale spread; and BOTH bounding caps
 are computed FROM these constant-extended limits, so the deviation
 region is cap-covered exactly (the cap arithmetic sees exactly what
-the strips emit). Strips are emitted as quads
-(two tris); orientation is ENGINE-NATIVE: the winding pass emits
+the strips emit). Strips are emitted as quads:
+with piece endpoints (a0, a1) at xLo and (b0, b1) at xHi in the
+piece's directed order, the quad is (a0, a1, b1, b0) split as
+triangles (a0, a1, b1), (a0, b1, b0) [R3-fold: vertex order
+stated]; orientation is ENGINE-NATIVE: the winding pass emits
 retained pieces interior-on-left in section space, which together
 with the sweep direction determines the material side of the strip
 - no per-face re-derivation (transfer-in-disguise is forbidden).
@@ -103,9 +106,11 @@ order is acyclic: (1) both slabs extend their retained pieces to c
 (tracks for class i/ii, constant for welds); (2) ONE cap
 arrangement runs over both extended limits; (3) its output verts -
 2D points (y, z) at the plane x = c, i.e. 3D points (c, y, z), no
-lift ambiguity - subdivide the cap loops AND replace each adjacent
-strip's c-side interval with the arrangement's subdivision of that
-interval. A constructed subdivision vert lies within alpha of its
+lift ambiguity - subdivide the cap loops AND the strip edges on BOTH sides: slab
+i's right-edge intervals and slab i+1's left-edge intervals are
+each replaced by the SAME single arrangement's subdivision of them
+- one arrangement at c, three consumers (cap, left strips, right
+strips). A constructed subdivision vert lies within alpha of its
 host segment (Smith 8.2, the shared kernels), hence within alpha of
 the strip's source-face plane - the standard eps-validity, not a
 new error class. Closure is then by shared construction, not
@@ -118,13 +123,15 @@ ordinary.
 DEGENERATE SLABS (width <= eps): no section is built; the slab
 contributes no strips; the caps at its two bounding criticals are
 computed from the NEAREST BUILT slabs on each side extended to the
-respective critical - equivalently, consecutive criticals with no
-built slab between them merge into one cap plane evaluated once
-(at the first critical of the run, all of them within eps of each
-other; positions within eps are one eps-valid plane). One rule, no
-anchor propagation, no span guard, no starvation class: a dense
-cluster of criticals = one merged cap between its flanking built
-slabs. [R1-fold - the dissolution claim was WRONG, convergent
+respective critical. [R3-fold] EVERY critical gets its own cap,
+including criticals inside an unbuilt run (each computed from the
+same flanking built slabs extended to that critical's x) - runs are
+NOT merged to one plane, because chained runs can span arbitrarily
+far (gaps <= eps, span unbounded); adjacent in-run caps then differ
+only by what happens between them, which is exactly nothing
+visible (no built section) - their differences are empty and the
+nonempty caps sit at the run's ends, correct by the same
+arithmetic. One rule, no anchor propagation, no starvation class. [R1-fold - the dissolution claim was WRONG, convergent
 finding] A feature living ENTIRELY inside a merged run appears in
 neither flanking section and would vanish silently - macroscopic
 sub-eps-thin chains are real (the proofed R1'-2 class). ONE guard
@@ -156,7 +163,9 @@ retained-piece out-channel - for every RETAINED boundary piece,
 (interior-on-left); this is the existing capture machinery
 restricted to retained pieces (the id plumbing is already built and
 2D-fence-verified); the (below, above) fields are not consumed by
-this design.
+this design. conflictCount semantics: nonfatal inside the 2D
+engine (sourceId = -1 + counter), any nonzero count fatal to the
+3D pipeline (EngineIdConflict) - the established rule.
 BORN: track extension (Interpolate at two x's per piece endpoint),
 cap construction (one engine Subtract per critical), strip/cap
 assembly. Expected net: a large deletion.
@@ -172,7 +181,10 @@ point via the shared kernels.
 ## Output and tests
 
 Output tessellation is per-slab strips + per-critical caps - finer
-than input faces (geometrically ON input faces for strips);
+than input faces. Strips bounded by class-i/ii tracks lie
+geometrically ON their source faces; strips at forced-through welds
+deviate within the block's eps-scale spread (eps-valid, Smith 7.7)
+- the on-face property is eps-valid, not exact, at welds;
 Simplify owns coarsening (performance campaign later). TEST
 EVOLUTION: oracle gates 1-5, the fixtures, fences, and pins that
 assert PUBLIC behavior (inverted cube, islands P12, touching
