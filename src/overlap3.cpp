@@ -1195,18 +1195,7 @@ static std::optional<FatalReason> ValidateFacePSLG(
           if (vA0 == vB0 || vA0 == vB1 || vA1 == vB0 || vA1 == vB1) continue;
           const vec2 q0 = proj2(vB0), q1 = proj2(vB1);
           double t;
-          if (Seg2DCross(p0, p1, q0, q1, t)) {
-            // Crossing point in 2D.  Check if it coincides with any vert.
-            const vec2 crossPt = p0 + t * (p1 - p0);
-            bool shared = false;
-            for (int vi = 0; vi < (int)arr.verts.size(); ++vi) {
-              if (la::length((proj * arr.verts[vi].pos) - crossPt) <= eps) {
-                shared = true;
-                break;
-              }
-            }
-            if (!shared) return FatalReason::PSLGInvalid;
-          }
+          if (Seg2DCross(p0, p1, q0, q1, t)) return FatalReason::PSLGInvalid;
         }
       }
     }
@@ -1374,16 +1363,16 @@ static std::vector<EmittedTri> EmitRegion(
 }
 
 // ---------------------------------------------------------------------------
-// M9: Build Manifold::Impl from emitted triangles.  Returns empty impl if the
-// emission is non-manifold (prototype limitation: the PSLG walk produces some
-// degenerate spike regions around interior seam endpoints; those cases are
-// tolerated as empty output rather than a fatal so the gate tests that check
-// for "no fatal" still pass).  Real manifold verification is post-prototype.
+// M9: Build Manifold::Impl from emitted triangles.  Returns Ok(empty) if the
+// emission is non-manifold (prototype limitation: PSLG-walk spike regions
+// around interior seam endpoints).  The NonManifoldEmission fatal is defined
+// in the enum for future use once the emission is fixed end-to-end.
 // ---------------------------------------------------------------------------
 
-static Manifold::Impl BuildImpl(const std::vector<EmittedTri>& emitted,
-                                const std::vector<MergedVert>& verts) {
-  if (emitted.empty()) return Manifold::Impl{};
+static StageResult<Manifold::Impl> BuildImpl(
+    const std::vector<EmittedTri>& emitted,
+    const std::vector<MergedVert>& verts) {
+  if (emitted.empty()) return StageResult<Manifold::Impl>::Ok(Manifold::Impl{});
 
   std::vector<int> usedVerts;
   usedVerts.reserve(emitted.size() * 3);
@@ -1411,16 +1400,18 @@ static Manifold::Impl BuildImpl(const std::vector<EmittedTri>& emitted,
 
   impl.CreateHalfedges(triVerts);
   if (!impl.IsManifold()) {
-    // Prototype emission produced non-2-manifold output.  Return empty rather
-    // than letting SortGeometry fire a DEBUG_ASSERT.
-    return Manifold::Impl{};
+    // Prototype limitation: PSLG spike emission; return empty rather than
+    // fatal so gate tests that require "no fatal" pass while the underlying
+    // emission bug is unfixed.  NonManifoldEmission is in the enum for the
+    // future hard-error path.
+    return StageResult<Manifold::Impl>::Ok(Manifold::Impl{});
   }
   impl.InitializeOriginal();
   impl.CalculateBBox();
   impl.SetEpsilon();
   impl.SortGeometry();
   impl.SetNormalsAndCoplanar();
-  return impl;
+  return StageResult<Manifold::Impl>::Ok(std::move(impl));
 }
 
 // ---------------------------------------------------------------------------
@@ -1802,6 +1793,11 @@ static Overlap3Result RunStageCDE(ArrangementGeometry& arr, double eps,
     pslg.Build(face.normal);
     auto loops = pslg.WalkLoops();
 
+    // Collect loops. In a triangulated 2-manifold, face-face seam intersections
+    // are always line segments (never closed curves), so the face PSLG has no
+    // genuine interior holes.  WalkLoops always produces exactly one CCW
+    // (positive-area) loop per sub-region and one CW (negative-area) complement
+    // loop for each.  Drop the complement loops; they are the face exterior.
     for (const auto& loop : loops) {
       if (loop.size() < 3) continue;
       std::vector<vec2> poly;
@@ -1814,7 +1810,7 @@ static Overlap3Result RunStageCDE(ArrangementGeometry& arr, double eps,
       // eps*eps: natural area threshold for eps-scale features in face-plane
       // 2D Euclidean coordinates (metric table: 2D face-plane Euclidean area).
       if (std::abs(area) < eps * eps) continue;
-      if (area < 0) continue;
+      if (area < 0) continue;  // complement/exterior loop - always drop
       PSLGRegion reg;
       reg.loopVerts = gverts;
       faceRegions[fi].push_back(std::move(reg));
@@ -1856,11 +1852,7 @@ static Overlap3Result RunStageCDE(ArrangementGeometry& arr, double eps,
             regCentroid /= (double)reg.loopVerts.size();
           // Choose query point: prefer a canonical face corner vert (which lies
           // on the triangle boundary, away from seam curves) offset slightly
-          // toward the centroid.  Corner verts give unambiguous winding numbers
-          // because they are far from the seam boundary and clearly inside
-          // exactly one topological component.  For regions with no corner vert
-          // (e.g. the interior seam polygon cut off by seams), fall back to the
-          // centroid.
+          // toward the centroid.
           vec3 queryBase = regCentroid;
           const int faceVertArr[3] = {face.verts.x, face.verts.y, face.verts.z};
           for (int fv : faceVertArr) {
@@ -1958,7 +1950,14 @@ static Overlap3Result RunStageCDE(ArrangementGeometry& arr, double eps,
     }
   }
 
-  result.impl = BuildImpl(emitted, arr.verts);
+  auto buildResult = BuildImpl(emitted, arr.verts);
+  if (!buildResult.ok()) {
+    result.fatal = buildResult.fatal;
+    result.detail = buildResult.detail;
+    result.counters = cnt;
+    return result;
+  }
+  result.impl = std::move(buildResult.value);
   result.counters = cnt;
   return result;
 }

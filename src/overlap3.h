@@ -62,6 +62,7 @@ enum class FatalReason {
   BalanceViolation,         // seam edge has unbalanced kept-region counts
   PSLGInvalid,              // seams cross without shared vert ids
   EngineIdConflict,         // 2D engine conflict counter nonzero
+  NonManifoldEmission,      // emitted triangulation is not 2-manifold
 };
 
 // Non-fatal counter accumulator (one per pipeline run).
