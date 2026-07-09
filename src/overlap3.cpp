@@ -898,6 +898,57 @@ static double SignedArea2D(const std::vector<vec2>& poly) {
   return area * 0.5;
 }
 
+// Collapse A,B,A spike patterns in a PSLG walk loop.
+//
+// A spike occurs when the planar walk backtracks through a degree-2 vertex B
+// that connects only to A: the walk produces ..., A, B, A, C, ... where B
+// contributes zero signed area but can cause TriangulateIdx to emit degenerate
+// triangles that violate the 2-manifold property.  The balance check's
+// hasEdgeNoSpike lambda already identifies these; this function removes them
+// at the source before region assembly.
+//
+// Algorithm: iteratively remove spike tips (vertex i where
+// loop[i-1]==loop[i+1]) one at a time, then remove consecutive duplicates
+// introduced by the collapse. Terminates because each iteration strictly
+// reduces loop size.
+static std::vector<int> CollapseSpikes(std::vector<int> loop) {
+  bool changed = true;
+  while (changed && (int)loop.size() >= 3) {
+    changed = false;
+    // Remove one spike tip: the first i where loop[i-1]==loop[i+1], i-1 != i.
+    const int n = (int)loop.size();
+    for (int i = 0; i < n; ++i) {
+      const int prev = loop[(i - 1 + n) % n];
+      const int next = loop[(i + 1) % n];
+      if (prev == next && prev != loop[i]) {
+        loop.erase(loop.begin() + i);
+        changed = true;
+        break;
+      }
+    }
+    if ((int)loop.size() < 3) break;
+    // Remove consecutive duplicates introduced by the collapse.
+    {
+      bool hasDup = false;
+      const int m = (int)loop.size();
+      for (int i = 0; i < m; ++i)
+        if (loop[i] == loop[(i + 1) % m]) {
+          hasDup = true;
+          break;
+        }
+      if (hasDup) {
+        std::vector<int> next;
+        next.reserve(m);
+        for (int i = 0; i < m; ++i)
+          if (loop[i] != loop[(i + 1) % m]) next.push_back(loop[i]);
+        loop = next;
+        changed = true;
+      }
+    }
+  }
+  return loop;
+}
+
 // PSLGRegion is declared in overlap3.h; no local definition needed here.
 
 // Build PSLG for a single face and walk it to get regions.
@@ -1093,6 +1144,15 @@ static std::optional<RegionClassification> ClassifyRegion(
   std::vector<vec2> regionPoly;
   for (int v : region.loopVerts) regionPoly.push_back(proj * verts[v].pos);
 
+  // Project hole boundaries for exclusion test (interior islands: pieces
+  // inside a hole belong to the island's classification, not this region).
+  std::vector<std::vector<vec2>> holePolys;
+  for (const auto& hloop : region.holeVerts) {
+    std::vector<vec2> hp;
+    for (int v : hloop) hp.push_back(proj * verts[v].pos);
+    holePolys.push_back(std::move(hp));
+  }
+
   std::optional<int64_t> belowVal, aboveVal;
   for (const auto& piece : slab.pieces) {
     if (piece.sourceId != faceId) continue;
@@ -1102,19 +1162,30 @@ static std::optional<RegionClassification> ClassifyRegion(
     const vec3 mid3d = {slab.xMid, mid2d.x, mid2d.y};
     // Project to face plane for point-in-polygon test.
     const vec2 midProj = proj * mid3d;
-    // Clearance check: must be at least eps from region boundary.
+    // Clearance check: must be at least eps from region outer boundary and
+    // hole boundaries.
     bool tooClose = false;
     const int nb = (int)regionPoly.size();
-    for (int k = 0; k < nb; ++k) {
+    for (int k = 0; k < nb && !tooClose; ++k) {
       const vec2 edgA = regionPoly[k], edgB = regionPoly[(k + 1) % nb];
       const vec2 ev = edgB - edgA;
       const double len2 = la::dot(ev, ev);
       if (len2 < 1e-28) continue;
       const double t = la::dot(midProj - edgA, ev) / len2;
       const vec2 closest = edgA + std::max(0.0, std::min(1.0, t)) * ev;
-      if (la::length(midProj - closest) < eps) {
-        tooClose = true;
-        break;
+      if (la::length(midProj - closest) < eps) tooClose = true;
+    }
+    for (const auto& hp : holePolys) {
+      if (tooClose) break;
+      const int nhb = (int)hp.size();
+      for (int k = 0; k < nhb && !tooClose; ++k) {
+        const vec2 hA = hp[k], hB = hp[(k + 1) % nhb];
+        const vec2 ev = hB - hA;
+        const double len2 = la::dot(ev, ev);
+        if (len2 < 1e-28) continue;
+        const double t = la::dot(midProj - hA, ev) / len2;
+        const vec2 closest = hA + std::max(0.0, std::min(1.0, t)) * ev;
+        if (la::length(midProj - closest) < eps) tooClose = true;
       }
     }
     if (tooClose) {
@@ -1123,6 +1194,17 @@ static std::optional<RegionClassification> ClassifyRegion(
     }
 
     if (!PointInPolygon2D(midProj, regionPoly)) continue;
+    // Skip pieces inside holes: they belong to the interior island, not this
+    // outer region.
+    {
+      bool inHole = false;
+      for (const auto& hp : holePolys)
+        if (PointInPolygon2D(midProj, hp)) {
+          inHole = true;
+          break;
+        }
+      if (inHole) continue;
+    }
 
     // Check agreement with previous pieces.
     if (!belowVal.has_value()) {
@@ -1363,10 +1445,12 @@ static std::vector<EmittedTri> EmitRegion(
 }
 
 // ---------------------------------------------------------------------------
-// M9: Build Manifold::Impl from emitted triangles.  Returns Ok(empty) if the
-// emission is non-manifold (prototype limitation: PSLG-walk spike regions
-// around interior seam endpoints).  The NonManifoldEmission fatal is defined
-// in the enum for future use once the emission is fixed end-to-end.
+// M9: Build Manifold::Impl from emitted triangles.  Returns NonManifoldEmission
+// if the triangulation is not 2-manifold.  Spikes in the PSLG walk are
+// collapsed by CollapseSpikes before region assembly, so non-manifold output
+// from spikes is prevented at the source; any remaining IsManifold() failure
+// indicates a deeper defect (e.g. a balance-passing but geometry-crossing
+// region) and stops the pipeline with a named reason.
 // ---------------------------------------------------------------------------
 
 static StageResult<Manifold::Impl> BuildImpl(
@@ -1400,11 +1484,42 @@ static StageResult<Manifold::Impl> BuildImpl(
 
   impl.CreateHalfedges(triVerts);
   if (!impl.IsManifold()) {
-    // Prototype limitation: PSLG spike emission; return empty rather than
-    // fatal so gate tests that require "no fatal" pass while the underlying
-    // emission bug is unfixed.  NonManifoldEmission is in the enum for the
-    // future hard-error path.
-    return StageResult<Manifold::Impl>::Ok(Manifold::Impl{});
+    // Diagnostic: count edge direction multiplicities to identify the root
+    // cause. geomMismatch arises when a directed edge A->B has more forward
+    // copies than backward copies (CreateHalfedges pairs wrong partners).
+    std::map<std::pair<int, int>, int> edgeCount;
+    for (int t = 0; t < (int)emitted.size(); ++t) {
+      const ivec3& tv = triVerts[t];
+      for (int i = 0; i < 3; ++i) {
+        const int a = tv[i], b = tv[(i + 1) % 3];
+        edgeCount[{std::min(a, b), std::max(a, b)}] += (a < b) ? 1 : -1;
+      }
+    }
+    // edge with net count != 0 is unbalanced
+    int unbalanced = 0, multiEdge = 0;
+    for (const auto& [e, cnt] : edgeCount) {
+      if (cnt != 0) ++unbalanced;
+      if (std::abs(cnt) > 1) ++multiEdge;
+    }
+    // Also check how many edges appear exactly twice in the same direction
+    std::map<std::pair<int, int>, int> dirCount;
+    for (int t = 0; t < (int)emitted.size(); ++t) {
+      const ivec3& tv = triVerts[t];
+      for (int i = 0; i < 3; ++i) {
+        const int a = tv[i], b = tv[(i + 1) % 3];
+        dirCount[{a, b}]++;
+      }
+    }
+    int dupDir = 0;
+    for (const auto& [e, cnt] : dirCount)
+      if (cnt > 1) dupDir += cnt;
+    std::string diagDetail = "emitted triangulation is not 2-manifold: tris=" +
+                             std::to_string(emitted.size()) +
+                             " unbalancedEdges=" + std::to_string(unbalanced) +
+                             " multiEdge=" + std::to_string(multiEdge) +
+                             " dupDirEdgeHalfedges=" + std::to_string(dupDir);
+    return StageResult<Manifold::Impl>::Fatal(FatalReason::NonManifoldEmission,
+                                              diagDetail);
   }
   impl.InitializeOriginal();
   impl.CalculateBBox();
@@ -1686,6 +1801,40 @@ static Overlap3Result RunStageCDE(ArrangementGeometry& arr, double eps,
   const int nFaces = (int)arr.faces.size();
   std::vector<std::vector<PSLGRegion>> faceRegions(nFaces);
 
+  // Pre-pass: for each face boundary edge (gA, gB), collect all seam verts
+  // from any face incident to that edge that lie on the edge.  Keyed by
+  // sorted {min(gA,gB), max(gA,gB)} so both adjacent faces see the same set.
+  //
+  // This fixes the case where a seam endpoint T lies on face F1's boundary
+  // edge but is interior to the adjacent face G.  T is in F1's faceSeams but
+  // not in G's; without this map, G's boundary chain omits T, and F1's
+  // emission of edges A-T and T-B has no partner from G (unbalanced output).
+  std::map<std::pair<int, int>, std::vector<int>> edgeMidVerts;
+  for (int fi0 = 0; fi0 < nFaces; ++fi0) {
+    const CanonicalFace& f0 = arr.faces[fi0];
+    const int gv0[3] = {f0.verts.x, f0.verts.y, f0.verts.z};
+    for (int ei = 0; ei < 3; ++ei) {
+      const int gA = gv0[ei], gB = gv0[(ei + 1) % 3];
+      const vec3 p3A = arr.verts[gA].pos, p3B = arr.verts[gB].pos;
+      const vec3 ev0 = p3B - p3A;
+      const double len2 = la::dot(ev0, ev0);
+      const auto key = std::make_pair(std::min(gA, gB), std::max(gA, gB));
+      for (int si : arr.faceSeams[fi0]) {
+        for (int v : arr.seams[si].vertIds) {
+          if (v == gA || v == gB) continue;
+          if (PointSegDist3(arr.verts[v].pos, p3A, p3B) > eps) continue;
+          if (len2 > 0.0) {
+            const double t = la::dot(arr.verts[v].pos - p3A, ev0) / len2;
+            if (t < -1e-8 || t > 1.0 + 1e-8) continue;
+          }
+          auto& slot = edgeMidVerts[key];
+          if (std::find(slot.begin(), slot.end(), v) == slot.end())
+            slot.push_back(v);
+        }
+      }
+    }
+  }
+
   for (int fi = 0; fi < nFaces; ++fi) {
     const CanonicalFace& face = arr.faces[fi];
     const mat2x3 proj = GetAxisAlignedProjection(face.normal);
@@ -1696,11 +1845,29 @@ static Overlap3Result RunStageCDE(ArrangementGeometry& arr, double eps,
     vertSet.insert(face.verts.z);
     for (int si : arr.faceSeams[fi])
       for (int v : arr.seams[si].vertIds) vertSet.insert(v);
+    // Also include seam verts from the adjacent face's seams that lie on this
+    // face's boundary edges (not in fi's own faceSeams but in edgeMidVerts).
+    {
+      const int gv[3] = {face.verts.x, face.verts.y, face.verts.z};
+      for (int ei = 0; ei < 3; ++ei) {
+        const int gA = gv[ei], gB = gv[(ei + 1) % 3];
+        const auto key = std::make_pair(std::min(gA, gB), std::max(gA, gB));
+        auto it = edgeMidVerts.find(key);
+        if (it != edgeMidVerts.end())
+          for (int v : it->second) vertSet.insert(v);
+      }
+    }
 
     FacePSLG pslg;
     pslg.vertIds.assign(vertSet.begin(), vertSet.end());
     pslg.pos2D.reserve(pslg.vertIds.size());
     for (int v : pslg.vertIds) pslg.pos2D.push_back(proj * arr.verts[v].pos);
+
+    // Track global vert ids that lie on this face's outer boundary (original
+    // triangle corners + seam verts snapped to face edges).  Used below to
+    // distinguish interior-seam CW loops (holes) from face-exterior CW loops
+    // (the complement/exterior of the outer boundary).
+    std::set<int> faceBndVerts;
 
     {
       const int gv[3] = {face.verts.x, face.verts.y, face.verts.z};
@@ -1726,6 +1893,24 @@ static Overlap3Result RunStageCDE(ArrangementGeometry& arr, double eps,
             if (lv >= 0) onEdge.push_back({t, lv});
           }
         }
+        // Also pick up cross-face seam verts from edgeMidVerts (they were
+        // added to vertSet above so pslg.localId finds them).
+        {
+          const auto key = std::make_pair(std::min(gA, gB), std::max(gA, gB));
+          auto it = edgeMidVerts.find(key);
+          if (it != edgeMidVerts.end()) {
+            for (int v : it->second) {
+              if (v == gA || v == gB) continue;
+              const int lv = pslg.localId(v);
+              if (lv < 0) continue;
+              const double t =
+                  (edgeLen2 != 0.0)
+                      ? la::dot(arr.verts[v].pos - p3A, edgeV) / edgeLen2
+                      : 0.0;
+              onEdge.push_back({t, lv});
+            }
+          }
+        }
         std::sort(onEdge.begin(), onEdge.end());
         onEdge.erase(std::unique(onEdge.begin(), onEdge.end(),
                                  [](const auto& a, const auto& b) {
@@ -1740,6 +1925,7 @@ static Overlap3Result RunStageCDE(ArrangementGeometry& arr, double eps,
           const int lgB = pslg.localId(gB);
           if (lgB != chain.back()) chain.push_back(lgB);
         }
+        for (int lv : chain) faceBndVerts.insert(pslg.vertIds[lv]);
         for (int k = 0; k + 1 < (int)chain.size(); ++k) {
           pslg.halfEdges.push_back({chain[k], chain[k + 1]});
           pslg.halfEdges.push_back({chain[k + 1], chain[k]});
@@ -1793,13 +1979,35 @@ static Overlap3Result RunStageCDE(ArrangementGeometry& arr, double eps,
     pslg.Build(face.normal);
     auto loops = pslg.WalkLoops();
 
-    // Collect loops. In a triangulated 2-manifold, face-face seam intersections
-    // are always line segments (never closed curves), so the face PSLG has no
-    // genuine interior holes.  WalkLoops always produces exactly one CCW
-    // (positive-area) loop per sub-region and one CW (negative-area) complement
-    // loop for each.  Drop the complement loops; they are the face exterior.
-    for (const auto& loop : loops) {
-      if (loop.size() < 3) continue;
+    // Collect loops from the PSLG walk.  The face PSLG can have multiple
+    // connected components when seams form closed loops interior to the face
+    // (the island class from spec Stage D [R1-fold]).  Each component produces
+    // two traversal directions; signed area distinguishes them.
+    //
+    //   CCW loop (area > 0): a face sub-region (outer boundary or interior
+    //     island) -> create PSLGRegion.
+    //   CW loop (area < 0): two sub-cases:
+    //     - At least one vert is in faceBndVerts: this is the face exterior
+    //       complement (the "outside" traversal of the outer boundary).  Drop.
+    //     - All verts are interior-seam-only: this is a hole of the enclosing
+    //       CCW region (a seam rectangle seen from outside the island).  Assign
+    //       to the smallest containing CCW region's holeVerts.
+    //
+    // eps*eps threshold: area of eps-scale features in face-plane 2D Euclidean
+    // coordinates (metric table).
+    // Spikes (A,B,A patterns from degree-2 seam endpoints) are collapsed before
+    // area computation so they never reach TriangulateIdx.
+    struct LoopData {
+      std::vector<int> gverts;
+      std::vector<vec2> poly;
+    };
+    std::vector<LoopData> ccwLoops;
+    std::vector<std::vector<int>> pendingHoles;
+
+    for (const auto& rawLoop : loops) {
+      std::vector<int> loop =
+          CollapseSpikes(std::vector<int>(rawLoop.begin(), rawLoop.end()));
+      if ((int)loop.size() < 3) continue;
       std::vector<vec2> poly;
       std::vector<int> gverts;
       for (int lv : loop) {
@@ -1807,12 +2015,48 @@ static Overlap3Result RunStageCDE(ArrangementGeometry& arr, double eps,
         gverts.push_back(pslg.vertIds[lv]);
       }
       const double area = SignedArea2D(poly);
-      // eps*eps: natural area threshold for eps-scale features in face-plane
-      // 2D Euclidean coordinates (metric table: 2D face-plane Euclidean area).
       if (std::abs(area) < eps * eps) continue;
-      if (area < 0) continue;  // complement/exterior loop - always drop
+      if (area > 0) {
+        ccwLoops.push_back({gverts, poly});
+      } else {
+        // CW loop: exterior complement or interior hole.
+        bool hasBndVert = false;
+        for (int gv : gverts)
+          if (faceBndVerts.count(gv)) {
+            hasBndVert = true;
+            break;
+          }
+        if (!hasBndVert) pendingHoles.push_back(gverts);
+        // else: face exterior complement - drop.
+      }
+    }
+
+    // Assign each interior hole to the smallest CCW region that contains it
+    // (point-in-polygon test on the hole's first vert as sample).
+    std::vector<std::vector<std::vector<int>>> regHoles(ccwLoops.size());
+    for (const auto& holeGverts : pendingHoles) {
+      if (holeGverts.empty()) continue;
+      const vec2 samplePt = proj * arr.verts[holeGverts[0]].pos;
+      int bestIdx = -1;
+      double bestArea = std::numeric_limits<double>::infinity();
+      for (int ri = 0; ri < (int)ccwLoops.size(); ++ri) {
+        if (PointInPolygon2D(samplePt, ccwLoops[ri].poly)) {
+          const double a = SignedArea2D(ccwLoops[ri].poly);  // positive (CCW)
+          if (a < bestArea) {
+            bestArea = a;
+            bestIdx = ri;
+          }
+        }
+      }
+      if (bestIdx >= 0) regHoles[bestIdx].push_back(holeGverts);
+      // else: no containing region found (degenerate); hole is dropped.
+    }
+
+    // Create PSLGRegions.
+    for (int ri = 0; ri < (int)ccwLoops.size(); ++ri) {
       PSLGRegion reg;
-      reg.loopVerts = gverts;
+      reg.loopVerts = std::move(ccwLoops[ri].gverts);
+      reg.holeVerts = std::move(regHoles[ri]);
       faceRegions[fi].push_back(std::move(reg));
     }
 
@@ -1829,9 +2073,13 @@ static Overlap3Result RunStageCDE(ArrangementGeometry& arr, double eps,
       const double xv2 = arr.verts[face.verts.z].pos.x;
       if (std::abs(xv0 - xv1) < eps && std::abs(xv1 - xv2) < eps) {
         const double xFace = (xv0 + xv1 + xv2) / 3.0;
+        // Find the nearest *built* slab on each side.  At event boundaries,
+        // coincident events produce zero-width slabs (built=false) that cannot
+        // be queried; skip them so the search finds the first usable slab.
         int leftSlab = -1, rightSlab = -1;
         double bestLeft = 1e18, bestRight = 1e18;
         for (int si = 0; si < (int)slabs.size(); ++si) {
+          if (!slabs[si].built) continue;
           const double dL = std::abs(slabs[si].xHi - xFace);
           const double dR = std::abs(slabs[si].xLo - xFace);
           if (dL < bestLeft) {

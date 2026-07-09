@@ -1305,3 +1305,24 @@ TEST(Overlap3, Pin_S3b_CubeMinusInverted_OracleSubtract) {
 }
 
 }  // namespace
+
+TEST(Overlap3, Pin_P12_InteriorIsland_StampThroughFace) {
+  // The design's ISLAND class (Stage D): a stamp piercing a big face's
+  // INTERIOR leaves a closed rectangle of seam segments with no attachment
+  // to the face's outer boundary - an interior island whose hole/island
+  // routing the emission path must handle. Generic offsets: no shared
+  // planes, no shared coordinate values between the two solids.
+  const Manifold a = Manifold::Cube({4, 4, 1});
+  const Manifold b =
+      Manifold::Cube({0.9, 1.1, 3.1}).Translate({1.53, 1.71, -0.93});
+  const Manifold oracle = a + b;  // Boolean3 union
+  const Manifold::Impl impl = ComposeImpl(a, b);
+  const double eps = ImplEps(impl);
+
+  const Overlap3Result result = RemoveOverlaps3D(impl, eps);
+  ASSERT_FALSE(result.fatal.has_value())
+      << "P12 island pipeline fatal=" << (int)*result.fatal << " "
+      << result.detail;
+  ASSERT_TRUE(result.impl.has_value());
+  OracleCompare(*result.impl, oracle, eps, "P12_InteriorIsland");
+}
