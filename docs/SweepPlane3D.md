@@ -591,3 +591,31 @@ the 2D engine extension (audited faithful, fences green), and the
 is a re-implementation against a frozen spec and a frozen test
 suite, a far smaller task than the original build. The tractability
 answer (YES) stands on the green oracle gates regardless.
+
+## Rewrite crucible close (2026-07-09, explore/sweep-plane-3d-v2)
+
+The single-author rewrite: -670 LOC (-24%), zero v1-catalog
+constants, all gates + fences green against the byte-frozen test
+suite. CLOSING VERDICTS, both BREAK: the fidelity audit found three
+spec-grounded holes the gates do not cover (the axis-parallel
+neighbor search can skip past sub-eps criticals and read stale
+winding; eps-x-co-location folds distinct critical planes into one
+winding jump; collapsed proper seams can split into singleton
+contact components and evade SubResolutionChain) - these are the
+v2 fix list. The simplicity judge found a FRESH garbage-21
+(CollapseSpikes as a post-walk repair pass, sentinels faked as
+2-eps criticals, direction-doubled coplanar detection, artificial
+infinities, silent found<2 escapes).
+
+THE PATTERN, stated honestly after two full implementations: the
+sweep/section/consistency core (stages A-C) implements cleanly and
+correctly both times; the special-case pressure concentrates in
+STAGE D/E - classification transfer, the PSLG walk, axis-parallel
+and degenerate handling. Two independent authorships both sprouted
+their strata THERE. That is design-level information, not
+agent-discipline information: the transfer-after-the-fact shape of
+stage D under-constrains its implementation. The next design
+conversation should weigh the incremental variant the handoff
+deferred (classification decided DURING the sweep, where the
+maintained order lives, rather than transferred after) before a
+third implementation pass.
