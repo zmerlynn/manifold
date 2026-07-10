@@ -30,7 +30,7 @@
 namespace manifold {
 
 // ---------------------------------------------------------------------------
-// Stage-A output.
+// Canonicalize-stage output.
 // ---------------------------------------------------------------------------
 
 // One canonical face after vert-merge and multiplicity accumulation.
@@ -59,8 +59,9 @@ enum class FatalReason {
 struct Overlap3Counters {
   int subEpsContactsDropped = 0;  // point-like skipped contacts
   int engineIdConflicts = 0;      // total engine id-conflict events
-  int capArrangements = 0;        // 2D arrangements run by stage E' (one per
-                                  // critical with cap input - the M4 pin)
+  int capArrangements = 0;        // 2D arrangements run by the caps stage
+                                  // (one per critical with cap input - the
+                                  // M4 pin)
 };
 
 // Per-stage result: either a product or a fatal reason.
@@ -86,7 +87,7 @@ struct StageResult {
 };
 
 // ---------------------------------------------------------------------------
-// Stage-C types.
+// Slabs-stage types.
 // ---------------------------------------------------------------------------
 
 // Directed section segment for one straddling face in a slab.
@@ -97,7 +98,7 @@ struct SectionFaceSegment {
   int64_t mult;  // signed multiplicity from CanonicalFace
 };
 
-// Per-face track for strip generation (stage D').
+// Per-face track for strip generation (strips stage).
 // Records the 3D edge pairs whose interpolations define the face's section
 // segment at any x in the slab:
 //   at x: p0(x) = Interpolate(va0, vb0, x),  p1(x) = Interpolate(va1, vb1, x)
@@ -125,7 +126,8 @@ inline vec2 InterpolateSafe(vec3 va, vec3 vb, double xTarget) {
   return {va.y + t * (vb.y - va.y), va.z + t * (vb.z - va.z)};
 }
 
-// Per-seam track for cap/strip extension of class-ii endpoints (spec D'/E').
+// Per-seam track for cap/strip extension of class-ii endpoints (spec
+// STRIPS/CAPS).
 // A seam crossing at yzMid lies on the 3D seam segment [vA, vB]; the correct
 // extension to any xTarget is InterpolateSafe(vA, vB, xTarget).yz.
 struct SeamTrackEntry {
@@ -147,7 +149,7 @@ struct SlabResult {
 };
 
 // ---------------------------------------------------------------------------
-// Stage-B types.
+// Seams-stage types.
 // ---------------------------------------------------------------------------
 
 struct MergedVert {
@@ -162,7 +164,8 @@ struct Seam {
 };
 
 // ---------------------------------------------------------------------------
-// Arrangement geometry (stage A+B' output, stage C'+D'+E' input).
+// Arrangement geometry (canonicalize + seams output; slabs, caps, and
+// strips input).
 // ---------------------------------------------------------------------------
 
 struct ArrangementGeometry {
@@ -170,8 +173,9 @@ struct ArrangementGeometry {
   std::vector<CanonicalFace> faces;  // canonical faces
   std::vector<Seam> seams;           // face-pair seam segments
   // Extra x-criticals with no vert identity: degenerate-contact endpoints and
-  // seam-seam crossing x's (spec B': only the x is consumed; over-inclusion
-  // is harmless).  Kept separate from verts - a critical is not a vertex.
+  // seam-seam crossing x's (spec SEAMS: only the x is consumed;
+  // over-inclusion is harmless).  Kept separate from verts - a critical is
+  // not a vertex.
   std::vector<double> criticalXs;
 };
 
@@ -201,7 +205,8 @@ struct Overlap3Internals {
   Overlap3Counters counters;
 };
 
-// Run stages A+B'+C'; slabs include sectionEdges/sectionVerts for gate-2.
+// Run canonicalize + seams + slabs; slabs include sectionEdges/sectionVerts
+// for gate-2.
 Overlap3Internals RemoveOverlaps3D_TestHooks(const Manifold::Impl& in,
                                              double eps = 0.0);
 

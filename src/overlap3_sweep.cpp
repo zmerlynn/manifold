@@ -12,8 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Stage C' of the 3D sweep-native emission prototype.
-// Design: docs/SweepEmit3D.md, Stage C'.
+// Slabs stage of the 3D sweep-native emission prototype: x-criticals,
+// per-slab sections through the 2D engine, extension tracks.
+// Design: docs/SweepEmit3D.md, SLABS.
 
 #include <algorithm>
 #include <cmath>
@@ -30,17 +31,16 @@ namespace manifold {
 namespace {
 
 // Compute the directed section segment for `face` at x = xMid, storing the
-// 3D edge-pair origins (va, vb) for each endpoint so stage D' can extend to
-// any x in the slab.
+// 3D edge-pair origins (va, vb) for each endpoint so the strips stage can
+// extend to any x in the slab.
 //
 // Orientation: dot(p1 - p0, yz(cross(+x, face.normal))) > 0.
 // cross((1,0,0),(nx,ny,nz)) = (0, -nz, ny), yz-projection = (-nz, ny).
 //
 // Returns false if the face does not straddle xMid (< 2 distinct crossings).
-static bool ComputeSectionSegment(const CanonicalFace& face,
-                                  const std::vector<MergedVert>& verts,
-                                  double xMid, SectionFaceSegment& segOut,
-                                  FaceTrack* trackOut) {
+bool ComputeSectionSegment(const CanonicalFace& face,
+                           const std::vector<MergedVert>& verts, double xMid,
+                           SectionFaceSegment& segOut, FaceTrack* trackOut) {
   const int vi[3] = {face.verts.x, face.verts.y, face.verts.z};
   const vec3 p[3] = {verts[vi[0]].pos, verts[vi[1]].pos, verts[vi[2]].pos};
 
@@ -91,16 +91,16 @@ static bool ComputeSectionSegment(const CanonicalFace& face,
 }  // namespace
 
 // ---------------------------------------------------------------------------
-// Stage C': x-criticals, per-slab sections, engine calls, face tracks.
+// Slabs stage: x-criticals, per-slab sections, engine calls, face tracks.
 // ---------------------------------------------------------------------------
 
 StageResult<std::vector<SlabResult>> BuildSlabs(const ArrangementGeometry& arr,
                                                 double eps,
                                                 Overlap3Counters& cnt) {
-  const int nFaces = (int)arr.faces.size();
+  const int nFaces = static_cast<int>(arr.faces.size());
 
-  // Collect x-criticals: all vert x's (stage-A + seam endpoints) plus the
-  // vertex-free criticals from stage B' (degenerate contacts, seam-seam
+  // Collect x-criticals: all vert x's (canonical + seam endpoints) plus the
+  // vertex-free criticals from the seams stage (degenerate contacts, seam-seam
   // crossings).
   std::vector<double> crits;
   crits.reserve(arr.verts.size() + arr.criticalXs.size());
@@ -113,8 +113,9 @@ StageResult<std::vector<SlabResult>> BuildSlabs(const ArrangementGeometry& arr,
 
   // No sentinel slabs: ComputeCap handles null exterior (leftSlab=nullptr or
   // rightSlab=nullptr) as an empty region, which is the correct exterior limit
-  // beyond the first/last critical (spec E', "exterior limit is empty region").
-  const int nSlabs = (int)crits.size() - 1;
+  // beyond the first/last critical (spec CAPS, "exterior limit is empty
+  // region").
+  const int nSlabs = static_cast<int>(crits.size()) - 1;
   std::vector<SlabResult> slabs(nSlabs);
 
   for (int si = 0; si < nSlabs; ++si) {
@@ -137,7 +138,7 @@ StageResult<std::vector<SlabResult>> BuildSlabs(const ArrangementGeometry& arr,
       auto key = std::make_pair(p_yz.x, p_yz.y);
       auto it = vertIdx.find(key);
       if (it != vertIdx.end()) return it->second;
-      const int id = (int)secVerts.size();
+      const int id = static_cast<int>(secVerts.size());
       secVerts.push_back(p_yz);
       vertIdx.emplace(key, id);
       return id;
@@ -166,13 +167,13 @@ StageResult<std::vector<SlabResult>> BuildSlabs(const ArrangementGeometry& arr,
       const int v0 = getVid(seg.p0);
       const int v1 = getVid(seg.p1);
       if (v0 == v1) continue;
-      edges.push_back({v0, v1, (int)face.mult, fi});
+      edges.push_back({v0, v1, static_cast<int>(face.mult), fi});
     }
 
     slab.sectionEdges = edges;
     slab.sectionVerts = secVerts;
 
-    // Populate seam tracks for class-ii endpoint extension (spec D').
+    // Populate seam tracks for class-ii endpoint extension (spec STRIPS).
     // For each seam whose x-range spans slab.xMid, record its (y,z) at xMid
     // and the 3D endpoints so caps/strips can use the seam track instead of
     // the face edge track for arrangement-constructed crossing vertices.

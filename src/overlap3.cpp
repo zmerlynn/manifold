@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Stages A, B', D', E' of the 3D sweep-native emission prototype.
-// Stage C' is in overlap3_sweep.cpp.
+// The 3D sweep-native emission prototype: canonicalize -> seams -> slabs ->
+// caps -> strips -> assembly.  Slab construction lives in overlap3_sweep.cpp.
 // Design: docs/SweepEmit3D.md (three crucible rounds).
 
 #include "overlap3.h"
@@ -36,7 +36,7 @@
 
 namespace manifold {
 
-// Stage C' forward declaration.
+// Slabs stage (overlap3_sweep.cpp) forward declaration.
 StageResult<std::vector<SlabResult>> BuildSlabs(const ArrangementGeometry& arr,
                                                 double eps,
                                                 Overlap3Counters& cnt);
@@ -44,27 +44,24 @@ StageResult<std::vector<SlabResult>> BuildSlabs(const ArrangementGeometry& arr,
 namespace {
 
 // ---------------------------------------------------------------------------
-// Stage B' helpers: coplanar clip, edge-in-plane detection, seam computation.
+// Seams-stage helpers: coplanar clip, edge-in-plane detection, seam segments.
 // ---------------------------------------------------------------------------
 
 // Sutherland-Hodgman clip of a convex polygon against one half-plane.
-static std::vector<vec2> ClipPolyByHalfplane(std::vector<vec2> poly, vec2 eA,
-                                             vec2 eB) {
+std::vector<vec2> ClipPolyByHalfplane(std::vector<vec2> poly, vec2 eA,
+                                      vec2 eB) {
   std::vector<vec2> out;
-  const int n = (int)poly.size();
+  const int n = static_cast<int>(poly.size());
   const vec2 e = eB - eA;
   for (int k = 0; k < n; ++k) {
     const vec2 &cur = poly[k], &nxt = poly[(k + 1) % n];
-    const bool ci = e.x * (cur.y - eA.y) - e.y * (cur.x - eA.x) >= 0.0;
-    const bool ni = e.x * (nxt.y - eA.y) - e.y * (nxt.x - eA.x) >= 0.0;
+    const bool ci = la::cross(e, cur - eA) >= 0.0;
+    const bool ni = la::cross(e, nxt - eA) >= 0.0;
     if (ci) out.push_back(cur);
     if (ci != ni) {
-      const vec2 d1 = nxt - cur, d2 = e;
-      const double den = d1.x * d2.y - d1.y * d2.x;
-      if (den != 0.0) {
-        const vec2 dc = eA - cur;
-        out.push_back(cur + (dc.x * d2.y - dc.y * d2.x) / den * d1);
-      }
+      const vec2 d1 = nxt - cur;
+      const double den = la::cross(d1, e);
+      if (den != 0.0) out.push_back(cur + la::cross(eA - cur, e) / den * d1);
     }
   }
   return out;
@@ -72,13 +69,13 @@ static std::vector<vec2> ClipPolyByHalfplane(std::vector<vec2> poly, vec2 eA,
 
 // Length of the intersection of segment [sA,sB] with the interior of triangle
 // (t0,t1,t2) in 2D. Used for EdgeInPlane detection.
-static double SegTriInteriorLen2D(vec2 sA, vec2 sB, vec2 t0, vec2 t1, vec2 t2) {
+double SegTriInteriorLen2D(vec2 sA, vec2 sB, vec2 t0, vec2 t1, vec2 t2) {
   double tLo = 0.0, tHi = 1.0;
   const vec2 triV[3] = {t0, t1, t2}, segD = sB - sA;
-  for (int i = 0; i < 3; ++i) {
+  for (const int i : {0, 1, 2}) {
     const vec2 eA = triV[i], eB = triV[(i + 1) % 3], e = eB - eA;
-    const double f0 = e.x * (sA.y - eA.y) - e.y * (sA.x - eA.x);
-    const double f1 = e.x * (sB.y - eA.y) - e.y * (sB.x - eA.x);
+    const double f0 = la::cross(e, sA - eA);
+    const double f1 = la::cross(e, sB - eA);
     const double fd = f1 - f0;
     if (fd == 0.0) {
       if (f0 < 0.0) return 0.0;
@@ -96,14 +93,14 @@ static double SegTriInteriorLen2D(vec2 sA, vec2 sB, vec2 t0, vec2 t1, vec2 t2) {
 
 // Clip line P + t*D against face triangle; return true when the overlap
 // interval is non-empty.  tLo/tHi receive the parameter range.
-static bool LineTriClip(vec3 P, vec3 D, vec3 v0, vec3 v1, vec3 v2, vec3 n,
-                        double& tLo, double& tHi, double eps) {
+bool LineTriClip(vec3 P, vec3 D, vec3 v0, vec3 v1, vec3 v2, vec3 n, double& tLo,
+                 double& tHi, double eps) {
   tLo = -std::numeric_limits<double>::infinity();
   tHi = std::numeric_limits<double>::infinity();
   const vec3 edges[3] = {v1 - v0, v2 - v1, v0 - v2};
   const vec3 vBase[3] = {v0, v1, v2};
   const double kTol = eps * la::length(n);
-  for (int i = 0; i < 3; ++i) {
+  for (const int i : {0, 1, 2}) {
     const vec3 ev = la::cross(edges[i], D),
                evB = la::cross(edges[i], vBase[i] - P);
     const double den = la::dot(n, ev), num = la::dot(n, evB);
@@ -125,8 +122,8 @@ static bool LineTriClip(vec3 P, vec3 D, vec3 v0, vec3 v1, vec3 v2, vec3 n,
 // Returns false only when the triangles are disjoint (or parallel-plane);
 // a point/tangent contact admitted by the eps clip model returns true with
 // qA == qB, so the caller's degenerate-contact arm records its x-critical.
-static bool TriTriSeam(vec3 a0, vec3 a1, vec3 a2, vec3 na, vec3 b0, vec3 b1,
-                       vec3 b2, vec3 nb, vec3& qA, vec3& qB, double eps) {
+bool TriTriSeam(vec3 a0, vec3 a1, vec3 a2, vec3 na, vec3 b0, vec3 b1, vec3 b2,
+                vec3 nb, vec3& qA, vec3& qB, double eps) {
   const vec3 D = la::cross(na, nb);
   const double Dlen = la::length(D);
   if (Dlen == 0.0) return false;
@@ -166,9 +163,10 @@ static bool TriTriSeam(vec3 a0, vec3 a1, vec3 a2, vec3 na, vec3 b0, vec3 b1,
 //   - the lines are non-parallel (|cross(dA,dB)| > 0)
 //   - the crossing is strictly interior to both seams (t, s in (eps_t,
 //   1-eps_t))
-// The x is the only output that matters per spec B' (over-inclusion harmless).
-static bool SeamSeamCrossX(vec3 A0, vec3 A1, vec3 B0, vec3 B1, double eps,
-                           double& xOut) {
+// The x is the only output that matters per spec SEAMS (over-inclusion
+// harmless).
+bool SeamSeamCrossX(vec3 A0, vec3 A1, vec3 B0, vec3 B1, double eps,
+                    double& xOut) {
   const vec3 dA = A1 - A0, dB = B1 - B0, dC = B0 - A0;
   const double lenA = la::length(dA), lenB = la::length(dB);
   if (lenA < eps || lenB < eps) return false;
@@ -192,27 +190,27 @@ static bool SeamSeamCrossX(vec3 A0, vec3 A1, vec3 B0, vec3 B1, double eps,
 }
 
 // Find or add a vert within eps of pos; return its index.
-static int FindOrAddVert(std::vector<MergedVert>& verts, vec3 pos, double eps) {
-  for (int i = 0; i < (int)verts.size(); ++i)
+int FindOrAddVert(std::vector<MergedVert>& verts, vec3 pos, double eps) {
+  for (int i = 0; i < static_cast<int>(verts.size()); ++i)
     if (la::length(verts[i].pos - pos) <= eps) return i;
-  const int id = (int)verts.size();
+  const int id = static_cast<int>(verts.size());
   verts.push_back({pos});
   return id;
 }
 
 // ---------------------------------------------------------------------------
-// Stage A: vert merge, multiplicity accumulation.
+// Canonicalize stage: vert merge, face multiplicity accumulation.
 // ---------------------------------------------------------------------------
 
-struct StageAResult {
+struct CanonicalGeometry {
   std::vector<vec3> mergedVerts;
-  std::vector<int> vertMap;
+  std::vector<int> origVert2Merged;
   std::vector<CanonicalFace> faces;
 };
 
-static StageAResult StageA(const Manifold::Impl& in, double eps) {
-  const int nVerts = (int)in.vertPos_.size();
-  const int nTris = (int)in.halfedge_.size() / 3;
+CanonicalGeometry Canonicalize(const Manifold::Impl& in, double eps) {
+  const int nVerts = static_cast<int>(in.vertPos_.size());
+  const int nTris = static_cast<int>(in.halfedge_.size()) / 3;
 
   DisjointSets uf(nVerts);
   for (int i = 0; i < nVerts; ++i)
@@ -220,9 +218,10 @@ static StageAResult StageA(const Manifold::Impl& in, double eps) {
       if (la::length(in.vertPos_[i] - in.vertPos_[j]) <= eps) uf.unite(i, j);
 
   std::map<int, std::vector<int>> comps;
-  for (int i = 0; i < nVerts; ++i) comps[(int)uf.find(i)].push_back(i);
+  for (int i = 0; i < nVerts; ++i)
+    comps[static_cast<int>(uf.find(i))].push_back(i);
 
-  std::vector<int> vertMap(nVerts);
+  std::vector<int> origVert2Merged(nVerts);
   std::vector<vec3> mergedVerts;
   std::map<int, int> rootToMerged;
   for (auto& [root, members] : comps) {
@@ -238,10 +237,11 @@ static StageAResult StageA(const Manifold::Impl& in, double eps) {
         best = v;
       }
     }
-    rootToMerged[root] = (int)mergedVerts.size();
+    rootToMerged[root] = static_cast<int>(mergedVerts.size());
     mergedVerts.push_back(in.vertPos_[best]);
   }
-  for (int i = 0; i < nVerts; ++i) vertMap[i] = rootToMerged[(int)uf.find(i)];
+  for (int i = 0; i < nVerts; ++i)
+    origVert2Merged[i] = rootToMerged[static_cast<int>(uf.find(i))];
 
   struct FaceKey {
     ivec3 s;
@@ -260,9 +260,9 @@ static StageAResult StageA(const Manifold::Impl& in, double eps) {
 
   for (int tri = 0; tri < nTris; ++tri) {
     const int h = 3 * tri;
-    int v0 = vertMap[in.halfedge_.Start(h)],
-        v1 = vertMap[in.halfedge_.Start(h + 1)],
-        v2 = vertMap[in.halfedge_.Start(h + 2)];
+    int v0 = origVert2Merged[in.halfedge_.Start(h)],
+        v1 = origVert2Merged[in.halfedge_.Start(h + 1)],
+        v2 = origVert2Merged[in.halfedge_.Start(h + 2)];
     if (v0 == v1 || v1 == v2 || v0 == v2) continue;
     int a = v0, b = v1, c = v2, par = 1;
     if (a > b) {
@@ -285,15 +285,15 @@ static StageAResult StageA(const Manifold::Impl& in, double eps) {
       it->second.mult += (par == it->second.repPar) ? 1 : -1;
   }
 
-  StageAResult res;
+  CanonicalGeometry res;
   res.mergedVerts = std::move(mergedVerts);
-  res.vertMap = std::move(vertMap);
+  res.origVert2Merged = std::move(origVert2Merged);
   for (auto& [key, e] : faceMap) {
     if (e.mult == 0) continue;
     const int h = 3 * e.repTri;
-    const int mv0 = res.vertMap[in.halfedge_.Start(h)];
-    const int mv1 = res.vertMap[in.halfedge_.Start(h + 1)];
-    const int mv2 = res.vertMap[in.halfedge_.Start(h + 2)];
+    const int mv0 = res.origVert2Merged[in.halfedge_.Start(h)];
+    const int mv1 = res.origVert2Merged[in.halfedge_.Start(h + 1)];
+    const int mv2 = res.origVert2Merged[in.halfedge_.Start(h + 2)];
     const vec3 n = la::cross(res.mergedVerts[mv1] - res.mergedVerts[mv0],
                              res.mergedVerts[mv2] - res.mergedVerts[mv0]);
     if (la::dot(n, n) == 0.0) continue;
@@ -308,49 +308,44 @@ static StageAResult StageA(const Manifold::Impl& in, double eps) {
 }
 
 // ---------------------------------------------------------------------------
-// Stage B': CoplanarOverlap + EdgeInPlane detection, seam computation.
-// No triple-point unification, no edge subdivision, no faceSeams.
+// Seams stage: CoplanarOverlap + EdgeInPlane detection, seam segments,
+// vertex-free extra criticals.  No triple-point unification, no edge
+// subdivision.
 // ---------------------------------------------------------------------------
 
-struct StageBResult {
+struct SeamsResult {
   ArrangementGeometry arr;
   std::optional<FatalReason> fatal;
   std::string detail;
 };
 
-static StageBResult StageBPrime(const StageAResult& stageA, double eps,
-                                Overlap3Counters& cnt) {
-  StageBResult res;
+SeamsResult FindSeams(const CanonicalGeometry& canon, double eps,
+                      Overlap3Counters& cnt) {
+  SeamsResult res;
   ArrangementGeometry& arr = res.arr;
-  const int nFaces = (int)stageA.faces.size();
+  const int nFaces = static_cast<int>(canon.faces.size());
 
-  arr.verts.resize(stageA.mergedVerts.size());
-  for (int i = 0; i < (int)stageA.mergedVerts.size(); ++i)
-    arr.verts[i] = {stageA.mergedVerts[i]};
-  arr.faces = stageA.faces;
+  arr.verts.resize(canon.mergedVerts.size());
+  for (int i = 0; i < static_cast<int>(canon.mergedVerts.size()); ++i)
+    arr.verts[i] = {canon.mergedVerts[i]};
+  arr.faces = canon.faces;
 
-  struct Box3 {
-    vec3 mn, mx;
-  };
-  std::vector<Box3> boxes(nFaces);
+  std::vector<Box> boxes(nFaces);
   std::vector<double> planeDist(nFaces);
   for (int fi = 0; fi < nFaces; ++fi) {
-    const auto& f = stageA.faces[fi];
+    const auto& f = canon.faces[fi];
     planeDist[fi] = la::dot(f.normal, arr.verts[f.verts.x].pos);
     const vec3 p0 = arr.verts[f.verts.x].pos, p1 = arr.verts[f.verts.y].pos,
                p2 = arr.verts[f.verts.z].pos;
-    boxes[fi] = {la::min(la::min(p0, p1), p2) - vec3(eps),
-                 la::max(la::max(p0, p1), p2) + vec3(eps)};
+    boxes[fi] = Box(la::min(la::min(p0, p1), p2) - vec3(eps),
+                    la::max(la::max(p0, p1), p2) + vec3(eps));
   }
 
   for (int fi = 0; fi < nFaces; ++fi) {
     for (int fj = fi + 1; fj < nFaces; ++fj) {
-      const Box3 &bi = boxes[fi], &bj = boxes[fj];
-      if (bi.mn.x > bj.mx.x || bi.mx.x < bj.mn.x || bi.mn.y > bj.mx.y ||
-          bi.mx.y < bj.mn.y || bi.mn.z > bj.mx.z || bi.mx.z < bj.mn.z)
-        continue;
+      if (!boxes[fi].DoesOverlap(boxes[fj])) continue;
 
-      const CanonicalFace &FA = stageA.faces[fi], &FB = stageA.faces[fj];
+      const CanonicalFace &FA = canon.faces[fi], &FB = canon.faces[fj];
       {
         // Faces sharing a merged edge are exempt from pair analysis.  Their
         // planes meet along the shared edge, so seam computation would return
@@ -394,13 +389,15 @@ static StageBResult StageBPrime(const StageAResult& stageA, double eps,
         const vec2 a2[3] = {proj * pA[0], proj * pA[1], proj * pA[2]};
         const vec2 b2[3] = {proj * pB[0], proj * pB[1], proj * pB[2]};
         std::vector<vec2> poly = {b2[0], b2[1], b2[2]};
-        for (int k = 0; k < 3 && !poly.empty(); ++k)
+        for (const int k : {0, 1, 2}) {
+          if (poly.empty()) break;
           poly = ClipPolyByHalfplane(poly, a2[k], a2[(k + 1) % 3]);
+        }
         if (poly.size() < 3) return false;
         double area = 0.0, perim = 0.0;
-        for (int k = 0; k < (int)poly.size(); ++k) {
-          const vec2 &p = poly[k], &q = poly[(k + 1) % (int)poly.size()];
-          area += p.x * q.y - q.x * p.y;
+        for (size_t k = 0; k < poly.size(); ++k) {
+          const vec2 &p = poly[k], &q = poly[(k + 1) % poly.size()];
+          area += la::cross(p, q);
           perim += la::length(q - p);
         }
         return std::abs(area) * 0.5 > perim * eps;
@@ -442,7 +439,7 @@ static StageBResult StageBPrime(const StageAResult& stageA, double eps,
                      projA = GetAxisAlignedProjection(na);
         const vec2 pb02 = projB * pb0, pb12 = projB * pb1, pb22 = projB * pb2;
         const vec2 pa02 = projA * pa0, pa12 = projA * pa1, pa22 = projA * pa2;
-        for (int ei = 0; ei < 3; ++ei) {
+        for (const int ei : {0, 1, 2}) {
           const int ej = (ei + 1) % 3;
           if (std::abs(la::dot(nb, eA[ei]) - dB) <= eps &&
               std::abs(la::dot(nb, eA[ej]) - dB) <= eps &&
@@ -473,8 +470,8 @@ static StageBResult StageBPrime(const StageAResult& stageA, double eps,
 
       if (seamLen <= eps) {
         // Degenerate contact: record the endpoint x's as criticals (no vert
-        // identity needed). SubEpsFeature guard in stage C' will catch any
-        // macro-scale hazard.
+        // identity needed). The slabs stage's SubEpsFeature guard will catch
+        // any macro-scale hazard.
         arr.criticalXs.push_back(qA.x);
         arr.criticalXs.push_back(qB.x);
         ++cnt.subEpsContactsDropped;
@@ -496,10 +493,10 @@ static StageBResult StageBPrime(const StageAResult& stageA, double eps,
     }
   }
 
-  // M1: seam-seam triple criticals (spec B'). For each pair of seams sharing
+  // M1: seam-seam triple criticals (spec SEAMS). For each pair of seams sharing
   // a face, compute the crossing of their in-plane projections. The crossing x
   // is the only quantity consumed (over-inclusion is harmless).
-  const int nSeams = (int)arr.seams.size();
+  const int nSeams = static_cast<int>(arr.seams.size());
   for (int si = 0; si < nSeams; ++si) {
     for (int sj = si + 1; sj < nSeams; ++sj) {
       const Seam& SA = arr.seams[si];
@@ -522,16 +519,16 @@ static StageBResult StageBPrime(const StageAResult& stageA, double eps,
 }
 
 // ---------------------------------------------------------------------------
-// Stage D': strip emission.
+// Strips stage: strip emission.
 // Track extension evaluates a piece endpoint's (y,z) at a boundary critical;
-// the extended limits feed the cap arrangements (stage E'), whose output
+// the extended limits feed the cap arrangements (caps stage), whose output
 // chains the strips then zip (spec [R2-fold]: strips consume the cap
 // subdivision, they do not re-derive it).
 // ---------------------------------------------------------------------------
 
 // Evaluate a piece endpoint in (y,z) at x=xTarget using the face's FaceTrack.
 // t = parameterization of pt on segment [ft.p0, ft.p1].
-static vec2 ExtendPt(vec2 pt, const FaceTrack& ft, double xTarget) {
+vec2 ExtendPt(vec2 pt, const FaceTrack& ft, double xTarget) {
   const vec2 segD = ft.p1 - ft.p0;
   const double segLen2 = la::dot(segD, segD);
   double t = 0.5;
@@ -544,7 +541,8 @@ static vec2 ExtendPt(vec2 pt, const FaceTrack& ft, double xTarget) {
   return (1.0 - t) * yz0 + t * yz1;
 }
 
-// Like ExtendPt but uses the seam track for class-ii endpoints (spec D'/E').
+// Like ExtendPt but uses the seam track for class-ii endpoints (spec
+// STRIPS/CAPS).
 // A class-ii endpoint is interior to the face's section segment (not at t~0
 // or t~1) and lies on a seam.  The seam track gives the correct extension;
 // the face-edge track gives the wrong yz because it follows a diagonal edge
@@ -557,9 +555,9 @@ static vec2 ExtendPt(vec2 pt, const FaceTrack& ft, double xTarget) {
 // matching against the slab's bounded seam-track set, and the classes are
 // mutually exclusive at scale > eps (a seam crossing interior to a face
 // segment is > eps from its endpoints, else the block rule collapsed it).
-static vec2 ExtendPtWithSeams(vec2 pt, const FaceTrack& ft,
-                              const std::vector<SeamTrackEntry>& seamTracks,
-                              double xTarget, double eps) {
+vec2 ExtendPtWithSeams(vec2 pt, const FaceTrack& ft,
+                       const std::vector<SeamTrackEntry>& seamTracks,
+                       double xTarget, double eps) {
   // Check if pt is strictly interior to the face segment (class-ii indicator).
   const vec2 segD = ft.p1 - ft.p0;
   const double segLen2 = la::dot(segD, segD);
@@ -586,7 +584,7 @@ struct OutTri3D {
   vec3 v[3];
 };
 
-// The third consumer of the cap arrangement (spec E' [R2-fold]): its output
+// The third consumer of the cap arrangement (spec CAPS [R2-fold]): its output
 // verts subdivide the adjacent strip edges.  `arrVerts` is the arrangement's
 // FULL vert set (merged inputs + every collected-arrangement vertex, per the
 // engine's negEdges contract).  Returns the verts lying strictly interior to
@@ -594,8 +592,8 @@ struct OutTri3D {
 // posture as the engine's own incidence rule), sorted by projection parameter
 // (exact ties by lex order).  The returned POSITIONS become the strip edge's
 // chain verts, bitwise equal to the cap triangulation corners they pair with.
-static std::vector<vec2> ChainSplitVerts(const std::vector<vec2>& arrVerts,
-                                         vec2 p0, vec2 p1, double eps) {
+std::vector<vec2> ChainSplitVerts(const std::vector<vec2>& arrVerts, vec2 p0,
+                                  vec2 p1, double eps) {
   const vec2 segD = p1 - p0;
   const double segLen2 = la::dot(segD, segD);
   if (segLen2 <= eps * eps) return {};
@@ -629,15 +627,15 @@ static std::vector<vec2> ChainSplitVerts(const std::vector<vec2>& arrVerts,
 // exactly with cap triangulation corners.  The merge advances by projection
 // parameter on each chain's own chord; exact ties advance the xLo side first
 // (the other diagonal of the same quad).
-static void ZipperEmit(double xLo, double xHi, const std::vector<vec2>& a,
-                       const std::vector<vec2>& b, std::vector<OutTri3D>& out) {
-  const int m = (int)a.size(), n = (int)b.size();
+void ZipperEmit(double xLo, double xHi, const std::vector<vec2>& a,
+                const std::vector<vec2>& b, std::vector<OutTri3D>& out) {
+  const int m = static_cast<int>(a.size()), n = static_cast<int>(b.size());
   auto params = [](const std::vector<vec2>& c) {
     std::vector<double> t(c.size(), 0.0);
     const vec2 d = c.back() - c.front();
     const double len2 = la::dot(d, d);
     if (c.size() >= 2 && len2 > 0.0) {
-      for (int i = 1; i + 1 < (int)c.size(); ++i)
+      for (int i = 1; i + 1 < static_cast<int>(c.size()); ++i)
         t[i] = la::dot(c[i] - c.front(), d) / len2;
       t.back() = 1.0;
     }
@@ -668,17 +666,17 @@ struct StripChains {
   std::vector<std::vector<vec2>> lo, hi;
 };
 
-// Stage D': emit strips.  Each strip zips its two c-side chains, built by the
-// cap arrangements at its slab's boundary-pair canonical criticals (spec E'
+// Strips stage: each strip zips its two c-side chains, built by the cap
+// arrangements at its slab's boundary-pair canonical criticals (spec CAPS
 // [R2-fold] third consumer).  No geometry is computed here: the chains carry
 // the cap arrangements' vert positions bitwise.  Every built slab has both
 // sides bound (its own xHi is always its pair's canonical; its lo is bound at
 // the preceding gap's canonical), with one chain per piece - attribution
 // failures fail closed in EmitCaps before this runs.
-static std::optional<std::pair<FatalReason, std::string>> EmitStrips(
+std::optional<std::pair<FatalReason, std::string>> EmitStrips(
     const std::vector<SlabResult>& slabs,
     const std::vector<StripChains>& chains, std::vector<OutTri3D>& out) {
-  for (int si = 0; si < (int)slabs.size(); ++si) {
+  for (int si = 0; si < static_cast<int>(slabs.size()); ++si) {
     if (!slabs[si].built) continue;
     const StripChains& ch = chains[si];
     // One non-empty chain per retained piece on each side is the EmitCaps
@@ -707,7 +705,7 @@ static std::optional<std::pair<FatalReason, std::string>> EmitStrips(
 }
 
 // ---------------------------------------------------------------------------
-// Stage E': cap emission.
+// Caps stage: cap emission.
 // At each critical x=c, ONE 2D arrangement runs over the extended pieces of
 // both adjacent slabs, and everything downstream consumes it (spec [R2-fold]
 // "one arrangement per critical, three consumers"): the positive measure's
@@ -721,8 +719,8 @@ static std::optional<std::pair<FatalReason, std::string>> EmitStrips(
 // If flipWinding is true, reverse each triangle (for -x normal caps).
 // idx is global across all loops (flat concatenation of allVerts).
 // Returns false if the triangulator produced an invalid index (fail closed).
-static bool TriangulateCap(const Polygons& polys, double xCap, bool flipWinding,
-                           double eps, std::vector<OutTri3D>& out) {
+bool TriangulateCap(const Polygons& polys, double xCap, bool flipWinding,
+                    double eps, std::vector<OutTri3D>& out) {
   if (polys.empty()) return true;
 
   PolygonsIdx pidx;
@@ -742,7 +740,7 @@ static bool TriangulateCap(const Polygons& polys, double xCap, bool flipWinding,
 
   const auto tris = TriangulateIdx(pidx, eps);
 
-  const int nAll = (int)allVerts.size();
+  const int nAll = static_cast<int>(allVerts.size());
   for (const auto& t : tris) {
     const bool inRange = t.x >= 0 && t.x < nAll && t.y >= 0 && t.y < nAll &&
                          t.z >= 0 && t.z < nAll;
@@ -772,9 +770,9 @@ struct CapEdgeSet {
   bool ok = true;
 };
 
-static CapEdgeSet BuildCapEdgeSet(const SlabResult* leftSlab,
-                                  const SlabResult* rightSlab, double xCap,
-                                  double eps) {
+CapEdgeSet BuildCapEdgeSet(const SlabResult* leftSlab,
+                           const SlabResult* rightSlab, double xCap,
+                           double eps) {
   CapEdgeSet ces;
   auto addPieces = [&](const SlabResult& slab,
                        std::vector<std::pair<int, int>>& slots) {
@@ -794,7 +792,7 @@ static CapEdgeSet BuildCapEdgeSet(const SlabResult* leftSlab,
                                            slab.seamTracks, xCap, eps);
       const vec2 eTo =
           ExtendPtWithSeams(piece.to, *it->second, slab.seamTracks, xCap, eps);
-      const int i0 = (int)ces.rawVerts.size();
+      const int i0 = static_cast<int>(ces.rawVerts.size());
       ces.rawVerts.push_back(eFrom);
       ces.rawVerts.push_back(eTo);
       slots.push_back({i0, i0 + 1});
@@ -816,7 +814,7 @@ static CapEdgeSet BuildCapEdgeSet(const SlabResult* leftSlab,
 // r.verts bitwise); a single-vert chain is a piece that vanished at this
 // critical.
 // Returns nullopt on success, or the fatal (reason, detail) to propagate.
-static std::optional<std::pair<FatalReason, std::string>> ComputeCap(
+std::optional<std::pair<FatalReason, std::string>> ComputeCap(
     const SlabResult* leftSlab, const SlabResult* rightSlab, double xCap,
     double eps, std::vector<OutTri3D>& out,
     std::vector<std::vector<vec2>>* leftChains,
@@ -886,7 +884,7 @@ static std::optional<std::pair<FatalReason, std::string>> ComputeCap(
   return std::nullopt;
 }
 
-// Stage E' driver: one cap per critical (spec [R3-fold]: runs are never
+// Caps-stage driver: one cap per critical (spec [R3-fold]: runs are never
 // merged; only IEEE-exact duplicate criticals collapse).  Adjacent built
 // slabs are found by INDEX: slab bounds are these exact critical values by
 // construction, so no tolerance enters the lookup.
@@ -901,12 +899,12 @@ static std::optional<std::pair<FatalReason, std::string>> ComputeCap(
 // one arrangement must own the seam.  The run's other caps are emitted from
 // their own arrangements but are sub-eps slivers that collapse in the
 // assembly weld.
-static std::optional<std::pair<FatalReason, std::string>> EmitCaps(
+std::optional<std::pair<FatalReason, std::string>> EmitCaps(
     const std::vector<SlabResult>& slabs, const std::vector<double>& crits,
     double eps, std::vector<OutTri3D>& out, std::vector<StripChains>& chains,
     Overlap3Counters& cnt) {
-  const int nSlabs = (int)slabs.size();
-  for (int ci = 0; ci < (int)crits.size(); ++ci) {
+  const int nSlabs = static_cast<int>(slabs.size());
+  for (int ci = 0; ci < static_cast<int>(crits.size()); ++ci) {
     int li = ci - 1;
     while (li >= 0 && !slabs[li].built) --li;
     int ri = ci;
@@ -927,16 +925,16 @@ static std::optional<std::pair<FatalReason, std::string>> EmitCaps(
 // Assembly: collect emitted triangles, dedup verts, build Impl.
 // ---------------------------------------------------------------------------
 
-static StageResult<Manifold::Impl> BuildImpl(const std::vector<OutTri3D>& tris,
-                                             double eps) {
+StageResult<Manifold::Impl> BuildImpl(const std::vector<OutTri3D>& tris,
+                                      double eps) {
   if (tris.empty()) return StageResult<Manifold::Impl>::Ok(Manifold::Impl{});
 
   // Collect verts with eps-dedup.
   std::vector<vec3> verts;
   auto getVertIdx = [&](vec3 p) -> int {
-    for (int i = 0; i < (int)verts.size(); ++i)
+    for (int i = 0; i < static_cast<int>(verts.size()); ++i)
       if (la::length(verts[i] - p) <= eps) return i;
-    int id = (int)verts.size();
+    int id = static_cast<int>(verts.size());
     verts.push_back(p);
     return id;
   };
@@ -977,7 +975,8 @@ static StageResult<Manifold::Impl> BuildImpl(const std::vector<OutTri3D>& tris,
 
   Manifold::Impl impl;
   impl.vertPos_.resize(verts.size());
-  for (int i = 0; i < (int)verts.size(); ++i) impl.vertPos_[i] = verts[i];
+  for (int i = 0; i < static_cast<int>(verts.size()); ++i)
+    impl.vertPos_[i] = verts[i];
 
   impl.CreateHalfedges(tv);
   if (!impl.IsManifold()) {
@@ -993,14 +992,12 @@ static StageResult<Manifold::Impl> BuildImpl(const std::vector<OutTri3D>& tris,
   return StageResult<Manifold::Impl>::Ok(std::move(impl));
 }
 
-}  // namespace
-
 // ---------------------------------------------------------------------------
-// Pipeline: stages C' + D' + E'.
+// Pipeline: slabs -> caps -> strips -> assembly.
 // ---------------------------------------------------------------------------
 
-static Overlap3Result RunCDEPrime(ArrangementGeometry& arr, double eps,
-                                  Overlap3Counters& cnt) {
+Overlap3Result SweepEmit(ArrangementGeometry& arr, double eps,
+                         Overlap3Counters& cnt) {
   Overlap3Result result;
 
   auto slabRes = BuildSlabs(arr, eps, cnt);
@@ -1053,6 +1050,8 @@ static Overlap3Result RunCDEPrime(ArrangementGeometry& arr, double eps,
   return result;
 }
 
+}  // namespace
+
 // ---------------------------------------------------------------------------
 // Public entry points.
 // ---------------------------------------------------------------------------
@@ -1065,19 +1064,19 @@ Overlap3Result RemoveOverlaps3D(const Manifold::Impl& in, double eps) {
     result.detail = "epsilon not computable";
     return result;
   }
-  const StageAResult stageA = StageA(in, eps);
-  if (stageA.faces.empty()) {
+  const CanonicalGeometry canon = Canonicalize(in, eps);
+  if (canon.faces.empty()) {
     result.impl = Manifold::Impl{};
     return result;
   }
   Overlap3Counters& cnt = result.counters;
-  StageBResult stageB = StageBPrime(stageA, eps, cnt);
-  if (stageB.fatal.has_value()) {
-    result.fatal = stageB.fatal;
-    result.detail = stageB.detail;
+  SeamsResult seams = FindSeams(canon, eps, cnt);
+  if (seams.fatal.has_value()) {
+    result.fatal = seams.fatal;
+    result.detail = seams.detail;
     return result;
   }
-  return RunCDEPrime(stageB.arr, eps, cnt);
+  return SweepEmit(seams.arr, eps, cnt);
 }
 
 Overlap3Internals RemoveOverlaps3D_TestHooks(const Manifold::Impl& in,
@@ -1089,15 +1088,15 @@ Overlap3Internals RemoveOverlaps3D_TestHooks(const Manifold::Impl& in,
     out.detail = "epsilon not computable";
     return out;
   }
-  const StageAResult stageA = StageA(in, eps);
-  if (stageA.faces.empty()) return out;
-  StageBResult stageB = StageBPrime(stageA, eps, out.counters);
-  if (stageB.fatal.has_value()) {
-    out.fatal = stageB.fatal;
-    out.detail = stageB.detail;
+  const CanonicalGeometry canon = Canonicalize(in, eps);
+  if (canon.faces.empty()) return out;
+  SeamsResult seams = FindSeams(canon, eps, out.counters);
+  if (seams.fatal.has_value()) {
+    out.fatal = seams.fatal;
+    out.detail = seams.detail;
     return out;
   }
-  out.arr = std::move(stageB.arr);
+  out.arr = std::move(seams.arr);
   auto slabRes = BuildSlabs(out.arr, eps, out.counters);
   if (!slabRes.ok()) {
     out.fatal = slabRes.fatal;

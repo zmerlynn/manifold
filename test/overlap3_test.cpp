@@ -126,7 +126,8 @@ static std::vector<BFSeam> BruteForceSeams(const Manifold::Impl& impl,
       if (!std::isfinite(la::length(na)) || !std::isfinite(la::length(nb)))
         continue;
       // Edge-adjacent pairs (sharing >= 2 verts) have no volumetric seam:
-      // their "intersection" is just the shared edge, which stage B skips.
+      // their "intersection" is just the shared edge, which the seams stage
+      // skips.
       {
         int sharedV = 0;
         for (int k = 0; k < 3; ++k)
@@ -211,7 +212,8 @@ static Manifold::Impl NestedCubes() {
 }
 
 // Touching-disjoint: two unit cubes with a sub-eps gap at x=1.
-// Stage A merges verts at distance 1e-15 < eps (so the shared-face verts
+// The canonicalize stage merges verts at distance 1e-15 < eps (so the
+// shared-face verts
 // unify) and cancels the two faces with opposite winding (mult=0).
 // Remaining faces form the 2x1x1 union. No seams, vol=2.
 // The 1e-15 gap prevents the combined MeshGL from having a non-2-manifold
@@ -338,7 +340,7 @@ static void OracleCompare(const Manifold::Impl& ours_impl,
 }
 
 // ---------------------------------------------------------------------------
-// Gate 1: Event parity - brute-force vs stage B
+// Gate 1: Event parity - brute-force vs the seams stage
 // ---------------------------------------------------------------------------
 
 TEST(Overlap3, Gate1_EventParity_GenericBoxes) {
@@ -354,12 +356,12 @@ TEST(Overlap3, Gate1_EventParity_GenericBoxes) {
 
   const Overlap3Internals h = RemoveOverlaps3D_TestHooks(impl, eps);
   ASSERT_FALSE(h.fatal.has_value())
-      << "Stage B fatal for generic boxes: " << h.detail
+      << "Seams-stage fatal for generic boxes: " << h.detail
       << " (code=" << (h.fatal ? (int)*h.fatal : -1) << ")";
 
-  // Parity: stage B seam count must equal brute-force seam count.
+  // Parity: the seams-stage count must equal the brute-force seam count.
   EXPECT_EQ(h.arr.seams.size(), bfSeams.size())
-      << "Stage B seams=" << h.arr.seams.size()
+      << "Seams-stage seams=" << h.arr.seams.size()
       << " brute-force seams=" << bfSeams.size();
 }
 
@@ -374,10 +376,10 @@ TEST(Overlap3, Gate1_EventParity_TwoTets) {
 
   const Overlap3Internals h = RemoveOverlaps3D_TestHooks(impl, eps);
   ASSERT_FALSE(h.fatal.has_value())
-      << "Stage B fatal for two tets: " << h.detail;
+      << "Seams-stage fatal for two tets: " << h.detail;
 
   EXPECT_EQ(h.arr.seams.size(), bfSeams.size())
-      << "Stage B seams=" << h.arr.seams.size()
+      << "Seams-stage seams=" << h.arr.seams.size()
       << " brute-force seams=" << bfSeams.size();
 }
 
@@ -391,7 +393,7 @@ TEST(Overlap3, Gate2_SectionValidity_SingleCube) {
   const double eps = ImplEps(impl);
   const Overlap3Internals h = RemoveOverlaps3D_TestHooks(impl, eps);
   ASSERT_FALSE(h.fatal.has_value())
-      << "Single cube stage B/C fatal: " << h.detail;
+      << "Single cube seams/slabs fatal: " << h.detail;
   const std::string err = CheckSectionValidity(h, eps);
   EXPECT_TRUE(err.empty()) << "Gate2 single cube: " << err;
 }
@@ -402,7 +404,7 @@ TEST(Overlap3, Gate2_SectionValidity_GenericBoxes) {
   const double eps = ImplEps(impl);
   const Overlap3Internals h = RemoveOverlaps3D_TestHooks(impl, eps);
   ASSERT_FALSE(h.fatal.has_value())
-      << "Generic boxes stage B/C fatal: " << h.detail;
+      << "Generic boxes seams/slabs fatal: " << h.detail;
   const std::string err = CheckSectionValidity(h, eps);
   EXPECT_TRUE(err.empty()) << "Gate2 generic boxes: " << err;
 
@@ -421,7 +423,8 @@ TEST(Overlap3, Gate2_SectionValidity_TwoTets) {
   const Manifold::Impl impl = TwoTets();
   const double eps = ImplEps(impl);
   const Overlap3Internals h = RemoveOverlaps3D_TestHooks(impl, eps);
-  ASSERT_FALSE(h.fatal.has_value()) << "Two tets stage B/C fatal: " << h.detail;
+  ASSERT_FALSE(h.fatal.has_value())
+      << "Two tets seams/slabs fatal: " << h.detail;
   const std::string err = CheckSectionValidity(h, eps);
   EXPECT_TRUE(err.empty()) << "Gate2 two tets: " << err;
 }
@@ -533,7 +536,8 @@ TEST(Overlap3, Gate4c_HullMask_MustResolve) {
 
 // (d) nearParallel with plane-separation inside eps. MUST FAIL-CLOSED with
 // named guard. sep=1e-14 << eps~1.4e-12 for unit-scale geometry: the plane
-// separation is within eps, so stage B' detects coplanar interior overlap and
+// separation is within eps, so the seams stage detects coplanar interior
+// overlap and
 // fires CoplanarOverlap.
 // Acceptable guards: CoplanarOverlap, SubEpsFeature, EdgeInPlane.
 TEST(Overlap3, Gate4d_NearParallel_1e10_MustFailClosed) {
@@ -608,7 +612,7 @@ TEST(Overlap3, Pin_M1_TripleCritical) {
   const double eps = ImplEps(impl);
   const Overlap3Internals h = RemoveOverlaps3D_TestHooks(impl, eps);
   ASSERT_FALSE(h.fatal.has_value())
-      << "ThreeOverlappingBoxes stage B fatal: " << h.detail;
+      << "ThreeOverlappingBoxes seams-stage fatal: " << h.detail;
 
   // M1 records seam-seam crossing x's in the vertex-free critical set (spec
   // B': triple criticals are x-values, not vertices).  This fixture has no
@@ -621,7 +625,8 @@ TEST(Overlap3, Pin_M1_TripleCritical) {
 
   // Semantic cross-check: every seam-seam crossing x computed independently
   // (pairs of brute-force seams sharing a face, coplanar segment crossing,
-  // interior by the same eps bounds as stage B') must appear in criticalXs.
+  // interior by the same eps bounds as the seams stage) must appear in
+  // criticalXs.
   const auto bfSeams = BruteForceSeams(impl, eps);
   int bfCrossings = 0;
   for (size_t i = 0; i < bfSeams.size(); ++i) {
@@ -635,7 +640,8 @@ TEST(Overlap3, Pin_M1_TripleCritical) {
       if (lenA < eps || lenB < eps) continue;
       const vec3 cAB = la::cross(dA, dB);
       const double cABlen2 = la::dot(cAB, cAB);
-      // Dimensional near-parallel gate, same as stage B' SeamSeamCrossX.
+      // Dimensional near-parallel gate, same as the seams stage's
+      // SeamSeamCrossX.
       const double parTol = eps * (lenA + lenB);
       if (cABlen2 <= parTol * parTol) continue;
       const double t = la::dot(la::cross(dC, dB), cAB) / cABlen2;
@@ -647,7 +653,7 @@ TEST(Overlap3, Pin_M1_TripleCritical) {
       ++bfCrossings;
       // The crossing x must be a critical: either recorded vertex-free in
       // criticalXs, or already a vert x (crossings at/near seam endpoints
-      // are non-interior for stage B' but their endpoint verts are
+      // are non-interior for the seams stage but their endpoint verts are
       // criticals themselves).
       bool found = false;
       for (double x : h.arr.criticalXs) {
@@ -676,7 +682,7 @@ TEST(Overlap3, Gate2_SectionValidity_ThreeOverlappingBoxes) {
   const double eps = ImplEps(impl);
   const Overlap3Internals h = RemoveOverlaps3D_TestHooks(impl, eps);
   ASSERT_FALSE(h.fatal.has_value())
-      << "ThreeOverlappingBoxes stage B/C fatal: " << h.detail;
+      << "ThreeOverlappingBoxes seams/slabs fatal: " << h.detail;
   const std::string err = CheckSectionValidity(h, eps);
   EXPECT_TRUE(err.empty()) << "Gate2 ThreeOverlappingBoxes: " << err;
 }
@@ -933,7 +939,8 @@ TEST(Overlap3, Pin_P4b_EdgeInPlane_OffMidpoint) {
 }
 
 // P6: Compose a tet with its winding-reversed copy. Both meshes share the same
-// 4 vertex positions {(0,0,0),(1,0,0),(0,1,0),(0,0,1)}. Stage A merges the
+// 4 vertex positions {(0,0,0),(1,0,0),(0,1,0),(0,0,1)}. The canonicalize
+// stage merges the
 // duplicate positions and finds each face pair has opposite permutation parity
 // -> mult = +1 + (-1) = 0 -> all 4 face keys dropped -> stageA.faces empty ->
 // result is empty Impl (no fatal, vol=0).
@@ -1123,7 +1130,7 @@ TEST(Overlap3, Pin_StripSubdivFromCap) {
   // R1-fold is exercised by this fixture).
   const Overlap3Internals h = RemoveOverlaps3D_TestHooks(impl, eps);
   ASSERT_FALSE(h.fatal.has_value())
-      << "Pin_StripSubdivFromCap stages A-C fatal: " << h.detail;
+      << "Pin_StripSubdivFromCap pre-emission fatal: " << h.detail;
   bool anySeamTracks = false;
   for (const auto& slab : h.slabs) {
     if (slab.built && !slab.seamTracks.empty()) {
@@ -1152,7 +1159,8 @@ TEST(Overlap3, Pin_StripSubdivFromCap) {
 // One-arrangement-per-critical pin: M4 structural property.
 // ---------------------------------------------------------------------------
 
-// Stage E' runs exactly ONE 2D arrangement per critical with cap input (spec
+// The caps stage runs exactly ONE 2D arrangement per critical with cap
+// input (spec
 // [R2-fold] one-arrangement-three-consumers).  A regression to per-measure
 // arrangements (e.g. separate cap_plus and cap_minus calls) doubles the
 // counter; a run-merge halves it.
@@ -1164,7 +1172,7 @@ TEST(Overlap3, Pin_OneArrangementPerCritical) {
   const double eps = ImplEps(impl);
 
   const Overlap3Internals h = RemoveOverlaps3D_TestHooks(impl, eps);
-  ASSERT_FALSE(h.fatal.has_value()) << "stages A-C fatal: " << h.detail;
+  ASSERT_FALSE(h.fatal.has_value()) << "pre-emission fatal: " << h.detail;
   ASSERT_FALSE(h.slabs.empty());
 
   // Expected arrangements: criticals (slab boundaries) whose nearest built
@@ -1186,5 +1194,5 @@ TEST(Overlap3, Pin_OneArrangementPerCritical) {
   ASSERT_FALSE(result.fatal.has_value())
       << "pipeline fatal=" << (int)*result.fatal << " " << result.detail;
   EXPECT_EQ(result.counters.capArrangements, expected)
-      << "stage E' must run exactly one arrangement per critical with input";
+      << "caps stage must run exactly one arrangement per critical with input";
 }

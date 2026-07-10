@@ -15,10 +15,19 @@ This design emits it.
 
 ## Architecture
 
-A - MERGE (unchanged from SweepPlane3D.md stage A): eps vert merge,
-identical-tri multiplicity, zero-mult drop.
+Stage names map to code entry points: CANONICALIZE (Canonicalize),
+SEAMS (FindSeams), SLABS (BuildSlabs), STRIPS (EmitStrips), CAPS
+(EmitCaps/ComputeCap); the pipeline driver is SweepEmit.  The
+crucible records later in this doc predate the names and keep their
+original stage letters: A = CANONICALIZE, B' = SEAMS, C' = SLABS,
+D' = STRIPS, E' = CAPS.
 
-B' - CRITICALS AND SEAMS, SOFTENED. The critical set = sorted x of:
+CANONICALIZE (formerly A - MERGE; unchanged from SweepPlane3D.md
+stage A): eps vert merge, identical-tri multiplicity, zero-mult
+drop.
+
+SEAMS (formerly B' - criticals and seams), SOFTENED. The critical
+set = sorted x of:
 merged verts; edge-face intersection points; seam-seam crossing
 points (triple points). Seams (tri-pair intersection segments) are
 computed as 3D SEGMENTS for two purposes only: their endpoint x's
@@ -40,7 +49,8 @@ Coplanar face overlap and edge-in-plane remain OUT OF SCOPE
 (detected exactly as today, fail closed): a coplanar pair has no
 transversal section story at their shared plane.
 
-C' - SECTIONS (unchanged mechanics): per slab wider than eps, at
+SLABS (formerly C' - sections; unchanged mechanics): per slab wider
+than eps, at
 mid-x every straddling face contributes one directed segment
 (sweepDir x outwardNormal convention, signed multiplicity), into
 the 2D engine's arrangement + winding passes. The engine returns
@@ -48,7 +58,8 @@ the RETAINED boundary pieces (its native output - the piece capture
 with (below, above) is no longer needed for emission; retained
 pieces suffice) with source ids.
 
-D' - STRIPS. Every retained piece endpoint tracks a 3D segment:
+STRIPS (formerly D'). Every retained piece endpoint tracks a 3D
+segment:
 piece endpoints are (i) face-edge crossings of the section plane -
 tracking the input EDGE - or (ii) crossings of two faces' section
 segments - tracking the SEAM (both faces' planes contain the seam;
@@ -75,7 +86,8 @@ retained pieces interior-on-left in section space, which together
 with the sweep direction determines the material side of the strip
 - no per-face re-derivation (transfer-in-disguise is forbidden).
 
-E' - CAPS. At each critical x = c, the retained REGIONS of the two
+CAPS (formerly E'). At each critical x = c, the retained REGIONS of
+the two
 adjacent slabs' sections (each a set of closed 2D loops - the
 engine's retained boundary bounds them), both evaluated AT c via
 the track extension, generally differ; the difference IS the output
@@ -195,7 +207,8 @@ critical), strip/cap assembly. Expected net: a large deletion.
 ## Eps posture
 
 Unchanged: one absolute eps (EpsilonFromScale budget 1000), input
-quantization at stage A, slab-width gate, the merged-cap rule for
+quantization at CANONICALIZE, slab-width gate, the merged-cap rule
+for
 sub-eps critical runs. The engine inside slabs and inside cap
 booleans runs its standard posture. Alpha covers every constructed
 point via the shared kernels.
