@@ -24,6 +24,7 @@
 #include <limits>
 #include <map>
 #include <set>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -44,52 +45,8 @@ StageResult<std::vector<SlabResult>> BuildSlabs(const ArrangementGeometry& arr,
 namespace {
 
 // ---------------------------------------------------------------------------
-// Seams-stage helpers: coplanar clip, edge-in-plane detection, seam segments.
+// Seams-stage helpers: seam segments and in-plane crossing computation.
 // ---------------------------------------------------------------------------
-
-// Sutherland-Hodgman clip of a convex polygon against one half-plane.
-std::vector<vec2> ClipPolyByHalfplane(std::vector<vec2> poly, vec2 eA,
-                                      vec2 eB) {
-  std::vector<vec2> out;
-  const int n = static_cast<int>(poly.size());
-  const vec2 e = eB - eA;
-  for (int k = 0; k < n; ++k) {
-    const vec2 &cur = poly[k], &nxt = poly[(k + 1) % n];
-    const bool ci = la::cross(e, cur - eA) >= 0.0;
-    const bool ni = la::cross(e, nxt - eA) >= 0.0;
-    if (ci) out.push_back(cur);
-    if (ci != ni) {
-      const vec2 d1 = nxt - cur;
-      const double den = la::cross(d1, e);
-      if (den != 0.0) out.push_back(cur + la::cross(eA - cur, e) / den * d1);
-    }
-  }
-  return out;
-}
-
-// Length of the intersection of segment [sA,sB] with the interior of triangle
-// (t0,t1,t2) in 2D. Used for EdgeInPlane detection.
-double SegTriInteriorLen2D(vec2 sA, vec2 sB, vec2 t0, vec2 t1, vec2 t2) {
-  double tLo = 0.0, tHi = 1.0;
-  const vec2 triV[3] = {t0, t1, t2}, segD = sB - sA;
-  for (const int i : {0, 1, 2}) {
-    const vec2 eA = triV[i], eB = triV[(i + 1) % 3], e = eB - eA;
-    const double f0 = la::cross(e, sA - eA);
-    const double f1 = la::cross(e, sB - eA);
-    const double fd = f1 - f0;
-    if (fd == 0.0) {
-      if (f0 < 0.0) return 0.0;
-    } else {
-      const double tc = -f0 / fd;
-      if (fd < 0.0)
-        tHi = std::min(tHi, tc);
-      else
-        tLo = std::max(tLo, tc);
-    }
-    if (tLo > tHi) return 0.0;
-  }
-  return (tHi - tLo) * la::length(segD);
-}
 
 // Clip line P + t*D against face triangle; returns the parameter interval,
 // or nullopt when the overlap is empty.
@@ -300,9 +257,9 @@ CanonicalGeometry Canonicalize(const Manifold::Impl& in, double eps) {
 }
 
 // ---------------------------------------------------------------------------
-// Seams stage: CoplanarOverlap + EdgeInPlane detection, seam segments,
-// vertex-free extra criticals.  No triple-point unification, no edge
-// subdivision.
+// Seams stage: coplanar grouping, seam segments, vertex-free extra criticals
+// (seam-seam and in-plane skeleton crossings).  No triple-point unification,
+// no edge subdivision.
 // ---------------------------------------------------------------------------
 
 struct SeamsResult {
@@ -333,24 +290,60 @@ SeamsResult FindSeams(const CanonicalGeometry& canon, double eps,
                     la::max(la::max(p0, p1), p2) + vec3(eps));
   }
 
+  // Coplanar grouping pre-pass (spec COPLANAR mechanism 1): union faces
+  // whose planes coincide within eps - the symmetric OR of the two direction
+  // tests - INCLUDING shared-edge pairs (a folded flap's pair must join
+  // its group before any exemption skips it).  Grouping is by PLANE, not by
+  // overlap: non-overlapping same-plane faces grouping is benign (their
+  // sections never coincide).  Components of two or more faces become
+  // groups; their in-plane content resolves through group-id seeding and
+  // the caps/strips machinery instead of failing closed.
+  {
+    DisjointSets faceUf(nFaces);
+    auto inPlaneOf = [&](int host, const CanonicalFace& Q) {
+      const vec3& n = canon.faces[host].normal;
+      const double d = planeDist[host];
+      return std::abs(la::dot(n, arr.verts[Q.verts.x].pos) - d) <= eps &&
+             std::abs(la::dot(n, arr.verts[Q.verts.y].pos) - d) <= eps &&
+             std::abs(la::dot(n, arr.verts[Q.verts.z].pos) - d) <= eps;
+    };
+    for (int fi = 0; fi < nFaces; ++fi)
+      for (int fj = fi + 1; fj < nFaces; ++fj)
+        if (inPlaneOf(fi, canon.faces[fj]) || inPlaneOf(fj, canon.faces[fi]))
+          faceUf.unite(fi, fj);
+    arr.face2Group.assign(nFaces, -1);
+    std::map<int, int> rootCount;
+    for (int fi = 0; fi < nFaces; ++fi)
+      ++rootCount[static_cast<int>(faceUf.find(fi))];
+    std::map<int, int> root2Group;
+    for (const auto& [root, count] : rootCount)
+      if (count >= 2) {
+        const int g = arr.numGroups++;
+        root2Group[root] = g;
+      }
+    for (int fi = 0; fi < nFaces; ++fi) {
+      const auto it = root2Group.find(static_cast<int>(faceUf.find(fi)));
+      if (it != root2Group.end()) arr.face2Group[fi] = it->second;
+    }
+  }
+
   for (int fi = 0; fi < nFaces; ++fi) {
     for (int fj = fi + 1; fj < nFaces; ++fj) {
       if (!boxes[fi].DoesOverlap(boxes[fj])) continue;
 
+      // Same plane group: no seam exists (identical planes), and the pair's
+      // in-plane interaction is the group machinery's job (spec COPLANAR).
+      if (arr.face2Group[fi] >= 0 && arr.face2Group[fi] == arr.face2Group[fj])
+        continue;
+
       const CanonicalFace &FA = canon.faces[fi], &FB = canon.faces[fj];
       {
-        // Faces sharing a merged edge are exempt from pair analysis.  Their
-        // planes meet along the shared edge, so seam computation would return
-        // that edge (its verts are already criticals) and the edge-in-plane
-        // detector would flag the shared edge itself.  This exemption also
-        // covers the coplanar shared-edge cases, in both directions:
-        // opposite-diagonal triangulations of two solids touching on a
-        // common plane are LEGAL (pinned by TouchingDisjoint) and locally
-        // indistinguishable from a folded flap here - the hazardous
-        // same-winding case fails closed downstream instead, where its
-        // coincident section edges carry two source ids with nonzero net
-        // multiplicity (EngineIdConflict); the legal touching case cancels
-        // (net zero) before any conflict is recorded.
+        // Faces sharing a merged edge produce no useful seam: their planes
+        // meet along the shared edge, whose verts are already criticals.
+        // Coplanar shared-edge pairs (touching diagonal triangulations,
+        // folded flaps) were unioned by the grouping pre-pass above and
+        // resolve through the group machinery (spec COPLANAR
+        // re-adjudication: a same-winding flap is ordinary +2 content).
         int shared = 0;
         const int va[3] = {FA.verts.x, FA.verts.y, FA.verts.z};
         const int vb[3] = {FB.verts.x, FB.verts.y, FB.verts.z};
@@ -368,91 +361,11 @@ SeamsResult FindSeams(const CanonicalGeometry& canon, double eps,
                  pb1 = arr.verts[FB.verts.y].pos,
                  pb2 = arr.verts[FB.verts.z].pos;
 
-      // Coplanar detection: called for both directions (B in A's plane,
-      // A in B's plane). Returns true if the clipped region is a genuine
-      // interior overlap: area > perimeter * eps, the house dimensionally-
-      // correct threshold (an overlap wider than eps somewhere).  Clip
-      // roundoff on adjacent coplanar triangles produces slivers of area
-      // ~ scale * machine-eps, far below it; sub-eps-wide contact is legal
-      // touching under the eps contract.
-      auto coplanarInteriorOverlap = [&](vec3 n, const vec3 pA[3],
-                                         const vec3 pB[3]) -> bool {
-        const mat2x3 proj = GetAxisAlignedProjection(n);
-        const vec2 a2[3] = {proj * pA[0], proj * pA[1], proj * pA[2]};
-        const vec2 b2[3] = {proj * pB[0], proj * pB[1], proj * pB[2]};
-        std::vector<vec2> poly = {b2[0], b2[1], b2[2]};
-        for (const int k : {0, 1, 2}) {
-          if (poly.empty()) break;
-          poly = ClipPolyByHalfplane(poly, a2[k], a2[(k + 1) % 3]);
-        }
-        if (poly.size() < 3) return false;
-        double area = 0.0, perim = 0.0;
-        for (size_t k = 0; k < poly.size(); ++k) {
-          const vec2 &p = poly[k], &q = poly[(k + 1) % poly.size()];
-          area += la::cross(p, q);
-          perim += la::length(q - p);
-        }
-        return std::abs(area) * 0.5 > perim * eps;
-      };
-      const vec3 pA[3] = {pa0, pa1, pa2}, pB[3] = {pb0, pb1, pb2};
-
-      // B in A's plane?
-      if (std::abs(la::dot(na, pb0) - planeDist[fi]) <= eps &&
-          std::abs(la::dot(na, pb1) - planeDist[fi]) <= eps &&
-          std::abs(la::dot(na, pb2) - planeDist[fi]) <= eps) {
-        if (coplanarInteriorOverlap(na, pA, pB)) {
-          res.fatal = FatalReason::CoplanarOverlap;
-          res.detail = "coplanar face pair with interior overlap";
-          return res;
-        }
-        continue;
-      }
-      // A in B's plane?
-      const double dB = la::dot(nb, pb0);
-      if (std::abs(la::dot(nb, pa0) - dB) <= eps &&
-          std::abs(la::dot(nb, pa1) - dB) <= eps &&
-          std::abs(la::dot(nb, pa2) - dB) <= eps) {
-        if (coplanarInteriorOverlap(nb, pB, pA)) {
-          res.fatal = FatalReason::CoplanarOverlap;
-          res.detail = "coplanar face pair with interior overlap";
-          return res;
-        }
-        continue;
-      }
-
+      // Parallel distinct planes: no seam.  (Same-plane pairs were grouped
+      // above; a pair reaching here with parallel planes is separated by
+      // more than eps - ordinary disjoint-parallel geometry.)
       const vec3 Dcross = la::cross(na, nb);
       if (la::length(Dcross) == 0.0) continue;
-
-      // EdgeInPlane detection.
-      {
-        const double dA = planeDist[fi], dB = la::dot(nb, pb0);
-        const vec3 eA[3] = {pa0, pa1, pa2}, eB[3] = {pb0, pb1, pb2};
-        const mat2x3 projB = GetAxisAlignedProjection(nb),
-                     projA = GetAxisAlignedProjection(na);
-        const vec2 pb02 = projB * pb0, pb12 = projB * pb1, pb22 = projB * pb2;
-        const vec2 pa02 = projA * pa0, pa12 = projA * pa1, pa22 = projA * pa2;
-        for (const int ei : {0, 1, 2}) {
-          const int ej = (ei + 1) % 3;
-          if (std::abs(la::dot(nb, eA[ei]) - dB) <= eps &&
-              std::abs(la::dot(nb, eA[ej]) - dB) <= eps &&
-              SegTriInteriorLen2D(projB * eA[ei], projB * eA[ej], pb02, pb12,
-                                  pb22) > eps) {
-            res.fatal = FatalReason::EdgeInPlane;
-            res.detail = "edge of face " + std::to_string(fi) +
-                         " in plane of face " + std::to_string(fj);
-            return res;
-          }
-          if (std::abs(la::dot(na, eB[ei]) - dA) <= eps &&
-              std::abs(la::dot(na, eB[ej]) - dA) <= eps &&
-              SegTriInteriorLen2D(projA * eB[ei], projA * eB[ej], pa02, pa12,
-                                  pa22) > eps) {
-            res.fatal = FatalReason::EdgeInPlane;
-            res.detail = "edge of face " + std::to_string(fj) +
-                         " in plane of face " + std::to_string(fi);
-            return res;
-          }
-        }
-      }
 
       // Seam computation.
       const auto seam = TriTriSeam(pa0, pa1, pa2, na, pb0, pb1, pb2, nb, eps);
@@ -506,6 +419,48 @@ SeamsResult FindSeams(const CanonicalGeometry& canon, double eps,
     }
   }
 
+  // In-plane skeleton criticals (spec COPLANAR mechanism 4).  Each group's
+  // skeleton = its members' edges (all three per face - internal shared
+  // edges included, over-inclusion is harmless) plus the in-plane seams of
+  // transversal faces with members (such a seam lies in the shared plane by
+  // construction).  Pairwise skeleton crossings are section-combinatorics
+  // events; SeamSeamCrossX's contract (coplanar 3D segments) computes them.
+  if (arr.numGroups > 0) {
+    std::vector<std::vector<std::pair<vec3, vec3>>> skeleton(arr.numGroups);
+    std::set<std::tuple<int, int, int>> seenEdges;  // (group, loVert, hiVert)
+    for (int fi = 0; fi < nFaces; ++fi) {
+      const int g = arr.face2Group[fi];
+      if (g < 0) continue;
+      const int vs[3] = {canon.faces[fi].verts.x, canon.faces[fi].verts.y,
+                         canon.faces[fi].verts.z};
+      for (const int k : {0, 1, 2}) {
+        int a = vs[k], b = vs[(k + 1) % 3];
+        if (a > b) std::swap(a, b);
+        if (!seenEdges.insert({g, a, b}).second) continue;
+        skeleton[g].push_back({arr.verts[a].pos, arr.verts[b].pos});
+      }
+    }
+    for (const auto& seam : arr.seams) {
+      const std::pair<vec3, vec3> seg = {arr.verts[seam.vertId0].pos,
+                                         arr.verts[seam.vertId1].pos};
+      const int g0 = arr.face2Group[seam.faceId0];
+      const int g1 = arr.face2Group[seam.faceId1];
+      if (g0 >= 0) skeleton[g0].push_back(seg);
+      if (g1 >= 0 && g1 != g0) skeleton[g1].push_back(seg);
+    }
+    for (const auto& segs : skeleton) {
+      const int n = static_cast<int>(segs.size());
+      for (int i = 0; i < n; ++i) {
+        for (int j = i + 1; j < n; ++j) {
+          const auto xCross =
+              SeamSeamCrossX(segs[i].first, segs[i].second, segs[j].first,
+                             segs[j].second, eps);
+          if (xCross) arr.criticalXs.push_back(*xCross);
+        }
+      }
+    }
+  }
+
   return res;
 }
 
@@ -517,56 +472,92 @@ SeamsResult FindSeams(const CanonicalGeometry& canon, double eps,
 // subdivision, they do not re-derive it).
 // ---------------------------------------------------------------------------
 
-// Evaluate a piece endpoint in (y,z) at x=xTarget using the face's FaceTrack.
-// t = parameterization of pt on segment [ft.p0, ft.p1].
-vec2 ExtendPt(vec2 pt, const FaceTrack& ft, double xTarget) {
-  const vec2 segD = ft.p1 - ft.p0;
-  const double segLen2 = la::length2(segD);
-  double t = 0.5;
-  if (segLen2 > 0.0) {
-    t = la::dot(pt - ft.p0, segD) / segLen2;
-    t = std::max(0.0, std::min(1.0, t));
-  }
-  const vec2 yz0 = InterpolateSafe(ft.va0, ft.vb0, xTarget);
-  const vec2 yz1 = InterpolateSafe(ft.va1, ft.vb1, xTarget);
-  return la::lerp(yz0, yz1, t);
-}
-
-// Like ExtendPt but uses the seam track for class-ii endpoints (spec
-// STRIPS/CAPS).
-// A class-ii endpoint is interior to the face's section segment (not at t~0
-// or t~1) and lies on a seam.  The seam track gives the correct extension;
-// the face-edge track gives the wrong yz because it follows a diagonal edge
-// instead of the seam line.
-//
-// The class test is an eps-match over the slab's own tracks (the engine
-// capture carries bare (y,z) endpoints; adjudicated in spec [R2-fold]).  The
-// classes are mutually exclusive at scale > eps: an interior seam crossing
-// sits > eps from the segment endpoints, else the block rule collapsed it.
-vec2 ExtendPtWithSeams(vec2 pt, const FaceTrack& ft,
-                       const std::vector<SeamTrackEntry>& seamTracks,
-                       double xTarget, double eps) {
-  // Check if pt is strictly interior to the face segment (class-ii indicator).
-  const vec2 segD = ft.p1 - ft.p0;
-  const double segLen2 = la::length2(segD);
-  if (segLen2 > eps * eps) {
-    const double atP0 = la::length(pt - ft.p0);
-    const double atP1 = la::length(pt - ft.p1);
-    if (atP0 > eps && atP1 > eps) {
-      // Interior point: search for matching seam track (class-ii).
-      for (const auto& st : seamTracks) {
-        if (la::length(pt - st.yzMid) <= eps) {
-          return InterpolateSafe(st.vA, st.vB, xTarget);
+// Per-slab extension resolver (spec COPLANAR mechanism 3): each section
+// vertex resolves ONCE to a 3D track (or a weld), and every incident piece
+// endpoint extends through that same resolution - same-side closure holds by
+// construction.  Candidate classes in priority order:
+//   (i)   face cutting-edge tracks, matched at their segment ends;
+//   (ii)  seam tracks (class-ii crossings);
+//   (iii) in-plane edges of coplanar-group members crossing this slab;
+//   (iv)  weld - constant (y,z), the forced-through fallback; its deviation
+//         is cap-covered (spec STRIPS [R2-fold]).
+// Ties resolve to the lowest class, then track order (face id / seam order /
+// edge order) - deterministic.  A track evaluated at a critical where it
+// terminates lands bitwise on the 3D vertex (InterpolateSafe at the
+// endpoint's own x): the spec's 3D-identity preference falls out of class
+// priority (terminating tracks beat welds).
+class SlabResolver {
+ public:
+  SlabResolver() = default;
+  SlabResolver(const SlabResult& slab, const ArrangementGeometry& arr,
+               double eps)
+      : eps_(eps) {
+    if (!slab.built) return;
+    // Class-iii candidates: edges of grouped faces crossing this slab's
+    // section plane (all three edges per member; over-inclusion harmless).
+    if (arr.numGroups > 0) {
+      std::set<std::pair<int, int>> seen;
+      for (int fi = 0; fi < static_cast<int>(arr.faces.size()); ++fi) {
+        if (arr.face2Group[fi] < 0) continue;
+        const int vs[3] = {arr.faces[fi].verts.x, arr.faces[fi].verts.y,
+                           arr.faces[fi].verts.z};
+        for (const int k : {0, 1, 2}) {
+          int a = vs[k], b = vs[(k + 1) % 3];
+          if (a > b) std::swap(a, b);
+          if (!seen.insert({a, b}).second) continue;
+          const vec3 pa = arr.verts[a].pos, pb = arr.verts[b].pos;
+          if (pa.x == pb.x) continue;  // no crossing trajectory
+          if (std::min(pa.x, pb.x) > slab.xMid ||
+              std::max(pa.x, pb.x) < slab.xMid)
+            continue;
+          planar_.push_back({pa, pb});
         }
       }
-      // No seam track matches: forced-through weld endpoint.
-      // Spec STRIPS (R2-fold): extend CONSTANT in (y,z) across the slab.
-      return pt;
+    }
+    // Resolve every piece endpoint once.
+    for (const SweepCapture& piece : slab.pieces) {
+      for (const vec2 pt : {piece.from, piece.to}) {
+        const auto key = std::make_pair(pt.x, pt.y);
+        if (tracks_.count(key)) continue;
+        tracks_.emplace(key, Resolve(pt, slab));
+      }
     }
   }
-  // Class-i endpoint: extend via the face edge track.
-  return ExtendPt(pt, ft, xTarget);
-}
+
+  // Extend a piece endpoint (exact section-vert coordinates) to xTarget.
+  vec2 Extend(vec2 pt, double xTarget) const {
+    const auto it = tracks_.find({pt.x, pt.y});
+    DEBUG_ASSERT(it != tracks_.end(), logicErr,
+                 "unresolved section vertex in SlabResolver");
+    if (it == tracks_.end() || it->second.weld) return pt;
+    return InterpolateSafe(it->second.a, it->second.b, xTarget);
+  }
+
+ private:
+  struct Track {
+    bool weld;
+    vec3 a, b;
+  };
+
+  Track Resolve(vec2 pt, const SlabResult& slab) const {
+    for (const FaceTrack& ft : slab.faceTracks) {
+      if (la::length(pt - ft.p0) <= eps_) return {false, ft.va0, ft.vb0};
+      if (la::length(pt - ft.p1) <= eps_) return {false, ft.va1, ft.vb1};
+    }
+    for (const SeamTrackEntry& st : slab.seamTracks) {
+      if (la::length(pt - st.yzMid) <= eps_) return {false, st.vA, st.vB};
+    }
+    for (const auto& e : planar_) {
+      const vec2 q = InterpolateSafe(e.first, e.second, slab.xMid);
+      if (la::length(pt - q) <= eps_) return {false, e.first, e.second};
+    }
+    return {true, vec3(0.0), vec3(0.0)};
+  }
+
+  double eps_ = 0.0;
+  std::vector<std::pair<vec3, vec3>> planar_;
+  std::map<std::pair<double, double>, Track> tracks_;
+};
 
 struct OutTri3D {
   vec3 v[3];
@@ -747,40 +738,28 @@ bool TriangulateCap(std::vector<OutTri3D>& out, const Polygons& polys,
 }
 
 // Extended cap input (spec [R2-fold] step (1)): both slabs extend their
-// retained pieces to x=c.  Endpoint slots align 1:1 with slab.pieces.  A
-// piece whose source face has no track is a broken attribution; ok goes
-// false and the caller fails closed (BuildSlabs made id conflicts fatal, so
-// this is unreachable in a consistent pipeline - asserted AND checked).
+// retained pieces to x=c through their SlabResolvers (spec COPLANAR
+// mechanism 3), so every piece endpoint at one section vertex extends
+// identically.  Endpoint slots align 1:1 with slab.pieces.
 // NO vertex pre-merge: the cap arrangement's MergeVerts owns snapping.
 struct CapEdgeSet {
   std::vector<vec2> rawVerts;
   std::vector<std::pair<int, int>> lPiece2RawVerts,
       rPiece2RawVerts;  // rawVerts index pairs
-  bool ok = true;
 };
 
 CapEdgeSet BuildCapEdgeSet(const SlabResult* leftSlab,
-                           const SlabResult* rightSlab, double xCap,
-                           double eps) {
+                           const SlabResolver* leftResolver,
+                           const SlabResult* rightSlab,
+                           const SlabResolver* rightResolver, double xCap) {
   CapEdgeSet ces;
-  auto addPieces = [&](const SlabResult& slab,
+  auto addPieces = [&](const SlabResult& slab, const SlabResolver& resolver,
                        std::vector<std::pair<int, int>>& slots) {
-    std::map<int, const FaceTrack*> trackOf;
-    for (const auto& tk : slab.faceTracks) trackOf[tk.faceId] = &tk;
     slots.reserve(slab.pieces.size());
     for (const auto& piece : slab.pieces) {
-      const auto it = trackOf.find(piece.sourceId);
-      DEBUG_ASSERT(it != trackOf.end(), logicErr,
-                   "retained piece has no face track");
-      if (it == trackOf.end()) {
-        ces.ok = false;
-        return;
-      }
       // Piece is emission-oriented (interior-on-left) per spec engine contract.
-      const vec2 eFrom = ExtendPtWithSeams(piece.from, *it->second,
-                                           slab.seamTracks, xCap, eps);
-      const vec2 eTo =
-          ExtendPtWithSeams(piece.to, *it->second, slab.seamTracks, xCap, eps);
+      const vec2 eFrom = resolver.Extend(piece.from, xCap);
+      const vec2 eTo = resolver.Extend(piece.to, xCap);
       const int i0 = static_cast<int>(ces.rawVerts.size());
       ces.rawVerts.push_back(eFrom);
       ces.rawVerts.push_back(eTo);
@@ -789,9 +768,10 @@ CapEdgeSet BuildCapEdgeSet(const SlabResult* leftSlab,
   };
   // L verts appended first, then R: one deterministic input order for the ONE
   // arrangement.
-  if (leftSlab && leftSlab->built) addPieces(*leftSlab, ces.lPiece2RawVerts);
-  if (ces.ok && rightSlab && rightSlab->built)
-    addPieces(*rightSlab, ces.rPiece2RawVerts);
+  if (leftSlab && leftSlab->built)
+    addPieces(*leftSlab, *leftResolver, ces.lPiece2RawVerts);
+  if (rightSlab && rightSlab->built)
+    addPieces(*rightSlab, *rightResolver, ces.rPiece2RawVerts);
   return ces;
 }
 
@@ -806,12 +786,11 @@ CapEdgeSet BuildCapEdgeSet(const SlabResult* leftSlab,
 std::optional<std::pair<FatalReason, std::string>> ComputeCap(
     std::vector<OutTri3D>& out, std::vector<std::vector<vec2>>* leftChains,
     std::vector<std::vector<vec2>>* rightChains, Overlap3Counters& cnt,
-    const SlabResult* leftSlab, const SlabResult* rightSlab, double xCap,
+    const SlabResult* leftSlab, const SlabResolver* leftResolver,
+    const SlabResult* rightSlab, const SlabResolver* rightResolver, double xCap,
     double eps) {
-  const CapEdgeSet ces = BuildCapEdgeSet(leftSlab, rightSlab, xCap, eps);
-  if (!ces.ok)
-    return std::make_pair(FatalReason::EngineIdConflict,
-                          std::string("retained piece has no face track"));
+  const CapEdgeSet ces =
+      BuildCapEdgeSet(leftSlab, leftResolver, rightSlab, rightResolver, xCap);
   // Pre-size bound chain outputs so every piece has a slot.
   if (leftChains) leftChains->assign(ces.lPiece2RawVerts.size(), {});
   if (rightChains) rightChains->assign(ces.rPiece2RawVerts.size(), {});
@@ -893,6 +872,7 @@ std::optional<std::pair<FatalReason, std::string>> ComputeCap(
 std::optional<std::pair<FatalReason, std::string>> EmitCaps(
     std::vector<OutTri3D>& out, std::vector<StripChains>& chains,
     Overlap3Counters& cnt, const std::vector<SlabResult>& slabs,
+    const std::vector<SlabResolver>& resolvers,
     const std::vector<double>& crits, double eps) {
   const int nSlabs = static_cast<int>(slabs.size());
   for (int ci = 0; ci < static_cast<int>(crits.size()); ++ci) {
@@ -906,7 +886,8 @@ std::optional<std::pair<FatalReason, std::string>> EmitCaps(
     if (auto fatal =
             ComputeCap(out, (canonical && left) ? &chains[li].hi : nullptr,
                        (canonical && right) ? &chains[ri].lo : nullptr, cnt,
-                       left, right, crits[ci], eps))
+                       left, li >= 0 ? &resolvers[li] : nullptr, right,
+                       ri < nSlabs ? &resolvers[ri] : nullptr, crits[ci], eps))
       return fatal;
   }
   return std::nullopt;
@@ -969,7 +950,10 @@ StageResult<Manifold::Impl> BuildImpl(const std::vector<OutTri3D>& tris,
     impl.vertPos_[i] = verts[i];
 
   impl.CreateHalfedges(tv);
-  if (!impl.IsManifold()) {
+  // The full 2-manifold gate (edge pairing AND vertex links): edge-on-face
+  // touching contact welds into a genuinely non-manifold union - the honest
+  // outcome is this named fatal, not a downstream assertion.
+  if (!impl.IsManifold() || !impl.Is2Manifold()) {
     return StageResult<Manifold::Impl>::Fatal(
         FatalReason::NonManifoldEmission,
         "emitted triangulation not 2-manifold");
@@ -1012,9 +996,16 @@ Overlap3Result SweepEmit(ArrangementGeometry& arr, double eps,
   // Caps before strips: each cap's ONE arrangement is the source of
   // truth at its critical - cap_plus, cap_minus, and both adjacent slabs'
   // strip chains all consume it (spec [R2-fold]).
+  // Per-slab extension resolvers (spec COPLANAR mechanism 3), built once;
+  // caps on both sides of a slab consume the same resolution table.
+  std::vector<SlabResolver> resolvers;
+  resolvers.reserve(slabs.size());
+  for (const SlabResult& slab : slabs) resolvers.emplace_back(slab, arr, eps);
+
   std::vector<OutTri3D> emitted;
   std::vector<StripChains> chains(slabs.size());
-  if (auto capFatal = EmitCaps(emitted, chains, cnt, slabs, crits, eps)) {
+  if (auto capFatal =
+          EmitCaps(emitted, chains, cnt, slabs, resolvers, crits, eps)) {
     result.fatal = capFatal->first;
     result.detail = std::move(capFatal->second);
     result.counters = cnt;

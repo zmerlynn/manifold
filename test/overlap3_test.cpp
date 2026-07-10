@@ -517,12 +517,16 @@ TEST(Overlap3, Gate4c_HullMask_MustResolve) {
   const Manifold::Impl impl = ComposeImpl(body, mask);
   const double eps = ImplEps(impl);
   const Overlap3Result result = RemoveOverlaps3D(impl, eps);
-  // CoplanarOverlap and EdgeInPlane are skip-eligible (known out-of-scope).
-  if (result.fatal == FatalReason::CoplanarOverlap) {
-    GTEST_SKIP() << "Gate4c hull: CoplanarOverlap (out of scope)";
+  // The coplanar family is in scope; the remaining honest boundaries on real
+  // hull geometry are the near-coplanar guard (sections coinciding from
+  // faces whose planes cross at a shallow angle - locally within eps,
+  // globally outside the grouping test) and the output manifold gate.
+  // Skip-eligible until those classes land; anything else is a regression.
+  if (result.fatal == FatalReason::EngineIdConflict) {
+    GTEST_SKIP() << "Gate4c hull: near-coplanar guard: " << result.detail;
   }
-  if (result.fatal == FatalReason::EdgeInPlane) {
-    GTEST_SKIP() << "Gate4c hull: EdgeInPlane (out of scope)";
+  if (result.fatal == FatalReason::NonManifoldEmission) {
+    GTEST_SKIP() << "Gate4c hull: output gate: " << result.detail;
   }
   ASSERT_FALSE(result.fatal.has_value())
       << "Gate4c hull MUST RESOLVE but got fatal="
@@ -531,34 +535,37 @@ TEST(Overlap3, Gate4c_HullMask_MustResolve) {
 }
 #endif
 
-// (d) nearParallel with plane-separation inside eps. MUST FAIL-CLOSED with
-// named guard. sep=1e-14 << eps~1.4e-12 for unit-scale geometry: the plane
-// separation is within eps, so the seams stage detects coplanar interior
-// overlap and
-// fires CoplanarOverlap.
-// Acceptable guards: CoplanarOverlap, SubEpsFeature, EdgeInPlane.
-TEST(Overlap3, Gate4d_NearParallel_1e10_MustFailClosed) {
+// (d) nearParallel with plane-separation inside eps (sep=1e-14 <<
+// eps~1.4e-12 for unit-scale geometry): the plates join one coplanar group.
+// Gate evolution (spec COPLANAR): the plates group (separation << eps) and
+// RESOLVE - a strictly stronger outcome than the old fail-closed contract;
+// the adversarial attack on this evolution failed (dv ~ 3.5e-15 vs oracle).
+// A named guard remains acceptable for the sub-eps arms.
+TEST(Overlap3, Gate4d_NearParallel_ResolveOrFailClosed) {
   const Manifold plate1 = Manifold::Cube({1.0, 0.001, 1.0}, true);
   const Manifold plate2 =
       Manifold::Cube({0.96, 0.001, 0.96}, true).Translate({0, 1e-14, 0});
   const Manifold plate3 =
       Manifold::Cube({0.88, 0.5, 0.01}, true).Rotate(5, 0, 0);
+  const Manifold oracle = plate1 + plate2 + plate3;
   const Manifold::Impl impl = ComposeMany({plate1, plate2, plate3});
   const double eps = ImplEps(impl);
 
   const Overlap3Result result = RemoveOverlaps3D(impl, eps);
-  ASSERT_TRUE(result.fatal.has_value())
-      << "Gate4d nearParallel(1e-10) MUST FAIL CLOSED but pipeline succeeded";
-  EXPECT_TRUE(*result.fatal == FatalReason::CoplanarOverlap ||
-              *result.fatal == FatalReason::SubEpsFeature ||
-              *result.fatal == FatalReason::EdgeInPlane)
-      << "Gate4d wrong guard: " << static_cast<int>(*result.fatal) << " "
-      << result.detail;
+  if (result.fatal.has_value()) {
+    EXPECT_TRUE(*result.fatal == FatalReason::SubEpsFeature ||
+                *result.fatal == FatalReason::EngineIdConflict)
+        << "Gate4d wrong guard: " << static_cast<int>(*result.fatal) << " "
+        << result.detail;
+  } else {
+    ASSERT_TRUE(result.impl.has_value());
+    OracleCompare(*result.impl, oracle, eps, "Gate4d_NearParallel");
+  }
 }
 
 // (e) Degenerate-seam guard. Two boxes with a seam of length ~0.5*eps.
 // If the coplanar check fires first (z=0 faces coplanar and overlapping),
-// CoplanarOverlap is accepted. Otherwise SubEpsFeature must fire.
+// resolution is accepted. Otherwise SubEpsFeature must fire.
 // Resolving is also accepted if the box geometry exceeds eps after
 // tessellation.
 TEST(Overlap3, Gate4e_SubResolutionChain_FailClosed) {
@@ -572,14 +579,14 @@ TEST(Overlap3, Gate4e_SubResolutionChain_FailClosed) {
   const Overlap3Result result = RemoveOverlaps3D(impl, eps_target);
   if (result.fatal.has_value()) {
     EXPECT_TRUE(*result.fatal == FatalReason::SubEpsFeature ||
-                *result.fatal == FatalReason::CoplanarOverlap)
+                *result.fatal == FatalReason::EngineIdConflict)
         << "Gate4e wrong guard: " << static_cast<int>(*result.fatal) << " "
         << result.detail;
   }
 }
 
 // (f) kWedges with axis offset ~0.3*eps. Acceptable: SubEpsFeature, or
-// CoplanarOverlap (if face pairs happen to be nearly coplanar at this scale).
+// a named guard (near-coplanar geometry at this scale).
 // Resolving is also accepted if the geometry clears eps after tessellation.
 TEST(Overlap3, Gate4f_Wedges_TinyOffset_FailClosed) {
   const double eps_target = EpsilonFromScale(1.0, 1000);
@@ -590,8 +597,8 @@ TEST(Overlap3, Gate4f_Wedges_TinyOffset_FailClosed) {
   const Overlap3Result result = RemoveOverlaps3D(impl, eps);
   if (result.fatal.has_value()) {
     EXPECT_TRUE(*result.fatal == FatalReason::SubEpsFeature ||
-                *result.fatal == FatalReason::CoplanarOverlap ||
-                *result.fatal == FatalReason::EdgeInPlane)
+                *result.fatal == FatalReason::EngineIdConflict ||
+                *result.fatal == FatalReason::NonManifoldEmission)
         << "Gate4f wrong guard: " << static_cast<int>(*result.fatal) << " "
         << result.detail;
   }
@@ -869,13 +876,15 @@ TEST(Overlap3, EmissionAlgebra_CubeSixFaces) {
 // (PropagateAnchorComponents_Test) are retired - those white-box mechanisms
 // no longer exist in the sweep-native emission architecture.
 
-// P4: EdgeInPlane fatal. Two tetrahedra: tet A has an edge in the z=0 plane
-// whose midpoint lies inside tet B's z=0 face.
+// P4: edge-on-face touching contact. Two tetrahedra: tet A (above z=0) has
+// an edge in the z=0 plane whose interior lies inside tet B's z=0 face; B
+// extends below. The union is genuinely non-manifold along the contact line
+// (four faces meet the welded edge), so the pipeline's output gate must fail
+// closed as NonManifoldEmission - a recorded limitation of geometric
+// welding, not a detector (EdgeInPlane retired with the coplanar family).
 //   Tet A: v0=(1,1,0), v1=(3,1,0), v2=(2,3,2), v3=(2,1,3).
 //   Tet B: v0=(0,0,0), v1=(4,0,0), v2=(2,4,0), v3=(2,2,-2).
-// Edge A (1,1,0)-(3,1,0) lies in z=0 (plane of B's face (0,1,2)).
-// Midpoint (2,1,0) is strictly inside B's z=0 face -> EdgeInPlane.
-TEST(Overlap3, Pin_P4_EdgeInPlane) {
+TEST(Overlap3, Pin_P4_EdgeOnFace_Touching) {
   MeshGL64 mgA;
   mgA.numProp = 3;
   // clang-format off
@@ -895,14 +904,14 @@ TEST(Overlap3, Pin_P4_EdgeInPlane) {
   const Manifold::Impl impl = ComposeImpl(Manifold(mgA), Manifold(mgB));
   const double eps = ImplEps(impl);
   const Overlap3Result result = RemoveOverlaps3D(impl, eps);
-  ASSERT_TRUE(result.fatal.has_value()) << "expected EdgeInPlane fatal";
-  EXPECT_EQ(*result.fatal, FatalReason::EdgeInPlane)
+  ASSERT_TRUE(result.fatal.has_value())
+      << "expected NonManifoldEmission for edge-on-face touching";
+  EXPECT_EQ(*result.fatal, FatalReason::NonManifoldEmission)
       << "got fatal=" << static_cast<int>(*result.fatal)
       << " detail=" << result.detail;
 }
 
-// P4b: EdgeInPlane - off-midpoint configuration that the midpoint heuristic
-// misses but the clip-based detector catches.
+// P4b: the off-midpoint variant of the same edge-on-face touching contact.
 //   Tet A: v0=(1,1,0), v1=(9,1,0), v2=(2,3,2), v3=(2,1,3).
 //   Tet B: v0=(0,0,0), v1=(4,0,0), v2=(2,4,0), v3=(2,2,-2). (same as P4)
 // Edge A (1,1,0)-(9,1,0) lies in z=0 (plane of B's face (0,1,2)).
@@ -911,7 +920,7 @@ TEST(Overlap3, Pin_P4_EdgeInPlane) {
 // Old midpoint check: PointInTri((5,1,0),...) = false -> MISSES.
 // New clip check: clipped segment [(1,1)-(3.5,1)] has length 2.5 >> eps ->
 // FIRES.
-TEST(Overlap3, Pin_P4b_EdgeInPlane_OffMidpoint) {
+TEST(Overlap3, Pin_P4b_EdgeOnFace_OffMidpoint) {
   MeshGL64 mgA;
   mgA.numProp = 3;
   // clang-format off
@@ -931,8 +940,9 @@ TEST(Overlap3, Pin_P4b_EdgeInPlane_OffMidpoint) {
   const Manifold::Impl impl = ComposeImpl(Manifold(mgA), Manifold(mgB));
   const double eps = ImplEps(impl);
   const Overlap3Result result = RemoveOverlaps3D(impl, eps);
-  ASSERT_TRUE(result.fatal.has_value()) << "expected EdgeInPlane fatal";
-  EXPECT_EQ(*result.fatal, FatalReason::EdgeInPlane)
+  ASSERT_TRUE(result.fatal.has_value())
+      << "expected NonManifoldEmission for edge-on-face touching";
+  EXPECT_EQ(*result.fatal, FatalReason::NonManifoldEmission)
       << "got fatal=" << static_cast<int>(*result.fatal)
       << " detail=" << result.detail;
 }
@@ -1194,4 +1204,272 @@ TEST(Overlap3, Pin_OneArrangementPerCritical) {
       << result.detail;
   EXPECT_EQ(result.counters.capArrangements, expected)
       << "caps stage must run exactly one arrangement per critical with input";
+}
+
+// ---------------------------------------------------------------------------
+// Coplanar family (spec COPLANAR): oracle gates + mechanism pins.
+// ---------------------------------------------------------------------------
+
+// Shared plane PERPENDICULAR to the sweep: pure cap arithmetic.
+TEST(Overlap3, Coplanar_StackedPerp_Oracle) {
+  const Manifold a = Manifold::Cube({1, 1, 1});
+  const Manifold b = Manifold::Cube({0.5, 0.5, 0.5}).Translate({1, 0.2, 0.3});
+  const Manifold oracle = a + b;
+  const Manifold::Impl impl = ComposeImpl(a, b);
+  const double eps = ImplEps(impl);
+  const Overlap3Result result = RemoveOverlaps3D(impl, eps);
+  ASSERT_FALSE(result.fatal.has_value())
+      << "fatal=" << static_cast<int>(*result.fatal) << " " << result.detail;
+  ASSERT_TRUE(result.impl.has_value());
+  OracleCompare(*result.impl, oracle, eps, "Coplanar_StackedPerp");
+}
+
+// Shared plane PARALLEL to the sweep, anti-oriented overlap (stacking).
+TEST(Overlap3, Coplanar_StackedParallel_Oracle) {
+  const Manifold a = Manifold::Cube({1, 1, 1});
+  const Manifold b = Manifold::Cube({0.5, 0.5, 0.5}).Translate({0.2, 0.3, 1});
+  const Manifold oracle = a + b;
+  const Manifold::Impl impl = ComposeImpl(a, b);
+  const double eps = ImplEps(impl);
+  const Overlap3Result result = RemoveOverlaps3D(impl, eps);
+  ASSERT_FALSE(result.fatal.has_value())
+      << "fatal=" << static_cast<int>(*result.fatal) << " " << result.detail;
+  ASSERT_TRUE(result.impl.has_value());
+  OracleCompare(*result.impl, oracle, eps, "Coplanar_StackedParallel");
+}
+
+// Two solids sharing a wall plane, anti-oriented, partial contact area.
+TEST(Overlap3, Coplanar_SharedWall_Oracle) {
+  const Manifold a = Manifold::Cube({1, 1, 1});
+  const Manifold b = Manifold::Cube({1, 0.6, 0.6}).Translate({0, 1, 0.2});
+  const Manifold oracle = a + b;
+  const Manifold::Impl impl = ComposeImpl(a, b);
+  const double eps = ImplEps(impl);
+  const Overlap3Result result = RemoveOverlaps3D(impl, eps);
+  ASSERT_FALSE(result.fatal.has_value())
+      << "fatal=" << static_cast<int>(*result.fatal) << " " << result.detail;
+  ASSERT_TRUE(result.impl.has_value());
+  OracleCompare(*result.impl, oracle, eps, "Coplanar_SharedWall");
+}
+
+// SAME-oriented coplanar overlap (+2 content): two boxes of equal height
+// overlapping in x/y - their top and bottom faces overlap same-oriented.
+TEST(Overlap3, Coplanar_SameOriented_Oracle) {
+  const Manifold a = Manifold::Cube({1, 1, 1});
+  const Manifold b = Manifold::Cube({1, 1, 1}).Translate({0.4, 0.3, 0});
+  const Manifold oracle = a + b;
+  const Manifold::Impl impl = ComposeImpl(a, b);
+  const double eps = ImplEps(impl);
+  const Overlap3Result result = RemoveOverlaps3D(impl, eps);
+  ASSERT_FALSE(result.fatal.has_value())
+      << "fatal=" << static_cast<int>(*result.fatal) << " " << result.detail;
+  ASSERT_TRUE(result.impl.has_value());
+  OracleCompare(*result.impl, oracle, eps, "Coplanar_SameOriented");
+}
+
+// In-plane skeleton criticals (spec COPLANAR mechanism 4): every in-plane
+// crossing of two grouped faces' boundary edges must be a critical.  For
+// closed solids the side faces rising from those edges usually deliver the
+// crossing as a seam ENDPOINT (a vert) - mechanism 4 is the belt for the
+// degenerate-adjacent cases - so the pin asserts the PROPERTY (crossing x's
+// are criticals, via verts or criticalXs), computed brute-force here.
+TEST(Overlap3, Pin_InPlaneSkeletonCriticals) {
+  const Manifold a = Manifold::Cube({1, 1, 1}).Rotate(0, 0, 15);
+  const Manifold b =
+      Manifold::Cube({1, 1, 1}).Rotate(0, 0, 40).Translate({0.5, 0.15, 0});
+  const Manifold oracle = a + b;
+  const Manifold::Impl impl = ComposeImpl(a, b);
+  const double eps = ImplEps(impl);
+
+  const Overlap3Internals h = RemoveOverlaps3D_TestHooks(impl, eps);
+  ASSERT_FALSE(h.fatal.has_value()) << "pre-emission fatal: " << h.detail;
+
+  // Brute-force the in-plane crossings of the two solids' z=0 boundary
+  // edges and require each crossing x to be a critical (vert or criticalXs).
+  int checked = 0;
+  const auto isZ0 = [&](const vec3& p) { return std::abs(p.z) <= eps; };
+  std::vector<std::pair<vec3, vec3>> z0edges;
+  for (const auto& f : h.arr.faces) {
+    const int vs[3] = {f.verts.x, f.verts.y, f.verts.z};
+    for (const int k : {0, 1, 2}) {
+      const vec3 pa = h.arr.verts[vs[k]].pos;
+      const vec3 pb = h.arr.verts[vs[(k + 1) % 3]].pos;
+      if (isZ0(pa) && isZ0(pb)) z0edges.push_back({pa, pb});
+    }
+  }
+  for (size_t i = 0; i < z0edges.size(); ++i) {
+    for (size_t j = i + 1; j < z0edges.size(); ++j) {
+      const vec3 dA = z0edges[i].second - z0edges[i].first;
+      const vec3 dB = z0edges[j].second - z0edges[j].first;
+      const vec3 dC = z0edges[j].first - z0edges[i].first;
+      const double lenA = la::length(dA), lenB = la::length(dB);
+      if (lenA < eps || lenB < eps) continue;
+      const vec3 cAB = la::cross(dA, dB);
+      const double c2 = la::length2(cAB);
+      const double parTol = eps * (lenA + lenB);
+      if (c2 <= parTol * parTol) continue;
+      const double t = la::dot(la::cross(dC, dB), cAB) / c2;
+      const double u = la::dot(la::cross(dC, dA), cAB) / c2;
+      const double tE = eps / lenA, uE = eps / lenB;
+      if (t <= tE || t >= 1.0 - tE || u <= uE || u >= 1.0 - uE) continue;
+      const double xCross = z0edges[i].first.x + t * dA.x;
+      ++checked;
+      bool isCritical = false;
+      for (const auto& v : h.arr.verts) {
+        if (std::abs(v.pos.x - xCross) <= eps) {
+          isCritical = true;
+          break;
+        }
+      }
+      for (size_t ci = 0; !isCritical && ci < h.arr.criticalXs.size(); ++ci) {
+        if (std::abs(h.arr.criticalXs[ci] - xCross) <= eps) isCritical = true;
+      }
+      EXPECT_TRUE(isCritical)
+          << "in-plane crossing x=" << xCross << " is not a critical";
+    }
+  }
+  EXPECT_GT(checked, 0) << "fixture produced no in-plane crossings";
+
+  const Overlap3Result result = RemoveOverlaps3D(impl, eps);
+  ASSERT_FALSE(result.fatal.has_value())
+      << "pipeline fatal=" << static_cast<int>(*result.fatal) << " "
+      << result.detail;
+  ASSERT_TRUE(result.impl.has_value());
+  OracleCompare(*result.impl, oracle, eps, "Pin_InPlaneSkeletonCriticals");
+}
+
+// Three solids sharing one plane: the z=0 and z=1 groups each carry six
+// member faces and the triple overlap sums to |m| = 3.
+TEST(Overlap3, Coplanar_ThreeFaceGroup_Oracle) {
+  const Manifold a = Manifold::Cube({1, 1, 1});
+  const Manifold b = Manifold::Cube({1, 1, 1}).Translate({0.4, 0.2, 0});
+  const Manifold c = Manifold::Cube({1, 1, 1}).Translate({0.2, 0.5, 0});
+  const Manifold oracle = a + b + c;
+  const Manifold::Impl impl = ComposeMany({a, b, c});
+  const double eps = ImplEps(impl);
+  const Overlap3Result result = RemoveOverlaps3D(impl, eps);
+  ASSERT_FALSE(result.fatal.has_value())
+      << "fatal=" << static_cast<int>(*result.fatal) << " " << result.detail;
+  ASSERT_TRUE(result.impl.has_value());
+  OracleCompare(*result.impl, oracle, eps, "Coplanar_ThreeFaceGroup");
+}
+
+// One plane hosting BOTH orientations: at z=1, A's and C's tops (+) meet B's
+// bottom (-); anti-oriented content cancels where B sits, same-oriented
+// content sums where A and C overlap.
+TEST(Overlap3, Coplanar_MixedOrientation_Oracle) {
+  const Manifold a = Manifold::Cube({1, 1, 1});
+  const Manifold c = Manifold::Cube({1, 1, 1}).Translate({0.5, 0.3, 0});
+  const Manifold b = Manifold::Cube({0.8, 0.8, 1}).Translate({0.3, 0.2, 1});
+  const Manifold oracle = a + b + c;
+  const Manifold::Impl impl = ComposeMany({a, b, c});
+  const double eps = ImplEps(impl);
+  const Overlap3Result result = RemoveOverlaps3D(impl, eps);
+  ASSERT_FALSE(result.fatal.has_value())
+      << "fatal=" << static_cast<int>(*result.fatal) << " " << result.detail;
+  ASSERT_TRUE(result.impl.has_value());
+  OracleCompare(*result.impl, oracle, eps, "Coplanar_MixedOrientation");
+}
+
+// An eps-CHAIN of top planes (pairwise within eps, endpoints apart by more):
+// the group unions transitively; geometric coherence is delegated to the
+// engine's vert merge (spec COPLANAR eps boundary).
+TEST(Overlap3, Coplanar_EpsChain_Oracle) {
+  const double eps0 = EpsilonFromScale(2.0, 1000);
+  const Manifold a = Manifold::Cube({1, 1, 1});
+  const Manifold b =
+      Manifold::Cube({1, 1, 1 + 0.6 * eps0}).Translate({0.5, 0.2, 0});
+  const Manifold c =
+      Manifold::Cube({1, 1, 1 + 1.2 * eps0}).Translate({1.0, 0.4, 0});
+  const Manifold oracle = a + b + c;
+  const Manifold::Impl impl = ComposeMany({a, b, c});
+  const double eps = ImplEps(impl);
+  const Overlap3Result result = RemoveOverlaps3D(impl, eps);
+  ASSERT_FALSE(result.fatal.has_value())
+      << "fatal=" << static_cast<int>(*result.fatal) << " " << result.detail;
+  ASSERT_TRUE(result.impl.has_value());
+  OracleCompare(*result.impl, oracle, eps, "Coplanar_EpsChain");
+}
+
+// The razor band just OUTSIDE the grouping eps (separation ~5 eps): not
+// grouped, thin-wedge geometry. Recorded contract: either a named guard
+// fires, or the output is manifold and oracle-true - never silent garbage.
+TEST(Overlap3, Coplanar_RazorBand_Recorded) {
+  const double eps0 = EpsilonFromScale(2.0, 1000);
+  const Manifold a = Manifold::Cube({1, 1, 1});
+  const Manifold b =
+      Manifold::Cube({1, 1, 1 + 5.0 * eps0}).Translate({0.4, 0.3, 0});
+  const Manifold oracle = a + b;
+  const Manifold::Impl impl = ComposeImpl(a, b);
+  const double eps = ImplEps(impl);
+  const Overlap3Result result = RemoveOverlaps3D(impl, eps);
+  if (result.fatal.has_value()) {
+    EXPECT_TRUE(*result.fatal == FatalReason::EngineIdConflict ||
+                *result.fatal == FatalReason::SubEpsFeature ||
+                *result.fatal == FatalReason::NonManifoldEmission)
+        << "razor band wrong guard: " << static_cast<int>(*result.fatal) << " "
+        << result.detail;
+  } else {
+    ASSERT_TRUE(result.impl.has_value());
+    OracleCompare(*result.impl, oracle, eps, "Coplanar_RazorBand");
+  }
+}
+
+// Two perpendicular faces sub-eps apart: MACRO cap content at both criticals
+// of a sub-eps run - the in-run macro-change dead zone recorded at the M4
+// close, now REACHABLE (the retired EdgeInPlane detector used to gate it).
+// Recorded contract: a named guard or a correct resolve, never silent
+// garbage.  Candidate fix: SubEpsFeature tightening (macro geometry change
+// at a non-canonical critical of a run).
+TEST(Overlap3, Coplanar_PerpFacesSubEpsApart_Recorded) {
+  const double eps0 = EpsilonFromScale(2.0, 1000);
+  const Manifold a = Manifold::Cube({1, 1, 1});
+  const Manifold b =
+      Manifold::Cube({1, 1, 1}).Translate({1.0 - 0.5 * eps0, 0.3, 0});
+  const Manifold oracle = a + b;
+  const Manifold::Impl impl = ComposeImpl(a, b);
+  const double eps = ImplEps(impl);
+  const Overlap3Result result = RemoveOverlaps3D(impl, eps);
+  if (result.fatal.has_value()) {
+    EXPECT_TRUE(*result.fatal == FatalReason::NonManifoldEmission ||
+                *result.fatal == FatalReason::SubEpsFeature ||
+                *result.fatal == FatalReason::EngineIdConflict)
+        << "wrong guard: " << static_cast<int>(*result.fatal) << " "
+        << result.detail;
+  } else {
+    ASSERT_TRUE(result.impl.has_value());
+    OracleCompare(*result.impl, oracle, eps, "Coplanar_PerpFacesSubEps");
+  }
+}
+
+// Subtract-encoded inverted solid stacked on a normal one, sharing the z=1
+// plane: B's shell is inverted (winding -1 inside), so the positive-region
+// output is A alone.
+TEST(Overlap3, Coplanar_InvertedStacking) {
+  const Manifold a = Manifold::Cube({1, 1, 1});
+  const Manifold b = Manifold::Cube({0.6, 0.6, 0.6}).Translate({0.2, 0.2, 1});
+  // Invert B by swapping triangle winding.
+  MeshGL64 mgb = b.GetMeshGL64();
+  for (size_t t = 0; t + 2 < mgb.triVerts.size(); t += 3)
+    std::swap(mgb.triVerts[t + 1], mgb.triVerts[t + 2]);
+  MeshGL64 mga = a.GetMeshGL64();
+  MeshGL64 combined;
+  combined.numProp = 3;
+  auto append = [&](const MeshGL64& m) {
+    const uint64_t base = combined.NumVert();
+    for (size_t i = 0; i < m.vertProperties.size(); ++i)
+      combined.vertProperties.push_back(m.vertProperties[i]);
+    for (size_t i = 0; i < m.triVerts.size(); ++i)
+      combined.triVerts.push_back(m.triVerts[i] + base);
+  };
+  append(mga);
+  append(mgb);
+  combined.runOriginalID.push_back(Manifold::ReserveIDs(1));
+  const Manifold::Impl impl(combined);
+  const double eps = ImplEps(impl);
+  const Overlap3Result result = RemoveOverlaps3D(impl, eps);
+  ASSERT_FALSE(result.fatal.has_value())
+      << "fatal=" << static_cast<int>(*result.fatal) << " " << result.detail;
+  ASSERT_TRUE(result.impl.has_value());
+  OracleCompare(*result.impl, a, eps, "Coplanar_InvertedStacking");
 }

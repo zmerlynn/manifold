@@ -165,7 +165,12 @@ StageResult<std::vector<SlabResult>> BuildSlabs(const ArrangementGeometry& arr,
       const int v0 = getVid(seg.p0);
       const int v1 = getVid(seg.p1);
       if (v0 == v1) continue;
-      edges.push_back({v0, v1, static_cast<int>(face.mult), fi});
+      // Grouped faces seed the GROUP id (spec COPLANAR mechanism 2), so
+      // coincident in-plane segments merge under one source id and
+      // anti-oriented content cancels without a conflict.
+      const int g = arr.face2Group.empty() ? -1 : arr.face2Group[fi];
+      const int srcId = g >= 0 ? nFaces + g : fi;
+      edges.push_back({v0, v1, static_cast<int>(face.mult), srcId});
     }
 
     slab.sectionEdges = edges;
@@ -197,7 +202,9 @@ StageResult<std::vector<SlabResult>> BuildSlabs(const ArrangementGeometry& arr,
     if (conflictCount > 0) {
       cnt.engineIdConflicts += conflictCount;
       return StageResult<std::vector<SlabResult>>::Fatal(
-          FatalReason::EngineIdConflict, "engine id conflict in slab");
+          FatalReason::EngineIdConflict,
+          "coincident sections from unrelated faces (near-coplanar geometry "
+          "outside the grouping eps)");
     }
   }
 

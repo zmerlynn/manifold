@@ -620,3 +620,49 @@ the output cap): the skeleton-crossing gap folded into mechanism
 remains; implementation is the next phase, with Gate4c's hulls as
 the empirical acceptance fixture and every mechanism pinned
 red-first per house discipline.
+
+## COPLANAR implementation close (main-agent, 2026-07-10)
+
+All five mechanisms landed in one pass; the four core oracle gates
+went green immediately (including same-oriented +2 and the +3
+triple group), and the extended surface followed: mixed-orientation
+planes, the eps-chain (engine-merge delegation held), inverted
+stacking, and the razor band resolving under its recorded contract.
+TouchingDisjoint and the inverted-cube pins held throughout;
+Gate4d resolves with oracle agreement as designed.
+
+FINDINGS DURING IMPLEMENTATION, recorded:
+- Mechanism 4 is the belt, seam endpoints are the suspenders: for
+  closed solids, every in-plane boundary-edge crossing is also the
+  endpoint of a side-face seam, hence already a vert.  The skeleton
+  pin asserts the property (crossings are criticals however
+  delivered) rather than a vertex-free entry; a mechanism-4 stub
+  would survive it on closed-solid fixtures - recorded as a pin
+  limitation, with the degenerate-adjacent construction (where the
+  belt matters) as future test surface.
+- Edge-on-face TOUCHING (the former EdgeInPlane P4 pins) welds into
+  a genuinely non-manifold union - four faces around the contact
+  line.  BuildImpl now gates on the full 2-manifold check
+  (Is2Manifold, vertex links included) and fails closed as
+  NonManifoldEmission; the pins pin that.  Resolving such contacts
+  would need topological (not geometric) welding - recorded as a
+  limitation.
+- The in-run macro-change dead zone from the M4 close is now
+  REACHABLE: two perpendicular faces sub-eps apart produce macro
+  cap content at both criticals of a sub-eps run and fail closed at
+  the output gate.  Recorded-contract fixture pins named-guard-or-
+  oracle; SubEpsFeature tightening moves up the priority list.
+- Gate4c hulls fail closed at the near-coplanar guard: real
+  geometry has faces whose planes cross at shallow angles -
+  sections coincide within eps locally while the global
+  three-verts-within-eps grouping test misses them.  The gate's
+  skip narrows to {EngineIdConflict, NonManifoldEmission}; closing
+  the hulls needs either local (per-section) conflict tolerance or
+  overlap-region-scoped grouping - the next arc's opening problem.
+- CoplanarOverlap and EdgeInPlane retired from the taxonomy; the
+  detectors and their helpers (the coplanar clip, the edge-interior
+  length test) deleted; the same-group skip and the grouping
+  pre-pass replaced them.  The closed-shell folded-flap fixture
+  remains open test surface (the +2 semantics are covered by the
+  same-oriented and triple-group gates; a valid hand-authored
+  folded shell is still owed).

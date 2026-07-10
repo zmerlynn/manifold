@@ -47,8 +47,6 @@ struct CanonicalFace {
 // ---------------------------------------------------------------------------
 
 enum class FatalReason {
-  CoplanarOverlap,      // coplanar face overlap (out of scope)
-  EdgeInPlane,          // edge lying in another face's plane (out of scope)
   SubEpsInput,          // eps <= 0 or degenerate input geometry
   SubEpsFeature,        // macro-scale face in merged sub-eps critical run
   EngineIdConflict,     // 2D engine source-id conflict in a slab
@@ -172,6 +170,12 @@ struct ArrangementGeometry {
   std::vector<MergedVert> verts;     // all canonical 3D verts
   std::vector<CanonicalFace> faces;  // canonical faces
   std::vector<Seam> seams;           // face-pair seam segments
+  // Coplanar groups (spec COPLANAR mechanism 1): face2Group[fi] is the
+  // group index of face fi, or -1 when ungrouped.  Grouped faces seed their
+  // section edges with id = faces.size() + group (mechanism 2), so
+  // coincident in-plane content merges under one source id.
+  std::vector<int> face2Group;
+  int numGroups = 0;
   // Extra x-criticals with no vert identity: degenerate-contact endpoints and
   // seam-seam crossing x's (spec SEAMS: only the x is consumed;
   // over-inclusion is harmless).  Kept separate from verts - a critical is

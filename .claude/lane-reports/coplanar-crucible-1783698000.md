@@ -321,3 +321,69 @@ plane cut, breakpoints = L(x) crossing in-plane 1D structure):
 D3 VERDICT (mine): NEED-CHANGE - one real R4 gap (skeleton
 crossings), three test-surface additions (razor band, eps-chain,
 coplanar x sub-eps pair), one predicate-symmetry note. No BREAK.
+
+## Step 8: IMPLEMENTATION (user: "push on")
+
+Order per brief: core gates RED first (P1/P2/P2c/Gate4d-evolution +
+skeleton pin), mechanisms 1 -> 2 -> 4 -> 3, EIP retirement with 1,
+then extended fixtures (three-face, mixed, inverted, chain, razor,
+corner, flap), then Gate4c acceptance run.
+
+Design notes settled while planning:
+- Mechanism 4 REUSES SeamSeamCrossX verbatim (skeleton segments are
+  coplanar 3D segments - exactly its contract). Skeleton = ALL
+  member edges (incl. internal diagonals - over-inclusion harmless,
+  finer slabs) + in-plane seams (seam with a group-member face),
+  deduped by sorted vert pair.
+- Mechanism 3 resolver: per-slab map from EXACT (y,z) (capture
+  coords are exact section-vert coords) -> Track{vec3 a,b} | Weld.
+  Candidates: face-track segment ENDS (class-i), seam yzMid
+  (class-ii), group-member edge crossings of the xMid plane
+  (class-iii), weld fallback. Priority = class then lowest id.
+  3D-identity falls out of InterpolateSafe evaluated at a
+  terminating endpoint's exact x (t=0 -> bitwise endpoint); crits
+  ARE vert x's bitwise, so no separate snap mechanism is needed -
+  choosing a TERMINATING track over weld is what class priority
+  does. Resolver stores tracks (not precomputed points) because
+  pair-canonical binding extends across unbuilt runs to foreign x.
+- Mechanism 1 kills coplanarInteriorOverlap + ClipPolyByHalfplane +
+  SegTriInteriorLen2D (EIP helper) - grouping is by PLANE not by
+  overlap, non-overlapping same-plane faces grouping is benign.
+
+## Step 9: implementation landed
+
+Mechanisms 1/2/4 (FindSeams grouping pre-pass + detector deletion,
+BuildSlabs group seeding, skeleton criticals) + mechanism 3
+(SlabResolver: per-vertex, class i/ii/iii/weld, built per slab,
+consumed by BuildCapEdgeSet; ExtendPt/ExtendPtWithSeams deleted;
+per-piece attribution fatal deleted with it).
+
+First full run: 35/40 - ALL FOUR core oracles green immediately
+(incl. the +2 probe-crasher). The five reds each taught something:
+- Skeleton pin: crossings ARE added but are ALSO seam endpoints
+  (side faces rising from boundary edges) -> already verts. Pin
+  reworked to the property form; mechanism 4 = belt for
+  degenerate-adjacent cases; red-first-vs-stub not achievable on
+  closed solids - recorded honestly.
+- P4/P4b: edge-on-face TOUCHING = genuinely non-manifold union
+  (4 faces at the welded contact line); was reaching SortGeometry's
+  debug assert THROUGH BuildImpl's weaker IsManifold gate ->
+  BuildImpl now gates Is2Manifold -> clean NonManifoldEmission;
+  pins evolved + renamed (EdgeOnFace_Touching).
+- Gate4d: RESOLVES (as designed) -> evolved to
+  resolve-with-oracle-or-named-guard, oracle added.
+- Gate4c: near-coplanar guard fires (shallow-crossing planes
+  coincide in section locally; global grouping test misses) ->
+  skip narrowed to {EngineIdConflict, NonManifoldEmission}; hulls
+  remain the next arc's opening problem.
+- Corner fixture accidentally built the in-run macro-change dead
+  zone (M4-close (a)) - now REACHABLE with EIP retired; converted
+  to recorded-contract (PerpFacesSubEpsApart_Recorded).
+
+Extended fixtures: ThreeFaceGroup (+3), MixedOrientation, EpsChain,
+RazorBand (recorded), InvertedStacking - 9/10 green on first run.
+Flap closed-shell fixture DEFERRED (owed; +2 semantics covered).
+Enum retirement: CoplanarOverlap + EdgeInPlane deleted; 4d/4e/4f
+guard sets updated; helper deletions (clip, seg-tri-interior).
+
+FULL SUITE: 591 + 1 skip (592 total; was 581). Overlap3 45 + 1.
