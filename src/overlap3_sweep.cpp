@@ -176,12 +176,16 @@ StageResult<std::vector<SlabResult>> BuildSlabs(const ArrangementGeometry& arr,
     // For each seam whose x-range spans slab.xMid, record its (y,z) at xMid
     // and the 3D endpoints so caps/strips can use the seam track instead of
     // the face edge track for arrangement-constructed crossing vertices.
+    // Membership is exact: seam endpoint x's are criticals and xMid is
+    // strictly interior to its slab, so a seam either genuinely spans xMid or
+    // has no crossing in this slab's section (this also excludes constant-x
+    // seams, keeping InterpolateSafe's divisor nonzero).
     for (const auto& seam : arr.seams) {
       const vec3 vA = arr.verts[seam.vertId0].pos;
       const vec3 vB = arr.verts[seam.vertId1].pos;
       const double xLo3D = std::min(vA.x, vB.x);
       const double xHi3D = std::max(vA.x, vB.x);
-      if (slab.xMid < xLo3D - eps || slab.xMid > xHi3D + eps) continue;
+      if (slab.xMid < xLo3D || slab.xMid > xHi3D) continue;
       const vec2 yzMid = InterpolateSafe(vA, vB, slab.xMid);
       slab.seamTracks.push_back({yzMid, vA, vB});
     }

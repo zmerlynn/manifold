@@ -618,6 +618,53 @@ TEST(Overlap3, Pin_M1_TripleCritical) {
   // recording them, not on new slab boundaries appearing.
   EXPECT_FALSE(h.arr.criticalXs.empty())
       << "M1: no seam-seam crossing x recorded for ThreeOverlappingBoxes";
+
+  // Semantic cross-check: every seam-seam crossing x computed independently
+  // (pairs of brute-force seams sharing a face, coplanar segment crossing,
+  // interior by the same eps bounds as stage B') must appear in criticalXs.
+  const auto bfSeams = BruteForceSeams(impl, eps);
+  int bfCrossings = 0;
+  for (size_t i = 0; i < bfSeams.size(); ++i) {
+    for (size_t j = i + 1; j < bfSeams.size(); ++j) {
+      const BFSeam &SA = bfSeams[i], &SB = bfSeams[j];
+      if (SA.faceA != SB.faceA && SA.faceA != SB.faceB &&
+          SA.faceB != SB.faceA && SA.faceB != SB.faceB)
+        continue;
+      const vec3 dA = SA.qB - SA.qA, dB = SB.qB - SB.qA, dC = SB.qA - SA.qA;
+      const double lenA = la::length(dA), lenB = la::length(dB);
+      if (lenA < eps || lenB < eps) continue;
+      const vec3 cAB = la::cross(dA, dB);
+      const double cABlen2 = la::dot(cAB, cAB);
+      // Dimensional near-parallel gate, same as stage B' SeamSeamCrossX.
+      const double parTol = eps * (lenA + lenB);
+      if (cABlen2 <= parTol * parTol) continue;
+      const double t = la::dot(la::cross(dC, dB), cAB) / cABlen2;
+      const double s = la::dot(la::cross(dC, dA), cAB) / cABlen2;
+      const double tEps = eps / lenA, sEps = eps / lenB;
+      if (t <= tEps || t >= 1.0 - tEps) continue;
+      if (s <= sEps || s >= 1.0 - sEps) continue;
+      const double xCross = SA.qA.x + t * dA.x;
+      ++bfCrossings;
+      // The crossing x must be a critical: either recorded vertex-free in
+      // criticalXs, or already a vert x (crossings at/near seam endpoints
+      // are non-interior for stage B' but their endpoint verts are
+      // criticals themselves).
+      bool found = false;
+      for (double x : h.arr.criticalXs) {
+        if (std::abs(x - xCross) <= eps) {
+          found = true;
+          break;
+        }
+      }
+      for (size_t vi = 0; !found && vi < h.arr.verts.size(); ++vi) {
+        if (std::abs(h.arr.verts[vi].pos.x - xCross) <= eps) found = true;
+      }
+      EXPECT_TRUE(found) << "brute-force seam-seam crossing x=" << xCross
+                         << " is not a critical (criticalXs or vert x)";
+    }
+  }
+  EXPECT_GT(bfCrossings, 0)
+      << "fixture produced no brute-force seam-seam crossings";
 }
 
 // ---------------------------------------------------------------------------
@@ -1099,4 +1146,45 @@ TEST(Overlap3, Pin_StripSubdivFromCap) {
       << "Pin_StripSubdivFromCap: non-manifold indicates missing strip "
          "subdivision at cap x";
   OracleCompare(*result.impl, oracle, eps, "Pin_StripSubdivFromCap");
+}
+
+// ---------------------------------------------------------------------------
+// One-arrangement-per-critical pin: M4 structural property.
+// ---------------------------------------------------------------------------
+
+// Stage E' runs exactly ONE 2D arrangement per critical with cap input (spec
+// [R2-fold] one-arrangement-three-consumers).  A regression to per-measure
+// arrangements (e.g. separate cap_plus and cap_minus calls) doubles the
+// counter; a run-merge halves it.
+TEST(Overlap3, Pin_OneArrangementPerCritical) {
+  const Manifold a = Manifold::Cube({2, 2, 2});
+  const Manifold b =
+      Manifold::Cube({1.7, 1.9, 2.3}).Translate({1.13, 0.41, 0.37});
+  const Manifold::Impl impl = ComposeImpl(a, b);
+  const double eps = ImplEps(impl);
+
+  const Overlap3Internals h = RemoveOverlaps3D_TestHooks(impl, eps);
+  ASSERT_FALSE(h.fatal.has_value()) << "stages A-C fatal: " << h.detail;
+  ASSERT_FALSE(h.slabs.empty());
+
+  // Expected arrangements: criticals (slab boundaries) whose nearest built
+  // slab on either side has pieces - EmitCaps' documented rule.
+  const int nSlabs = (int)h.slabs.size();
+  int expected = 0;
+  for (int ci = 0; ci <= nSlabs; ++ci) {
+    int li = ci - 1;
+    while (li >= 0 && !h.slabs[li].built) --li;
+    int ri = ci;
+    while (ri < nSlabs && !h.slabs[ri].built) ++ri;
+    const bool leftHas = li >= 0 && !h.slabs[li].pieces.empty();
+    const bool rightHas = ri < nSlabs && !h.slabs[ri].pieces.empty();
+    if (leftHas || rightHas) ++expected;
+  }
+  ASSERT_GT(expected, 0);
+
+  const Overlap3Result result = RemoveOverlaps3D(impl, eps);
+  ASSERT_FALSE(result.fatal.has_value())
+      << "pipeline fatal=" << (int)*result.fatal << " " << result.detail;
+  EXPECT_EQ(result.counters.capArrangements, expected)
+      << "stage E' must run exactly one arrangement per critical with input";
 }

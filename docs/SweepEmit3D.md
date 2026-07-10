@@ -362,3 +362,51 @@ box+rotated is the de-facto pin for the canonical-binding rule (it
 reds under per-critical binding); the M1 pin now asserts the
 criticalXs mechanism and is mutation-verified against a stubbed M1
 loop.
+
+## Post-M4 audit round (main-agent, 2026-07-10)
+
+Both closing audits returned NEED-CHANGE with converging short
+lists (simplicity 13 -> 9, "no longer reads like a rewrite
+candidate... recognizably one design"; fidelity: M4 open on one
+point). Fixed after my own validation of each finding:
+- Engine: `verts` under the negEdges contract now includes EVERY
+  collected-arrangement vertex (retained-only materialization
+  missed crossings whose four quadrant windings share one sign) -
+  the spec sentence "its output verts" is now literal.
+- Fail-closed release arms: missing piece-track attribution fatals
+  as EngineIdConflict; a bad triangulator index fatals as
+  NonManifoldEmission (both were assert-then-continue).
+- The coplanar-overlap threshold is dimensional (area >
+  perimeter * eps, the house rule) - the old eps^2 was FP-noise
+  fragile for shared-vertex coplanar pairs.
+- SeamSeamCrossX's near-parallel gate is dimensional (|cross| >
+  eps * (lenA + lenB)) - the old eps^4 admitted pseudo-crossings
+  of near-parallel seams at meaningless x (over-inclusive but
+  noisy).
+- Seam-track slab membership is exact (endpoint x's are criticals;
+  xMid is strictly interior); InterpolateSafe documents its named
+  extrapolation role and asserts x-nondegeneracy.
+- Both degenerate-contact arms record endpoint x's in criticalXs.
+- The M1 pin cross-checks criticalXs against brute-force seam-seam
+  crossings; Pin_OneArrangementPerCritical pins the M4 count
+  structurally via the capArrangements counter (a two-call
+  regression doubles it).
+
+DEFENDED against the audits (recorded disagreements):
+- The shared-edge exemption cannot move after coplanar detection:
+  opposite-diagonal triangulations of two solids touching on a
+  common plane are legal (TouchingDisjoint pin) and locally
+  indistinguishable from a folded flap; the hazardous same-winding
+  case fails closed downstream (coincident section edges with two
+  source ids and nonzero net multiplicity -> EngineIdConflict; the
+  legal case cancels to net zero before any conflict). Empirical:
+  the suggested reorder reds TouchingDisjoint.
+- BuildImpl's exact-duplicate drop is the [R3] "their differences
+  are empty" sentence realized (per-critical caps of a sub-eps pair
+  computing the same macro difference twice), not a run-merge.
+- The class-ii/weld eps-inference stands per the [R2-fold]
+  adjudication.
+- ChainSplitVerts remains a geometric on-chord scan (the
+  tolerance-model reading of "verts subdivide the strip edges");
+  per-input-edge chains from the engine would upgrade it to exact
+  identity and are recorded as future work.

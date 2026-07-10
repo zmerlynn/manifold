@@ -192,9 +192,11 @@ enum class WindRule {
 // srcIds at the same key with nonzero net multiplicity). If `negEdges` is
 // non-null, a second winding measure runs over the SAME collected arrangement
 // with all multiplicities negated and *negEdges receives its retained
-// boundary; both edge sets reference the same `verts` (one arrangement, two
-// signed measures - the 3D cap consumer). 2D callers pass nullptr for all
-// three, leaving behavior unchanged.
+// boundary; both edge sets reference the same `verts`, and `verts` is
+// additionally extended with EVERY collected-arrangement vertex (retained or
+// not) - the 3D cap consumer's subdivision authority (one arrangement, two
+// signed measures). 2D callers pass nullptr for all three, leaving behavior
+// unchanged.
 std::vector<OutEdge> SweepWinding(const std::vector<EdgeM>& edges,
                                   std::vector<vec2>& verts, WindRule rule,
                                   std::vector<SweepCapture>* capture = nullptr,

@@ -161,16 +161,20 @@ static bool TriTriSeam(vec3 a0, vec3 a1, vec3 a2, vec3 na, vec3 b0, vec3 b1,
 static bool SeamSeamCrossX(vec3 A0, vec3 A1, vec3 B0, vec3 B1, double eps,
                            double& xOut) {
   const vec3 dA = A1 - A0, dB = B1 - B0, dC = B0 - A0;
+  const double lenA = la::length(dA), lenB = la::length(dB);
+  if (lenA < eps || lenB < eps) return false;
   const vec3 cAB = la::cross(dA, dB);
   const double cABlen2 = la::dot(cAB, cAB);
-  if (cABlen2 < eps * eps * eps * eps) return false;  // parallel or degenerate
+  // Near-parallel gate, dimensionally correct: |cross| has units len^2, so
+  // compare against eps * (lenA + lenB).  Endpoint noise on near-parallel
+  // seams otherwise yields a pseudo-crossing at a meaningless x.
+  const double parTol = eps * (lenA + lenB);
+  if (cABlen2 <= parTol * parTol) return false;
   // t on A: t * |cAB|^2 = dot(cross(dC, dB), cAB)
   const double t = la::dot(la::cross(dC, dB), cAB) / cABlen2;
   // s on B: s * |cAB|^2 = dot(cross(dC, dA), cAB)
   const double s = la::dot(la::cross(dC, dA), cAB) / cABlen2;
   // Require strictly interior to both seams (not at endpoints).
-  const double lenA = la::length(dA), lenB = la::length(dB);
-  if (lenA < eps || lenB < eps) return false;
   const double tEps = eps / lenA, sEps = eps / lenB;
   if (t <= tEps || t >= 1.0 - tEps) return false;
   if (s <= sEps || s >= 1.0 - sEps) return false;
@@ -339,14 +343,18 @@ static StageBResult StageBPrime(const StageAResult& stageA, double eps,
 
       const CanonicalFace &FA = stageA.faces[fi], &FB = stageA.faces[fj];
       {
-        // Faces sharing a merged edge are surface-adjacent, not overlapping:
-        // their planes meet exactly along the shared edge, so seam
-        // computation would return that edge (no new critical - its verts
-        // already are criticals) and the coplanar/edge-in-plane detectors
-        // would false-positive on ordinary adjacency.  A same-plane pair
-        // sharing an edge with genuine interior overlap is impossible for
-        // distinct canonical faces (stage A canonicalized coincident
-        // triangles into one face with summed multiplicity).
+        // Faces sharing a merged edge are exempt from pair analysis.  Their
+        // planes meet along the shared edge, so seam computation would return
+        // that edge (its verts are already criticals) and the edge-in-plane
+        // detector would flag the shared edge itself.  This exemption also
+        // covers the coplanar shared-edge cases, in both directions:
+        // opposite-diagonal triangulations of two solids touching on a
+        // common plane are LEGAL (pinned by TouchingDisjoint) and locally
+        // indistinguishable from a folded flap here - the hazardous
+        // same-winding case fails closed downstream instead, where its
+        // coincident section edges carry two source ids with nonzero net
+        // multiplicity (EngineIdConflict); the legal touching case cancels
+        // (net zero) before any conflict is recorded.
         int shared = 0;
         const int va[3] = {FA.verts.x, FA.verts.y, FA.verts.z};
         const int vb[3] = {FB.verts.x, FB.verts.y, FB.verts.z};
@@ -365,7 +373,12 @@ static StageBResult StageBPrime(const StageAResult& stageA, double eps,
                  pb2 = arr.verts[FB.verts.z].pos;
 
       // Coplanar detection: called for both directions (B in A's plane,
-      // A in B's plane). Returns true if the 2D clipped area > eps^2.
+      // A in B's plane). Returns true if the clipped region is a genuine
+      // interior overlap: area > perimeter * eps, the house dimensionally-
+      // correct threshold (an overlap wider than eps somewhere).  Clip
+      // roundoff on adjacent coplanar triangles produces slivers of area
+      // ~ scale * machine-eps, far below it; sub-eps-wide contact is legal
+      // touching under the eps contract.
       auto coplanarInteriorOverlap = [&](vec3 n, const vec3 pA[3],
                                          const vec3 pB[3]) -> bool {
         const mat2x3 proj = GetAxisAlignedProjection(n);
@@ -374,12 +387,14 @@ static StageBResult StageBPrime(const StageAResult& stageA, double eps,
         std::vector<vec2> poly = {b2[0], b2[1], b2[2]};
         for (int k = 0; k < 3 && !poly.empty(); ++k)
           poly = ClipPolyByHalfplane(poly, a2[k], a2[(k + 1) % 3]);
-        double area = 0.0;
+        if (poly.size() < 3) return false;
+        double area = 0.0, perim = 0.0;
         for (int k = 0; k < (int)poly.size(); ++k) {
           const vec2 &p = poly[k], &q = poly[(k + 1) % (int)poly.size()];
           area += p.x * q.y - q.x * p.y;
+          perim += la::length(q - p);
         }
-        return std::abs(area) * 0.5 > eps * eps;
+        return std::abs(area) * 0.5 > perim * eps;
       };
       const vec3 pA[3] = {pa0, pa1, pa2}, pB[3] = {pb0, pb1, pb2};
 
@@ -460,7 +475,10 @@ static StageBResult StageBPrime(const StageAResult& stageA, double eps,
       const int vA = FindOrAddVert(arr.verts, qA, eps);
       const int vB = FindOrAddVert(arr.verts, qB, eps);
       if (vA == vB) {
-        // Collapsed after snap: treat as degenerate.
+        // Collapsed after snap: same degenerate-contact handling as above -
+        // the endpoint x's still enter the critical set.
+        arr.criticalXs.push_back(qA.x);
+        arr.criticalXs.push_back(qB.x);
         ++cnt.subEpsContactsDropped;
         continue;
       }
@@ -559,13 +577,15 @@ struct OutTri3D {
   vec3 v[3];
 };
 
-// The third consumer of the cap arrangement (spec E' [R2-fold]): its retained
-// verts subdivide the adjacent strip edges.  Returns the retained verts lying
-// strictly interior to the chord [p0, p1] (within eps), sorted by projection
-// parameter (exact ties by lex order).  The returned POSITIONS become the
-// strip edge's chain verts, bitwise equal to the cap triangulation corners
-// they pair with.
-static std::vector<vec2> ChainSplitVerts(const std::vector<vec2>& retained,
+// The third consumer of the cap arrangement (spec E' [R2-fold]): its output
+// verts subdivide the adjacent strip edges.  `arrVerts` is the arrangement's
+// FULL vert set (merged inputs + every collected-arrangement vertex, per the
+// engine's negEdges contract).  Returns the verts lying strictly interior to
+// the chord [p0, p1] (within eps - the tolerance-model on-edge test, same
+// posture as the engine's own incidence rule), sorted by projection parameter
+// (exact ties by lex order).  The returned POSITIONS become the strip edge's
+// chain verts, bitwise equal to the cap triangulation corners they pair with.
+static std::vector<vec2> ChainSplitVerts(const std::vector<vec2>& arrVerts,
                                          vec2 p0, vec2 p1, double eps) {
   const vec2 segD = p1 - p0;
   const double segLen2 = la::dot(segD, segD);
@@ -573,7 +593,7 @@ static std::vector<vec2> ChainSplitVerts(const std::vector<vec2>& retained,
   const double invLen2 = 1.0 / segLen2;
   const double tEps = eps / std::sqrt(segLen2);
   std::vector<std::pair<double, vec2>> hits;
-  for (const auto& v : retained) {
+  for (const auto& v : arrVerts) {
     const double t = la::dot(v - p0, segD) * invLen2;
     if (t <= tEps || t >= 1.0 - tEps) continue;
     const vec2 proj = p0 + t * segD;
@@ -641,10 +661,12 @@ struct StripChains {
 };
 
 // Stage D': emit strips.  Each strip zips its two c-side chains, built by the
-// cap arrangements at the slab's boundary criticals (spec E' [R2-fold] third
-// consumer).  No geometry is computed here: the chains carry the cap
-// arrangements' vert positions bitwise.  An empty chain marks a piece skipped
-// upstream (asserted there).
+// cap arrangements at its slab's boundary-pair canonical criticals (spec E'
+// [R2-fold] third consumer).  No geometry is computed here: the chains carry
+// the cap arrangements' vert positions bitwise.  Every built slab has both
+// sides bound (its own xHi is always its pair's canonical; its lo is bound at
+// the preceding gap's canonical), with one chain per piece - attribution
+// failures fail closed in EmitCaps before this runs.
 static void EmitStrips(const std::vector<SlabResult>& slabs,
                        const std::vector<StripChains>& chains,
                        std::vector<OutTri3D>& out) {
@@ -653,11 +675,8 @@ static void EmitStrips(const std::vector<SlabResult>& slabs,
     const StripChains& ch = chains[si];
     DEBUG_ASSERT(ch.lo.size() == ch.hi.size(), logicErr,
                  "strip chain sides disagree on piece count");
-    const size_t nPieces = std::min(ch.lo.size(), ch.hi.size());
-    for (size_t k = 0; k < nPieces; ++k) {
-      if (ch.lo[k].empty() || ch.hi[k].empty()) continue;
+    for (size_t k = 0; k < ch.lo.size(); ++k)
       ZipperEmit(slabs[si].xLo, slabs[si].xHi, ch.lo[k], ch.hi[k], out);
-    }
   }
 }
 
@@ -675,9 +694,10 @@ static void EmitStrips(const std::vector<SlabResult>& slabs,
 // Triangulate a Polygons and append cap triangles to out, emitting at x=xCap.
 // If flipWinding is true, reverse each triangle (for -x normal caps).
 // idx is global across all loops (flat concatenation of allVerts).
-static void TriangulateCap(const Polygons& polys, double xCap, bool flipWinding,
+// Returns false if the triangulator produced an invalid index (fail closed).
+static bool TriangulateCap(const Polygons& polys, double xCap, bool flipWinding,
                            double eps, std::vector<OutTri3D>& out) {
-  if (polys.empty()) return;
+  if (polys.empty()) return true;
 
   PolygonsIdx pidx;
   std::vector<vec2> allVerts;
@@ -702,7 +722,7 @@ static void TriangulateCap(const Polygons& polys, double xCap, bool flipWinding,
                          t.z >= 0 && t.z < nAll;
     DEBUG_ASSERT(inRange, logicErr,
                  "cap triangulation returned out-of-range index");
-    if (!inRange) continue;
+    if (!inRange) return false;  // fail closed: no silent cap loss
     const vec3 v0 = {xCap, allVerts[t.x].x, allVerts[t.x].y};
     const vec3 v1 = {xCap, allVerts[t.y].x, allVerts[t.y].y};
     const vec3 v2 = {xCap, allVerts[t.z].x, allVerts[t.z].y};
@@ -711,16 +731,19 @@ static void TriangulateCap(const Polygons& polys, double xCap, bool flipWinding,
     else
       out.push_back({v0, v2, v1});
   }
+  return true;
 }
 
 // Extended cap input (spec [R2-fold] step (1)): both slabs extend their
-// retained pieces to x=c.  Endpoint slots align 1:1 with slab.pieces; a piece
-// whose source face has no track is a broken attribution (BuildSlabs made
-// id conflicts fatal, so this is asserted) and gets slot (-1,-1).
+// retained pieces to x=c.  Endpoint slots align 1:1 with slab.pieces.  A
+// piece whose source face has no track is a broken attribution; ok goes
+// false and the caller fails closed (BuildSlabs made id conflicts fatal, so
+// this is unreachable in a consistent pipeline - asserted AND checked).
 // NO vertex pre-dedup: the cap arrangement's MergeVerts owns snapping.
 struct CapEdgeSet {
   std::vector<vec2> rawVerts;
   std::vector<std::pair<int, int>> lPieces, rPieces;  // rawVerts index pairs
+  bool ok = true;
 };
 
 static CapEdgeSet BuildCapEdgeSet(const SlabResult* leftSlab,
@@ -737,8 +760,8 @@ static CapEdgeSet BuildCapEdgeSet(const SlabResult* leftSlab,
       DEBUG_ASSERT(it != trackOf.end(), logicErr,
                    "retained piece has no face track");
       if (it == trackOf.end()) {
-        slots.push_back({-1, -1});
-        continue;
+        ces.ok = false;
+        return;
       }
       // Piece is emission-oriented (interior-on-left) per spec engine contract.
       const vec2 eFrom = ExtendPtWithSeams(piece.from, *it->second,
@@ -754,7 +777,8 @@ static CapEdgeSet BuildCapEdgeSet(const SlabResult* leftSlab,
   // L verts appended first, then R: one deterministic input order for the ONE
   // arrangement.
   if (leftSlab && leftSlab->built) addPieces(*leftSlab, ces.lPieces);
-  if (rightSlab && rightSlab->built) addPieces(*rightSlab, ces.rPieces);
+  if (ces.ok && rightSlab && rightSlab->built)
+    addPieces(*rightSlab, ces.rPieces);
   return ces;
 }
 
@@ -765,46 +789,54 @@ static CapEdgeSet BuildCapEdgeSet(const SlabResult* leftSlab,
 // `rightChains`, when bound, receive one chain per slab piece (positions from
 // r.verts bitwise); a single-vert chain is a piece that vanished at this
 // critical.
-static void ComputeCap(const SlabResult* leftSlab, const SlabResult* rightSlab,
-                       double xCap, double eps, std::vector<OutTri3D>& out,
-                       std::vector<std::vector<vec2>>* leftChains,
-                       std::vector<std::vector<vec2>>* rightChains) {
+// Returns nullopt on success, or the fatal (reason, detail) to propagate.
+static std::optional<std::pair<FatalReason, std::string>> ComputeCap(
+    const SlabResult* leftSlab, const SlabResult* rightSlab, double xCap,
+    double eps, std::vector<OutTri3D>& out,
+    std::vector<std::vector<vec2>>* leftChains,
+    std::vector<std::vector<vec2>>* rightChains, Overlap3Counters& cnt) {
   const CapEdgeSet ces = BuildCapEdgeSet(leftSlab, rightSlab, xCap, eps);
-  // Pre-size bound chain outputs so every piece has a slot (empty = skipped).
+  if (!ces.ok)
+    return std::make_pair(FatalReason::EngineIdConflict,
+                          std::string("retained piece has no face track"));
+  // Pre-size bound chain outputs so every piece has a slot.
   if (leftChains) leftChains->assign(ces.lPieces.size(), {});
   if (rightChains) rightChains->assign(ces.rPieces.size(), {});
-  if (ces.rawVerts.empty()) return;
+  if (ces.rawVerts.empty()) return std::nullopt;
 
   std::vector<EdgeM> edges;
   edges.reserve(ces.lPieces.size() + ces.rPieces.size());
-  for (const auto& s : ces.lPieces)
-    if (s.first >= 0) edges.push_back({s.first, s.second, +1});
-  for (const auto& s : ces.rPieces)
-    if (s.first >= 0) edges.push_back({s.first, s.second, -1});
+  for (const auto& s : ces.lPieces) edges.push_back({s.first, s.second, +1});
+  for (const auto& s : ces.rPieces) edges.push_back({s.first, s.second, -1});
 
   std::vector<OutEdge> negEdges;
+  ++cnt.capArrangements;
   const OverlapResult r =
       RemoveOverlaps2D(ces.rawVerts, edges, eps, /*debug=*/false, WindRule::Add,
                        /*trace=*/nullptr, &negEdges);
+  bool trisOk = true;
   if (!r.edges.empty())
-    TriangulateCap(OutEdgesToPolygons(r.verts, r.edges), xCap,
-                   /*flipWinding=*/false, eps, out);
-  if (!negEdges.empty())
-    TriangulateCap(OutEdgesToPolygons(r.verts, negEdges), xCap,
-                   /*flipWinding=*/true, eps, out);
+    trisOk = TriangulateCap(OutEdgesToPolygons(r.verts, r.edges), xCap,
+                            /*flipWinding=*/false, eps, out);
+  if (trisOk && !negEdges.empty())
+    trisOk = TriangulateCap(OutEdgesToPolygons(r.verts, negEdges), xCap,
+                            /*flipWinding=*/true, eps, out);
+  if (!trisOk)
+    return std::make_pair(
+        FatalReason::NonManifoldEmission,
+        std::string("cap triangulation returned invalid indices"));
 
-  if (!leftChains && !rightChains) return;
+  if (!leftChains && !rightChains) return std::nullopt;
   // The subdivision authority for strip edges is the arrangement's FULL vert
-  // set (r.verts): merged input verts plus constructed crossings.  It cannot
-  // be narrowed to retained-edge verts - where L and R coincide, their edges
-  // annihilate and retention is empty, yet the strips on both sides still
-  // need the SAME subdivision to pair across the critical; the merge/
-  // incidence machinery is exactly what guarantees both sides see the same
-  // verts.
+  // set (r.verts: merged input verts plus every collected-arrangement vertex,
+  // per the engine's negEdges contract).  It cannot be narrowed to
+  // retained-edge verts - where L and R coincide, their edges annihilate and
+  // retention is empty, yet the strips on both sides still need the SAME
+  // subdivision to pair across the critical; the merge/incidence machinery is
+  // exactly what guarantees both sides see the same verts.
   auto buildChains = [&](const std::vector<std::pair<int, int>>& slots,
                          std::vector<std::vector<vec2>>& chains) {
     for (size_t k = 0; k < slots.size(); ++k) {
-      if (slots[k].first < 0) continue;  // no track: slot stays empty
       const int m0 = r.inputVert2Merged[slots[k].first];
       const int m1 = r.inputVert2Merged[slots[k].second];
       std::vector<vec2>& chain = chains[k];
@@ -819,6 +851,7 @@ static void ComputeCap(const SlabResult* leftSlab, const SlabResult* rightSlab,
   };
   if (leftChains) buildChains(ces.lPieces, *leftChains);
   if (rightChains) buildChains(ces.rPieces, *rightChains);
+  return std::nullopt;
 }
 
 // Stage E' driver: one cap per critical (spec [R3-fold]: runs are never
@@ -836,10 +869,10 @@ static void ComputeCap(const SlabResult* leftSlab, const SlabResult* rightSlab,
 // one arrangement must own the seam.  The run's other caps are emitted from
 // their own arrangements but are sub-eps slivers that collapse in the
 // assembly weld.
-static void EmitCaps(const std::vector<SlabResult>& slabs,
-                     const std::vector<double>& crits, double eps,
-                     std::vector<OutTri3D>& out,
-                     std::vector<StripChains>& chains) {
+static std::optional<std::pair<FatalReason, std::string>> EmitCaps(
+    const std::vector<SlabResult>& slabs, const std::vector<double>& crits,
+    double eps, std::vector<OutTri3D>& out, std::vector<StripChains>& chains,
+    Overlap3Counters& cnt) {
   const int nSlabs = (int)slabs.size();
   for (int ci = 0; ci < (int)crits.size(); ++ci) {
     int li = ci - 1;
@@ -849,10 +882,13 @@ static void EmitCaps(const std::vector<SlabResult>& slabs,
     const SlabResult* left = li >= 0 ? &slabs[li] : nullptr;
     const SlabResult* right = ri < nSlabs ? &slabs[ri] : nullptr;
     const bool canonical = ci == li + 1;
-    ComputeCap(left, right, crits[ci], eps, out,
-               (canonical && left) ? &chains[li].hi : nullptr,
-               (canonical && right) ? &chains[ri].lo : nullptr);
+    if (auto fatal =
+            ComputeCap(left, right, crits[ci], eps, out,
+                       (canonical && left) ? &chains[li].hi : nullptr,
+                       (canonical && right) ? &chains[ri].lo : nullptr, cnt))
+      return fatal;
   }
+  return std::nullopt;
 }
 
 // ---------------------------------------------------------------------------
@@ -876,10 +912,13 @@ static StageResult<Manifold::Impl> BuildImpl(const std::vector<OutTri3D>& tris,
   // Filter degenerate and duplicate triangles.
   // Degenerate: strip quads whose corners collapse within eps produce v0==v1
   // etc., which would crash CreateHalfedges.
-  // Duplicate: sub-eps critical pairs can emit caps at x=c1 and x=c2 where
-  // |c2-c1|<eps; both cap triangulations collapse to the same vertex indices
-  // after eps-dedup.  Emitting each triangle twice is non-manifold.  Spec E'
-  // says "their differences are empty" - dropping the second copy is correct.
+  // Duplicate: per-critical caps (spec [R3-fold]: runs are never merged) mean
+  // a sub-eps critical pair computes the SAME macro difference twice - at
+  // x=c1 and x=c2 with |c2-c1| <= eps - and both triangulations collapse to
+  // identical vertex triples after the weld.  This exact-duplicate drop is
+  // the [R3] sentence "their differences are empty" realized empirically: it
+  // suppresses only post-weld identical triangles, never distinct caps (the
+  // run-merge mistake this replaced suppressed by slab-pair identity).
   Vec<ivec3> tv;
   tv.reserve(tris.size());
   std::set<std::tuple<int, int, int>> seenTris;
@@ -956,7 +995,12 @@ static Overlap3Result RunCDEPrime(ArrangementGeometry& arr, double eps,
   // strip chains all consume it (spec [R2-fold]).
   std::vector<OutTri3D> emitted;
   std::vector<StripChains> chains(slabs.size());
-  EmitCaps(slabs, crits, eps, emitted, chains);
+  if (auto capFatal = EmitCaps(slabs, crits, eps, emitted, chains, cnt)) {
+    result.fatal = capFatal->first;
+    result.detail = std::move(capFatal->second);
+    result.counters = cnt;
+    return result;
+  }
   EmitStrips(slabs, chains, emitted);
 
   // Assembly.

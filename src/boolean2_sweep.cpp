@@ -508,11 +508,14 @@ PolySet2 CollectArrangement(PolySet2 arr, WindRule rule,
 // receives its retained boundary - the other signed difference from the one
 // arrangement. The winding pass constructs no points, so both measures share
 // the arrangement's geometry exactly. Its conflict events are sign-independent
-// duplicates of the first measure's and are not re-counted.
+// duplicates of the first measure's and are not re-counted. When `cleanOut`
+// is non-null it receives the collected arrangement itself (every sub-edge,
+// retained or not).
 PolySet2 CollectThenMeasure(PolySet2 arr, WindRule rule,
                             std::vector<SweepCapture>* capture = nullptr,
                             int* conflicts = nullptr,
-                            PolySet2* negOut = nullptr) {
+                            PolySet2* negOut = nullptr,
+                            PolySet2* cleanOut = nullptr) {
   PolySet2 clean = CollectArrangement(std::move(arr), rule, conflicts);
   SweepPass measure(rule, SweepMode::Winding, capture);
   for (const auto& kv : clean)
@@ -527,6 +530,7 @@ PolySet2 CollectThenMeasure(PolySet2 arr, WindRule rule,
     measureNeg.Run(/*mergeVerticalOutput=*/false);
     *negOut = std::move(measureNeg.Out());
   }
+  if (cleanOut) *cleanOut = std::move(clean);
   return std::move(measure.Out());
 }
 
@@ -574,9 +578,10 @@ std::vector<OutEdge> SweepWinding(const std::vector<EdgeM>& edges,
   }
   MergeVerticals1D(arr, &conflicts);
 
-  PolySet2 negOut;
+  PolySet2 negOut, cleanArr;
   const PolySet2 out = CollectThenMeasure(
-      std::move(arr), rule, capture, &conflicts, negEdges ? &negOut : nullptr);
+      std::move(arr), rule, capture, &conflicts, negEdges ? &negOut : nullptr,
+      negEdges ? &cleanArr : nullptr);
   if (conflictCount) *conflictCount = conflicts;
 
   // Materialize retained boundaries as directed OutEdges via the shared getId,
@@ -596,7 +601,20 @@ std::vector<OutEdge> SweepWinding(const std::vector<EdgeM>& edges,
   };
   std::vector<OutEdge> result;
   materialize(out, result);
-  if (negEdges) materialize(negOut, *negEdges);
+  if (negEdges) {
+    materialize(negOut, *negEdges);
+    // The 3D cap consumer treats `verts` as THE arrangement vert set (strip
+    // edges subdivide at every arrangement vert, retained or not), so
+    // materialize the collected arrangement's endpoints as well: a
+    // constructed crossing referenced only by non-retained sub-edges (all
+    // surrounding windings nonzero with one sign) would otherwise be absent.
+    // Appended after the retained materialization, so retained vert indices
+    // are unchanged.
+    for (const auto& kv : cleanArr) {
+      getId(kv.first.first);
+      getId(kv.first.second);
+    }
+  }
   return result;
 }
 

@@ -59,6 +59,8 @@ enum class FatalReason {
 struct Overlap3Counters {
   int subEpsContactsDropped = 0;  // point-like skipped contacts
   int engineIdConflicts = 0;      // total engine id-conflict events
+  int capArrangements = 0;        // 2D arrangements run by stage E' (one per
+                                  // critical with cap input - the M4 pin)
 };
 
 // Per-stage result: either a product or a fatal reason.
@@ -108,10 +110,16 @@ struct FaceTrack {
   vec3 va1, vb1;  // 3D edge pair for p1
 };
 
-// Linearly interpolate (y,z) of segment va-vb at x=xTarget.  Unlike
-// shared.h:Interpolate, this extrapolates when xTarget is outside [va.x,vb.x].
+// Linearly interpolate (y,z) of segment va-vb at x=xTarget.  This is the
+// named EXTRAPOLATION path (unlike shared.h:Interpolate): extending a piece
+// backward/forward across an unbuilt run evaluates a track outside
+// [va.x, vb.x] by design.  x-degenerate tracks cannot reach here: face tracks
+// exclude section-parallel edges (ComputeSectionSegment) and seam tracks use
+// exact span membership with xMid strictly between criticals (BuildSlabs);
+// the guard is release-safety only.
 inline vec2 InterpolateSafe(vec3 va, vec3 vb, double xTarget) {
   const double dx = vb.x - va.x;
+  DEBUG_ASSERT(dx != 0.0, logicErr, "x-degenerate track in InterpolateSafe");
   if (dx == 0.0) return {va.y, va.z};
   const double t = (xTarget - va.x) / dx;
   return {va.y + t * (vb.y - va.y), va.z + t * (vb.z - va.z)};
