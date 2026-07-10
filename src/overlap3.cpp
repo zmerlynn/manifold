@@ -91,12 +91,13 @@ double SegTriInteriorLen2D(vec2 sA, vec2 sB, vec2 t0, vec2 t1, vec2 t2) {
   return (tHi - tLo) * la::length(segD);
 }
 
-// Clip line P + t*D against face triangle; return true when the overlap
-// interval is non-empty.  tLo/tHi receive the parameter range.
-bool LineTriClip(vec3 P, vec3 D, vec3 v0, vec3 v1, vec3 v2, vec3 n, double& tLo,
-                 double& tHi, double eps) {
-  tLo = -std::numeric_limits<double>::infinity();
-  tHi = std::numeric_limits<double>::infinity();
+// Clip line P + t*D against face triangle; returns the parameter interval,
+// or nullopt when the overlap is empty.
+std::optional<std::pair<double, double>> LineTriClip(vec3 P, vec3 D, vec3 v0,
+                                                     vec3 v1, vec3 v2, vec3 n,
+                                                     double eps) {
+  double tLo = -std::numeric_limits<double>::infinity();
+  double tHi = std::numeric_limits<double>::infinity();
   const vec3 edges[3] = {v1 - v0, v2 - v1, v0 - v2};
   const vec3 vBase[3] = {v0, v1, v2};
   const double kTol = eps * la::length(n);
@@ -105,7 +106,7 @@ bool LineTriClip(vec3 P, vec3 D, vec3 v0, vec3 v1, vec3 v2, vec3 n, double& tLo,
                evB = la::cross(edges[i], vBase[i] - P);
     const double den = la::dot(n, ev), num = la::dot(n, evB);
     if (std::abs(den) <= kTol) {
-      if (num > kTol) return false;
+      if (num > kTol) return std::nullopt;
     } else {
       const double t = num / den;
       if (den > 0)
@@ -114,19 +115,21 @@ bool LineTriClip(vec3 P, vec3 D, vec3 v0, vec3 v1, vec3 v2, vec3 n, double& tLo,
         tHi = std::min(tHi, t);
     }
   }
-  return tLo <= tHi + eps;
+  if (tLo > tHi + eps) return std::nullopt;
+  return std::make_pair(tLo, tHi);
 }
 
-// Compute the seam segment [qA, qB] as the intersection of face triangles
-// (a0,a1,a2) with normal na and (b0,b1,b2) with normal nb.
-// Returns false only when the triangles are disjoint (or parallel-plane);
-// a point/tangent contact admitted by the eps clip model returns true with
-// qA == qB, so the caller's degenerate-contact arm records its x-critical.
-bool TriTriSeam(vec3 a0, vec3 a1, vec3 a2, vec3 na, vec3 b0, vec3 b1, vec3 b2,
-                vec3 nb, vec3& qA, vec3& qB, double eps) {
+// Compute the seam segment [first, second] as the intersection of face
+// triangles (a0,a1,a2) with normal na and (b0,b1,b2) with normal nb.
+// nullopt only when the triangles are disjoint (or parallel-plane); a
+// point/tangent contact admitted by the eps clip model returns an equal pair,
+// so the caller's degenerate-contact arm records its x-critical.
+std::optional<std::pair<vec3, vec3>> TriTriSeam(vec3 a0, vec3 a1, vec3 a2,
+                                                vec3 na, vec3 b0, vec3 b1,
+                                                vec3 b2, vec3 nb, double eps) {
   const vec3 D = la::cross(na, nb);
   const double Dlen = la::length(D);
-  if (Dlen == 0.0) return false;
+  if (Dlen == 0.0) return std::nullopt;
   const vec3 dir = D / Dlen;
   const double da = la::dot(na, a0), db = la::dot(nb, b0);
   const vec3 absD = la::abs(dir);
@@ -136,57 +139,52 @@ bool TriTriSeam(vec3 a0, vec3 a1, vec3 a2, vec3 na, vec3 b0, vec3 b1, vec3 b2,
   const int c1 = (mc + 1) % 3, c2 = (mc + 2) % 3;
   const double a11 = na[c1], a12 = na[c2], b11 = nb[c1], b12 = nb[c2];
   const double det = a11 * b12 - a12 * b11;
-  if (det == 0.0) return false;
+  if (det == 0.0) return std::nullopt;
   vec3 P(0.0);
   P[c1] = (da * b12 - db * a12) / det;
   P[c2] = (a11 * db - b11 * da) / det;
-  double tAlo, tAhi, tBlo, tBhi;
-  if (!LineTriClip(P, dir, a0, a1, a2, na, tAlo, tAhi, eps)) return false;
-  if (!LineTriClip(P, dir, b0, b1, b2, nb, tBlo, tBhi, eps)) return false;
-  const double tLo = std::max(tAlo, tBlo), tHi = std::min(tAhi, tBhi);
+  const auto clipA = LineTriClip(P, dir, a0, a1, a2, na, eps);
+  if (!clipA) return std::nullopt;
+  const auto clipB = LineTriClip(P, dir, b0, b1, b2, nb, eps);
+  if (!clipB) return std::nullopt;
+  const double tLo = std::max(clipA->first, clipB->first);
+  const double tHi = std::min(clipA->second, clipB->second);
   // dir is unit length, so the parameter interval is in length units and
   // eps applies directly (matching LineTriClip's own slop).
-  if (tLo > tHi + eps) return false;  // genuinely disjoint
+  if (tLo > tHi + eps) return std::nullopt;  // genuinely disjoint
   if (tLo >= tHi) {
     // Point/tangent contact: collapse to the interval midpoint.
-    qA = qB = P + (0.5 * (tLo + tHi)) * dir;
-    return true;
+    const vec3 q = P + (0.5 * (tLo + tHi)) * dir;
+    return std::make_pair(q, q);
   }
-  qA = P + tLo * dir;
-  qB = P + tHi * dir;
-  return true;
+  return std::make_pair(P + tLo * dir, P + tHi * dir);
 }
 
-// Compute the 3D crossing point of two line segments [A0,A1] and [B0,B1]
-// assumed to be coplanar (both lie in the shared face plane).
-// Returns true and sets t (param on A) and x (the crossing x-coordinate) when:
-//   - the lines are non-parallel (|cross(dA,dB)| > 0)
-//   - the crossing is strictly interior to both seams (t, s in (eps_t,
-//   1-eps_t))
-// The x is the only output that matters per spec SEAMS (over-inclusion
-// harmless).
-bool SeamSeamCrossX(vec3 A0, vec3 A1, vec3 B0, vec3 B1, double eps,
-                    double& xOut) {
+// The crossing x-coordinate of two coplanar line segments [A0,A1] and
+// [B0,B1] (both in a shared face plane), or nullopt unless the lines are
+// non-parallel and the crossing is strictly interior to both seams.  The x
+// is the only output per spec SEAMS (over-inclusion harmless).
+std::optional<double> SeamSeamCrossX(vec3 A0, vec3 A1, vec3 B0, vec3 B1,
+                                     double eps) {
   const vec3 dA = A1 - A0, dB = B1 - B0, dC = B0 - A0;
   const double lenA = la::length(dA), lenB = la::length(dB);
-  if (lenA < eps || lenB < eps) return false;
+  if (lenA < eps || lenB < eps) return std::nullopt;
   const vec3 cAB = la::cross(dA, dB);
   const double cABlen2 = la::length2(cAB);
   // Near-parallel gate, dimensionally correct: |cross| has units len^2, so
   // compare against eps * (lenA + lenB).  Endpoint noise on near-parallel
   // seams otherwise yields a pseudo-crossing at a meaningless x.
   const double parTol = eps * (lenA + lenB);
-  if (cABlen2 <= parTol * parTol) return false;
+  if (cABlen2 <= parTol * parTol) return std::nullopt;
   // t on A: t * |cAB|^2 = dot(cross(dC, dB), cAB)
   const double t = la::dot(la::cross(dC, dB), cAB) / cABlen2;
   // s on B: s * |cAB|^2 = dot(cross(dC, dA), cAB)
   const double s = la::dot(la::cross(dC, dA), cAB) / cABlen2;
   // Require strictly interior to both seams (not at endpoints).
   const double tEps = eps / lenA, sEps = eps / lenB;
-  if (t <= tEps || t >= 1.0 - tEps) return false;
-  if (s <= sEps || s >= 1.0 - sEps) return false;
-  xOut = A0.x + t * dA.x;
-  return true;
+  if (t <= tEps || t >= 1.0 - tEps) return std::nullopt;
+  if (s <= sEps || s >= 1.0 - sEps) return std::nullopt;
+  return A0.x + t * dA.x;
 }
 
 // Find or add a vert within eps of pos; return its index.
@@ -457,9 +455,9 @@ SeamsResult FindSeams(const CanonicalGeometry& canon, double eps,
       }
 
       // Seam computation.
-      vec3 qA, qB;
-      if (!TriTriSeam(pa0, pa1, pa2, na, pb0, pb1, pb2, nb, qA, qB, eps))
-        continue;
+      const auto seam = TriTriSeam(pa0, pa1, pa2, na, pb0, pb1, pb2, nb, eps);
+      if (!seam) continue;
+      const vec3 qA = seam->first, qB = seam->second;
       const double seamLen = la::length(qB - qA);
 
       if (seamLen <= eps) {
@@ -503,9 +501,8 @@ SeamsResult FindSeams(const CanonicalGeometry& canon, double eps,
       const vec3 A1 = arr.verts[SA.vertId1].pos;
       const vec3 B0 = arr.verts[SB.vertId0].pos;
       const vec3 B1 = arr.verts[SB.vertId1].pos;
-      double xCross;
-      if (!SeamSeamCrossX(A0, A1, B0, B1, eps, xCross)) continue;
-      arr.criticalXs.push_back(xCross);
+      const auto xCross = SeamSeamCrossX(A0, A1, B0, B1, eps);
+      if (xCross) arr.criticalXs.push_back(*xCross);
     }
   }
 
@@ -542,13 +539,10 @@ vec2 ExtendPt(vec2 pt, const FaceTrack& ft, double xTarget) {
 // the face-edge track gives the wrong yz because it follows a diagonal edge
 // instead of the seam line.
 //
-// The class test is an eps-match over the slab's own tracks because the
-// engine capture carries bare (y,z) endpoints - piece endpoints have no
-// provenance.  Adjudicated in spec [R2-fold]: threading per-endpoint
-// provenance through the engine's split/merge machinery is heavier than
-// matching against the slab's bounded seam-track set, and the classes are
-// mutually exclusive at scale > eps (a seam crossing interior to a face
-// segment is > eps from its endpoints, else the block rule collapsed it).
+// The class test is an eps-match over the slab's own tracks (the engine
+// capture carries bare (y,z) endpoints; adjudicated in spec [R2-fold]).  The
+// classes are mutually exclusive at scale > eps: an interior seam crossing
+// sits > eps from the segment endpoints, else the block rule collapsed it.
 vec2 ExtendPtWithSeams(vec2 pt, const FaceTrack& ft,
                        const std::vector<SeamTrackEntry>& seamTracks,
                        double xTarget, double eps) {
@@ -942,10 +936,9 @@ StageResult<Manifold::Impl> BuildImpl(const std::vector<OutTri3D>& tris,
   // Duplicate: per-critical caps (spec [R3-fold]: runs are never merged) mean
   // a sub-eps critical pair computes the SAME macro difference twice - at
   // x=c1 and x=c2 with |c2-c1| <= eps - and both triangulations collapse to
-  // identical vertex triples after the weld.  This exact-duplicate drop is
-  // the [R3] sentence "their differences are empty" realized empirically: it
-  // suppresses only post-weld identical triangles, never distinct caps (the
-  // run-merge mistake this replaced suppressed by slab-pair identity).
+  // identical vertex triples after the weld.  This drop suppresses only
+  // post-weld identical triangles, never distinct caps (the [R3] sentence
+  // "their differences are empty").
   Vec<ivec3> tv;
   tv.reserve(tris.size());
   std::set<std::tuple<int, int, int>> seenTris;

@@ -1,0 +1,13 @@
+1. BREAK [src/overlap3.cpp:840](/tmp/codex-branch-review/review/src/overlap3.cpp:840); `emittedPairs` skips later criticals with the same flanking built-slab pair at [src/overlap3.cpp:855](/tmp/codex-branch-review/review/src/overlap3.cpp:855). That is still merged-run cap suppression. Since `ComputeCap` extends geometry to the actual `xCap`, caps at different in-run criticals are not generally identical. Correction: remove the pair skip; compute every exact critical’s cap.
+
+2. BREAK [src/overlap3.cpp:776](/tmp/codex-branch-review/review/src/overlap3.cpp:776); M4 is not one arrangement with three consumers. It runs two `RemoveOverlaps2D` calls at [src/overlap3.cpp:808](/tmp/codex-branch-review/review/src/overlap3.cpp:808) and [src/overlap3.cpp:819](/tmp/codex-branch-review/review/src/overlap3.cpp:819), then strips only use collected cap vertices as split hints and recompute points in `ZipperEmit`. Correction: run one combined cap arrangement, retain its subdivided edge/vertex records, and feed those exact records to cap triangulation plus both adjacent strip sides.
+
+3. NEED-CHANGE [test/overlap3_test.cpp:255](/tmp/codex-branch-review/review/test/overlap3_test.cpp:255); Gate 2 is not the spec-table gate. It checks attributed pieces and raw section flux, but not “per critical, cap boolean closes against adjacent strips” edge pairing. Correction: add a per-critical cap/strip edge multiset closure check.
+
+4. NEED-CHANGE [test/overlap3_test.cpp:711](/tmp/codex-branch-review/review/test/overlap3_test.cpp:711); the claimed M2 weld coverage is not effective. I temporarily reverted the no-track path from constant `(y,z)` to face-track fallback and rebuilt; `Gate3_ThreeOverlappingBoxes`, `Gate2_SectionValidity_ThreeOverlappingBoxes`, and `Gate5_Oracle_ThreeOverlappingBoxes` still passed. Correction: add a fixture/assertion that observes a forced-through endpoint and fails when [src/overlap3.cpp:540](/tmp/codex-branch-review/review/src/overlap3.cpp:540) is changed back.
+
+5. NEED-CHANGE [src/overlap3.cpp:570](/tmp/codex-branch-review/review/src/overlap3.cpp:570); magic constants remain: `1e-10` split coalescing/comparison and `eps * 0.1` slab lookup at [src/overlap3.cpp:845](/tmp/codex-branch-review/review/src/overlap3.cpp:845). Correction: replace with named, spec-derived tolerances or exact critical/slab adjacency.
+
+Checked: M1 is present and feeds shared-face seam-pair crossings into `arr.verts`; `Pin_M1_TripleCritical` passes. M2 implementation itself is constant-extension now. Engine capture is emission-oriented and no longer exposes below/above. Rebuilt overlap3 tests: 31 passed, 1 skipped.
+
+VERDICT: BREAK

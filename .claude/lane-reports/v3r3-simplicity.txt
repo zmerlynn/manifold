@@ -1,0 +1,33 @@
+Reviewed current workspace files; `25f7c84a` was not resolvable locally.
+
+1. `src/overlap3.cpp:836-855` - suppresses caps by `(leftIdx,rightIdx)` and emits only the first critical in an unbuilt run. Spec demands the opposite: every critical gets its own cap. Delete `emittedPairs`; compute every `c`.
+
+2. `src/overlap3.cpp:845-849` - `eps * 0.1` neighbor-slab selection is a magic tolerance. Spec says nearest built slabs. Replace with critical-index based left/right lookup.
+
+3. `src/overlap3.cpp:770-827` - comment says “ONE cap arrangement,” but code runs two independent `RemoveOverlaps2D` arrangements for plus/minus. Spec demands one source of truth. Arrange once, then classify/emit both signed differences from that arrangement.
+
+4. `src/overlap3.cpp:551-573,662-673` - strip subdivision is reconstructed by scanning a loose bag of cap verts using `eps` and `1e-10`. Spec demands cap arrangement output define the edge subdivision. Return explicit per-edge ordered subdivisions from cap construction.
+
+5. `src/overlap3.cpp:580-617` - `ZipperEmit` uses sentinel `2.0` and `1e-10` comparison tolerances. Not spec-demanded; it exists because subdivision provenance is missing. Remove once strips consume cap-produced polylines/intervals directly.
+
+6. `src/overlap3.cpp:628-635` - cap lookup by fuzzy x key is another workaround for missing critical identity. Spec wants criticals as the coordinating object. Use stable critical indices/shared records.
+
+7. `src/overlap3.cpp:181-188,446-489` - `FindOrAddVert` globally eps-merges seam endpoints and triple criticals. Spec explicitly killed global triple unification and says degenerate contacts contribute x-critical values. Separate critical-x collection from seam-track endpoint storage.
+
+8. `src/overlap3.cpp:340-348` - blanket `shared >= 2` face-pair exemption skips all detection. Spec does not demand this. Replace with a general “proper interior overlap” predicate that naturally ignores shared boundary-only adjacency.
+
+9. `src/overlap3.cpp:522-540` - class-ii vs forced-through endpoints are inferred by “interior and within eps of seam track, else constant.” The classes are spec-demanded; this guessing is not. Carry track/provenance from the sweep/cap arrangement instead.
+
+10. `src/overlap3.cpp:644-651,745-751` - duplicated face-track lookup silently drops pieces with missing source tracks. Spec says conflicts are fatal. Build a sourceId-to-track map once and fail/assert on missing attribution.
+
+11. `src/overlap3.cpp:713-715` - invalid triangulation indices are silently skipped. Not spec-demanded; fail closed or assert, otherwise cap loss is hidden.
+
+12. `src/overlap3_sweep.cpp:111-118` - fake exterior sentinel slabs with `2.0 * eps` are unnecessary special machinery; `ComputeCap` already accepts null exterior slabs. Model the spec’s empty exterior directly.
+
+13. `src/boolean2_sweep.cpp:551-557` - initial `PolySetAdd` conflict return is ignored, so a `sourceId=-1` can be created without incrementing `conflictCount`. Spec requires any nonzero conflict to be fatal in 3D. Count conflicts during seeding through one helper.
+
+Overall: this is not a clean single design yet. Stages A/C mostly read coherently, but D/E cap-to-strip closure has patch strata: duplicate cap arrangements, fuzzy x lookup, vertex-bag splitting, sentinels, and silent drops all compensate for missing explicit cap subdivision/provenance.
+
+GARBAGE COUNT: 13 (of which spec-demanded: 0)
+
+VERDICT: NEED-CHANGE

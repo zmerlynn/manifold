@@ -450,3 +450,21 @@ prompted to always find something; the honest close criterion here
 is the trajectory's convergence and the fidelity SURVIVE, with the
 round-3 residual fixed and every defended item carrying its
 recorded rebuttal above. Owner review is the next gate.
+
+## Style crucible (main-agent, 2026-07-10)
+
+A behavior-preserving simplicity/style/naming pass, two review
+rounds (style judge, a dedicated linalg/reuse hunter, a naming
+lane).  The stages got their names (the letters were sequential
+noise); house style per the manifold-style-review skill landed:
+linalg does its job (length2, lerp, 2D cross/perp forms, swizzle
+blends - each verified bitwise against linalg.h before folding),
+manifold::Box replaced a hand-rolled AABB, the seam-cluster helpers
+return optionals instead of trailing out-refs, casts and
+anonymous-namespace statics normalized, stale comments (including
+an M1 pin banner describing the pre-criticalXs mechanism) rewritten,
+and the Gate4e/4f names stopped lying (FailClosed; assertions
+untouched).  The reuse lane converged to SURVIVE.  Residuals, both
+deferred as upstream follow-ups rather than churned here: the
+upstream boolean2.cpp's reopened anonymous namespaces, and its Box2
+vs the public Rect.

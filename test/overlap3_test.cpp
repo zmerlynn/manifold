@@ -614,7 +614,7 @@ TEST(Overlap3, Pin_M1_TripleCritical) {
   // M1 records seam-seam crossing x's in the vertex-free critical set (spec
   // SEAMS: triple criticals are x-values, not vertices).  This fixture has no
   // degenerate contacts, so every criticalXs entry is M1's; stubbing the M1
-  // loop empties it (mutation-verified).  For axis-aligned boxes the crossing
+  // loop empties it.  For axis-aligned boxes the crossing
   // x's coincide with vertex-plane x's - the pin is on the mechanism
   // recording them, not on new slab boundaries appearing.
   EXPECT_FALSE(h.arr.criticalXs.empty())

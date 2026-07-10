@@ -38,9 +38,9 @@ namespace {
 // the 2D perp la::cross(1.0, normal.yz()).
 //
 // Returns false if the face does not straddle xMid (< 2 distinct crossings).
-bool ComputeSectionSegment(const CanonicalFace& face,
-                           const std::vector<MergedVert>& verts, double xMid,
-                           SectionFaceSegment& segOut, FaceTrack* trackOut) {
+bool ComputeSectionSegment(SectionFaceSegment& segOut, FaceTrack& trackOut,
+                           const CanonicalFace& face,
+                           const std::vector<MergedVert>& verts, double xMid) {
   const int vi[3] = {face.verts.x, face.verts.y, face.verts.z};
   const vec3 p[3] = {verts[vi[0]].pos, verts[vi[1]].pos, verts[vi[2]].pos};
 
@@ -76,15 +76,13 @@ bool ComputeSectionSegment(const CanonicalFace& face,
   segOut.p1 = pts[1];
   segOut.mult = face.mult;
 
-  if (trackOut) {
-    trackOut->faceId = -1;  // set by caller
-    trackOut->p0 = pts[0];
-    trackOut->p1 = pts[1];
-    trackOut->va0 = ePair[0][0];
-    trackOut->vb0 = ePair[0][1];
-    trackOut->va1 = ePair[1][0];
-    trackOut->vb1 = ePair[1][1];
-  }
+  trackOut.faceId = -1;  // set by caller
+  trackOut.p0 = pts[0];
+  trackOut.p1 = pts[1];
+  trackOut.va0 = ePair[0][0];
+  trackOut.vb0 = ePair[0][1];
+  trackOut.va1 = ePair[1][0];
+  trackOut.vb1 = ePair[1][1];
   return true;
 }
 
@@ -157,7 +155,7 @@ StageResult<std::vector<SlabResult>> BuildSlabs(const ArrangementGeometry& arr,
 
       SectionFaceSegment seg;
       FaceTrack track;
-      if (!ComputeSectionSegment(face, arr.verts, slab.xMid, seg, &track))
+      if (!ComputeSectionSegment(seg, track, face, arr.verts, slab.xMid))
         continue;
       seg.faceId = fi;
       track.faceId = fi;
