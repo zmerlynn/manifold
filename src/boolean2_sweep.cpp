@@ -548,11 +548,12 @@ std::vector<OutEdge> SweepWinding(const std::vector<EdgeM>& edges,
   // near-concurrences to a single shared vertex; eps-scale vertex-on-edge
   // incidences are pre-split by the caller.
   PolySet2 arr;
+  int conflicts = 0;
   for (const auto& e : edges) {
     if (e.v0 == e.v1) continue;
-    PolySetAdd(arr, verts[e.v0], verts[e.v1], {e.mult, e.srcId});
+    if (PolySetAdd(arr, verts[e.v0], verts[e.v1], {e.mult, e.srcId}))
+      ++conflicts;
   }
-  int conflicts = 0;
   MergeVerticals1D(arr, &conflicts);
 
   const PolySet2 out =
@@ -569,7 +570,8 @@ std::vector<OutEdge> SweepWinding(const std::vector<EdgeM>& edges,
     const int hiId = getId(kv.first.second);
     const int from = m > 0 ? loId : hiId;
     const int to = m > 0 ? hiId : loId;
-    for (int64_t c = 0; c < std::abs(m); ++c) result.push_back({from, to, 1});
+    for (int64_t c = 0; c < std::abs(m); ++c)
+      result.push_back({from, to, 1, kv.second.srcId});
   }
   return result;
 }

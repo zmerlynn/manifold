@@ -1036,3 +1036,82 @@ TEST(Overlap3, Pin_P12_InteriorIsland_StampThroughFace) {
   ASSERT_TRUE(result.impl.has_value());
   OracleCompare(*result.impl, oracle, eps, "P12_InteriorIsland");
 }
+
+// ---------------------------------------------------------------------------
+// Per-critical-cap pin: sub-eps critical pairs handled without duplicate caps.
+// ---------------------------------------------------------------------------
+
+// Pins the "per-critical cap" property: each critical in arr.verts gets its
+// own cap computation, even when two criticals c1 and c2 (|c2-c1| < eps)
+// share the same adjacent built-slab pair.  BuildImpl deduplicates the
+// resulting identical triangles, so the output is manifold and oracle-correct.
+// Gate3_ThreeOverlappingBoxes checks only manifold; this also checks oracle.
+TEST(Overlap3, Pin_PerCriticalCaps) {
+  const Manifold a = Manifold::Cube({2, 0.5, 0.5}, true);
+  const Manifold b =
+      Manifold::Cube({0.5, 2, 0.5}, true).Translate({0.1, 0, 0.17});
+  const Manifold c =
+      Manifold::Cube({0.5, 0.5, 2}, true).Translate({0.07, 0.07, 0.07});
+  const Manifold oracle = a + b + c;
+  const Manifold::Impl impl = ComposeMany({a, b, c});
+  const double eps = ImplEps(impl);
+
+  const Overlap3Result result = RemoveOverlaps3D(impl, eps);
+  ASSERT_FALSE(result.fatal.has_value())
+      << "Pin_PerCriticalCaps fatal=" << (int)*result.fatal << " "
+      << result.detail;
+  ASSERT_TRUE(result.impl.has_value());
+  ASSERT_TRUE(result.impl->IsManifold())
+      << "Pin_PerCriticalCaps: sub-eps critical pair produced non-manifold "
+         "output";
+  OracleCompare(*result.impl, oracle, eps, "Pin_PerCriticalCaps");
+}
+
+// ---------------------------------------------------------------------------
+// Strip-subdiv-from-cap pin: R1-fold property.
+// ---------------------------------------------------------------------------
+
+// R1-fold: cap arrangement vertices at x=c subdivide adjacent strip edges.
+// White-box: verifies that the fixture has slabs with interior seam tracks
+// (these are the x-values where cap subdivision must have occurred).
+// The full-pipeline manifold assertion proves no T-junctions remain; oracle
+// checks geometric correctness.
+TEST(Overlap3, Pin_StripSubdivFromCap) {
+  // GenericBoxes: seams span multiple criticals so slabs within the seam's
+  // x-range carry non-empty seamTracks; the cap at each such critical's
+  // boundary subdivides the adjacent strip edges.
+  const Manifold a = Manifold::Cube({2, 2, 2});
+  const Manifold b =
+      Manifold::Cube({1.7, 1.9, 2.3}).Translate({1.13, 0.41, 0.37});
+  const Manifold oracle = a + b;
+  const Manifold::Impl impl = ComposeImpl(a, b);
+  const double eps = ImplEps(impl);
+
+  // White-box: verify that at least one built slab has seam tracks (proving
+  // R1-fold is exercised by this fixture).
+  const Overlap3Internals h = RemoveOverlaps3D_TestHooks(impl, eps);
+  ASSERT_FALSE(h.fatal.has_value())
+      << "Pin_StripSubdivFromCap stages A-C fatal: " << h.detail;
+  bool anySeamTracks = false;
+  for (const auto& slab : h.slabs) {
+    if (slab.built && !slab.seamTracks.empty()) {
+      anySeamTracks = true;
+      break;
+    }
+  }
+  EXPECT_TRUE(anySeamTracks)
+      << "Pin_StripSubdivFromCap: no slab has seam tracks; R1-fold is not "
+         "exercised by this fixture";
+
+  // Full pipeline: manifold + oracle.  T-junctions from missing subdivision
+  // would yield non-manifold; oracle checks geometric volume/genus.
+  const Overlap3Result result = RemoveOverlaps3D(impl, eps);
+  ASSERT_FALSE(result.fatal.has_value())
+      << "Pin_StripSubdivFromCap pipeline fatal=" << (int)*result.fatal << " "
+      << result.detail;
+  ASSERT_TRUE(result.impl.has_value());
+  EXPECT_TRUE(result.impl->IsManifold())
+      << "Pin_StripSubdivFromCap: non-manifold indicates missing strip "
+         "subdivision at cap x";
+  OracleCompare(*result.impl, oracle, eps, "Pin_StripSubdivFromCap");
+}

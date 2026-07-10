@@ -106,17 +106,11 @@ StageResult<std::vector<SlabResult>> BuildSlabs(const ArrangementGeometry& arr,
   std::sort(crits.begin(), crits.end());
   crits.erase(std::unique(crits.begin(), crits.end()), crits.end());
 
-  if (crits.empty()) return StageResult<std::vector<SlabResult>>::Ok({});
+  if (crits.size() < 2) return StageResult<std::vector<SlabResult>>::Ok({});
 
-  // Sentinel slabs: width = 2*eps > eps so they are built.  No face vertex
-  // lies in these ranges so the engine produces an empty capture (winding 0
-  // everywhere - correct exterior).
-  const double xMin = crits.front();
-  const double xMax = crits.back();
-  const double sentW = 2.0 * eps;
-  crits.insert(crits.begin(), xMin - sentW);
-  crits.push_back(xMax + sentW);
-
+  // No sentinel slabs: ComputeCap handles null exterior (leftSlab=nullptr or
+  // rightSlab=nullptr) as an empty region, which is the correct exterior limit
+  // beyond the first/last critical (spec E', "exterior limit is empty region").
   const int nSlabs = (int)crits.size() - 1;
   std::vector<SlabResult> slabs(nSlabs);
 

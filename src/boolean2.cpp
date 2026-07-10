@@ -856,11 +856,12 @@ OverlapResult RemoveOverlaps2D(const std::vector<vec2>& vertsIn,
     for (size_t e = 0; e < edges.size(); ++e) {
       int prev = edges[e].v0;
       for (int v : incidenceLists[e]) {
-        if (v != prev) subEdges.push_back({prev, v, edges[e].mult});
+        if (v != prev)
+          subEdges.push_back({prev, v, edges[e].mult, edges[e].srcId});
         prev = v;
       }
       if (edges[e].v1 != prev)
-        subEdges.push_back({prev, edges[e].v1, edges[e].mult});
+        subEdges.push_back({prev, edges[e].v1, edges[e].mult, edges[e].srcId});
     }
     edges = std::move(subEdges);
   }

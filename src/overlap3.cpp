@@ -833,11 +833,6 @@ static std::map<double, std::vector<vec2>> EmitCaps(
     double eps, std::vector<OutTri3D>& out) {
   std::map<double, std::vector<vec2>> capVertsMap;
   const int nSlabs = (int)slabs.size();
-  // Track which (leftIdx, rightIdx) slab pairs have already generated a cap.
-  // Two criticals that land in the same gap between built slabs (because the
-  // slab between them is unbuilt/sub-eps-wide) would otherwise generate
-  // identical caps. Only the first critical in such a run is emitted.
-  std::set<std::pair<int, int>> emittedPairs;
   for (double c : crits) {
     int leftIdx = -1, rightIdx = -1;
     for (int si = 0; si < nSlabs; ++si) {
@@ -851,8 +846,6 @@ static std::map<double, std::vector<vec2>> EmitCaps(
         break;
       }
     }
-    const auto key = std::make_pair(leftIdx, rightIdx);
-    if (!emittedPairs.insert(key).second) continue;  // duplicate slab pair
     const SlabResult* leftSlab = (leftIdx >= 0) ? &slabs[leftIdx] : nullptr;
     const SlabResult* rightSlab = (rightIdx >= 0) ? &slabs[rightIdx] : nullptr;
     ComputeCap(leftSlab, rightSlab, c, eps, out, capVertsMap[c]);
@@ -878,16 +871,34 @@ static StageResult<Manifold::Impl> BuildImpl(const std::vector<OutTri3D>& tris,
     return id;
   };
 
-  // Filter degenerate triangles: strip quads whose corners collapse to within
-  // eps of each other after vertex dedup produce v0==v1 etc., which would
-  // crash CreateHalfedges.  These carry zero area and are safe to drop.
+  // Filter degenerate and duplicate triangles.
+  // Degenerate: strip quads whose corners collapse within eps produce v0==v1
+  // etc., which would crash CreateHalfedges.
+  // Duplicate: sub-eps critical pairs can emit caps at x=c1 and x=c2 where
+  // |c2-c1|<eps; both cap triangulations collapse to the same vertex indices
+  // after eps-dedup.  Emitting each triangle twice is non-manifold.  Spec E'
+  // says "their differences are empty" - dropping the second copy is correct.
   Vec<ivec3> tv;
   tv.reserve(tris.size());
+  std::set<std::tuple<int, int, int>> seenTris;
   for (const auto& tri : tris) {
     const int v0 = getVertIdx(tri.v[0]);
     const int v1 = getVertIdx(tri.v[1]);
     const int v2 = getVertIdx(tri.v[2]);
     if (v0 == v1 || v1 == v2 || v0 == v2) continue;
+    // Canonical key: rotate so smallest vertex is first, preserving
+    // orientation.
+    int a = v0, b = v1, c = v2;
+    if (b < a && b < c) {
+      a = v1;
+      b = v2;
+      c = v0;
+    } else if (c < a && c < b) {
+      a = v2;
+      b = v0;
+      c = v1;
+    }
+    if (!seenTris.insert({a, b, c}).second) continue;  // exact duplicate
     tv.push_back({v0, v1, v2});
   }
 
