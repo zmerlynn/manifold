@@ -277,3 +277,22 @@ returns relative to the oracle-anchored implementation gates, which
 are the stronger fence and already exist. Then implementation
 crucible on this branch, with the L3 implementer-temptation list as
 the forbidden catalog.
+
+## Implementation crucible close (round 3 cap, 2026-07-10, 25f7c84a)
+
+Round trajectory - simplicity judge: BREAK/21 (v1) -> BREAK/21 (v2)
+-> BREAK/13 -> NEED-CHANGE/13 (first non-rewrite verdict across
+four implementation generations); fidelity: 7 findings -> 2. Green:
+31 + 1 scope-skip gates incl. the new triple-critical and 3-solid
+oracle fixtures, fences 111, full suite 577, all four round-2
+mechanism BREAKs implemented and verified. REMAINING (both in the
+cap construction, one afternoon's scope): the emittedPairs
+duplicate-skip is a run-merge in disguise (replace with the spec's
+per-critical caps computed at each critical's own x); M4 still runs
+two arrangements over shared input and strips still self-extend -
+the spec's literal one-arrangement-three-consumers remains
+unimplemented. Judge's 13 items stand listed in the audit answers.
+The architecture verdict after three implementations: the
+sweep-native emission core is sound and each round's findings
+narrowed monotonically; what remains is finishing one function
+cluster to its spec, not another rewrite.
