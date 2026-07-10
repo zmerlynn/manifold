@@ -175,6 +175,20 @@ StageResult<std::vector<SlabResult>> BuildSlabs(const ArrangementGeometry& arr,
     slab.sectionEdges = edges;
     slab.sectionVerts = secVerts;
 
+    // Populate seam tracks for class-ii endpoint extension (spec D').
+    // For each seam whose x-range spans slab.xMid, record its (y,z) at xMid
+    // and the 3D endpoints so caps/strips can use the seam track instead of
+    // the face edge track for arrangement-constructed crossing vertices.
+    for (const auto& seam : arr.seams) {
+      const vec3 vA = arr.verts[seam.vertId0].pos;
+      const vec3 vB = arr.verts[seam.vertId1].pos;
+      const double xLo3D = std::min(vA.x, vB.x);
+      const double xHi3D = std::max(vA.x, vB.x);
+      if (slab.xMid < xLo3D - eps || slab.xMid > xHi3D + eps) continue;
+      const vec2 yzMid = InterpolateSafe(vA, vB, slab.xMid);
+      slab.seamTracks.push_back({yzMid, vA, vB});
+    }
+
     if (edges.empty()) continue;
 
     int conflictCount = 0;

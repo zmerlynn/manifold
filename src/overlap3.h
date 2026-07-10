@@ -108,6 +108,23 @@ struct FaceTrack {
   vec3 va1, vb1;  // 3D edge pair for p1
 };
 
+// Linearly interpolate (y,z) of segment va-vb at x=xTarget.  Unlike
+// shared.h:Interpolate, this extrapolates when xTarget is outside [va.x,vb.x].
+inline vec2 InterpolateSafe(vec3 va, vec3 vb, double xTarget) {
+  const double dx = vb.x - va.x;
+  if (dx == 0.0) return {va.y, va.z};
+  const double t = (xTarget - va.x) / dx;
+  return {va.y + t * (vb.y - va.y), va.z + t * (vb.z - va.z)};
+}
+
+// Per-seam track for cap/strip extension of class-ii endpoints (spec D'/E').
+// A seam crossing at yzMid lies on the 3D seam segment [vA, vB]; the correct
+// extension to any xTarget is InterpolateSafe(vA, vB, xTarget).yz.
+struct SeamTrackEntry {
+  vec2 yzMid;   // seam's (y,z) at this slab's xMid (for endpoint lookup)
+  vec3 vA, vB;  // 3D seam segment endpoints
+};
+
 // Per-slab output.
 struct SlabResult {
   double xLo, xHi, xMid;
@@ -115,6 +132,7 @@ struct SlabResult {
   std::vector<SweepCapture> pieces;  // retained boundary pieces from engine
   std::vector<SectionFaceSegment> segments;  // directed section segments
   std::vector<FaceTrack> faceTracks;  // per-face tracks for strip extension
+  std::vector<SeamTrackEntry> seamTracks;  // per-seam tracks for class-ii ext
   // Test-hook: raw section edges and verts before arrangement.
   std::vector<EdgeM> sectionEdges;
   std::vector<vec2> sectionVerts;

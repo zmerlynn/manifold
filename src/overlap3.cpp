@@ -451,18 +451,6 @@ static StageBResult StageBPrime(const StageAResult& stageA, double eps,
 // by track-extending the (y,z) endpoints to xLo and xHi.
 // ---------------------------------------------------------------------------
 
-// Linearly interpolate (y,z) of segment (va, vb) at x=xTarget.
-// Unlike Interpolate() from shared.h, this does not assert when x is out of
-// the segment's domain; it extrapolates linearly instead.  This is needed when
-// extending to a cap critical that lies just outside a face-edge endpoint due
-// to sub-eps critical runs.
-static vec2 InterpolateSafe(vec3 va, vec3 vb, double xTarget) {
-  const double dx = vb.x - va.x;
-  if (dx == 0.0) return {va.y, va.z};
-  const double t = (xTarget - va.x) / dx;
-  return {va.y + t * (vb.y - va.y), va.z + t * (vb.z - va.z)};
-}
-
 // Evaluate a piece endpoint in (y,z) at x=xTarget using the face's FaceTrack.
 // t = parameterization of pt on segment [ft.p0, ft.p1].
 static vec2 ExtendPt(vec2 pt, const FaceTrack& ft, double xTarget) {
@@ -478,18 +466,129 @@ static vec2 ExtendPt(vec2 pt, const FaceTrack& ft, double xTarget) {
   return (1.0 - t) * yz0 + t * yz1;
 }
 
+// Like ExtendPt but uses the seam track for class-ii endpoints (spec D'/E').
+// A class-ii endpoint is interior to the face's section segment (not at t~0
+// or t~1) and lies on a seam.  The seam track gives the correct extension;
+// the face-edge track gives the wrong yz because it follows a diagonal edge
+// instead of the seam line.
+static vec2 ExtendPtWithSeams(vec2 pt, const FaceTrack& ft,
+                              const std::vector<SeamTrackEntry>& seamTracks,
+                              double xTarget, double eps) {
+  // Check if pt is strictly interior to the face segment (class-ii indicator).
+  const vec2 segD = ft.p1 - ft.p0;
+  const double segLen2 = la::dot(segD, segD);
+  if (segLen2 > eps * eps) {
+    const double atP0 = la::length(pt - ft.p0);
+    const double atP1 = la::length(pt - ft.p1);
+    if (atP0 > eps && atP1 > eps) {
+      // Interior point: search for matching seam track.
+      for (const auto& st : seamTracks) {
+        if (la::length(pt - st.yzMid) <= eps) {
+          return InterpolateSafe(st.vA, st.vB, xTarget);
+        }
+      }
+    }
+  }
+  return ExtendPt(pt, ft, xTarget);
+}
+
 struct OutTri3D {
   vec3 v[3];
 };
 
-static void EmitStrips(const std::vector<SlabResult>& slabs,
+// Find interior split t-values in (0,1) where cap arrangement vertices lie on
+// the strip segment [p0c, p1c] (within eps).  Returned values are sorted.
+static std::vector<double> FindCapSplits(const std::vector<vec2>& capVerts,
+                                         vec2 p0c, vec2 p1c, double eps) {
+  std::vector<double> result;
+  const vec2 segD = p1c - p0c;
+  const double segLen2 = la::dot(segD, segD);
+  if (segLen2 <= eps * eps) return result;
+  const double invLen2 = 1.0 / segLen2;
+  const double tEps = eps / std::sqrt(segLen2);
+  for (const auto& v : capVerts) {
+    const double t = la::dot(v - p0c, segD) * invLen2;
+    if (t <= tEps || t >= 1.0 - tEps) continue;
+    const vec2 proj = p0c + t * segD;
+    if (la::length(v - proj) > eps) continue;
+    result.push_back(t);
+  }
+  std::sort(result.begin(), result.end());
+  auto last = std::unique(result.begin(), result.end(),
+                          [](double a, double b) { return b - a < 1e-10; });
+  result.erase(last, result.end());
+  return result;
+}
+
+// Zipper-triangulate a strip between two polylines parameterized from t=0 to 1.
+// s_params: sorted xLo polyline split params (must include 0 and 1).
+// t_params: sorted xHi polyline split params (must include 0 and 1).
+// Each side is subdivided independently by the cap arrangement at that
+// critical x (spec R1-fold: no spurious interior vertices on the other side).
+static void ZipperEmit(double xLo, double xHi, vec2 yz_a0, vec2 yz_a1,
+                       vec2 yz_b0, vec2 yz_b1,
+                       const std::vector<double>& s_params,
+                       const std::vector<double>& t_params,
                        std::vector<OutTri3D>& out) {
+  auto ptA = [&](double s) -> vec3 {
+    const vec2 yz = (1.0 - s) * yz_a0 + s * yz_a1;
+    return {xLo, yz.x, yz.y};
+  };
+  auto ptB = [&](double t) -> vec3 {
+    const vec2 yz = (1.0 - t) * yz_b0 + t * yz_b1;
+    return {xHi, yz.x, yz.y};
+  };
+  auto emitTri = [&](vec3 v0, vec3 v1, vec3 v2) {
+    if (v0 != v1 && v1 != v2 && v0 != v2) out.push_back({v0, v1, v2});
+  };
+
+  const int m = (int)s_params.size() - 1;
+  const int n = (int)t_params.size() - 1;
+  int i = 0, j = 0;
+  while (i < m || j < n) {
+    const double s_next = (i < m) ? s_params[i + 1] : 2.0;
+    const double t_next = (j < n) ? t_params[j + 1] : 2.0;
+    const vec3 Ai = ptA(s_params[i]);
+    const vec3 Bj = ptB(t_params[j]);
+    if (t_next < s_next - 1e-10) {
+      emitTri(Ai, ptB(t_next), Bj);  // advance right
+      ++j;
+    } else if (s_next < t_next - 1e-10) {
+      emitTri(Ai, ptA(s_next), Bj);  // advance left
+      ++i;
+    } else {
+      emitTri(Ai, ptA(s_next), ptB(t_next));  // advance both (quad tri 1)
+      emitTri(Ai, ptB(t_next), Bj);           // advance both (quad tri 2)
+      ++i;
+      ++j;
+    }
+  }
+}
+
+// Stage D': emit strips with cap-vertex subdivision at each c-side.
+// capVertsMap[xCrit] = all yz vertices from the cap arrangement at xCrit.
+// Per spec R1-fold: each c-side takes its polyline from the cap arrangement
+// at that critical x; the two sides are subdivided independently.
+static void EmitStrips(const std::vector<SlabResult>& slabs,
+                       const std::map<double, std::vector<vec2>>& capVertsMap,
+                       std::vector<OutTri3D>& out, double eps) {
+  const std::vector<vec2> emptyVerts;
+  // eps-based map lookup: seam endpoints can land at a slightly different
+  // x than the original vertex, making the slab boundary differ from the
+  // capVertsMap key by a sub-eps amount.
+  auto capVertsLookup = [&](double x) -> const std::vector<vec2>& {
+    auto it = capVertsMap.lower_bound(x - eps);
+    if (it != capVertsMap.end() && std::abs(it->first - x) <= eps)
+      return it->second;
+    return emptyVerts;
+  };
   for (const auto& slab : slabs) {
     if (!slab.built) continue;
     const double xLo = slab.xLo, xHi = slab.xHi;
+    const std::vector<vec2>& capLo = capVertsLookup(xLo);
+    const std::vector<vec2>& capHi = capVertsLookup(xHi);
 
     for (const auto& piece : slab.pieces) {
-      // Find FaceTrack for this face.
       const FaceTrack* ft = nullptr;
       for (const auto& tk : slab.faceTracks) {
         if (tk.faceId == piece.sourceId) {
@@ -499,26 +598,27 @@ static void EmitStrips(const std::vector<SlabResult>& slabs,
       }
       if (!ft) continue;
 
-      // Emission direction: insAbove -> from lex-forward; insBelow -> reversed.
       const bool insAbove = IsInside3D(piece.above);
-      // piece.from/to are in lex-forward order; orient to get p0, p1.
       const vec2 p0 = insAbove ? piece.from : piece.to;
       const vec2 p1 = insAbove ? piece.to : piece.from;
 
-      // Extend to xLo and xHi.
-      const vec2 yz_a0 = ExtendPt(p0, *ft, xLo);
-      const vec2 yz_a1 = ExtendPt(p1, *ft, xLo);
-      const vec2 yz_b0 = ExtendPt(p0, *ft, xHi);
-      const vec2 yz_b1 = ExtendPt(p1, *ft, xHi);
+      const vec2 yz_a0 = ExtendPtWithSeams(p0, *ft, slab.seamTracks, xLo, eps);
+      const vec2 yz_a1 = ExtendPtWithSeams(p1, *ft, slab.seamTracks, xLo, eps);
+      const vec2 yz_b0 = ExtendPtWithSeams(p0, *ft, slab.seamTracks, xHi, eps);
+      const vec2 yz_b1 = ExtendPtWithSeams(p1, *ft, slab.seamTracks, xHi, eps);
 
-      const vec3 A0 = {xLo, yz_a0.x, yz_a0.y};
-      const vec3 A1 = {xLo, yz_a1.x, yz_a1.y};
-      const vec3 B0 = {xHi, yz_b0.x, yz_b0.y};
-      const vec3 B1 = {xHi, yz_b1.x, yz_b1.y};
+      // Independent splits at each c-side from the cap at that critical x.
+      std::vector<double> s_params = {0.0};
+      for (double t : FindCapSplits(capLo, yz_a0, yz_a1, eps))
+        s_params.push_back(t);
+      s_params.push_back(1.0);
 
-      // Quad (A0, A1, B1, B0) -> triangles (A0,A1,B1) and (A0,B1,B0).
-      if (A0 != A1 && A1 != B1 && A0 != B1) out.push_back({A0, A1, B1});
-      if (A0 != B1 && B1 != B0 && A0 != B0) out.push_back({A0, B1, B0});
+      std::vector<double> t_params = {0.0};
+      for (double t : FindCapSplits(capHi, yz_b0, yz_b1, eps))
+        t_params.push_back(t);
+      t_params.push_back(1.0);
+
+      ZipperEmit(xLo, xHi, yz_a0, yz_a1, yz_b0, yz_b1, s_params, t_params, out);
     }
   }
 }
@@ -586,8 +686,10 @@ static void AppendCapEdges(const SlabResult& slab, int sign, double xCap,
       }
     if (!ft) continue;
 
-    const vec2 from_c = ExtendPt(piece.from, *ft, xCap);
-    const vec2 to_c = ExtendPt(piece.to, *ft, xCap);
+    const vec2 from_c =
+        ExtendPtWithSeams(piece.from, *ft, slab.seamTracks, xCap, eps);
+    const vec2 to_c =
+        ExtendPtWithSeams(piece.to, *ft, slab.seamTracks, xCap, eps);
     const bool insAbove = IsInside3D(piece.above);
     const vec2 eFrom = insAbove ? from_c : to_c;
     const vec2 eTo = insAbove ? to_c : from_c;
@@ -611,8 +713,23 @@ static void AppendCapEdges(const SlabResult& slab, int sign, double xCap,
 // Run ONE arrangement over combined cap edges, triangulate, append to out.
 // cap_plus (facing +x): leftSlab mult=+1, rightSlab mult=-1.
 // cap_minus (facing -x): rightSlab mult=+1, leftSlab mult=-1.
+// capVerts accumulates all yz vertices from the arrangements for strip
+// subdivision at this critical (spec R1-fold: one source of truth per
+// critical).
 static void ComputeCap(const SlabResult* leftSlab, const SlabResult* rightSlab,
-                       double xCap, double eps, std::vector<OutTri3D>& out) {
+                       double xCap, double eps, std::vector<OutTri3D>& out,
+                       std::vector<vec2>& capVerts) {
+  auto collectVerts = [&](const std::vector<vec2>& rv) {
+    for (const auto& v : rv) {
+      bool found = false;
+      for (const auto& cv : capVerts)
+        if (la::length(v - cv) <= eps) {
+          found = true;
+          break;
+        }
+      if (!found) capVerts.push_back(v);
+    }
+  };
   // cap_plus = L - R.
   {
     std::vector<vec2> verts;
@@ -621,8 +738,12 @@ static void ComputeCap(const SlabResult* leftSlab, const SlabResult* rightSlab,
       AppendCapEdges(*leftSlab, +1, xCap, eps, verts, edges);
     if (rightSlab && rightSlab->built)
       AppendCapEdges(*rightSlab, -1, xCap, eps, verts, edges);
+    // Collect input vertices so that piece-endpoint "junction" vertices that
+    // cancel in the arrangement still get into capVerts for strip subdivision.
+    collectVerts(verts);
     if (!edges.empty()) {
       OverlapResult r = RemoveOverlaps2D(verts, edges, eps);
+      collectVerts(r.verts);
       if (!r.edges.empty()) {
         const Polygons cp = OutEdgesToPolygons(r.verts, r.edges);
         TriangulateCap(cp, xCap, /*flipWinding=*/false, eps, out);
@@ -637,8 +758,10 @@ static void ComputeCap(const SlabResult* leftSlab, const SlabResult* rightSlab,
       AppendCapEdges(*rightSlab, +1, xCap, eps, verts, edges);
     if (leftSlab && leftSlab->built)
       AppendCapEdges(*leftSlab, -1, xCap, eps, verts, edges);
+    collectVerts(verts);
     if (!edges.empty()) {
       OverlapResult r = RemoveOverlaps2D(verts, edges, eps);
+      collectVerts(r.verts);
       if (!r.edges.empty()) {
         const Polygons cm = OutEdgesToPolygons(r.verts, r.edges);
         TriangulateCap(cm, xCap, /*flipWinding=*/true, eps, out);
@@ -647,9 +770,12 @@ static void ComputeCap(const SlabResult* leftSlab, const SlabResult* rightSlab,
   }
 }
 
-static void EmitCaps(const std::vector<SlabResult>& slabs,
-                     const std::vector<double>& crits, double eps,
-                     std::vector<OutTri3D>& out) {
+// Returns a map from each critical x to the yz vertex set of its cap
+// arrangement, for use by EmitStrips (spec R1-fold).
+static std::map<double, std::vector<vec2>> EmitCaps(
+    const std::vector<SlabResult>& slabs, const std::vector<double>& crits,
+    double eps, std::vector<OutTri3D>& out) {
+  std::map<double, std::vector<vec2>> capVertsMap;
   const int nSlabs = (int)slabs.size();
   for (double c : crits) {
     int leftIdx = -1, rightIdx = -1;
@@ -666,8 +792,9 @@ static void EmitCaps(const std::vector<SlabResult>& slabs,
     }
     const SlabResult* leftSlab = (leftIdx >= 0) ? &slabs[leftIdx] : nullptr;
     const SlabResult* rightSlab = (rightIdx >= 0) ? &slabs[rightIdx] : nullptr;
-    ComputeCap(leftSlab, rightSlab, c, eps, out);
+    ComputeCap(leftSlab, rightSlab, c, eps, out, capVertsMap[c]);
   }
+  return capVertsMap;
 }
 
 // ---------------------------------------------------------------------------
@@ -693,10 +820,10 @@ static StageResult<Manifold::Impl> BuildImpl(const std::vector<OutTri3D>& tris,
   // crash CreateHalfedges.  These carry zero area and are safe to drop.
   Vec<ivec3> tv;
   tv.reserve(tris.size());
-  for (int i = 0; i < (int)tris.size(); ++i) {
-    const int v0 = getVertIdx(tris[i].v[0]);
-    const int v1 = getVertIdx(tris[i].v[1]);
-    const int v2 = getVertIdx(tris[i].v[2]);
+  for (const auto& tri : tris) {
+    const int v0 = getVertIdx(tri.v[0]);
+    const int v1 = getVertIdx(tri.v[1]);
+    const int v2 = getVertIdx(tri.v[2]);
     if (v0 == v1 || v1 == v2 || v0 == v2) continue;
     tv.push_back({v0, v1, v2});
   }
@@ -706,10 +833,11 @@ static StageResult<Manifold::Impl> BuildImpl(const std::vector<OutTri3D>& tris,
   for (int i = 0; i < (int)verts.size(); ++i) impl.vertPos_[i] = verts[i];
 
   impl.CreateHalfedges(tv);
-  if (!impl.IsManifold())
+  if (!impl.IsManifold()) {
     return StageResult<Manifold::Impl>::Fatal(
         FatalReason::NonManifoldEmission,
         "emitted triangulation not 2-manifold");
+  }
   impl.InitializeOriginal();
   impl.CalculateBBox();
   impl.SetEpsilon();
@@ -738,18 +866,31 @@ static Overlap3Result RunCDEPrime(ArrangementGeometry& arr, double eps,
   const std::vector<SlabResult>& slabs = *slabRes.value;
 
   // Collect x-criticals (all vert x-values) for cap generation.
+  // Use eps-based dedup: seam endpoints can land slightly off a mesh vertex
+  // x-coordinate, creating sub-eps duplicate criticals that would invoke
+  // ComputeCap twice with the same adjacent slabs and emit double caps.
   std::vector<double> crits;
   crits.reserve(arr.verts.size());
   for (const auto& v : arr.verts) crits.push_back(v.pos.x);
   std::sort(crits.begin(), crits.end());
   crits.erase(std::unique(crits.begin(), crits.end()), crits.end());
+  {
+    std::vector<double> dedupCrits;
+    dedupCrits.reserve(crits.size());
+    for (double c : crits)
+      if (dedupCrits.empty() || c - dedupCrits.back() > eps)
+        dedupCrits.push_back(c);
+    crits = std::move(dedupCrits);
+  }
 
-  // D': emit strips.
+  // E': emit caps at each critical, collecting arrangement vertices.
+  // Caps run first so their vertex set can subdivide adjacent strip edges
+  // (spec R1-fold: one source of truth per critical).
   std::vector<OutTri3D> emitted;
-  EmitStrips(slabs, emitted);
+  const auto capVertsMap = EmitCaps(slabs, crits, eps, emitted);
 
-  // E': emit caps at each critical.
-  EmitCaps(slabs, crits, eps, emitted);
+  // D': emit strips, subdividing each c-side by the cap arrangement vertices.
+  EmitStrips(slabs, capVertsMap, emitted, eps);
 
   // Assembly.
   auto buildRes = BuildImpl(emitted, eps);
