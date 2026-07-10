@@ -800,7 +800,8 @@ void CollectIntersectionPairs(const std::vector<EdgeM>& edges,
 
 OverlapResult RemoveOverlaps2D(const std::vector<vec2>& vertsIn,
                                const std::vector<EdgeM>& edgesIn, double eps,
-                               bool debug, WindRule pred, Trace* trace) {
+                               bool debug, WindRule pred, Trace* trace,
+                               std::vector<OutEdge>* edgesNeg) {
   auto& P = GlobalPhases();
   ScopedTiming totalTiming(P.totalNs);
   TraceRecorder traceRecorder(trace, eps, pred);
@@ -869,7 +870,7 @@ OverlapResult RemoveOverlaps2D(const std::vector<vec2>& vertsIn,
   std::vector<OutEdge> out;
   {
     ScopedTiming timing(P.filterWindingNs);
-    out = SweepWinding(edges, merge.verts, pred);
+    out = SweepWinding(edges, merge.verts, pred, nullptr, nullptr, edgesNeg);
   }
   traceRecorder.RecordFilteredOutput(merge.verts, out);
   CountTimingCase();

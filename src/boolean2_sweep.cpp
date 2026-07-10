@@ -503,16 +503,30 @@ PolySet2 CollectArrangement(PolySet2 arr, WindRule rule,
 // Arrangement then winding over the resulting true arrangement. The optional
 // `capture` receives one SweepCapture per retained boundary piece in the
 // winding pass. `conflicts` is incremented by the total number of attribution
-// conflicts.
+// conflicts. When `negOut` is non-null, a SECOND winding measure runs over the
+// same collected arrangement with all multiplicities negated and *negOut
+// receives its retained boundary - the other signed difference from the one
+// arrangement. The winding pass constructs no points, so both measures share
+// the arrangement's geometry exactly. Its conflict events are sign-independent
+// duplicates of the first measure's and are not re-counted.
 PolySet2 CollectThenMeasure(PolySet2 arr, WindRule rule,
                             std::vector<SweepCapture>* capture = nullptr,
-                            int* conflicts = nullptr) {
+                            int* conflicts = nullptr,
+                            PolySet2* negOut = nullptr) {
   PolySet2 clean = CollectArrangement(std::move(arr), rule, conflicts);
   SweepPass measure(rule, SweepMode::Winding, capture);
   for (const auto& kv : clean)
     measure.Seed(kv.first.first, kv.first.second, kv.second);
   measure.Run(/*mergeVerticalOutput=*/false);  // preserve T-junction verts
   if (conflicts) *conflicts += measure.ConflictCount();
+  if (negOut) {
+    SweepPass measureNeg(rule, SweepMode::Winding, nullptr);
+    for (const auto& kv : clean)
+      measureNeg.Seed(kv.first.first, kv.first.second,
+                      {-kv.second.m, kv.second.srcId});
+    measureNeg.Run(/*mergeVerticalOutput=*/false);
+    *negOut = std::move(measureNeg.Out());
+  }
   return std::move(measure.Out());
 }
 
@@ -524,11 +538,15 @@ PolySet2 CollectThenMeasure(PolySet2 arr, WindRule rule,
 // If `capture` is non-null, appends one SweepCapture per retained winding-pass
 // piece (see SweepCapture definition in boolean2.h).
 // If `conflictCount` is non-null, *conflictCount receives the total number of
-// source-id attribution conflicts; 2D callers pass nullptr for both.
+// source-id attribution conflicts.
+// If `negEdges` is non-null, *negEdges receives the retained boundary of the
+// negated measure over the same arrangement, referencing the same `verts`
+// (see boolean2.h). 2D callers pass nullptr for all three.
 std::vector<OutEdge> SweepWinding(const std::vector<EdgeM>& edges,
                                   std::vector<vec2>& verts, WindRule rule,
                                   std::vector<SweepCapture>* capture,
-                                  int* conflictCount) {
+                                  int* conflictCount,
+                                  std::vector<OutEdge>* negEdges) {
   std::map<std::pair<double, double>, int> vertId;
   for (int v = 0; v < static_cast<int>(verts.size()); ++v)
     vertId.emplace(std::make_pair(verts[v].x, verts[v].y), v);
@@ -556,23 +574,29 @@ std::vector<OutEdge> SweepWinding(const std::vector<EdgeM>& edges,
   }
   MergeVerticals1D(arr, &conflicts);
 
-  const PolySet2 out =
-      CollectThenMeasure(std::move(arr), rule, capture, &conflicts);
+  PolySet2 negOut;
+  const PolySet2 out = CollectThenMeasure(
+      std::move(arr), rule, capture, &conflicts, negEdges ? &negOut : nullptr);
   if (conflictCount) *conflictCount = conflicts;
 
-  // Materialize the retained boundary as directed OutEdges. A key stores the
-  // lex-min/lex-max endpoints with signed multiplicity: positive runs lo->hi.
+  // Materialize retained boundaries as directed OutEdges via the shared getId,
+  // so both measures reference one vert list. A key stores the lex-min/lex-max
+  // endpoints with signed multiplicity: positive runs lo->hi.
+  auto materialize = [&](const PolySet2& ps, std::vector<OutEdge>& result) {
+    for (const auto& kv : ps) {
+      const int64_t m = kv.second.m;
+      if (m == 0) continue;
+      const int loId = getId(kv.first.first);
+      const int hiId = getId(kv.first.second);
+      const int from = m > 0 ? loId : hiId;
+      const int to = m > 0 ? hiId : loId;
+      for (int64_t c = 0; c < std::abs(m); ++c)
+        result.push_back({from, to, 1, kv.second.srcId});
+    }
+  };
   std::vector<OutEdge> result;
-  for (const auto& kv : out) {
-    const int64_t m = kv.second.m;
-    if (m == 0) continue;
-    const int loId = getId(kv.first.first);
-    const int hiId = getId(kv.first.second);
-    const int from = m > 0 ? loId : hiId;
-    const int to = m > 0 ? hiId : loId;
-    for (int64_t c = 0; c < std::abs(m); ++c)
-      result.push_back({from, to, 1, kv.second.srcId});
-  }
+  materialize(out, result);
+  if (negEdges) materialize(negOut, *negEdges);
   return result;
 }
 

@@ -189,12 +189,17 @@ enum class WindRule {
 // reference. If `capture` is non-null, one SweepCapture per retained winding-
 // pass piece is appended. If `conflictCount` is non-null, *conflictCount
 // receives the total number of source-id attribution conflicts (distinct
-// srcIds at the same key with nonzero net multiplicity); 2D callers pass
-// nullptr for both, leaving behavior unchanged.
+// srcIds at the same key with nonzero net multiplicity). If `negEdges` is
+// non-null, a second winding measure runs over the SAME collected arrangement
+// with all multiplicities negated and *negEdges receives its retained
+// boundary; both edge sets reference the same `verts` (one arrangement, two
+// signed measures - the 3D cap consumer). 2D callers pass nullptr for all
+// three, leaving behavior unchanged.
 std::vector<OutEdge> SweepWinding(const std::vector<EdgeM>& edges,
                                   std::vector<vec2>& verts, WindRule rule,
                                   std::vector<SweepCapture>* capture = nullptr,
-                                  int* conflictCount = nullptr);
+                                  int* conflictCount = nullptr,
+                                  std::vector<OutEdge>* negEdges = nullptr);
 
 struct OverlapResult {
   std::vector<vec2> verts;
@@ -205,11 +210,14 @@ struct OverlapResult {
 
 // `eps` is the per-op FP-noise bound (3D: Impl::epsilon_). The arrangement is
 // eps-only; tolerance-scale decimation is Simplify's job, as in boolean3.
+// `edgesNeg`, when non-null, receives the retained boundary of the negated
+// measure over the same arrangement (see SweepWinding).
 OverlapResult RemoveOverlaps2D(const std::vector<vec2>& vertsIn,
                                const std::vector<EdgeM>& edgesIn, double eps,
                                bool debug = false,
                                WindRule pred = WindRule::Add,
-                               Trace* trace = nullptr);
+                               Trace* trace = nullptr,
+                               std::vector<OutEdge>* edgesNeg = nullptr);
 
 double InferEps(const Polygons& a, const Polygons& b);
 

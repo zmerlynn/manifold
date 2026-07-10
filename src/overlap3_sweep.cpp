@@ -99,10 +99,13 @@ StageResult<std::vector<SlabResult>> BuildSlabs(const ArrangementGeometry& arr,
                                                 Overlap3Counters& cnt) {
   const int nFaces = (int)arr.faces.size();
 
-  // Collect x-criticals from all verts (stage-A + seam endpoints).
+  // Collect x-criticals: all vert x's (stage-A + seam endpoints) plus the
+  // vertex-free criticals from stage B' (degenerate contacts, seam-seam
+  // crossings).
   std::vector<double> crits;
-  crits.reserve(arr.verts.size());
+  crits.reserve(arr.verts.size() + arr.criticalXs.size());
   for (const auto& v : arr.verts) crits.push_back(v.pos.x);
+  for (double x : arr.criticalXs) crits.push_back(x);
   std::sort(crits.begin(), crits.end());
   crits.erase(std::unique(crits.begin(), crits.end()), crits.end());
 

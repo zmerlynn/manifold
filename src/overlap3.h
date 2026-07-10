@@ -161,6 +161,10 @@ struct ArrangementGeometry {
   std::vector<MergedVert> verts;     // all canonical 3D verts
   std::vector<CanonicalFace> faces;  // canonical faces
   std::vector<Seam> seams;           // face-pair seam segments
+  // Extra x-criticals with no vert identity: degenerate-contact endpoints and
+  // seam-seam crossing x's (spec B': only the x is consumed; over-inclusion
+  // is harmless).  Kept separate from verts - a critical is not a vertex.
+  std::vector<double> criticalXs;
 };
 
 // ---------------------------------------------------------------------------

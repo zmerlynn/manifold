@@ -114,11 +114,28 @@ strips). A constructed subdivision vert lies within alpha of its
 host segment (Smith 8.2, the shared kernels), hence within alpha of
 the strip's source-face plane - the standard eps-validity, not a
 new error class. Closure is then by shared construction, not
-assertion. Both cap_plus and cap_minus are computed (one engine
-Subtract each); cap regions triangulate via Triangulate (holes CW
-per its contract - never fans); the exterior limit beyond the
-first/last critical is the empty region, making the outermost caps
-ordinary.
+assertion. Both cap_plus and cap_minus come from the ONE
+arrangement [M4-close]: the engine's winding measure runs twice
+over the same collected arrangement (the second with negated
+multiplicities - the winding pass constructs no points, so both
+measures share the arrangement's geometry exactly); cap regions
+triangulate via Triangulate (holes CW per its contract - never
+fans); the exterior limit beyond the first/last critical is the
+empty region, making the outermost caps ordinary. [M4-close] Two
+adjudications from implementation: (a) "its output verts" means the
+arrangement's FULL vert set (merged input verts + constructed
+crossings), not the retained-edge subset - where the two limits
+coincide their edges annihilate and retention is empty, yet the
+strips on both sides still need the same subdivision to pair;
+the merge/incidence machinery is what guarantees agreement, and
+retention measures winding, not incidence. (b) Strip-edge chains
+bind per adjacent-built-slab PAIR at the pair's canonical critical
+- the FIRST critical of the gap between them (the critical itself
+under direct adjacency, the generic case). One arrangement must own
+each strip-strip seam: the two arrangements of a sub-eps critical
+pair can disagree macroscopically about the subdivision of a shared
+(cancelled) edge, since geometry changes discontinuously at a
+critical by definition.
 
 DEGENERATE SLABS (width <= eps): no section is built; the slab
 contributes no strips; the caps at its two bounding criticals are
@@ -165,10 +182,15 @@ restricted to retained pieces (the id plumbing is already built and
 2D-fence-verified); the (below, above) fields are not consumed by
 this design. conflictCount semantics: nonfatal inside the 2D
 engine (sourceId = -1 + counter), any nonzero count fatal to the
-3D pipeline (EngineIdConflict) - the established rule.
+3D pipeline (EngineIdConflict) - the established rule. [M4-close]
+SweepWinding/RemoveOverlaps2D additionally gain an optional
+negated-measure out-param (negEdges/edgesNeg): one collected
+arrangement, a second winding measure over it with negated
+multiplicities, both edge sets materialized against the same vert
+list. Null default; 2D callers unchanged.
 BORN: track extension (Interpolate at two x's per piece endpoint),
-cap construction (one engine Subtract per critical), strip/cap
-assembly. Expected net: a large deletion.
+cap construction (one arrangement + two signed measures per
+critical), strip/cap assembly. Expected net: a large deletion.
 
 ## Eps posture
 
@@ -296,3 +318,47 @@ The architecture verdict after three implementations: the
 sweep-native emission core is sound and each round's findings
 narrowed monotonically; what remains is finishing one function
 cluster to its spec, not another rewrite.
+
+## M4 close (main-agent, 2026-07-10)
+
+The one-arrangement-three-consumers cluster is implemented to spec
+after escaping three subagent lanes. Engine: optional negated
+second winding measure over the one collected arrangement (nulled
+for 2D callers; negation commutes with collect - verified by
+bitwise-identical cap output against the old two-call scheme on the
+box+rotated fixture). ComputeCap: ONE RemoveOverlaps2D call;
+cap_plus from the positive measure, cap_minus from the negated one;
+per-piece strip chains carry the arrangement's vert positions
+bitwise (snapped endpoints via the input-vert map, interior splits
+by projection onto the snapped chord). Strips stop self-extending:
+extension now happens once, as cap input; EmitStrips zips
+cap-produced position polylines. Died with the two-call scheme: the
+capVerts bag + eps-dedup collection, the fuzzy x-keyed cap lookup,
+the eps*0.1 neighbor-slab tolerance (slab lookup is index-exact:
+slab bounds ARE the criticals), the param-space zipper's 2.0/1e-10
+sentinels, the duplicated linear face-track searches (one map +
+assert), and the fake criticals-as-vertices pattern (degenerate
+contacts and seam-seam crossing x's now live in
+ArrangementGeometry.criticalXs; a critical is not a vertex).
+
+The two seam adjudications recorded in-line above ([M4-close] tags)
+came from a real red: per-critical chain binding broke the
+strip-strip weld across sub-eps critical pairs, and the
+retained-subset scan emptied exactly at cancellation seams. The
+invariant that makes per-critical caps survive sub-eps pairs: a
+non-canonical cap of a run is sliver-only and collapses in the
+assembly weld.
+
+KNOWN DEAD ZONES at close (recorded, not regressions - all
+inherited by construction and unreachable in the suite): (a) a
+macro-scale geometry change at a non-canonical critical of a
+sub-eps run (a face starting mid-run with a full yz edge) emits a
+macro cap whose corners no strip carries; candidate SubEpsFeature
+tightening. (b) A bare merged vert (every incident edge cancelled)
+lying eps-on a retained cap edge is not incidence-split into that
+edge but does subdivide the strips. (c) Multi-sliver runs (total
+gap > eps) weld strip-to-strip across more than eps. Gate5
+box+rotated is the de-facto pin for the canonical-binding rule (it
+reds under per-critical binding); the M1 pin now asserts the
+criticalXs mechanism and is mutation-verified against a stubbed M1
+loop.
