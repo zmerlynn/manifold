@@ -225,8 +225,12 @@ double InferEps(const Polygons& a, const Polygons& b);
 
 std::pair<std::vector<vec2>, std::vector<EdgeM>> PolygonsToInput(
     const Polygons& polys);
+// `allClosed`, when non-null, receives false if any retained walk failed to
+// close (that walk is dropped from the result) - checked-extraction for
+// callers that must fail closed rather than lose a loop.
 Polygons OutEdgesToPolygons(const std::vector<vec2>& verts,
-                            const std::vector<OutEdge>& edges);
+                            const std::vector<OutEdge>& edges,
+                            bool* allClosed = nullptr);
 
 // Regularize one polygon set under the Positive (Add) winding rule at
 // machine-scale eps. Fill-rule application, not tolerance decimation.

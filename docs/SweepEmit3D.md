@@ -410,3 +410,17 @@ DEFENDED against the audits (recorded disagreements):
   tolerance-model reading of "verts subdivide the strip edges");
   per-input-edge chains from the engine would upgrade it to exact
   identity and are recorded as future work.
+
+CONVERGENCE ROUND (same day): fidelity SURVIVE - M4 RESOLVED with
+probe evidence (internal crossing verts materialize under negEdges;
+default path unchanged), both new pins verified structural, no new
+findings. Simplicity NEED-CHANGE narrowed to three release/drop
+paths ("this is one design now, not patch strata"), all three
+fixed: TriTriSeam no longer conflates point/tangent contact with
+disjoint (an eps-admitted contact returns a collapsed seam and its
+x enters criticalXs through the ordinary degenerate arm);
+OutEdgesToPolygons gained a checked-extraction out-flag and a
+non-closing cap boundary walk fatals as NonManifoldEmission instead
+of silently dropping a loop; EmitStrips validates the
+one-non-empty-chain-per-piece contract and fatals on violation
+(ZipperEmit's empty-chain tolerance deleted with it).

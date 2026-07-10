@@ -122,7 +122,9 @@ static bool LineTriClip(vec3 P, vec3 D, vec3 v0, vec3 v1, vec3 v2, vec3 n,
 
 // Compute the seam segment [qA, qB] as the intersection of face triangles
 // (a0,a1,a2) with normal na and (b0,b1,b2) with normal nb.
-// Returns false if no interior seam exists (non-intersecting or degenerate).
+// Returns false only when the triangles are disjoint (or parallel-plane);
+// a point/tangent contact admitted by the eps clip model returns true with
+// qA == qB, so the caller's degenerate-contact arm records its x-critical.
 static bool TriTriSeam(vec3 a0, vec3 a1, vec3 a2, vec3 na, vec3 b0, vec3 b1,
                        vec3 b2, vec3 nb, vec3& qA, vec3& qB, double eps) {
   const vec3 D = la::cross(na, nb);
@@ -145,7 +147,14 @@ static bool TriTriSeam(vec3 a0, vec3 a1, vec3 a2, vec3 na, vec3 b0, vec3 b1,
   if (!LineTriClip(P, dir, a0, a1, a2, na, tAlo, tAhi, eps)) return false;
   if (!LineTriClip(P, dir, b0, b1, b2, nb, tBlo, tBhi, eps)) return false;
   const double tLo = std::max(tAlo, tBlo), tHi = std::min(tAhi, tBhi);
-  if (tLo >= tHi) return false;
+  // dir is unit length, so the parameter interval is in length units and
+  // eps applies directly (matching LineTriClip's own slop).
+  if (tLo > tHi + eps) return false;  // genuinely disjoint
+  if (tLo >= tHi) {
+    // Point/tangent contact: collapse to the interval midpoint.
+    qA = qB = P + (0.5 * (tLo + tHi)) * dir;
+    return true;
+  }
   qA = P + tLo * dir;
   qB = P + tHi * dir;
   return true;
@@ -623,7 +632,6 @@ static std::vector<vec2> ChainSplitVerts(const std::vector<vec2>& arrVerts,
 static void ZipperEmit(double xLo, double xHi, const std::vector<vec2>& a,
                        const std::vector<vec2>& b, std::vector<OutTri3D>& out) {
   const int m = (int)a.size(), n = (int)b.size();
-  if (m == 0 || n == 0) return;
   auto params = [](const std::vector<vec2>& c) {
     std::vector<double> t(c.size(), 0.0);
     const vec2 d = c.back() - c.front();
@@ -667,17 +675,32 @@ struct StripChains {
 // sides bound (its own xHi is always its pair's canonical; its lo is bound at
 // the preceding gap's canonical), with one chain per piece - attribution
 // failures fail closed in EmitCaps before this runs.
-static void EmitStrips(const std::vector<SlabResult>& slabs,
-                       const std::vector<StripChains>& chains,
-                       std::vector<OutTri3D>& out) {
+static std::optional<std::pair<FatalReason, std::string>> EmitStrips(
+    const std::vector<SlabResult>& slabs,
+    const std::vector<StripChains>& chains, std::vector<OutTri3D>& out) {
   for (int si = 0; si < (int)slabs.size(); ++si) {
     if (!slabs[si].built) continue;
     const StripChains& ch = chains[si];
-    DEBUG_ASSERT(ch.lo.size() == ch.hi.size(), logicErr,
-                 "strip chain sides disagree on piece count");
-    for (size_t k = 0; k < ch.lo.size(); ++k)
+    // One non-empty chain per piece on each side is the EmitCaps contract
+    // (every built slab's sides bind at their pair-canonical criticals);
+    // violation means emission would drop or mispair strips - fail closed.
+    if (ch.lo.size() != ch.hi.size()) {
+      DEBUG_ASSERT(false, logicErr,
+                   "strip chain sides disagree on piece count");
+      return std::make_pair(
+          FatalReason::NonManifoldEmission,
+          std::string("strip chain sides disagree on piece count"));
+    }
+    for (size_t k = 0; k < ch.lo.size(); ++k) {
+      if (ch.lo[k].empty() || ch.hi[k].empty()) {
+        DEBUG_ASSERT(false, logicErr, "empty strip chain");
+        return std::make_pair(FatalReason::NonManifoldEmission,
+                              std::string("empty strip chain"));
+      }
       ZipperEmit(slabs[si].xLo, slabs[si].xHi, ch.lo[k], ch.hi[k], out);
+    }
   }
+  return std::nullopt;
 }
 
 // ---------------------------------------------------------------------------
@@ -814,13 +837,19 @@ static std::optional<std::pair<FatalReason, std::string>> ComputeCap(
   const OverlapResult r =
       RemoveOverlaps2D(ces.rawVerts, edges, eps, /*debug=*/false, WindRule::Add,
                        /*trace=*/nullptr, &negEdges);
+  bool loopsClosed = true;
   bool trisOk = true;
-  if (!r.edges.empty())
-    trisOk = TriangulateCap(OutEdgesToPolygons(r.verts, r.edges), xCap,
-                            /*flipWinding=*/false, eps, out);
-  if (trisOk && !negEdges.empty())
-    trisOk = TriangulateCap(OutEdgesToPolygons(r.verts, negEdges), xCap,
-                            /*flipWinding=*/true, eps, out);
+  if (!r.edges.empty()) {
+    const Polygons cp = OutEdgesToPolygons(r.verts, r.edges, &loopsClosed);
+    trisOk = TriangulateCap(cp, xCap, /*flipWinding=*/false, eps, out);
+  }
+  if (loopsClosed && trisOk && !negEdges.empty()) {
+    const Polygons cm = OutEdgesToPolygons(r.verts, negEdges, &loopsClosed);
+    trisOk = TriangulateCap(cm, xCap, /*flipWinding=*/true, eps, out);
+  }
+  if (!loopsClosed)
+    return std::make_pair(FatalReason::NonManifoldEmission,
+                          std::string("cap boundary walk failed to close"));
   if (!trisOk)
     return std::make_pair(
         FatalReason::NonManifoldEmission,
@@ -1001,7 +1030,12 @@ static Overlap3Result RunCDEPrime(ArrangementGeometry& arr, double eps,
     result.counters = cnt;
     return result;
   }
-  EmitStrips(slabs, chains, emitted);
+  if (auto stripFatal = EmitStrips(slabs, chains, emitted)) {
+    result.fatal = stripFatal->first;
+    result.detail = std::move(stripFatal->second);
+    result.counters = cnt;
+    return result;
+  }
 
   // Assembly.
   auto buildRes = BuildImpl(emitted, eps);

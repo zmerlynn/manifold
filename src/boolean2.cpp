@@ -156,7 +156,9 @@ std::pair<std::vector<vec2>, std::vector<EdgeM>> PolygonsToInput(
 
 // Walk retained directed sub-edges into regularized polygon loops.
 Polygons OutEdgesToPolygons(const std::vector<vec2>& verts,
-                            const std::vector<OutEdge>& edges) {
+                            const std::vector<OutEdge>& edges,
+                            bool* allClosed) {
+  if (allClosed) *allClosed = true;
   const int nE = static_cast<int>(edges.size());
   // Per-vertex outgoing edges; the next-pointer loop scans each list with
   // deterministic cross/dot comparisons.
@@ -206,6 +208,7 @@ Polygons OutEdgesToPolygons(const std::vector<vec2>& verts,
     if (!closed) {
       DEBUG_ASSERT(false, logicErr,
                    "retained directed edges must form closed walks");
+      if (allClosed) *allClosed = false;
       continue;
     }
     if (loopVerts.size() >= 3) {
