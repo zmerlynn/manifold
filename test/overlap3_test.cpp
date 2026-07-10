@@ -594,6 +594,62 @@ TEST(Overlap3, Gate4f_Wedges_TinyOffset_MustFail) {
 }
 
 // ---------------------------------------------------------------------------
+// M1 white-box pin: triple-critical vertex in arr.verts.
+// ThreeOverlappingBoxes has pairs of seams sharing a face of box A; M1 adds
+// the crossing point of those seams (as a 3D vertex) to arr.verts. Any such
+// vertex is NOT referenced by any canonical face or seam endpoint. If M1 is
+// absent, arr.verts contains only face/seam vertices (usedVerts == arr.verts).
+// This test is WHITE-BOX: it fires only if RemoveOverlaps3D_TestHooks exposes
+// the arr produced by StageBPrime.
+// ---------------------------------------------------------------------------
+
+TEST(Overlap3, Pin_M1_TripleCritical) {
+  const Manifold::Impl impl = ThreeOverlappingBoxes();
+  const double eps = ImplEps(impl);
+  const Overlap3Internals h = RemoveOverlaps3D_TestHooks(impl, eps);
+  ASSERT_FALSE(h.fatal.has_value())
+      << "ThreeOverlappingBoxes stage B fatal: " << h.detail;
+
+  // Collect vertex indices referenced by canonical faces and seam endpoints.
+  std::set<int> usedByFacesAndSeams;
+  for (const auto& f : h.arr.faces) {
+    usedByFacesAndSeams.insert(f.verts.x);
+    usedByFacesAndSeams.insert(f.verts.y);
+    usedByFacesAndSeams.insert(f.verts.z);
+  }
+  for (const auto& s : h.arr.seams) {
+    usedByFacesAndSeams.insert(s.vertId0);
+    usedByFacesAndSeams.insert(s.vertId1);
+  }
+
+  // M1 adds at least one vertex NOT referenced by any face or seam.
+  bool foundTriple = false;
+  for (int vi = 0; vi < (int)h.arr.verts.size(); ++vi) {
+    if (usedByFacesAndSeams.count(vi) == 0) {
+      foundTriple = true;
+      break;
+    }
+  }
+  EXPECT_TRUE(foundTriple)
+      << "M1: no triple-critical vertex found in arr.verts "
+      << "(all " << h.arr.verts.size() << " verts are face/seam endpoints)";
+}
+
+// ---------------------------------------------------------------------------
+// Gate 2: Section validity for the triple-critical fixture.
+// ---------------------------------------------------------------------------
+
+TEST(Overlap3, Gate2_SectionValidity_ThreeOverlappingBoxes) {
+  const Manifold::Impl impl = ThreeOverlappingBoxes();
+  const double eps = ImplEps(impl);
+  const Overlap3Internals h = RemoveOverlaps3D_TestHooks(impl, eps);
+  ASSERT_FALSE(h.fatal.has_value())
+      << "ThreeOverlappingBoxes stage B/C fatal: " << h.detail;
+  const std::string err = CheckSectionValidity(h, eps);
+  EXPECT_TRUE(err.empty()) << "Gate2 ThreeOverlappingBoxes: " << err;
+}
+
+// ---------------------------------------------------------------------------
 // Gate 5: Oracle - SAME operands composed and oracled.
 // Spec: "SAME generic operands composed and oracled (round-0 test compared
 // different geometry!)"; |vol diff| <= eps * max(SA) exactly (no *1000);
@@ -650,6 +706,28 @@ TEST(Overlap3, Gate5_Oracle_TwoSpheres) {
       << result.detail;
   ASSERT_TRUE(result.impl.has_value());
   OracleCompare(*result.impl, oracle, eps, "Gate5_TwoSpheres");
+}
+
+TEST(Overlap3, Gate5_Oracle_ThreeOverlappingBoxes) {
+  // Three pairwise-overlapping boxes with a genuine triple-critical: all three
+  // seam lines meet in a common region. Oracle is the Boolean3 union of three
+  // solids. This exercises M1 (triple criticals), M2 (weld extension), M3
+  // (per-critical caps), and M4 (one arrangement per critical).
+  const Manifold a = Manifold::Cube({2, 0.5, 0.5}, true);
+  const Manifold b =
+      Manifold::Cube({0.5, 2, 0.5}, true).Translate({0.1, 0, 0.17});
+  const Manifold c =
+      Manifold::Cube({0.5, 0.5, 2}, true).Translate({0.07, 0.07, 0.07});
+  const Manifold oracle = (a + b) + c;
+  const Manifold::Impl impl = ComposeMany({a, b, c});
+  const double eps = ImplEps(impl);
+
+  const Overlap3Result result = RemoveOverlaps3D(impl, eps);
+  ASSERT_FALSE(result.fatal.has_value())
+      << "Gate5 ThreeOverlappingBoxes pipeline fatal=" << (int)*result.fatal
+      << " " << result.detail;
+  ASSERT_TRUE(result.impl.has_value());
+  OracleCompare(*result.impl, oracle, eps, "Gate5_ThreeOverlappingBoxes");
 }
 
 // ---------------------------------------------------------------------------

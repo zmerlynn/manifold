@@ -23,6 +23,7 @@
 #include <cstdint>
 #include <limits>
 #include <map>
+#include <set>
 #include <utility>
 #include <vector>
 
@@ -41,8 +42,6 @@ StageResult<std::vector<SlabResult>> BuildSlabs(const ArrangementGeometry& arr,
                                                 Overlap3Counters& cnt);
 
 namespace {
-
-static bool IsInside3D(int64_t w) { return w > 0; }
 
 // ---------------------------------------------------------------------------
 // Stage B' helpers: coplanar clip, edge-in-plane detection, seam computation.
@@ -99,8 +98,8 @@ static double SegTriInteriorLen2D(vec2 sA, vec2 sB, vec2 t0, vec2 t1, vec2 t2) {
 // interval is non-empty.  tLo/tHi receive the parameter range.
 static bool LineTriClip(vec3 P, vec3 D, vec3 v0, vec3 v1, vec3 v2, vec3 n,
                         double& tLo, double& tHi, double eps) {
-  tLo = -1e18;
-  tHi = 1e18;
+  tLo = -std::numeric_limits<double>::infinity();
+  tHi = std::numeric_limits<double>::infinity();
   const vec3 edges[3] = {v1 - v0, v2 - v1, v0 - v2};
   const vec3 vBase[3] = {v0, v1, v2};
   const double kTol = eps * la::length(n);
@@ -149,6 +148,33 @@ static bool TriTriSeam(vec3 a0, vec3 a1, vec3 a2, vec3 na, vec3 b0, vec3 b1,
   if (tLo >= tHi) return false;
   qA = P + tLo * dir;
   qB = P + tHi * dir;
+  return true;
+}
+
+// Compute the 3D crossing point of two line segments [A0,A1] and [B0,B1]
+// assumed to be coplanar (both lie in the shared face plane).
+// Returns true and sets t (param on A) and x (the crossing x-coordinate) when:
+//   - the lines are non-parallel (|cross(dA,dB)| > 0)
+//   - the crossing is strictly interior to both seams (t, s in (eps_t,
+//   1-eps_t))
+// The x is the only output that matters per spec B' (over-inclusion harmless).
+static bool SeamSeamCrossX(vec3 A0, vec3 A1, vec3 B0, vec3 B1, double eps,
+                           double& xOut) {
+  const vec3 dA = A1 - A0, dB = B1 - B0, dC = B0 - A0;
+  const vec3 cAB = la::cross(dA, dB);
+  const double cABlen2 = la::dot(cAB, cAB);
+  if (cABlen2 < eps * eps * eps * eps) return false;  // parallel or degenerate
+  // t on A: t * |cAB|^2 = dot(cross(dC, dB), cAB)
+  const double t = la::dot(la::cross(dC, dB), cAB) / cABlen2;
+  // s on B: s * |cAB|^2 = dot(cross(dC, dA), cAB)
+  const double s = la::dot(la::cross(dC, dA), cAB) / cABlen2;
+  // Require strictly interior to both seams (not at endpoints).
+  const double lenA = la::length(dA), lenB = la::length(dB);
+  if (lenA < eps || lenB < eps) return false;
+  const double tEps = eps / lenA, sEps = eps / lenB;
+  if (t <= tEps || t >= 1.0 - tEps) return false;
+  if (s <= sEps || s >= 1.0 - sEps) return false;
+  xOut = A0.x + t * dA.x;
   return true;
 }
 
@@ -330,54 +356,47 @@ static StageBResult StageBPrime(const StageAResult& stageA, double eps,
                  pb1 = arr.verts[FB.verts.y].pos,
                  pb2 = arr.verts[FB.verts.z].pos;
 
-      // Coplanar detection: all three verts of FB within eps of FA's plane.
-      const double planeSep0B = std::abs(la::dot(na, pb0) - planeDist[fi]);
-      const double planeSep1B = std::abs(la::dot(na, pb1) - planeDist[fi]);
-      const double planeSep2B = std::abs(la::dot(na, pb2) - planeDist[fi]);
-      if (planeSep0B <= eps && planeSep1B <= eps && planeSep2B <= eps) {
-        const mat2x3 proj = GetAxisAlignedProjection(na);
-        const vec2 a2[3] = {proj * pa0, proj * pa1, proj * pa2};
-        const vec2 b2[3] = {proj * pb0, proj * pb1, proj * pb2};
+      // Coplanar detection: called for both directions (B in A's plane,
+      // A in B's plane). Returns true if the 2D clipped area > eps^2.
+      auto coplanarInteriorOverlap = [&](vec3 n, const vec3 pA[3],
+                                         const vec3 pB[3]) -> bool {
+        const mat2x3 proj = GetAxisAlignedProjection(n);
+        const vec2 a2[3] = {proj * pA[0], proj * pA[1], proj * pA[2]};
+        const vec2 b2[3] = {proj * pB[0], proj * pB[1], proj * pB[2]};
         std::vector<vec2> poly = {b2[0], b2[1], b2[2]};
         for (int k = 0; k < 3 && !poly.empty(); ++k)
           poly = ClipPolyByHalfplane(poly, a2[k], a2[(k + 1) % 3]);
-        double clipArea = 0.0;
+        double area = 0.0;
         for (int k = 0; k < (int)poly.size(); ++k) {
           const vec2 &p = poly[k], &q = poly[(k + 1) % (int)poly.size()];
-          clipArea += p.x * q.y - q.x * p.y;
+          area += p.x * q.y - q.x * p.y;
         }
-        if (std::abs(clipArea) * 0.5 > eps * eps) {
+        return std::abs(area) * 0.5 > eps * eps;
+      };
+      const vec3 pA[3] = {pa0, pa1, pa2}, pB[3] = {pb0, pb1, pb2};
+
+      // B in A's plane?
+      if (std::abs(la::dot(na, pb0) - planeDist[fi]) <= eps &&
+          std::abs(la::dot(na, pb1) - planeDist[fi]) <= eps &&
+          std::abs(la::dot(na, pb2) - planeDist[fi]) <= eps) {
+        if (coplanarInteriorOverlap(na, pA, pB)) {
           res.fatal = FatalReason::CoplanarOverlap;
           res.detail = "coplanar face pair with interior overlap";
           return res;
         }
         continue;
       }
-      // Symmetric coplanar check (all verts of FA on FB's plane).
-      {
-        const double dB = la::dot(nb, pb0);
-        const double sepA0 = std::abs(la::dot(nb, pa0) - dB);
-        const double sepA1 = std::abs(la::dot(nb, pa1) - dB);
-        const double sepA2 = std::abs(la::dot(nb, pa2) - dB);
-        if (sepA0 <= eps && sepA1 <= eps && sepA2 <= eps) {
-          const mat2x3 proj = GetAxisAlignedProjection(nb);
-          const vec2 a2[3] = {proj * pa0, proj * pa1, proj * pa2};
-          const vec2 b2[3] = {proj * pb0, proj * pb1, proj * pb2};
-          std::vector<vec2> poly = {a2[0], a2[1], a2[2]};
-          for (int k = 0; k < 3 && !poly.empty(); ++k)
-            poly = ClipPolyByHalfplane(poly, b2[k], b2[(k + 1) % 3]);
-          double clipArea = 0.0;
-          for (int k = 0; k < (int)poly.size(); ++k) {
-            const vec2 &p = poly[k], &q = poly[(k + 1) % (int)poly.size()];
-            clipArea += p.x * q.y - q.x * p.y;
-          }
-          if (std::abs(clipArea) * 0.5 > eps * eps) {
-            res.fatal = FatalReason::CoplanarOverlap;
-            res.detail = "coplanar face pair with interior overlap";
-            return res;
-          }
-          continue;
+      // A in B's plane?
+      const double dB = la::dot(nb, pb0);
+      if (std::abs(la::dot(nb, pa0) - dB) <= eps &&
+          std::abs(la::dot(nb, pa1) - dB) <= eps &&
+          std::abs(la::dot(nb, pa2) - dB) <= eps) {
+        if (coplanarInteriorOverlap(nb, pB, pA)) {
+          res.fatal = FatalReason::CoplanarOverlap;
+          res.detail = "coplanar face pair with interior overlap";
+          return res;
         }
+        continue;
       }
 
       const vec3 Dcross = la::cross(na, nb);
@@ -442,6 +461,35 @@ static StageBResult StageBPrime(const StageAResult& stageA, double eps,
     }
   }
 
+  // M1: seam-seam triple criticals (spec B'). For each pair of seams sharing
+  // a face, compute the crossing of their in-plane projections. The crossing x
+  // is the only quantity consumed (over-inclusion is harmless).
+  const int nSeams = (int)arr.seams.size();
+  for (int si = 0; si < nSeams; ++si) {
+    for (int sj = si + 1; sj < nSeams; ++sj) {
+      const Seam& SA = arr.seams[si];
+      const Seam& SB = arr.seams[sj];
+      // Check for shared face.
+      if (SA.faceId0 != SB.faceId0 && SA.faceId0 != SB.faceId1 &&
+          SA.faceId1 != SB.faceId0 && SA.faceId1 != SB.faceId1)
+        continue;
+      const vec3 A0 = arr.verts[SA.vertId0].pos;
+      const vec3 A1 = arr.verts[SA.vertId1].pos;
+      const vec3 B0 = arr.verts[SB.vertId0].pos;
+      const vec3 B1 = arr.verts[SB.vertId1].pos;
+      double xCross;
+      if (!SeamSeamCrossX(A0, A1, B0, B1, eps, xCross)) continue;
+      // Add a vertex carrying the crossing x into the critical set.
+      // Compute the 3D crossing from the parameter on A (recovered from x).
+      const double dAx = A1.x - A0.x;
+      const vec3 crossPt =
+          (std::abs(dAx) > eps)
+              ? A0 + ((xCross - A0.x) / dAx) * (A1 - A0)
+              : vec3{xCross, (A0.y + A1.y) * 0.5, (A0.z + A1.z) * 0.5};
+      FindOrAddVert(arr.verts, crossPt, eps);
+    }
+  }
+
   return res;
 }
 
@@ -481,14 +529,18 @@ static vec2 ExtendPtWithSeams(vec2 pt, const FaceTrack& ft,
     const double atP0 = la::length(pt - ft.p0);
     const double atP1 = la::length(pt - ft.p1);
     if (atP0 > eps && atP1 > eps) {
-      // Interior point: search for matching seam track.
+      // Interior point: search for matching seam track (class-ii).
       for (const auto& st : seamTracks) {
         if (la::length(pt - st.yzMid) <= eps) {
           return InterpolateSafe(st.vA, st.vB, xTarget);
         }
       }
+      // No seam track matches: forced-through weld endpoint.
+      // Spec D' (R2-fold): extend CONSTANT in (y,z) across the slab.
+      return pt;
     }
   }
+  // Class-i endpoint: extend via the face edge track.
   return ExtendPt(pt, ft, xTarget);
 }
 
@@ -598,9 +650,9 @@ static void EmitStrips(const std::vector<SlabResult>& slabs,
       }
       if (!ft) continue;
 
-      const bool insAbove = IsInside3D(piece.above);
-      const vec2 p0 = insAbove ? piece.from : piece.to;
-      const vec2 p1 = insAbove ? piece.to : piece.from;
+      // Piece is emission-oriented (interior-on-left) per spec engine contract.
+      const vec2 p0 = piece.from;
+      const vec2 p1 = piece.to;
 
       const vec2 yz_a0 = ExtendPtWithSeams(p0, *ft, slab.seamTracks, xLo, eps);
       const vec2 yz_a1 = ExtendPtWithSeams(p1, *ft, slab.seamTracks, xLo, eps);
@@ -671,54 +723,62 @@ static void TriangulateCap(const Polygons& polys, double xCap, bool flipWinding,
   }
 }
 
-// Append extended directed edges from one slab into (verts, edges).
-// sign=+1 contributes positively; sign=-1 subtracts (for cap_minus).
-// Vertex dedup is eps-radius nearest-first within the growing verts list.
-static void AppendCapEdges(const SlabResult& slab, int sign, double xCap,
-                           double eps, std::vector<vec2>& verts,
-                           std::vector<EdgeM>& edges) {
-  for (const auto& piece : slab.pieces) {
-    const FaceTrack* ft = nullptr;
-    for (const auto& tk : slab.faceTracks)
-      if (tk.faceId == piece.sourceId) {
-        ft = &tk;
-        break;
-      }
-    if (!ft) continue;
+// Build one raw-vertex list for both L and R slab pieces extended to xCap.
+// Returns (rawVerts, lFrom, lTo, rFrom, rTo) where lFrom[i]/lTo[i] are
+// indices into rawVerts for the i-th L piece, and similarly for R.
+// NO vertex pre-dedup: RemoveOverlaps2D's MergeVerts handles it.
+// Both cap_plus and cap_minus arrangements below receive the SAME rawVerts
+// in the SAME ORDER, so MergeVerts produces the SAME snap for both.
+struct CapEdgeSet {
+  std::vector<vec2> rawVerts;
+  std::vector<int> lFrom, lTo;
+  std::vector<int> rFrom, rTo;
+};
 
-    const vec2 from_c =
-        ExtendPtWithSeams(piece.from, *ft, slab.seamTracks, xCap, eps);
-    const vec2 to_c =
-        ExtendPtWithSeams(piece.to, *ft, slab.seamTracks, xCap, eps);
-    const bool insAbove = IsInside3D(piece.above);
-    const vec2 eFrom = insAbove ? from_c : to_c;
-    const vec2 eTo = insAbove ? to_c : from_c;
-
-    auto getV = [&](vec2 p) -> int {
-      for (int i = 0; i < (int)verts.size(); ++i)
-        if (std::abs(verts[i].x - p.x) < eps &&
-            std::abs(verts[i].y - p.y) < eps)
-          return i;
-      const int id = (int)verts.size();
-      verts.push_back(p);
-      return id;
-    };
-    const int v0 = getV(eFrom);
-    const int v1 = getV(eTo);
-    if (v0 == v1) continue;
-    edges.push_back({v0, v1, sign});
-  }
+static CapEdgeSet BuildCapEdgeSet(const SlabResult* leftSlab,
+                                  const SlabResult* rightSlab, double xCap,
+                                  double eps) {
+  CapEdgeSet ces;
+  auto addPieces = [&](const SlabResult& slab, std::vector<int>& froms,
+                       std::vector<int>& tos) {
+    for (const auto& piece : slab.pieces) {
+      const FaceTrack* ft = nullptr;
+      for (const auto& tk : slab.faceTracks)
+        if (tk.faceId == piece.sourceId) {
+          ft = &tk;
+          break;
+        }
+      if (!ft) continue;
+      // Piece is emission-oriented (interior-on-left) per spec engine contract.
+      const vec2 eFrom =
+          ExtendPtWithSeams(piece.from, *ft, slab.seamTracks, xCap, eps);
+      const vec2 eTo =
+          ExtendPtWithSeams(piece.to, *ft, slab.seamTracks, xCap, eps);
+      froms.push_back((int)ces.rawVerts.size());
+      ces.rawVerts.push_back(eFrom);
+      tos.push_back((int)ces.rawVerts.size());
+      ces.rawVerts.push_back(eTo);
+    }
+  };
+  // L verts appended first, R verts second - consistent order for both
+  // cap_plus and cap_minus arrangements below.
+  if (leftSlab && leftSlab->built) addPieces(*leftSlab, ces.lFrom, ces.lTo);
+  if (rightSlab && rightSlab->built) addPieces(*rightSlab, ces.rFrom, ces.rTo);
+  return ces;
 }
 
-// Run ONE arrangement over combined cap edges, triangulate, append to out.
-// cap_plus (facing +x): leftSlab mult=+1, rightSlab mult=-1.
-// cap_minus (facing -x): rightSlab mult=+1, leftSlab mult=-1.
-// capVerts accumulates all yz vertices from the arrangements for strip
-// subdivision at this critical (spec R1-fold: one source of truth per
-// critical).
+// Run TWO arrangements over the cap at xCap using the SAME raw-vert set built
+// by BuildCapEdgeSet. Passing the same rawVerts to both ensures MergeVerts
+// yields the same snap, so cap_plus and cap_minus share a consistent vertex
+// geometry (spec M4 "one source of truth per critical").
+// capVerts accumulates all yz vertices from both arrangements for strip
+// subdivision at this critical (spec E' R1-fold).
 static void ComputeCap(const SlabResult* leftSlab, const SlabResult* rightSlab,
                        double xCap, double eps, std::vector<OutTri3D>& out,
                        std::vector<vec2>& capVerts) {
+  const CapEdgeSet ces = BuildCapEdgeSet(leftSlab, rightSlab, xCap, eps);
+  if (ces.lFrom.empty() && ces.rFrom.empty()) return;
+
   auto collectVerts = [&](const std::vector<vec2>& rv) {
     for (const auto& v : rv) {
       bool found = false;
@@ -730,19 +790,22 @@ static void ComputeCap(const SlabResult* leftSlab, const SlabResult* rightSlab,
       if (!found) capVerts.push_back(v);
     }
   };
-  // cap_plus = L - R.
-  {
-    std::vector<vec2> verts;
+
+  auto buildEdges = [&](int lSign, int rSign) -> std::vector<EdgeM> {
     std::vector<EdgeM> edges;
-    if (leftSlab && leftSlab->built)
-      AppendCapEdges(*leftSlab, +1, xCap, eps, verts, edges);
-    if (rightSlab && rightSlab->built)
-      AppendCapEdges(*rightSlab, -1, xCap, eps, verts, edges);
-    // Collect input vertices so that piece-endpoint "junction" vertices that
-    // cancel in the arrangement still get into capVerts for strip subdivision.
-    collectVerts(verts);
-    if (!edges.empty()) {
-      OverlapResult r = RemoveOverlaps2D(verts, edges, eps);
+    for (int i = 0; i < (int)ces.lFrom.size(); ++i)
+      edges.push_back({ces.lFrom[i], ces.lTo[i], lSign});
+    for (int i = 0; i < (int)ces.rFrom.size(); ++i)
+      edges.push_back({ces.rFrom[i], ces.rTo[i], rSign});
+    return edges;
+  };
+
+  // cap_plus = L - R: L(+1), R(-1).  cap_minus = R - L: R(+1), L(-1).
+  // Both use ces.rawVerts so MergeVerts snaps identically.
+  {
+    const std::vector<EdgeM> cpEdges = buildEdges(+1, -1);
+    if (!cpEdges.empty()) {
+      const OverlapResult r = RemoveOverlaps2D(ces.rawVerts, cpEdges, eps);
       collectVerts(r.verts);
       if (!r.edges.empty()) {
         const Polygons cp = OutEdgesToPolygons(r.verts, r.edges);
@@ -750,17 +813,10 @@ static void ComputeCap(const SlabResult* leftSlab, const SlabResult* rightSlab,
       }
     }
   }
-  // cap_minus = R - L.
   {
-    std::vector<vec2> verts;
-    std::vector<EdgeM> edges;
-    if (rightSlab && rightSlab->built)
-      AppendCapEdges(*rightSlab, +1, xCap, eps, verts, edges);
-    if (leftSlab && leftSlab->built)
-      AppendCapEdges(*leftSlab, -1, xCap, eps, verts, edges);
-    collectVerts(verts);
-    if (!edges.empty()) {
-      OverlapResult r = RemoveOverlaps2D(verts, edges, eps);
+    const std::vector<EdgeM> cmEdges = buildEdges(-1, +1);
+    if (!cmEdges.empty()) {
+      const OverlapResult r = RemoveOverlaps2D(ces.rawVerts, cmEdges, eps);
       collectVerts(r.verts);
       if (!r.edges.empty()) {
         const Polygons cm = OutEdgesToPolygons(r.verts, r.edges);
@@ -777,6 +833,11 @@ static std::map<double, std::vector<vec2>> EmitCaps(
     double eps, std::vector<OutTri3D>& out) {
   std::map<double, std::vector<vec2>> capVertsMap;
   const int nSlabs = (int)slabs.size();
+  // Track which (leftIdx, rightIdx) slab pairs have already generated a cap.
+  // Two criticals that land in the same gap between built slabs (because the
+  // slab between them is unbuilt/sub-eps-wide) would otherwise generate
+  // identical caps. Only the first critical in such a run is emitted.
+  std::set<std::pair<int, int>> emittedPairs;
   for (double c : crits) {
     int leftIdx = -1, rightIdx = -1;
     for (int si = 0; si < nSlabs; ++si) {
@@ -790,6 +851,8 @@ static std::map<double, std::vector<vec2>> EmitCaps(
         break;
       }
     }
+    const auto key = std::make_pair(leftIdx, rightIdx);
+    if (!emittedPairs.insert(key).second) continue;  // duplicate slab pair
     const SlabResult* leftSlab = (leftIdx >= 0) ? &slabs[leftIdx] : nullptr;
     const SlabResult* rightSlab = (rightIdx >= 0) ? &slabs[rightIdx] : nullptr;
     ComputeCap(leftSlab, rightSlab, c, eps, out, capVertsMap[c]);
@@ -869,19 +932,13 @@ static Overlap3Result RunCDEPrime(ArrangementGeometry& arr, double eps,
   // Use eps-based dedup: seam endpoints can land slightly off a mesh vertex
   // x-coordinate, creating sub-eps duplicate criticals that would invoke
   // ComputeCap twice with the same adjacent slabs and emit double caps.
+  // Spec E' (R3-fold): every critical gets its own cap, runs are NOT merged.
+  // Only exact duplicates are collapsed (same IEEE bit pattern after sort).
   std::vector<double> crits;
   crits.reserve(arr.verts.size());
   for (const auto& v : arr.verts) crits.push_back(v.pos.x);
   std::sort(crits.begin(), crits.end());
   crits.erase(std::unique(crits.begin(), crits.end()), crits.end());
-  {
-    std::vector<double> dedupCrits;
-    dedupCrits.reserve(crits.size());
-    for (double c : crits)
-      if (dedupCrits.empty() || c - dedupCrits.back() > eps)
-        dedupCrits.push_back(c);
-    crits = std::move(dedupCrits);
-  }
 
   // E': emit caps at each critical, collecting arrangement vertices.
   // Caps run first so their vertex set can subdivide adjacent strip edges

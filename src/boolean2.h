@@ -44,13 +44,12 @@ struct EdgeM {
 using OutEdge = EdgeM;
 
 // Capture record emitted by SweepWinding for each retained boundary piece in
-// the winding pass. (from, to) are in lex-forward order (from < to). (below,
-// above) are status-order windings: for non-vertical pieces, below = smaller-z
-// side; for vertical pieces, gradient-rank status order (spec sec. C).
+// the winding pass. (from, to) are EMISSION-ORIENTED: interior-on-left of the
+// directed edge from->to. (below, above) are dropped per spec engine contract
+// (the 3D pipeline uses the emission direction, not winding values).
 struct SweepCapture {
-  vec2 from, to;  // section (y,z), lex-forward measure-pass direction
+  vec2 from, to;  // section (y,z), emission-oriented (interior-on-left)
   int32_t sourceId;
-  int64_t below, above;
 };
 
 double SignedArea(const SimplePolygon& loop);

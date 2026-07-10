@@ -200,13 +200,15 @@ void MergeVerticals1D(PolySet2& ps, int* conflicts = nullptr) {
     bool have = false;
     for (const auto& ev : events) {
       if (have && totalCover != 0) {
-        // Determine srcId for this (prevY, ev.first) interval
-        int32_t resolvedId = -2;  // -2 = unset sentinel
+        // Determine srcId for this (prevY, ev.first) interval.
+        int32_t resolvedId = 0;
+        bool have_id = false;
         bool multi = false;
         for (const auto& as : activeSrcs) {
           if (as.second != 0) {
-            if (resolvedId == -2) {
+            if (!have_id) {
               resolvedId = as.first;
+              have_id = true;
             } else {
               multi = true;
               break;
@@ -216,8 +218,10 @@ void MergeVerticals1D(PolySet2& ps, int* conflicts = nullptr) {
         if (multi) {
           resolvedId = -1;
           if (conflicts) ++(*conflicts);
-        } else if (resolvedId == -2) {
-          resolvedId = 0;  // all net-zero: shouldn't occur if totalCover != 0
+        } else {
+          DEBUG_ASSERT(
+              have_id, logicErr,
+              "MergeVerticals1D: nonzero totalCover but no active src");
         }
         PolySetAdd(ps, {x, prevY}, {x, ev.first}, {totalCover, resolvedId});
       }
@@ -348,11 +352,13 @@ class SweepPass {
     const bool insA = IsInside(rule_, above);
     if (insB == insA) return;
     // Retained-piece out-channel: only pieces crossing the fill boundary are
-    // captured (spec engine contract).  Store in lex-forward direction.
+    // captured. Store EMISSION-ORIENTED (interior-on-left of from->to).
+    // insA: above side is inside, edge goes in the original sweep direction.
+    // insB: below side is inside, edge goes in the reversed direction.
     if (capture_) {
-      const vec2 capFrom = kLexLess(from, to) ? from : to;
-      const vec2 capTo = kLexLess(from, to) ? to : from;
-      capture_->push_back({capFrom, capTo, srcId, below, above});
+      const vec2 emitFrom = insA ? from : to;
+      const vec2 emitTo = insA ? to : from;
+      capture_->push_back({emitFrom, emitTo, srcId});
     }
     // above inside -> lex-forward; below inside -> lex-backward.
     if (PolySetAdd(out_, from, to,
