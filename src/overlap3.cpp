@@ -681,15 +681,18 @@ static std::optional<std::pair<FatalReason, std::string>> EmitStrips(
   for (int si = 0; si < (int)slabs.size(); ++si) {
     if (!slabs[si].built) continue;
     const StripChains& ch = chains[si];
-    // One non-empty chain per piece on each side is the EmitCaps contract
-    // (every built slab's sides bind at their pair-canonical criticals);
-    // violation means emission would drop or mispair strips - fail closed.
-    if (ch.lo.size() != ch.hi.size()) {
+    // One non-empty chain per retained piece on each side is the EmitCaps
+    // contract (every built slab's sides bind at their pair-canonical
+    // criticals); violation means emission would drop or mispair strips -
+    // fail closed.  Both sides are checked against the piece count itself,
+    // not just each other, so equal truncation cannot slip through.
+    const size_t nPieces = slabs[si].pieces.size();
+    if (ch.lo.size() != nPieces || ch.hi.size() != nPieces) {
       DEBUG_ASSERT(false, logicErr,
-                   "strip chain sides disagree on piece count");
+                   "strip chain count disagrees with piece count");
       return std::make_pair(
           FatalReason::NonManifoldEmission,
-          std::string("strip chain sides disagree on piece count"));
+          std::string("strip chain count disagrees with piece count"));
     }
     for (size_t k = 0; k < ch.lo.size(); ++k) {
       if (ch.lo[k].empty() || ch.hi[k].empty()) {
