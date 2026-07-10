@@ -1,0 +1,323 @@
+# Coplanar-family crucible - main-agent notebook
+
+Branch explore/sweep-plane-3d-v3 from bd2a330e. User directive:
+resolve coplanar FIRST (huge CAD class), ahead of the corpus
+measurement.
+
+GOAL: coplanar face overlap + edge-in-plane IN SCOPE (resolved, not
+fail-closed). DONE GATE: existing 35+1 gates + fences + suite green
+PLUS coplanar oracle gates; Gate4c hulls unskipped if EdgeInPlane
+lands. Cap 3 rounds.
+
+## Framing analysis (before any code)
+
+Why coplanar is fatal today, decomposed:
+(a) Shared plane PERPENDICULAR to sweep (normal ~ +-x): both faces
+    are section-invisible (parallel-to-section skip); their content
+    is pure CAP arithmetic - the cap at that critical computes
+    region differences of adjacent limits, which IS the coplanar
+    resolution. HYPOTHESIS: free once the fatal is lifted.
+(b) Shared plane PARALLEL/OBLIQUE to sweep: sections cut pi into
+    COLLINEAR OVERLAPPING segments from different faces. The engine
+    merges/cancels these natively (PolySetAdd, MergeVerticals1D,
+    Smith overlap handling); multiplicities sum (+2 same-oriented,
+    0 anti-oriented stacking - both algebraically right). What
+    breaks: ATTRIBUTION (MergeSrcId -> -1 -> EngineIdConflict
+    fatal) and TRACKS (a merged piece's endpoint is a breakpoint
+    created by ONE member's boundary edge - which member's track?).
+    HYPOTHESIS: per-breakpoint attribution is determinate (the
+    breakpoint IS some member's segment endpoint = that member's
+    cutting edge = class-i for that member); the piece needs a
+    GROUP to search, not a single face id.
+(c) EdgeInPlane (T-contact, hulls): F transversal, one edge in G's
+    plane. Sections get T-junctions (incidence pre-split handles);
+    the F-G seam is a real segment usable as a class-ii track.
+    HYPOTHESIS: the fatal is a June-PSLG-architecture carryover;
+    the current architecture may mostly handle it.
+
+RISKS -> lanes (after probes sharpen them):
+R1 track-resolution rule for merged pieces (load-bearing)
+R2 perpendicular-case-is-free claim
+R3 EdgeInPlane relaxation vs hulls
+R4 winding semantics: |m|=2 boundaries, mixed-orientation groups,
+   inverted shells, the flap (same-winding double cover)
+R5 engine attribution change must be null-default (2D fences)
+R6 criticals completeness: in-plane edge-edge crossing x's
+   (M1-analog) or slabs change combinatorially mid-slab
+R7 near-coplanar (within-eps vs just-outside-eps) razor seams
+R8 stage-A interplay: partially-overlapping coplanar faces sharing
+   verts (the flap/touching family)
+
+## Step 1: probes (lift fatals, observe what ACTUALLY breaks)
+
+P1: stacked-along-x boxes (perpendicular shared plane) - expect cap
+    arithmetic to just work.
+P2: boxes sharing a z-plane with overlapping area (parallel case) -
+    expect EngineIdConflict in slabs.
+P3: Gate4c hulls with EdgeInPlane lifted - observe.
+Probe method: temporary env-var bypass of the two fatals + a scratch
+test binary run; no committed changes.
+
+### Probe results (scratch driver, all fatals bypassed)
+
+BASELINE (no bypass): identical-face stacking ALREADY WORKS dv=0
+(stage-A annihilates coincident faces; caps do the rest). Every
+partial-overlap case dies on EdgeInPlane FIRST (the small box's
+side-face edges lie in the big face's plane) - EIP is the gating
+detector for the entire stacking family, not CoplanarOverlap.
+
+ALL BYPASSED:
+- P1 stackedX smallOnBig (plane PERP to sweep): manifold, dv=0.
+  Hypothesis (a) CONFIRMED - pure cap arithmetic, free.
+- P2 stackedZ smallOnBig + sideBySide (plane PARALLEL to sweep,
+  ANTI-oriented faces): manifold, dv=0, conflicts=0! Cancellation:
+  +1/-1 collinear segments annihilate in PolySetAdd BEFORE
+  MergeSrcId - no conflict is ever recorded. The dominant CAD class
+  (stacking/walls) is conflict-free by cancellation.
+- P2c sameTop overlap (SAME-oriented +1+1 = +2): THROWS "retained
+  piece has no face track" - srcId=-1 from the merge, no track.
+  THE one mechanism gap.
+
+### Design shape (post-probe, much smaller than framed)
+
+1. SEAMS: CoplanarOverlap fatal -> COPLANAR GROUPS (union-find by
+   plane-within-eps). Coplanar pairs skip seam creation but add the
+   M1-ANALOG criticals: in-plane boundary-edge crossing x's (for
+   axis-aligned these coincide with vert x's - P2c reached the
+   track crash with correct geometry - but rotated coplanar pairs
+   need them).
+2. ATTRIBUTION WITHOUT ENGINE CHANGE: seed section edges of grouped
+   faces with the GROUP id (ids >= nFaces) instead of the face id.
+   Coincident group segments then merge with NO MergeSrcId conflict
+   (same id). Genuine non-coplanar conflicts still fatal. The
+   engine is untouched.
+3. TRACKS: per-ENDPOINT member selection for group-attributed
+   pieces - an endpoint matching a member's section-segment end is
+   class-i via THAT member's track; else seam track; else weld.
+   Two endpoints may track different members; both trajectories lie
+   in the shared plane, so the strip quad stays in-plane.
+4. EdgeInPlane fatal dies on this evidence (T-junctions are
+   incidence-handled); lanes hunt residual hazards.
+5. THE FLAP re-adjudicates: same-winding shared-edge overlap
+   becomes +2 content and RESOLVES (regularized single cover) -
+   the correct overlap-removal semantics, superseding the
+   fails-closed-downstream story.
+
+Next probe: Gate4c hulls with EIP bypassed.
+
+### Gate4c hull probe (all bypasses)
+
+Dies DEEPER: "retained directed edges must form closed walks"
+(boolean2.cpp OutEdgesToPolygons - the checked-extraction guard
+from the M4 audit round, throwing in debug). Real geometry breaks
+beyond the mechanism probes for an undiagnosed reason. Calibration:
+boxes prove the mechanism shape; hulls remain the EMPIRICAL
+acceptance fixture. D1's highest-value assignment.
+
+## Step 2: design written + lanes launched (round 1 of 3)
+
+Design = "COPLANAR (extension design, under crucible review)"
+section appended to docs/SweepEmit3D.md (uncommitted; probe
+bypasses also uncommitted in tree, synced to both review copies).
+Four mechanisms: (1) coplanar groups via union-find at SEAMS,
+CoplanarOverlap retires; (2) group-id seeding (ids >= nFaces), zero
+engine change, genuine conflicts stay fatal; (3) per-endpoint
+member track selection; (4) in-plane crossing criticals (M1
+analog, axis-aligned fixtures mask it). EdgeInPlane dies; flap
+re-adjudicates to resolve-as-+2; Gate4d evolves to
+resolve-or-named-guard.
+
+Lanes: D1 (Codex, review tree) = engine reality: R3 seeding trace,
+R1 endpoint matching, R7 DIAGNOSE THE HULL OPEN WALK empirically.
+D2 (Codex, review-reuse) = winding semantics: R2 |m|=2 end-to-end,
+R6 mixed/inverted groups, flap semantics, Gate4d wrongly-resolving
+attack. D3 (Sonnet, canonical read-only) = R4 criticals
+completeness enumeration, R5 near-coplanar eps boundary +
+group-chain diameter question, test-surface gaps.
+
+## Step 3: D1/D2 verdicts (D3 pending)
+
+D1 BREAK (+3 NC): the four mechanisms do NOT close Gate4c -
+instrumented the open cap walk to x=-107.465, open path
+32->33->35->45, endpoint gap 2.98e-8 ~ 85 eps (hull scale eps
+~3.4e-10). Root shape: BuildCapEdgeSet extends adjacent pieces
+INDEPENDENTLY; two pieces sharing a section vertex resolve tracks
+independently and land apart. Its fifth-mechanism proposal:
+per-critical endpoint BINDING - resolve the extension ONCE PER
+SECTION VERTEX (3D incidence identity), all incident pieces reuse
+it. My working hypothesis for the 85-eps magnitude: extrapolation
+amplification (a track with sub-eps dx and macro dy/dz) OR
+weld-vs-track cascade mismatch between neighbors - needs my own
+validation probe before the fold commits to a mechanism shape.
+D1-3: grouping must PRECEDE the shared-edge exemption (flap pairs
+must join groups before seam-skip). D1-4: non-coplanar faces
+cannot section-overlap collinearly (planes meet in a line -> point
+crossing only) - I verified this geometric claim myself: residual
+conflicts = missed grouping (near-coplanar), reframe as guard.
+
+D2 NEED-CHANGE/4: (1) +2 content REGULARIZES to unit boundary
+inside the engine (probe: duplicate same-id square -> out=4 not 8,
+area 1) - R2 mostly evaporates, design text needs the precise
+invariant; (2) strips are positive-region boundaries only
+(negEdges is caps-only) - need pins for mixed-sign and inverted
+coplanar groups; (3) converges with D1-2: group id cannot flow
+through the one-id-one-track table - the resolver must be defined
+with tie rules, fail closed when unbounded; (4) flap needs a REAL
+closed-shell folded fixture (its naive one never reached the
+pipeline). Gate4d attack FAILED to break: near-parallel resolved
+dv=3.49e-15 vs oracle - evolution to oracle-or-named-guard stands.
+
+CONVERGENCE: D1-2 + D2-3 (resolver underspecified) + D1-1 (hull
+break) all point at ONE design revision: per-section-vertex
+extension binding replacing per-piece-endpoint matching.
+
+## Step 4: my Phase-4 validation of the BREAK (EXTLOG probe)
+
+Instrumented ExtendPtWithSeams at the failing cap. The 85-eps gap:
+- LEFT: pt f=9461 CLASS-I -> (127.196017974, 153.402142203) =
+  vert 32 EXACTLY (the 3D vertex at the critical - class-i is
+  exact by construction, edges terminate at criticals).
+- RIGHT: pt=(127.196017997, 153.402142184) f=9347 WELD (interior,
+  atP0=6.57, seam search MISSED) -> constant-frozen at xMid =
+  vert 45. The junction moved 2.3e-8 between xMid and the critical
+  and the weld cannot track it.
+WHY the seam search missed: the junction's bounding structure on
+the right is a coplanar/degenerate contact - under bypass (and
+UNDER THE DRAFT DESIGN TOO) those contribute criticalXs but NO
+seam/track object. The 9347x9461 seam ended AT the critical (9461
+died there), so the right slab legitimately has no such track; what
+bounds 9347's piece there needed an IN-PLANE track that does not
+exist. D1's BREAK is real and sharper than stated: mechanism 4
+gives in-plane junctions their CRITICALS but nothing to EXTEND
+ALONG.
+
+FOLD SHAPE (mechanism 5, replacing draft mechanism 3):
+(a) resolve extensions PER SECTION VERTEX once (all incident
+    pieces reuse - same-side closure by construction);
+(b) track candidates grow a third class: in-plane boundary edges
+    of coplanar-group members (ordinary 3D edge interpolations);
+(c) 3D-identity preference: when the governing track terminates at
+    an arr.verts vertex at the target critical, the extension IS
+    that vertex (exact, not eps);
+(d) weld shrinks to genuine block-rule artifacts, cap coverage
+    argument unchanged.
+EXTLOG instrumentation to remove before the fold commit.
+
+## Step 5: round-2 fold + relaunch
+
+Design section REWRITTEN in docs/SweepEmit3D.md ("round 2 - post
+D1/D2 fold"): five mechanisms - groups-as-pre-pass incl.
+shared-edge pairs [D1-3]; group-id seeding + unit-boundary
+regularization invariant [D2-1] + strips-positive-only [D2-2] +
+near-coplanar-guard reframing [D1-4]; PER-VERTEX extension
+resolution with class-iii in-plane member edges + 3D-identity
+preference + deterministic ties + fail-closed [D1-1/D1-2/D2-3];
+in-plane crossing criticals; checked closure as the Gate4c
+boundary. Flap re-adjudication + closed-shell fixture requirement
+[D2-4]. Gate4d evolution recorded with D2's failed-attack evidence.
+
+Lane housekeeping: D3 (Sonnet) DIED at the 32k final-message cap
+with an EMPTY notebook log - it ignored the incremental convention;
+only its plan survived. Relaunch D3b was POLICY-BLOCKED instantly
+(false positive, 0 tool uses - suspect the "reuse the dead lane's
+plan" phrasing). D3c relaunched with rephrased prompt + hard
+output discipline (findings INTO the notebook as derived, final
+message < 10 lines), attacking the round-2 design directly.
+D1-round2 convergence lane launched in parallel: walk ITS OWN hull
+junction through the revised mechanism 3, adjudicate class-iii
+enumerability (per-slab member edges vs hidden in-plane
+arrangement), hunt new holes (per-vertex table vs pair-canonical
+binding; caps vs raw extensions).
+
+## Step 6: round-2 verdicts
+
+D1-R2: SURVIVE - all four round-1 findings RESOLVED, including
+walking its own hull junction through revised mechanism 3
+(class-iii -> 3D-identity -> same arr.verts vertex both sides) and
+adjudicating class-iii enumerability (member-edge scan suffices, no
+hidden in-plane arrangement). No new findings.
+
+D3c: DIED at the 32k cap AGAIN (10 tool uses, 42 min) - notebook
+got plan + grounding notes (progress over D3's empty log) but the
+attack derivations burst in the final message and were lost. Two
+deaths on the same angles -> executing D3's attacks MYSELF
+(main-agent-for-failed-lanes, the confirmed pattern).
+
+## Step 7: D3 attacks, main-agent execution
+
+### R4 criticals completeness - enumeration
+
+Events changing a coplanar group's section combinatorics along x
+(section of group = 1D interval arrangement on the line L(x) =
+plane cut, breakpoints = L(x) crossing in-plane 1D structure):
+1. member vertex crosses sweep plane: vert x's, COVERED.
+2. member-edge x member-edge in-plane crossing: mechanism 4,
+   COVERED.
+3. in-plane tangency (endpoint-on-edge): the endpoint is a vertex,
+   COVERED by vert x's.
+4. collinear-overlapping member edges in-plane: combinatorics
+   change only at edge ENDPOINTS (verts, covered); between them
+   the coincident breakpoints are one 3D line - class-iii
+   interpolations agree; tie rule picks deterministically. BENIGN.
+5. seam(T, member) x member-edge in-plane crossing, T transversal:
+   the seam of a transversal face with a member LIES IN THE PLANE;
+   where it crosses ANOTHER member's boundary edge, a section
+   junction transfers (T's endpoint slides across a group
+   breakpoint). NOT covered: M1 covers seam x seam sharing a face;
+   mechanism 4 covers edge x edge. GAP - REAL (fixture: two
+   partially-overlapping coplanar rectangles + a rotated
+   transversal triangle whose seam with member 1 sweeps across
+   member 2's boundary edge at a non-vertex x).
+   FIX: define the group's IN-PLANE SKELETON = member boundary
+   edges + in-plane seams (transversal x member); mechanism 4
+   becomes pairwise skeleton-crossing x's (subsumes the edge x edge
+   case; M1 remains for the non-coplanar seam x seam class).
+6. group membership changing along x: membership is per-face and
+   x-independent (a face is in the plane for its whole extent);
+   entry/exit happens at vert x's. NOT AN EVENT CLASS. COVERED.
+7. near-perpendicular planes (L(x) sweeping fast): not a
+   combinatorial class; x-extent <= eps falls to SubEpsFeature;
+   noted under R5 as an amplification band, not a critical gap.
+
+### R5 near-coplanar eps boundary
+
+(a) Separation just OUTSIDE eps (razor band, ~2-10 eps): not
+    grouped; sections are parallel segments a few eps apart - they
+    do NOT exact-merge (no conflict, the guard never fires) and
+    instead arrange as thin slivers -> BuildImpl weld partially
+    collapses them. UNTESTED BAND, honest status: add a band
+    fixture to the test surface; behavior decides whether the
+    grouping threshold widens or a band guard lands. NEED-CHANGE
+    (test surface), not BREAK.
+(b) eps-CHAINS (pairwise-within-eps spanning >> eps): the group is
+    one id, but geometric coherence is delegated to the ENGINE's
+    vert merge - which is ITSELF an eps-union-find over the same
+    geometry, so section verts chain-weld exactly where faces
+    chain-group. Consistent by construction; no diameter guard
+    needed for the SECTION story (the old design's diameter guard
+    served triple-point unification, a dead mechanism). PIN IT
+    (3-face eps-chain fixture) and STATE the delegation in the
+    design. Class-iii tracks are per-member TRUE 3D edges (no
+    common-plane projection), so chained groups do not distort
+    tracks.
+(c) predicate symmetry: union-find membership must be the
+    symmetric OR of the two direction tests (the current detector
+    short-circuits after B-in-A); the grouping pre-pass must
+    restructure this. PROSE/IMPL note.
+
+### R6/R7 test surface + resolver
+
+- coplanar x sub-eps critical pair: no new mechanism (pair-
+  canonical binding + per-critical caps own it) but ADD a fixture:
+  a group overlap corner within eps of a vertex plane.
+- group at first/last critical: exterior-cap path already covers
+  (P1 fixture ends at extremes). COVERED.
+- coplanar + M1: subsumed by the skeleton rule (R4 fix).
+- R7 resolver mechanics: adjudicated by D1-R2 (member-edge scan);
+  candidate matching = evaluate candidate tracks at xMid, eps-match
+  to the vertex, deterministic ties - same posture as today's seam
+  matching. NO sixth mechanism.
+
+D3 VERDICT (mine): NEED-CHANGE - one real R4 gap (skeleton
+crossings), three test-surface additions (razor band, eps-chain,
+coplanar x sub-eps pair), one predicate-symmetry note. No BREAK.

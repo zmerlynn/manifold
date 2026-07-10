@@ -468,3 +468,155 @@ untouched).  The reuse lane converged to SURVIVE.  Residuals, both
 deferred as upstream follow-ups rather than churned here: the
 upstream boolean2.cpp's reopened anonymous namespaces, and its Box2
 vs the public Rect.
+
+## COPLANAR (extension design, round 2 - post D1/D2 fold)
+
+The coplanar family comes IN SCOPE: coplanar face overlap and
+edge-in-plane contacts resolve instead of failing closed.  CAD
+inputs hit this constantly (stacked solids, shared walls).
+
+PROBE EVIDENCE (scratch driver, fatals bypassed, before design):
+identical-face stacking already resolves exactly (CANONICALIZE
+annihilates coincident opposite faces; caps do the rest).  A shared
+plane PERPENDICULAR to the sweep resolves exactly with no new
+mechanism (pure cap arithmetic).  A shared plane PARALLEL to the
+sweep with ANTI-oriented overlap - stacking and walls, the dominant
+class - resolves exactly and conflict-free: +1/-1 collinear section
+segments annihilate in PolySetAdd before any srcId merge.  The
+mechanism gaps: SAME-oriented overlap (+2) loses attribution, and -
+the round-1 BREAK, validated by instrumentation - junctions bounded
+by in-plane structure have CRITICALS but NO TRACK, so their
+extensions weld-freeze at xMid while the far side lands exactly on
+the 3D vertex (hull fixture: an 85-eps open cap walk, CLASS-I vs
+WELD across one critical).
+
+DESIGN, five mechanisms:
+
+1. COPLANAR GROUPS (SEAMS).  A grouping PRE-PASS unions canonical
+   faces by plane-within-eps (either orientation; the existing
+   detector's test is the membership test), INCLUDING shared-edge
+   pairs - the flap's pair must join its group before any exemption
+   skips it [D1-3].  Grouped pairs skip seam creation; the
+   CoplanarOverlap fatal retires.  Group ids occupy nFaces + k.
+
+2. GROUP-ID SEEDING (SLABS; zero engine change).  A grouped face
+   seeds its section edges with its GROUP id; multiplicities stay
+   per-face.  Coincident group segments merge under one id - no
+   conflict exists to record.  Anti-oriented content cancels;
+   same-oriented content sums and the winding pass REGULARIZES it:
+   a 0 -> +2 boundary emits ONE unit-multiplicity retained piece
+   (empirically verified; the |m| materialization loop never sees
+   the 2) [D2-1].  Strips remain boundaries of the positive region
+   only; the negated measure exists for caps alone [D2-2].
+   A conflict that still reaches -1 means a face pair coincided in
+   section WITHOUT sharing a plane group: geometrically impossible
+   for genuinely non-coplanar planes (they meet in a line, sections
+   cross at a point), so it indicates near-coplanar geometry the
+   grouping eps-test missed - a named guard (EngineIdConflict
+   narrows to this), not an ordinary residual class [D1-4].
+
+3. PER-VERTEX EXTENSION RESOLUTION (STRIPS/CAPS; replaces the
+   per-piece cascade - the round-1 BREAK's fix).  Extensions resolve
+   ONCE PER SECTION VERTEX; every incident piece endpoint reuses
+   the resolved point, so same-side closure holds by construction.
+   The track candidate classes, in order:
+   (i) face cutting edges (class-i, existing);
+   (ii) seam tracks (class-ii, existing);
+   (iii) IN-PLANE BOUNDARY EDGES of coplanar-group members - the 3D
+   edges (lying in the shared plane) whose section crossings create
+   the group's interior junctions; ordinary edge interpolations, new
+   candidate class;
+   (iv) weld constant - shrinks to genuine block-rule artifacts;
+   the cap-coverage argument for weld deviation is unchanged.
+   3D-IDENTITY PREFERENCE: when the governing track terminates at
+   an arr.verts vertex at the target critical, the extension IS
+   that vertex's (y,z) - exact identity, never an eps snap (the
+   85-eps gap is far beyond snapping) [D1-1].  Ties across
+   candidates resolve deterministically (lowest class, then lowest
+   member id); an unresolvable vertex fails closed [D2-3].
+
+4. IN-PLANE SKELETON CRITICALS (SEAMS; the M1 analog, widened in
+   round 2).  Each group's IN-PLANE SKELETON = its members' boundary
+   edges PLUS the in-plane seams of transversal faces with members
+   (a seam with a member lies in the shared plane by construction).
+   Pairwise skeleton-crossing x's enter criticalXs: edge x edge
+   crossings (the original mechanism) AND seam x edge crossings -
+   the event where a transversal junction slides across a group
+   breakpoint, which neither M1 (seam x seam sharing a face) nor
+   edge x edge covered [D3-R4].  Axis-aligned fixtures mask the
+   class (crossings sit at vert x's); a rotated coplanar pair plus
+   a rotated transversal pin it red-first.  Benign non-events,
+   enumerated: in-plane tangency (the endpoint is a vertex, already
+   critical); collinear-overlapping member edges (combinatorics
+   change only at their endpoint verts; between them the coincident
+   breakpoints share one 3D line and the tie rule is deterministic);
+   group membership along x (per-face and x-independent).
+
+5. CHECKED CLOSURE (already landed, the backstop): open retained
+   walks in any cap fail closed as NonManifoldEmission.  Gate4c's
+   hulls become MustResolve only when they empirically resolve
+   under mechanisms 1-4; until then the open-walk guard is the
+   honest boundary and the gate's skip narrows to it.
+
+EDGE-IN-PLANE: the fatal dies with the family.  T-contacts section
+to T-junctions the engine's incidence pre-split owns; the F-G seam
+is an ordinary class-ii track; probe evidence shows the stacking
+family resolving exactly through such contacts.
+
+RE-ADJUDICATION (supersedes the style-round note): the same-winding
+shared-edge flap becomes ordinary +2 content and RESOLVES to a
+regularized single cover.  The fails-closed-via-EngineIdConflict
+story retires with the conflict it relied on.  Requires a REAL
+closed-shell folded-flap fixture (a single solid whose shell folds
+back over itself), asserting single-cover output [D2-4].
+
+GATE EVOLUTION: Gate4d's near-parallel plates group and RESOLVE
+(adversarial attack failed to break this: dv = 3.5e-15 against the
+oracle); the gate evolves to resolve-with-oracle-or-named-guard - a
+strictly stronger accepted outcome.  Gate4c per mechanism 5 above.
+
+NEW TEST SURFACE: oracle gates for stacked-perpendicular,
+stacked-parallel, shared-wall, same-oriented partial overlap; a
+rotated coplanar pair (mechanism 4, red-first); a three-face group;
+inverted-shell and mixed-orientation groups (+ + -, - - +, and
+subtract-encoded inverted stacking) [D2-2]; the closed folded-flap
+shell; unit-boundary regularization of +2 content pinned
+explicitly [D2-1].
+
+EPS BOUNDARY [D3-R5]: group membership is the symmetric OR of the
+two plane-direction tests (the pairwise detector's short-circuit
+restructures into the grouping pre-pass).  Geometric coherence of
+eps-CHAINED groups (pairwise within eps, wider in total) is
+DELEGATED to the engine's vert merge - itself an eps-union-find over
+the same geometry, so section verts chain-weld exactly where faces
+chain-group; class-iii tracks are per-member true 3D edges, so no
+common-plane projection distorts a wide group.  No diameter guard
+(the old design's served triple-point unification, a dead
+mechanism); a three-face eps-chain fixture pins the delegation.
+The band just OUTSIDE eps (razor wedges, ~2-10 eps separation) is
+recorded as UNTESTED: not grouped, no exact merge, no conflict
+guard fires - thin-sliver behavior is empirical; a band fixture
+joins the test surface and its outcome decides whether the
+grouping threshold widens or a named band guard lands.
+
+TEST SURFACE ADDITIONS [D3-R6]: a coplanar overlap corner within
+eps of a vertex plane (group x sub-eps critical pair x
+pair-canonical binding); the rotated skeleton pin (mechanism 4);
+the razor-band fixture; the eps-chain fixture.  Exterior-cap
+groups are covered by the stacked-at-extreme gates; coplanar + M1
+interplay is subsumed by the skeleton rule.
+
+DESIGN CRUCIBLE CLOSE (round 2): D1 (engine reality) SURVIVE after
+the fold - its own instrumented hull junction resolves through
+class-iii + 3D-identity to one arr.verts vertex from both sides;
+class-iii candidates enumerable by member-edge scan, no hidden
+in-plane arrangement.  D2 (winding) folded: unit-boundary
+regularization stated as the invariant, strips positive-only,
+mixed-orientation and folded-flap fixtures required, Gate4d
+evolution attack failed (dv 3.5e-15 vs oracle).  D3 (criticals/eps
+boundary; executed by the orchestrator after two lane deaths at
+the output cap): the skeleton-crossing gap folded into mechanism
+4, eps-boundary items above, no BREAK.  No unrefuted BREAK
+remains; implementation is the next phase, with Gate4c's hulls as
+the empirical acceptance fixture and every mechanism pinned
+red-first per house discipline.
