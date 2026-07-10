@@ -14,7 +14,8 @@
 
 // Overlap3 test suite: contractual validation gates 1-5 for the 3D
 // sweep-native emission prototype. Design: docs/SweepEmit3D.md (final spec).
-// Every gate asserts the spec; no GTEST_SKIP on fatal paths.
+// Every gate asserts the spec; skips exist only for documented named-guard
+// boundaries (Gate4c) and missing model files.
 
 #include "../src/overlap3.h"
 
@@ -918,8 +919,8 @@ TEST(Overlap3, Pin_P4_EdgeOnFace_Touching) {
 // At y=1: B's face spans x in [0.5, 3.5].  Entry point (1,1,0) is inside
 // (x=1 in [0.5,3.5]), midpoint (5,1,0) is OUTSIDE (x=5 > 3.5).
 // Old midpoint check: PointInTri((5,1,0),...) = false -> MISSES.
-// New clip check: clipped segment [(1,1)-(3.5,1)] has length 2.5 >> eps ->
-// FIRES.
+// The touching contact spans [(1,1)-(3.5,1)] in B's face - macro length, so
+// the welded union is non-manifold along it and the output gate fires.
 TEST(Overlap3, Pin_P4b_EdgeOnFace_OffMidpoint) {
   MeshGL64 mgA;
   mgA.numProp = 3;

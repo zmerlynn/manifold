@@ -387,3 +387,31 @@ Enum retirement: CoplanarOverlap + EdgeInPlane deleted; 4d/4e/4f
 guard sets updated; helper deletions (clip, seg-tri-interior).
 
 FULL SUITE: 591 + 1 skip (592 total; was 581). Overlap3 45 + 1.
+
+## Step 10: implementation audit round + close
+
+FIDELITY: all five mechanisms FAITHFUL with evidence (gdb-verified
+Gate4d's resolve branch; verified the M4-belt claim is recorded
+honestly, not quietly vacuous; Extend's miss arm unreachable -
+resolver keys exactly the piece endpoints caps extend). 2 LOW
+stale comments -> fixed (suite header skip claim; P4b clip-story).
+
+SIMPLICITY: NEED-CHANGE/3 -> (1)+(2) FOLDED: shared
+CollectGroupedMemberEdges (one concept, one collection - skeleton
+partitions by group, resolver filters by x-span) +
+AppendPairwiseCrossXs for the skeleton's pairwise loop (M1's
+seam-pair loop keeps its two-line body - predicate indirection for
+two differently-filtered sites is heavier than the duplication;
+adjudicated). (3) skeleton pin doesn't isolate mechanism 4:
+DEFENDED as recorded-owed - the doc close section already records
+the degenerate-adjacent fixture as future test surface and the
+fidelity lane called that recording honest.
+
+CLOSE: design 2 rounds + impl 1 round (cap respected). Full suite
+591 + 1 skip. The user's directive is delivered: the coplanar
+family resolves - stacking, walls, same-oriented overlap, triple
+groups, mixed orientation, near-parallel-within-eps, eps-chains,
+inverted stacking - with the remaining boundaries NAMED and pinned
+(near-coplanar shallow-crossing hulls at EngineIdConflict;
+edge-on-face touching at NonManifoldEmission; in-run macro change
+recorded; razor band recorded; flap closed-shell fixture owed).

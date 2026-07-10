@@ -144,6 +144,47 @@ std::optional<double> SeamSeamCrossX(vec3 A0, vec3 A1, vec3 B0, vec3 B1,
   return A0.x + t * dA.x;
 }
 
+// Deduped 3D edges of coplanar-group members, tagged by group index - the
+// shared source for the skeleton criticals and the resolver's class-iii
+// candidates (one concept, one collection).
+struct GroupedEdge {
+  int group;
+  vec3 a, b;
+};
+
+std::vector<GroupedEdge> CollectGroupedMemberEdges(
+    const ArrangementGeometry& arr) {
+  std::vector<GroupedEdge> out;
+  if (arr.numGroups == 0) return out;
+  std::set<std::tuple<int, int, int>> seen;  // (group, loVert, hiVert)
+  for (int fi = 0; fi < static_cast<int>(arr.faces.size()); ++fi) {
+    const int g = arr.face2Group[fi];
+    if (g < 0) continue;
+    const int vs[3] = {arr.faces[fi].verts.x, arr.faces[fi].verts.y,
+                       arr.faces[fi].verts.z};
+    for (const int k : {0, 1, 2}) {
+      int a = vs[k], b = vs[(k + 1) % 3];
+      if (a > b) std::swap(a, b);
+      if (!seen.insert({g, a, b}).second) continue;
+      out.push_back({g, arr.verts[a].pos, arr.verts[b].pos});
+    }
+  }
+  return out;
+}
+
+// Pairwise in-plane crossing x's of coplanar segments, appended as criticals.
+void AppendPairwiseCrossXs(const std::vector<std::pair<vec3, vec3>>& segs,
+                           double eps, std::vector<double>& criticalXs) {
+  const int n = static_cast<int>(segs.size());
+  for (int i = 0; i < n; ++i) {
+    for (int j = i + 1; j < n; ++j) {
+      const auto xCross = SeamSeamCrossX(segs[i].first, segs[i].second,
+                                         segs[j].first, segs[j].second, eps);
+      if (xCross) criticalXs.push_back(*xCross);
+    }
+  }
+}
+
 // Find or add a vert within eps of pos; return its index.
 int FindOrAddVert(std::vector<MergedVert>& verts, vec3 pos, double eps) {
   for (int i = 0; i < static_cast<int>(verts.size()); ++i)
@@ -427,19 +468,8 @@ SeamsResult FindSeams(const CanonicalGeometry& canon, double eps,
   // events; SeamSeamCrossX's contract (coplanar 3D segments) computes them.
   if (arr.numGroups > 0) {
     std::vector<std::vector<std::pair<vec3, vec3>>> skeleton(arr.numGroups);
-    std::set<std::tuple<int, int, int>> seenEdges;  // (group, loVert, hiVert)
-    for (int fi = 0; fi < nFaces; ++fi) {
-      const int g = arr.face2Group[fi];
-      if (g < 0) continue;
-      const int vs[3] = {canon.faces[fi].verts.x, canon.faces[fi].verts.y,
-                         canon.faces[fi].verts.z};
-      for (const int k : {0, 1, 2}) {
-        int a = vs[k], b = vs[(k + 1) % 3];
-        if (a > b) std::swap(a, b);
-        if (!seenEdges.insert({g, a, b}).second) continue;
-        skeleton[g].push_back({arr.verts[a].pos, arr.verts[b].pos});
-      }
-    }
+    for (const GroupedEdge& e : CollectGroupedMemberEdges(arr))
+      skeleton[e.group].push_back({e.a, e.b});
     for (const auto& seam : arr.seams) {
       const std::pair<vec3, vec3> seg = {arr.verts[seam.vertId0].pos,
                                          arr.verts[seam.vertId1].pos};
@@ -448,17 +478,8 @@ SeamsResult FindSeams(const CanonicalGeometry& canon, double eps,
       if (g0 >= 0) skeleton[g0].push_back(seg);
       if (g1 >= 0 && g1 != g0) skeleton[g1].push_back(seg);
     }
-    for (const auto& segs : skeleton) {
-      const int n = static_cast<int>(segs.size());
-      for (int i = 0; i < n; ++i) {
-        for (int j = i + 1; j < n; ++j) {
-          const auto xCross =
-              SeamSeamCrossX(segs[i].first, segs[i].second, segs[j].first,
-                             segs[j].second, eps);
-          if (xCross) arr.criticalXs.push_back(*xCross);
-        }
-      }
-    }
+    for (const auto& segs : skeleton)
+      AppendPairwiseCrossXs(segs, eps, arr.criticalXs);
   }
 
   return res;
@@ -495,24 +516,12 @@ class SlabResolver {
     if (!slab.built) return;
     // Class-iii candidates: edges of grouped faces crossing this slab's
     // section plane (all three edges per member; over-inclusion harmless).
-    if (arr.numGroups > 0) {
-      std::set<std::pair<int, int>> seen;
-      for (int fi = 0; fi < static_cast<int>(arr.faces.size()); ++fi) {
-        if (arr.face2Group[fi] < 0) continue;
-        const int vs[3] = {arr.faces[fi].verts.x, arr.faces[fi].verts.y,
-                           arr.faces[fi].verts.z};
-        for (const int k : {0, 1, 2}) {
-          int a = vs[k], b = vs[(k + 1) % 3];
-          if (a > b) std::swap(a, b);
-          if (!seen.insert({a, b}).second) continue;
-          const vec3 pa = arr.verts[a].pos, pb = arr.verts[b].pos;
-          if (pa.x == pb.x) continue;  // no crossing trajectory
-          if (std::min(pa.x, pb.x) > slab.xMid ||
-              std::max(pa.x, pb.x) < slab.xMid)
-            continue;
-          planar_.push_back({pa, pb});
-        }
-      }
+    for (const GroupedEdge& e : CollectGroupedMemberEdges(arr)) {
+      if (e.a.x == e.b.x) continue;  // no crossing trajectory
+      if (std::min(e.a.x, e.b.x) > slab.xMid ||
+          std::max(e.a.x, e.b.x) < slab.xMid)
+        continue;
+      planar_.push_back({e.a, e.b});
     }
     // Resolve every piece endpoint once.
     for (const SweepCapture& piece : slab.pieces) {
