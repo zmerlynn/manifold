@@ -34,8 +34,8 @@ namespace {
 // 3D edge-pair origins (va, vb) for each endpoint so the strips stage can
 // extend to any x in the slab.
 //
-// Orientation: dot(p1 - p0, yz(cross(+x, face.normal))) > 0.
-// cross((1,0,0),(nx,ny,nz)) = (0, -nz, ny), yz-projection = (-nz, ny).
+// Orientation: dot(p1 - p0, cross(+x, face.normal).yz()) > 0, computed as
+// the 2D perp la::cross(1.0, normal.yz()).
 //
 // Returns false if the face does not straddle xMid (< 2 distinct crossings).
 bool ComputeSectionSegment(const CanonicalFace& face,
@@ -64,7 +64,7 @@ bool ComputeSectionSegment(const CanonicalFace& face,
   if (found < 2) return false;
 
   // Orient: dot(p1-p0, refDir) > 0.
-  const vec2 refDir = {-face.normal.z, face.normal.y};
+  const vec2 refDir = la::cross(1.0, face.normal.yz());
   const vec2 d = pts[1] - pts[0];
   if (la::dot(d, refDir) < 0) {
     std::swap(pts[0], pts[1]);

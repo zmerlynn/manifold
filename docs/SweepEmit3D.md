@@ -17,10 +17,10 @@ This design emits it.
 
 Stage names map to code entry points: CANONICALIZE (Canonicalize),
 SEAMS (FindSeams), SLABS (BuildSlabs), STRIPS (EmitStrips), CAPS
-(EmitCaps/ComputeCap); the pipeline driver is SweepEmit.  The
-crucible records later in this doc predate the names and keep their
-original stage letters: A = CANONICALIZE, B' = SEAMS, C' = SLABS,
-D' = STRIPS, E' = CAPS.
+(EmitCaps/ComputeCap); the pipeline driver is SweepEmit.  Stage
+LETTERS appearing in this doc and in SweepPlane3D.md refer to the
+superseded v1/v2 architecture; for reading them against this design:
+A = CANONICALIZE, B' = SEAMS, C' = SLABS, D' = STRIPS, E' = CAPS.
 
 CANONICALIZE (formerly A - MERGE; unchanged from SweepPlane3D.md
 stage A): eps vert merge, identical-tri multiplicity, zero-mult

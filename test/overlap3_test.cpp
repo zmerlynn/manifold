@@ -43,7 +43,7 @@ namespace {
 // ---------------------------------------------------------------------------
 // Compose helper: merge two Impl's into one without boolean resolution.
 // ---------------------------------------------------------------------------
-static Manifold::Impl ComposeImpl(const Manifold& a, const Manifold& b) {
+Manifold::Impl ComposeImpl(const Manifold& a, const Manifold& b) {
   const auto mga = a.GetMeshGL64();
   const auto mgb = b.GetMeshGL64();
   MeshGL64 combined;
@@ -62,7 +62,7 @@ static Manifold::Impl ComposeImpl(const Manifold& a, const Manifold& b) {
 }
 
 // Compose N manifolds.
-static Manifold::Impl ComposeMany(std::initializer_list<Manifold> ms) {
+Manifold::Impl ComposeMany(std::initializer_list<Manifold> ms) {
   MeshGL64 combined;
   combined.numProp = 3;
   for (const auto& m : ms) {
@@ -77,7 +77,7 @@ static Manifold::Impl ComposeMany(std::initializer_list<Manifold> ms) {
   return Manifold::Impl(combined);
 }
 
-static double ImplEps(const Manifold::Impl& impl) {
+double ImplEps(const Manifold::Impl& impl) {
   return EpsilonFromScale(impl.bBox_.Scale(), 1000);
 }
 
@@ -90,9 +90,8 @@ struct BFSeam {
   vec3 qA, qB;
 };
 
-static std::vector<BFSeam> BruteForceSeams(const Manifold::Impl& impl,
-                                           double eps) {
-  const int nTris = (int)impl.halfedge_.size() / 3;
+std::vector<BFSeam> BruteForceSeams(const Manifold::Impl& impl, double eps) {
+  const int nTris = static_cast<int>(impl.halfedge_.size()) / 3;
   std::vector<BFSeam> out;
 
   auto edgeTri = [&](vec3 e0, vec3 e1, vec3 t0, vec3 t1, vec3 t2,
@@ -105,7 +104,7 @@ static std::vector<BFSeam> BruteForceSeams(const Manifold::Impl& impl,
     const vec3 c0 = la::cross(t1 - t0, q - t0);
     const vec3 c1 = la::cross(t2 - t1, q - t1);
     const vec3 c2 = la::cross(t0 - t2, q - t2);
-    // Match LineTriClip's 1e-14 interior tolerance so BF agrees with
+    // Match LineTriClip's 1e-14 interior slack so BF agrees with
     // TriTriSeam's boundary handling (avoiding -1e-10 near-miss over-counting).
     if (la::dot(c0, tn) >= -1e-14 && la::dot(c1, tn) >= -1e-14 &&
         la::dot(c2, tn) >= -1e-14)
@@ -171,14 +170,14 @@ static std::vector<BFSeam> BruteForceSeams(const Manifold::Impl& impl,
 // A = Cube({2,2,2}) from (0,0,0) to (2,2,2).
 // B = Cube({1.7,1.9,2.3}).Translate({1.13,0.41,0.37}).
 // Overlap region is non-trivial, no face pair is coplanar.
-static Manifold::Impl GenericBoxes() {
+Manifold::Impl GenericBoxes() {
   const Manifold a = Manifold::Cube({2, 2, 2});
   const Manifold b =
       Manifold::Cube({1.7, 1.9, 2.3}).Translate({1.13, 0.41, 0.37});
   return ComposeImpl(a, b);
 }
 
-static Manifold::Impl TwoTets() {
+Manifold::Impl TwoTets() {
   const Manifold a = Manifold::Tetrahedron();
   const Manifold b = Manifold::Tetrahedron().Translate({0.3, 0.1, 0.1});
   return ComposeImpl(a, b);
@@ -187,7 +186,7 @@ static Manifold::Impl TwoTets() {
 // Three pairwise-overlapping boxes in generic positions (no shared planes).
 // Each box has a distinct z-translation so no two boxes share a z-face plane.
 // All three pairwise overlap in a common volume region.
-static Manifold::Impl ThreeOverlappingBoxes() {
+Manifold::Impl ThreeOverlappingBoxes() {
   // a: x in [-1,1], y in [-0.25,0.25], z in [-0.25,0.25]
   const Manifold a = Manifold::Cube({2, 0.5, 0.5}, true);
   // b: x in [-0.15,0.35], y in [-1,1], z in [-0.08,0.42] (no coplanar z face
@@ -205,7 +204,7 @@ static Manifold::Impl ThreeOverlappingBoxes() {
 // RemoveOverlaps3D should return the outer shell only (vol=27).
 // The inner shell is entirely inside: winding=2 on both sides -> not a fill
 // transition -> not emitted. After removal, 12 triangles (outer cube).
-static Manifold::Impl NestedCubes() {
+Manifold::Impl NestedCubes() {
   const Manifold outer = Manifold::Cube({3, 3, 3}, true);
   const Manifold inner = Manifold::Cube({1, 1, 1}, true);
   return ComposeImpl(outer, inner);
@@ -218,7 +217,7 @@ static Manifold::Impl NestedCubes() {
 // Remaining faces form the 2x1x1 union. No seams, vol=2.
 // The 1e-15 gap prevents the combined MeshGL from having a non-2-manifold
 // shared edge (which would crash the Impl constructor).
-static Manifold::Impl TouchingDisjoint() {
+Manifold::Impl TouchingDisjoint() {
   const Manifold a = Manifold::Cube({1, 1, 1});
   const Manifold b = Manifold::Cube({1, 1, 1}).Translate({1 + 1e-15, 0, 0});
   return ComposeImpl(a, b);
@@ -226,7 +225,7 @@ static Manifold::Impl TouchingDisjoint() {
 
 // k thin wedge boxes 1x0.02x(zSize) rotated about z, with per-wedge unique
 // z-extent so top/bottom faces are NOT coplanar across wedges.
-static Manifold::Impl MakeKWedges(int k, double axisOffset) {
+Manifold::Impl MakeKWedges(int k, double axisOffset) {
   MeshGL combined;
   combined.numProp = 3;
   for (int i = 0; i < k; ++i) {
@@ -254,9 +253,8 @@ static Manifold::Impl MakeKWedges(int k, double axisOffset) {
 
 // Check per-slab section validity properties from test hooks.
 // Returns "" on success, or a failure description.
-static std::string CheckSectionValidity(const Overlap3Internals& h,
-                                        double eps) {
-  for (int si = 0; si < (int)h.slabs.size(); ++si) {
+std::string CheckSectionValidity(const Overlap3Internals& h, double eps) {
+  for (int si = 0; si < static_cast<int>(h.slabs.size()); ++si) {
     const SlabResult& slab = h.slabs[si];
     if (!slab.built) continue;
 
@@ -290,9 +288,8 @@ static std::string CheckSectionValidity(const Overlap3Internals& h,
 // Oracle comparison helper (gate 5)
 // ---------------------------------------------------------------------------
 
-static void OracleCompare(const Manifold::Impl& ours_impl,
-                          const Manifold& oracle, double eps,
-                          const std::string& tag) {
+void OracleCompare(const Manifold::Impl& ours_impl, const Manifold& oracle,
+                   double eps, const std::string& tag) {
   // Round-trip through MeshGL to get a Manifold for Contains queries.
   const Manifold ours(GetMeshGLImpl<double, uint64_t>(ours_impl, -1));
   ASSERT_EQ(ours.Status(), Manifold::Error::NoError) << tag;
@@ -357,7 +354,7 @@ TEST(Overlap3, Gate1_EventParity_GenericBoxes) {
   const Overlap3Internals h = RemoveOverlaps3D_TestHooks(impl, eps);
   ASSERT_FALSE(h.fatal.has_value())
       << "Seams-stage fatal for generic boxes: " << h.detail
-      << " (code=" << (h.fatal ? (int)*h.fatal : -1) << ")";
+      << " (code=" << (h.fatal ? static_cast<int>(*h.fatal) : -1) << ")";
 
   // Parity: the seams-stage count must equal the brute-force seam count.
   EXPECT_EQ(h.arr.seams.size(), bfSeams.size())
@@ -462,8 +459,8 @@ TEST(Overlap3, Gate3_ThreeOverlappingBoxes) {
   const double eps = ImplEps(impl);
   const Overlap3Result result = RemoveOverlaps3D(impl, eps);
   ASSERT_FALSE(result.fatal.has_value())
-      << "ThreeOverlappingBoxes gate3 fatal: " << (int)*result.fatal << " "
-      << result.detail;
+      << "ThreeOverlappingBoxes gate3 fatal: "
+      << static_cast<int>(*result.fatal) << " " << result.detail;
   ASSERT_TRUE(result.impl.has_value());
   EXPECT_TRUE(result.impl->IsManifold())
       << "ThreeOverlappingBoxes output not manifold";
@@ -483,7 +480,7 @@ TEST(Overlap3, Gate4a_Wedges8_MustResolve) {
   const Overlap3Result result = RemoveOverlaps3D(impl, eps);
   ASSERT_FALSE(result.fatal.has_value())
       << "Gate4a kWedges(8,1e-3) MUST RESOLVE but got fatal="
-      << (int)*result.fatal << " " << result.detail;
+      << static_cast<int>(*result.fatal) << " " << result.detail;
   ASSERT_TRUE(result.impl.has_value());
   EXPECT_TRUE(result.impl->IsManifold())
       << "kWedges(8,1e-3) output not manifold";
@@ -502,7 +499,7 @@ TEST(Overlap3, Gate4b_NearParallel_1e6_MustResolve) {
   const Overlap3Result result = RemoveOverlaps3D(impl, eps);
   ASSERT_FALSE(result.fatal.has_value())
       << "Gate4b nearParallel(1e-6) MUST RESOLVE but got fatal="
-      << (int)*result.fatal << " " << result.detail;
+      << static_cast<int>(*result.fatal) << " " << result.detail;
 }
 
 // (c) Hull fixtures (skip only if OBJ files not found).
@@ -528,8 +525,8 @@ TEST(Overlap3, Gate4c_HullMask_MustResolve) {
     GTEST_SKIP() << "Gate4c hull: EdgeInPlane (out of scope)";
   }
   ASSERT_FALSE(result.fatal.has_value())
-      << "Gate4c hull MUST RESOLVE but got fatal=" << (int)*result.fatal << " "
-      << result.detail;
+      << "Gate4c hull MUST RESOLVE but got fatal="
+      << static_cast<int>(*result.fatal) << " " << result.detail;
   ASSERT_TRUE(result.impl.has_value());
 }
 #endif
@@ -555,7 +552,8 @@ TEST(Overlap3, Gate4d_NearParallel_1e10_MustFailClosed) {
   EXPECT_TRUE(*result.fatal == FatalReason::CoplanarOverlap ||
               *result.fatal == FatalReason::SubEpsFeature ||
               *result.fatal == FatalReason::EdgeInPlane)
-      << "Gate4d wrong guard: " << (int)*result.fatal << " " << result.detail;
+      << "Gate4d wrong guard: " << static_cast<int>(*result.fatal) << " "
+      << result.detail;
 }
 
 // (e) Degenerate-seam guard. Two boxes with a seam of length ~0.5*eps.
@@ -563,7 +561,7 @@ TEST(Overlap3, Gate4d_NearParallel_1e10_MustFailClosed) {
 // CoplanarOverlap is accepted. Otherwise SubEpsFeature must fire.
 // Resolving is also accepted if the box geometry exceeds eps after
 // tessellation.
-TEST(Overlap3, Gate4e_SubResolutionChain_MustFail) {
+TEST(Overlap3, Gate4e_SubResolutionChain_FailClosed) {
   const double eps_target = EpsilonFromScale(1.0, 1000);
   const double seamLen = 0.5 * eps_target;
   const Manifold a = Manifold::Cube({1.0, 1.0, seamLen}, true);
@@ -575,14 +573,15 @@ TEST(Overlap3, Gate4e_SubResolutionChain_MustFail) {
   if (result.fatal.has_value()) {
     EXPECT_TRUE(*result.fatal == FatalReason::SubEpsFeature ||
                 *result.fatal == FatalReason::CoplanarOverlap)
-        << "Gate4e wrong guard: " << (int)*result.fatal << " " << result.detail;
+        << "Gate4e wrong guard: " << static_cast<int>(*result.fatal) << " "
+        << result.detail;
   }
 }
 
 // (f) kWedges with axis offset ~0.3*eps. Acceptable: SubEpsFeature, or
 // CoplanarOverlap (if face pairs happen to be nearly coplanar at this scale).
 // Resolving is also accepted if the geometry clears eps after tessellation.
-TEST(Overlap3, Gate4f_Wedges_TinyOffset_MustFail) {
+TEST(Overlap3, Gate4f_Wedges_TinyOffset_FailClosed) {
   const double eps_target = EpsilonFromScale(1.0, 1000);
   const double axisOffset = 0.3 * eps_target;
   const Manifold::Impl impl = MakeKWedges(4, axisOffset);
@@ -593,18 +592,16 @@ TEST(Overlap3, Gate4f_Wedges_TinyOffset_MustFail) {
     EXPECT_TRUE(*result.fatal == FatalReason::SubEpsFeature ||
                 *result.fatal == FatalReason::CoplanarOverlap ||
                 *result.fatal == FatalReason::EdgeInPlane)
-        << "Gate4f wrong guard: " << (int)*result.fatal << " " << result.detail;
+        << "Gate4f wrong guard: " << static_cast<int>(*result.fatal) << " "
+        << result.detail;
   }
 }
 
 // ---------------------------------------------------------------------------
-// M1 white-box pin: triple-critical vertex in arr.verts.
-// ThreeOverlappingBoxes has pairs of seams sharing a face of box A; M1 adds
-// the crossing point of those seams (as a 3D vertex) to arr.verts. Any such
-// vertex is NOT referenced by any canonical face or seam endpoint. If M1 is
-// absent, arr.verts contains only face/seam vertices (usedVerts == arr.verts).
-// This test is WHITE-BOX: it fires only if RemoveOverlaps3D_TestHooks exposes
-// the arr produced by StageBPrime.
+// M1 white-box pin: seam-seam crossing x's enter criticalXs.
+// ThreeOverlappingBoxes has pairs of seams sharing a face; M1 records their
+// crossing x's in the vertex-free critical set exposed by
+// RemoveOverlaps3D_TestHooks.
 // ---------------------------------------------------------------------------
 
 TEST(Overlap3, Pin_M1_TripleCritical) {
@@ -615,7 +612,7 @@ TEST(Overlap3, Pin_M1_TripleCritical) {
       << "ThreeOverlappingBoxes seams-stage fatal: " << h.detail;
 
   // M1 records seam-seam crossing x's in the vertex-free critical set (spec
-  // B': triple criticals are x-values, not vertices).  This fixture has no
+  // SEAMS: triple criticals are x-values, not vertices).  This fixture has no
   // degenerate contacts, so every criticalXs entry is M1's; stubbing the M1
   // loop empties it (mutation-verified).  For axis-aligned boxes the crossing
   // x's coincide with vertex-plane x's - the pin is on the mechanism
@@ -705,8 +702,8 @@ TEST(Overlap3, Gate5_Oracle_GenericBoxes) {
 
   const Overlap3Result result = RemoveOverlaps3D(impl, eps);
   ASSERT_FALSE(result.fatal.has_value())
-      << "Gate5 generic boxes pipeline fatal=" << (int)*result.fatal << " "
-      << result.detail;
+      << "Gate5 generic boxes pipeline fatal="
+      << static_cast<int>(*result.fatal) << " " << result.detail;
   ASSERT_TRUE(result.impl.has_value());
   OracleCompare(*result.impl, oracle, eps, "Gate5_GenericBoxes");
 }
@@ -724,8 +721,8 @@ TEST(Overlap3, Gate5_Oracle_BoxPlusRotatedBox) {
 
   const Overlap3Result result = RemoveOverlaps3D(impl, eps);
   ASSERT_FALSE(result.fatal.has_value())
-      << "Gate5 box+rotated pipeline fatal=" << (int)*result.fatal << " "
-      << result.detail;
+      << "Gate5 box+rotated pipeline fatal=" << static_cast<int>(*result.fatal)
+      << " " << result.detail;
   ASSERT_TRUE(result.impl.has_value());
   OracleCompare(*result.impl, oracle, eps, "Gate5_BoxPlusRotatedBox");
 }
@@ -740,8 +737,8 @@ TEST(Overlap3, Gate5_Oracle_TwoSpheres) {
 
   const Overlap3Result result = RemoveOverlaps3D(impl, eps);
   ASSERT_FALSE(result.fatal.has_value())
-      << "Gate5 two spheres pipeline fatal=" << (int)*result.fatal << " "
-      << result.detail;
+      << "Gate5 two spheres pipeline fatal=" << static_cast<int>(*result.fatal)
+      << " " << result.detail;
   ASSERT_TRUE(result.impl.has_value());
   OracleCompare(*result.impl, oracle, eps, "Gate5_TwoSpheres");
 }
@@ -762,8 +759,8 @@ TEST(Overlap3, Gate5_Oracle_ThreeOverlappingBoxes) {
 
   const Overlap3Result result = RemoveOverlaps3D(impl, eps);
   ASSERT_FALSE(result.fatal.has_value())
-      << "Gate5 ThreeOverlappingBoxes pipeline fatal=" << (int)*result.fatal
-      << " " << result.detail;
+      << "Gate5 ThreeOverlappingBoxes pipeline fatal="
+      << static_cast<int>(*result.fatal) << " " << result.detail;
   ASSERT_TRUE(result.impl.has_value());
   OracleCompare(*result.impl, oracle, eps, "Gate5_ThreeOverlappingBoxes");
 }
@@ -900,7 +897,8 @@ TEST(Overlap3, Pin_P4_EdgeInPlane) {
   const Overlap3Result result = RemoveOverlaps3D(impl, eps);
   ASSERT_TRUE(result.fatal.has_value()) << "expected EdgeInPlane fatal";
   EXPECT_EQ(*result.fatal, FatalReason::EdgeInPlane)
-      << "got fatal=" << (int)*result.fatal << " detail=" << result.detail;
+      << "got fatal=" << static_cast<int>(*result.fatal)
+      << " detail=" << result.detail;
 }
 
 // P4b: EdgeInPlane - off-midpoint configuration that the midpoint heuristic
@@ -935,14 +933,15 @@ TEST(Overlap3, Pin_P4b_EdgeInPlane_OffMidpoint) {
   const Overlap3Result result = RemoveOverlaps3D(impl, eps);
   ASSERT_TRUE(result.fatal.has_value()) << "expected EdgeInPlane fatal";
   EXPECT_EQ(*result.fatal, FatalReason::EdgeInPlane)
-      << "got fatal=" << (int)*result.fatal << " detail=" << result.detail;
+      << "got fatal=" << static_cast<int>(*result.fatal)
+      << " detail=" << result.detail;
 }
 
 // P6: Compose a tet with its winding-reversed copy. Both meshes share the same
 // 4 vertex positions {(0,0,0),(1,0,0),(0,1,0),(0,0,1)}. The canonicalize
 // stage merges the
 // duplicate positions and finds each face pair has opposite permutation parity
-// -> mult = +1 + (-1) = 0 -> all 4 face keys dropped -> stageA.faces empty ->
+// -> mult = +1 + (-1) = 0 -> all 4 face keys dropped -> canon.faces empty ->
 // result is empty Impl (no fatal, vol=0).
 //   Tet A outward faces: {0,2,1, 0,1,3, 0,3,2, 1,2,3}
 //   Tet B reversed faces (verts offset by 4): {4,5,6, 4,7,5, 4,6,7, 5,7,6}
@@ -988,7 +987,7 @@ TEST(Overlap3, Pin_P7_SubEpsInput) {
 // ---------------------------------------------------------------------------
 
 // Return an Impl with all triangle windings flipped relative to m.
-static Manifold::Impl InvertWinding(const Manifold& m) {
+Manifold::Impl InvertWinding(const Manifold& m) {
   MeshGL64 mg = m.GetMeshGL64();
   for (size_t i = 0; i < mg.triVerts.size(); i += 3)
     std::swap(mg.triVerts[i + 1], mg.triVerts[i + 2]);
@@ -998,8 +997,7 @@ static Manifold::Impl InvertWinding(const Manifold& m) {
 }
 
 // Compose A with a winding-inverted copy of B (for subtract oracle test).
-static Manifold::Impl ComposeWithInverted(const Manifold& a,
-                                          const Manifold& b) {
+Manifold::Impl ComposeWithInverted(const Manifold& a, const Manifold& b) {
   const MeshGL64 mga = a.GetMeshGL64();
   MeshGL64 mgb = b.GetMeshGL64();
   for (size_t i = 0; i < mgb.triVerts.size(); i += 3)
@@ -1049,8 +1047,8 @@ TEST(Overlap3, Pin_S3b_CubeMinusInverted_OracleSubtract) {
 
   const Overlap3Result result = RemoveOverlaps3D(impl, eps);
   ASSERT_FALSE(result.fatal.has_value())
-      << "CubeMinusInverted: pipeline fatal=" << (int)*result.fatal << " "
-      << result.detail;
+      << "CubeMinusInverted: pipeline fatal=" << static_cast<int>(*result.fatal)
+      << " " << result.detail;
   ASSERT_TRUE(result.impl.has_value());
   OracleCompare(*result.impl, oracle, eps, "Pin_S3b_CubeMinusInverted");
 }
@@ -1070,7 +1068,7 @@ TEST(Overlap3, Pin_P12_InteriorIsland_StampThroughFace) {
 
   const Overlap3Result result = RemoveOverlaps3D(impl, eps);
   ASSERT_FALSE(result.fatal.has_value())
-      << "P12 island pipeline fatal=" << (int)*result.fatal << " "
+      << "P12 island pipeline fatal=" << static_cast<int>(*result.fatal) << " "
       << result.detail;
   ASSERT_TRUE(result.impl.has_value());
   OracleCompare(*result.impl, oracle, eps, "P12_InteriorIsland");
@@ -1097,7 +1095,7 @@ TEST(Overlap3, Pin_PerCriticalCaps) {
 
   const Overlap3Result result = RemoveOverlaps3D(impl, eps);
   ASSERT_FALSE(result.fatal.has_value())
-      << "Pin_PerCriticalCaps fatal=" << (int)*result.fatal << " "
+      << "Pin_PerCriticalCaps fatal=" << static_cast<int>(*result.fatal) << " "
       << result.detail;
   ASSERT_TRUE(result.impl.has_value());
   ASSERT_TRUE(result.impl->IsManifold())
@@ -1146,8 +1144,8 @@ TEST(Overlap3, Pin_StripSubdivFromCap) {
   // would yield non-manifold; oracle checks geometric volume/genus.
   const Overlap3Result result = RemoveOverlaps3D(impl, eps);
   ASSERT_FALSE(result.fatal.has_value())
-      << "Pin_StripSubdivFromCap pipeline fatal=" << (int)*result.fatal << " "
-      << result.detail;
+      << "Pin_StripSubdivFromCap pipeline fatal="
+      << static_cast<int>(*result.fatal) << " " << result.detail;
   ASSERT_TRUE(result.impl.has_value());
   EXPECT_TRUE(result.impl->IsManifold())
       << "Pin_StripSubdivFromCap: non-manifold indicates missing strip "
@@ -1177,7 +1175,7 @@ TEST(Overlap3, Pin_OneArrangementPerCritical) {
 
   // Expected arrangements: criticals (slab boundaries) whose nearest built
   // slab on either side has pieces - EmitCaps' documented rule.
-  const int nSlabs = (int)h.slabs.size();
+  const int nSlabs = static_cast<int>(h.slabs.size());
   int expected = 0;
   for (int ci = 0; ci <= nSlabs; ++ci) {
     int li = ci - 1;
@@ -1192,7 +1190,8 @@ TEST(Overlap3, Pin_OneArrangementPerCritical) {
 
   const Overlap3Result result = RemoveOverlaps3D(impl, eps);
   ASSERT_FALSE(result.fatal.has_value())
-      << "pipeline fatal=" << (int)*result.fatal << " " << result.detail;
+      << "pipeline fatal=" << static_cast<int>(*result.fatal) << " "
+      << result.detail;
   EXPECT_EQ(result.counters.capArrangements, expected)
       << "caps stage must run exactly one arrangement per critical with input";
 }

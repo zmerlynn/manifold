@@ -171,7 +171,7 @@ bool SeamSeamCrossX(vec3 A0, vec3 A1, vec3 B0, vec3 B1, double eps,
   const double lenA = la::length(dA), lenB = la::length(dB);
   if (lenA < eps || lenB < eps) return false;
   const vec3 cAB = la::cross(dA, dB);
-  const double cABlen2 = la::dot(cAB, cAB);
+  const double cABlen2 = la::length2(cAB);
   // Near-parallel gate, dimensionally correct: |cross| has units len^2, so
   // compare against eps * (lenA + lenB).  Endpoint noise on near-parallel
   // seams otherwise yields a pseudo-crossing at a meaningless x.
@@ -227,7 +227,7 @@ CanonicalGeometry Canonicalize(const Manifold::Impl& in, double eps) {
   for (auto& [root, members] : comps) {
     vec3 c(0.0);
     for (int v : members) c += in.vertPos_[v];
-    c /= (double)members.size();
+    c /= static_cast<double>(members.size());
     int best = members[0];
     double bestD = la::length(in.vertPos_[best] - c);
     for (int v : members) {
@@ -243,14 +243,8 @@ CanonicalGeometry Canonicalize(const Manifold::Impl& in, double eps) {
   for (int i = 0; i < nVerts; ++i)
     origVert2Merged[i] = rootToMerged[static_cast<int>(uf.find(i))];
 
-  struct FaceKey {
-    ivec3 s;
-    bool operator<(const FaceKey& o) const {
-      if (s.x != o.s.x) return s.x < o.s.x;
-      if (s.y != o.s.y) return s.y < o.s.y;
-      return s.z < o.s.z;
-    }
-  };
+  // Sorted vert triple; std::array's lexicographic order keys the map.
+  using FaceKey = std::array<int, 3>;
   struct FaceEntry {
     int64_t mult;
     int repTri;
@@ -277,7 +271,7 @@ CanonicalGeometry Canonicalize(const Manifold::Impl& in, double eps) {
       std::swap(a, b);
       par = -par;
     }
-    FaceKey key{{a, b, c}};
+    const FaceKey key{a, b, c};
     auto it = faceMap.find(key);
     if (it == faceMap.end())
       faceMap.emplace(key, FaceEntry{1, tri, par});
@@ -296,7 +290,7 @@ CanonicalGeometry Canonicalize(const Manifold::Impl& in, double eps) {
     const int mv2 = res.origVert2Merged[in.halfedge_.Start(h + 2)];
     const vec3 n = la::cross(res.mergedVerts[mv1] - res.mergedVerts[mv0],
                              res.mergedVerts[mv2] - res.mergedVerts[mv0]);
-    if (la::dot(n, n) == 0.0) continue;
+    if (la::length2(n) == 0.0) continue;
     CanonicalFace cf;
     cf.id = e.repTri;
     cf.verts = {mv0, mv1, mv2};
@@ -530,7 +524,7 @@ SeamsResult FindSeams(const CanonicalGeometry& canon, double eps,
 // t = parameterization of pt on segment [ft.p0, ft.p1].
 vec2 ExtendPt(vec2 pt, const FaceTrack& ft, double xTarget) {
   const vec2 segD = ft.p1 - ft.p0;
-  const double segLen2 = la::dot(segD, segD);
+  const double segLen2 = la::length2(segD);
   double t = 0.5;
   if (segLen2 > 0.0) {
     t = la::dot(pt - ft.p0, segD) / segLen2;
@@ -538,7 +532,7 @@ vec2 ExtendPt(vec2 pt, const FaceTrack& ft, double xTarget) {
   }
   const vec2 yz0 = InterpolateSafe(ft.va0, ft.vb0, xTarget);
   const vec2 yz1 = InterpolateSafe(ft.va1, ft.vb1, xTarget);
-  return (1.0 - t) * yz0 + t * yz1;
+  return la::lerp(yz0, yz1, t);
 }
 
 // Like ExtendPt but uses the seam track for class-ii endpoints (spec
@@ -560,7 +554,7 @@ vec2 ExtendPtWithSeams(vec2 pt, const FaceTrack& ft,
                        double xTarget, double eps) {
   // Check if pt is strictly interior to the face segment (class-ii indicator).
   const vec2 segD = ft.p1 - ft.p0;
-  const double segLen2 = la::dot(segD, segD);
+  const double segLen2 = la::length2(segD);
   if (segLen2 > eps * eps) {
     const double atP0 = la::length(pt - ft.p0);
     const double atP1 = la::length(pt - ft.p1);
@@ -572,7 +566,7 @@ vec2 ExtendPtWithSeams(vec2 pt, const FaceTrack& ft,
         }
       }
       // No seam track matches: forced-through weld endpoint.
-      // Spec D' (R2-fold): extend CONSTANT in (y,z) across the slab.
+      // Spec STRIPS (R2-fold): extend CONSTANT in (y,z) across the slab.
       return pt;
     }
   }
@@ -595,7 +589,7 @@ struct OutTri3D {
 std::vector<vec2> ChainSplitVerts(const std::vector<vec2>& arrVerts, vec2 p0,
                                   vec2 p1, double eps) {
   const vec2 segD = p1 - p0;
-  const double segLen2 = la::dot(segD, segD);
+  const double segLen2 = la::length2(segD);
   if (segLen2 <= eps * eps) return {};
   const double invLen2 = 1.0 / segLen2;
   const double tEps = eps / std::sqrt(segLen2);
@@ -627,13 +621,13 @@ std::vector<vec2> ChainSplitVerts(const std::vector<vec2>& arrVerts, vec2 p0,
 // exactly with cap triangulation corners.  The merge advances by projection
 // parameter on each chain's own chord; exact ties advance the xLo side first
 // (the other diagonal of the same quad).
-void ZipperEmit(double xLo, double xHi, const std::vector<vec2>& a,
-                const std::vector<vec2>& b, std::vector<OutTri3D>& out) {
+void ZipperEmit(std::vector<OutTri3D>& out, double xLo, double xHi,
+                const std::vector<vec2>& a, const std::vector<vec2>& b) {
   const int m = static_cast<int>(a.size()), n = static_cast<int>(b.size());
   auto params = [](const std::vector<vec2>& c) {
     std::vector<double> t(c.size(), 0.0);
     const vec2 d = c.back() - c.front();
-    const double len2 = la::dot(d, d);
+    const double len2 = la::length2(d);
     if (c.size() >= 2 && len2 > 0.0) {
       for (int i = 1; i + 1 < static_cast<int>(c.size()); ++i)
         t[i] = la::dot(c[i] - c.front(), d) / len2;
@@ -674,8 +668,8 @@ struct StripChains {
 // the preceding gap's canonical), with one chain per piece - attribution
 // failures fail closed in EmitCaps before this runs.
 std::optional<std::pair<FatalReason, std::string>> EmitStrips(
-    const std::vector<SlabResult>& slabs,
-    const std::vector<StripChains>& chains, std::vector<OutTri3D>& out) {
+    std::vector<OutTri3D>& out, const std::vector<SlabResult>& slabs,
+    const std::vector<StripChains>& chains) {
   for (int si = 0; si < static_cast<int>(slabs.size()); ++si) {
     if (!slabs[si].built) continue;
     const StripChains& ch = chains[si];
@@ -698,7 +692,7 @@ std::optional<std::pair<FatalReason, std::string>> EmitStrips(
         return std::make_pair(FatalReason::NonManifoldEmission,
                               std::string("empty strip chain"));
       }
-      ZipperEmit(slabs[si].xLo, slabs[si].xHi, ch.lo[k], ch.hi[k], out);
+      ZipperEmit(out, slabs[si].xLo, slabs[si].xHi, ch.lo[k], ch.hi[k]);
     }
   }
   return std::nullopt;
@@ -719,8 +713,8 @@ std::optional<std::pair<FatalReason, std::string>> EmitStrips(
 // If flipWinding is true, reverse each triangle (for -x normal caps).
 // idx is global across all loops (flat concatenation of allVerts).
 // Returns false if the triangulator produced an invalid index (fail closed).
-bool TriangulateCap(const Polygons& polys, double xCap, bool flipWinding,
-                    double eps, std::vector<OutTri3D>& out) {
+bool TriangulateCap(std::vector<OutTri3D>& out, const Polygons& polys,
+                    double xCap, bool flipWinding, double eps) {
   if (polys.empty()) return true;
 
   PolygonsIdx pidx;
@@ -763,10 +757,11 @@ bool TriangulateCap(const Polygons& polys, double xCap, bool flipWinding,
 // piece whose source face has no track is a broken attribution; ok goes
 // false and the caller fails closed (BuildSlabs made id conflicts fatal, so
 // this is unreachable in a consistent pipeline - asserted AND checked).
-// NO vertex pre-dedup: the cap arrangement's MergeVerts owns snapping.
+// NO vertex pre-merge: the cap arrangement's MergeVerts owns snapping.
 struct CapEdgeSet {
   std::vector<vec2> rawVerts;
-  std::vector<std::pair<int, int>> lPieces, rPieces;  // rawVerts index pairs
+  std::vector<std::pair<int, int>> lPiece2RawVerts,
+      rPiece2RawVerts;  // rawVerts index pairs
   bool ok = true;
 };
 
@@ -800,9 +795,9 @@ CapEdgeSet BuildCapEdgeSet(const SlabResult* leftSlab,
   };
   // L verts appended first, then R: one deterministic input order for the ONE
   // arrangement.
-  if (leftSlab && leftSlab->built) addPieces(*leftSlab, ces.lPieces);
+  if (leftSlab && leftSlab->built) addPieces(*leftSlab, ces.lPiece2RawVerts);
   if (ces.ok && rightSlab && rightSlab->built)
-    addPieces(*rightSlab, ces.rPieces);
+    addPieces(*rightSlab, ces.rPiece2RawVerts);
   return ces;
 }
 
@@ -815,23 +810,25 @@ CapEdgeSet BuildCapEdgeSet(const SlabResult* leftSlab,
 // critical.
 // Returns nullopt on success, or the fatal (reason, detail) to propagate.
 std::optional<std::pair<FatalReason, std::string>> ComputeCap(
+    std::vector<OutTri3D>& out, std::vector<std::vector<vec2>>* leftChains,
+    std::vector<std::vector<vec2>>* rightChains, Overlap3Counters& cnt,
     const SlabResult* leftSlab, const SlabResult* rightSlab, double xCap,
-    double eps, std::vector<OutTri3D>& out,
-    std::vector<std::vector<vec2>>* leftChains,
-    std::vector<std::vector<vec2>>* rightChains, Overlap3Counters& cnt) {
+    double eps) {
   const CapEdgeSet ces = BuildCapEdgeSet(leftSlab, rightSlab, xCap, eps);
   if (!ces.ok)
     return std::make_pair(FatalReason::EngineIdConflict,
                           std::string("retained piece has no face track"));
   // Pre-size bound chain outputs so every piece has a slot.
-  if (leftChains) leftChains->assign(ces.lPieces.size(), {});
-  if (rightChains) rightChains->assign(ces.rPieces.size(), {});
+  if (leftChains) leftChains->assign(ces.lPiece2RawVerts.size(), {});
+  if (rightChains) rightChains->assign(ces.rPiece2RawVerts.size(), {});
   if (ces.rawVerts.empty()) return std::nullopt;
 
   std::vector<EdgeM> edges;
-  edges.reserve(ces.lPieces.size() + ces.rPieces.size());
-  for (const auto& s : ces.lPieces) edges.push_back({s.first, s.second, +1});
-  for (const auto& s : ces.rPieces) edges.push_back({s.first, s.second, -1});
+  edges.reserve(ces.lPiece2RawVerts.size() + ces.rPiece2RawVerts.size());
+  for (const auto& s : ces.lPiece2RawVerts)
+    edges.push_back({s.first, s.second, +1});
+  for (const auto& s : ces.rPiece2RawVerts)
+    edges.push_back({s.first, s.second, -1});
 
   std::vector<OutEdge> negEdges;
   ++cnt.capArrangements;
@@ -842,11 +839,11 @@ std::optional<std::pair<FatalReason, std::string>> ComputeCap(
   bool trisOk = true;
   if (!r.edges.empty()) {
     const Polygons cp = OutEdgesToPolygons(r.verts, r.edges, &loopsClosed);
-    trisOk = TriangulateCap(cp, xCap, /*flipWinding=*/false, eps, out);
+    trisOk = TriangulateCap(out, cp, xCap, /*flipWinding=*/false, eps);
   }
   if (loopsClosed && trisOk && !negEdges.empty()) {
     const Polygons cm = OutEdgesToPolygons(r.verts, negEdges, &loopsClosed);
-    trisOk = TriangulateCap(cm, xCap, /*flipWinding=*/true, eps, out);
+    trisOk = TriangulateCap(out, cm, xCap, /*flipWinding=*/true, eps);
   }
   if (!loopsClosed)
     return std::make_pair(FatalReason::NonManifoldEmission,
@@ -879,15 +876,15 @@ std::optional<std::pair<FatalReason, std::string>> ComputeCap(
       }
     }
   };
-  if (leftChains) buildChains(ces.lPieces, *leftChains);
-  if (rightChains) buildChains(ces.rPieces, *rightChains);
+  if (leftChains) buildChains(ces.lPiece2RawVerts, *leftChains);
+  if (rightChains) buildChains(ces.rPiece2RawVerts, *rightChains);
   return std::nullopt;
 }
 
 // Caps-stage driver: one cap per critical (spec [R3-fold]: runs are never
 // merged; only IEEE-exact duplicate criticals collapse).  Adjacent built
 // slabs are found by INDEX: slab bounds are these exact critical values by
-// construction, so no tolerance enters the lookup.
+// construction, so no slack enters the lookup.
 //
 // Chains bind per adjacent-built-slab PAIR, at the pair's canonical critical:
 // the first critical of the gap between the slabs (index li+1, which is the
@@ -900,9 +897,9 @@ std::optional<std::pair<FatalReason, std::string>> ComputeCap(
 // their own arrangements but are sub-eps slivers that collapse in the
 // assembly weld.
 std::optional<std::pair<FatalReason, std::string>> EmitCaps(
-    const std::vector<SlabResult>& slabs, const std::vector<double>& crits,
-    double eps, std::vector<OutTri3D>& out, std::vector<StripChains>& chains,
-    Overlap3Counters& cnt) {
+    std::vector<OutTri3D>& out, std::vector<StripChains>& chains,
+    Overlap3Counters& cnt, const std::vector<SlabResult>& slabs,
+    const std::vector<double>& crits, double eps) {
   const int nSlabs = static_cast<int>(slabs.size());
   for (int ci = 0; ci < static_cast<int>(crits.size()); ++ci) {
     int li = ci - 1;
@@ -913,23 +910,23 @@ std::optional<std::pair<FatalReason, std::string>> EmitCaps(
     const SlabResult* right = ri < nSlabs ? &slabs[ri] : nullptr;
     const bool canonical = ci == li + 1;
     if (auto fatal =
-            ComputeCap(left, right, crits[ci], eps, out,
-                       (canonical && left) ? &chains[li].hi : nullptr,
-                       (canonical && right) ? &chains[ri].lo : nullptr, cnt))
+            ComputeCap(out, (canonical && left) ? &chains[li].hi : nullptr,
+                       (canonical && right) ? &chains[ri].lo : nullptr, cnt,
+                       left, right, crits[ci], eps))
       return fatal;
   }
   return std::nullopt;
 }
 
 // ---------------------------------------------------------------------------
-// Assembly: collect emitted triangles, dedup verts, build Impl.
+// Assembly: weld verts, drop exact-duplicate triangles, build Impl.
 // ---------------------------------------------------------------------------
 
 StageResult<Manifold::Impl> BuildImpl(const std::vector<OutTri3D>& tris,
                                       double eps) {
   if (tris.empty()) return StageResult<Manifold::Impl>::Ok(Manifold::Impl{});
 
-  // Collect verts with eps-dedup.
+  // Collect verts with an eps-weld.
   std::vector<vec3> verts;
   auto getVertIdx = [&](vec3 p) -> int {
     for (int i = 0; i < static_cast<int>(verts.size()); ++i)
@@ -1011,7 +1008,7 @@ Overlap3Result SweepEmit(ArrangementGeometry& arr, double eps,
 
   // The criticals are the slab boundaries: the same sorted-unique vert
   // x-values BuildSlabs derived the slabs from, recovered exactly (no
-  // recompute, no tolerance).
+  // recompute, no slack).
   std::vector<double> crits;
   if (!slabs.empty()) {
     crits.reserve(slabs.size() + 1);
@@ -1019,18 +1016,18 @@ Overlap3Result SweepEmit(ArrangementGeometry& arr, double eps,
     crits.push_back(slabs.back().xHi);
   }
 
-  // E' then D': caps run first; each cap's ONE arrangement is the source of
+  // Caps before strips: each cap's ONE arrangement is the source of
   // truth at its critical - cap_plus, cap_minus, and both adjacent slabs'
   // strip chains all consume it (spec [R2-fold]).
   std::vector<OutTri3D> emitted;
   std::vector<StripChains> chains(slabs.size());
-  if (auto capFatal = EmitCaps(slabs, crits, eps, emitted, chains, cnt)) {
+  if (auto capFatal = EmitCaps(emitted, chains, cnt, slabs, crits, eps)) {
     result.fatal = capFatal->first;
     result.detail = std::move(capFatal->second);
     result.counters = cnt;
     return result;
   }
-  if (auto stripFatal = EmitStrips(slabs, chains, emitted)) {
+  if (auto stripFatal = EmitStrips(emitted, slabs, chains)) {
     result.fatal = stripFatal->first;
     result.detail = std::move(stripFatal->second);
     result.counters = cnt;

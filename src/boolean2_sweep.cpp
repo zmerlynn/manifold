@@ -124,7 +124,7 @@ using PolySet2 = std::map<std::pair<vec2, vec2>, PolyVal, PairLexLess>;
 // Merge two srcIds under the conflict rule: same id or one is already -1 ->
 // propagate (no new conflict); two distinct valid ids -> conflict (-1), return
 // true to signal a new conflict event.
-static bool MergeSrcId(int32_t& existing, int32_t incoming) {
+bool MergeSrcId(int32_t& existing, int32_t incoming) {
   if (existing == incoming) return false;
   if (existing == -1 || incoming == -1) {
     existing = -1;

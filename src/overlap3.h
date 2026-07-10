@@ -123,7 +123,7 @@ inline vec2 InterpolateSafe(vec3 va, vec3 vb, double xTarget) {
   DEBUG_ASSERT(dx != 0.0, logicErr, "x-degenerate track in InterpolateSafe");
   if (dx == 0.0) return {va.y, va.z};
   const double t = (xTarget - va.x) / dx;
-  return {va.y + t * (vb.y - va.y), va.z + t * (vb.z - va.z)};
+  return va.yz() + t * (vb.yz() - va.yz());
 }
 
 // Per-seam track for cap/strip extension of class-ii endpoints (spec
