@@ -523,13 +523,34 @@ class SlabResolver {
         continue;
       planar_.push_back({e.a, e.b});
     }
-    // Resolve every piece endpoint once.
+    // Resolve piece endpoints per EPS-CLUSTER, not per exact vertex: the
+    // winding pass constructs T-junction verts exactly and never merges
+    // them, so a section can carry sub-eps-adjacent twins.  Resolved
+    // independently they can match DIFFERENT tracks, and divergent tracks
+    // amplify a sub-eps section gap into a many-eps gap at the cap
+    // (corpus-diagnosed).  One ball, one track, every member extends
+    // identically - the same one-entity rule as the vert merges.
+    std::vector<vec2> pts;
     for (const SweepCapture& piece : slab.pieces) {
       for (const vec2 pt : {piece.from, piece.to}) {
         const auto key = std::make_pair(pt.x, pt.y);
         if (tracks_.count(key)) continue;
-        tracks_.emplace(key, Resolve(pt, slab));
+        tracks_.emplace(key, Track{true, vec3(0.0), vec3(0.0)});
+        pts.push_back(pt);
       }
+    }
+    const int n = static_cast<int>(pts.size());
+    DisjointSets clusterUf(n);
+    for (int i = 0; i < n; ++i)
+      for (int j = i + 1; j < n; ++j)
+        if (la::length(pts[i] - pts[j]) <= eps) clusterUf.unite(i, j);
+    std::map<int, Track> root2Track;
+    for (int i = 0; i < n; ++i) {
+      const int root = static_cast<int>(clusterUf.find(i));
+      auto it = root2Track.find(root);
+      if (it == root2Track.end())
+        it = root2Track.emplace(root, Resolve(pts[root], slab)).first;
+      tracks_[{pts[i].x, pts[i].y}] = it->second;
     }
   }
 
@@ -812,11 +833,20 @@ std::optional<std::pair<FatalReason, std::string>> ComputeCap(
   for (const auto& s : ces.rPiece2RawVerts)
     edges.push_back({s.first, s.second, -1});
 
+  // Cap inputs are twice-constructed (seam endpoints are TriTriSeam
+  // constructions, extensions interpolate along tracks), so two derivations
+  // of one junction can land several eps apart - above the engine's merge
+  // ball at eps, which leaves micro-edges and sliver fans in the output
+  // (corpus-falsified on real geometry).  The cap arrangement therefore runs
+  // at the construction-noise radius: alpha ~ eps per kernel, depth two,
+  // both sides -> 4 eps, doubled for headroom.  Chains use the same radius
+  // so strip subdivision matches the cap identity model.
+  const double capEps = 8 * eps;
   std::vector<OutEdge> negEdges;
   ++cnt.capArrangements;
   const OverlapResult r =
-      RemoveOverlaps2D(ces.rawVerts, edges, eps, /*debug=*/false, WindRule::Add,
-                       /*trace=*/nullptr, &negEdges);
+      RemoveOverlaps2D(ces.rawVerts, edges, capEps, /*debug=*/false,
+                       WindRule::Add, /*trace=*/nullptr, &negEdges);
   bool loopsClosed = true;
   bool trisOk = true;
   if (!r.edges.empty()) {
@@ -852,7 +882,7 @@ std::optional<std::pair<FatalReason, std::string>> ComputeCap(
       chain.push_back(r.verts[m0]);
       if (m0 != m1) {
         for (const vec2& v :
-             ChainSplitVerts(r.verts, r.verts[m0], r.verts[m1], eps))
+             ChainSplitVerts(r.verts, r.verts[m0], r.verts[m1], capEps))
           chain.push_back(v);
         chain.push_back(r.verts[m1]);
       }
@@ -891,11 +921,18 @@ std::optional<std::pair<FatalReason, std::string>> EmitCaps(
     while (ri < nSlabs && !slabs[ri].built) ++ri;
     const SlabResult* left = li >= 0 ? &slabs[li] : nullptr;
     const SlabResult* right = ri < nSlabs ? &slabs[ri] : nullptr;
-    const bool canonical = ci == li + 1;
+    // Non-canonical criticals (interior to an unbuilt run) emit NOTHING:
+    // their cap would be the same L-R difference the run's canonical cap
+    // already computed, re-derived at an x within eps of it - and the two
+    // arrangements coincide only up to snap noise, which track slopes can
+    // amplify past eps (corpus-falsified: the doubled-cap emission-closure
+    // defect).  One cap per adjacent-built-slab pair, at the critical where
+    // the chains bind.
+    if (ci != li + 1) continue;
     if (auto fatal =
-            ComputeCap(out, (canonical && left) ? &chains[li].hi : nullptr,
-                       (canonical && right) ? &chains[ri].lo : nullptr, cnt,
-                       left, li >= 0 ? &resolvers[li] : nullptr, right,
+            ComputeCap(out, left ? &chains[li].hi : nullptr,
+                       right ? &chains[ri].lo : nullptr, cnt, left,
+                       li >= 0 ? &resolvers[li] : nullptr, right,
                        ri < nSlabs ? &resolvers[ri] : nullptr, crits[ci], eps))
       return fatal;
   }

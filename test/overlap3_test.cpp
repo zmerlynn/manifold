@@ -1192,8 +1192,10 @@ TEST(Overlap3, Pin_OneArrangementPerCritical) {
   ASSERT_FALSE(h.fatal.has_value()) << "pre-emission fatal: " << h.detail;
   ASSERT_FALSE(h.slabs.empty());
 
-  // Expected arrangements: criticals (slab boundaries) whose nearest built
-  // slab on either side has pieces - EmitCaps' documented rule.
+  // Expected arrangements: PAIR-CANONICAL criticals (ci == li + 1) whose
+  // nearest built slab on either side has pieces - EmitCaps' documented
+  // rule (non-canonical in-run criticals emit nothing; their content would
+  // re-derive the canonical cap's).
   const int nSlabs = static_cast<int>(h.slabs.size());
   int expected = 0;
   for (int ci = 0; ci <= nSlabs; ++ci) {
@@ -1201,6 +1203,7 @@ TEST(Overlap3, Pin_OneArrangementPerCritical) {
     while (li >= 0 && !h.slabs[li].built) --li;
     int ri = ci;
     while (ri < nSlabs && !h.slabs[ri].built) ++ri;
+    if (ci != li + 1) continue;
     const bool leftHas = li >= 0 && !h.slabs[li].pieces.empty();
     const bool rightHas = ri < nSlabs && !h.slabs[ri].pieces.empty();
     if (leftHas || rightHas) ++expected;
@@ -1522,3 +1525,45 @@ TEST(Overlap3, Touch_VertexOnly_Cubes) {
       << "vertex-touching cubes must stay two topological components";
   OracleCompare(*result.impl, oracle, eps, "Touch_VertexOnly");
 }
+
+#ifndef MANIFOLD_NO_FILESYSTEM
+// Corpus fixtures: real operand pairs from the measurement campaign,
+// carrying the emission-closure class (steep-track junction spreads).
+static void CorpusPairGate(const char* leftName, const char* rightName,
+                           const char* tag) {
+  std::filesystem::path file(__FILE__);
+  auto modelDir = file.parent_path() / "models";
+  std::ifstream fL((modelDir / leftName).string());
+  std::ifstream fR((modelDir / rightName).string());
+  if (!fL.is_open() || !fR.is_open()) GTEST_SKIP() << "models not found";
+  const Manifold a = Manifold::ReadOBJ(fL);
+  const Manifold b = Manifold::ReadOBJ(fR);
+  const Manifold oracle = a + b;
+  const Manifold::Impl impl = ComposeImpl(a, b);
+  const double eps = ImplEps(impl);
+  const Overlap3Result result = RemoveOverlaps3D(impl, eps);
+  // Recorded contract (spec: emission-closure diagnosis): steep-track
+  // junction spreads break the eps-identity closure on these meshes;
+  // resolution needs provenance-exact strip/cap chains (the recorded
+  // per-input-edge upgrade).  Until then: a named guard or a true resolve,
+  // never silent garbage.
+  if (result.fatal.has_value()) {
+    EXPECT_EQ(*result.fatal, FatalReason::NonManifoldEmission)
+        << tag << " wrong guard: " << static_cast<int>(*result.fatal) << " "
+        << result.detail;
+    return;
+  }
+  ASSERT_TRUE(result.impl.has_value());
+  OracleCompare(*result.impl, oracle, eps, tag);
+}
+
+TEST(Overlap3, Corpus_Havocglass8_Recorded) {
+  CorpusPairGate("Havocglass8_left.obj", "Havocglass8_right.obj",
+                 "Corpus_Havocglass8");
+}
+
+TEST(Overlap3, Corpus_GenericTwin7863_Recorded) {
+  CorpusPairGate("Generic_Twin_7863.1.t0_left.obj",
+                 "Generic_Twin_7863.1.t0_right.obj", "Corpus_GenericTwin7863");
+}
+#endif

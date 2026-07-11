@@ -509,3 +509,34 @@ emission-closure defect (Generic_Twin_7863 is the smaller repro),
 (2) hulls' near-coplanar guard, (3) perf campaign (weld hash
 first). The 900s openscad run left going for slow-vs-hung
 confirmation; result to check next session.
+
+## Step 13: emission-closure crucible (user directive)
+
+GOAL: the unbalanced-fan class (1F/0B Generic_Twin_7863, 1F/2B
+Havocglass8) - root cause + fix. Suspects, ranked before evidence:
+(a) BuildImpl exact-duplicate drop removing a NEEDED copy (odd
+multiplicities on dense real geometry - the R3 reasoning assumed
+exactly-two); (b) TriangulateCap silently under-covering a
+degenerate/self-touching cap loop; (c) chain/zipper mismatch
+(strip edge subdivided differently from its cap partner); (d)
+PushSimpleLoops splitting a figure-eight and dropping an edge.
+NOTE: index-degenerate triangle drops are balance-PRESERVING
+(their two live edges cancel internally) - not a suspect.
+Method: TEMP provenance instrumentation in BuildImpl (dump
+unpaired edges with positions + which mechanism emitted the
+incident triangles), then minimize (7863_left is 11KB - tiny).
+
+### Step 13 close (5 instrumented iterations)
+
+Layer-by-layer: (1) doubled in-run caps -> canonical-only emission
+[KEPT]; (2) sub-eps section twins resolving to different tracks ->
+per-cluster resolution [KEPT]; (3) capEps=8 noise floor [KEPT,
+scoped honestly - floor not bound]; (4) triangulator-eps experiment
+[REVERTED - the mismatch theory was wrong; the polygon itself
+carried the hair]; (5) final diagnosis: L/R limits disagree about
+junction position by 10-100 eps (retained loops split hairs across
+a 10-eps micro-edge; "equal limit locally" fails at sub-cluster
+scale). Named requirement: provenance-exact strip/cap closure
+(per-input-edge retained chains + partial-retention semantics).
+Corpus gates -> Recorded contracts; Pin_OneArrangementPerCritical
+updated to the canonical rule. Full suite 595+1 skip (596 total).

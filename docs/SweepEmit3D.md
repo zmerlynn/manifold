@@ -735,3 +735,46 @@ every case - nothing resolved wrong (zero ORACLE-OFF) - and the
 residual work splits three ways: the near-coplanar guard (known),
 one new emission-closure defect class (new, needs a minimized
 fixture), and the deferred performance campaign.
+
+## Emission-closure crucible (main-agent, 2026-07-11)
+
+The corpus' unbalanced-fan class, root-caused through five instrumented
+iterations on the Havocglass8 fixture (each layer peeled revealed
+the next):
+
+1. DOUBLED IN-RUN CAPS (fixed): per-critical caps inside a sub-eps
+   run re-derive the same L-R difference; the [R3] premise that the
+   copies collapse by exact post-weld identity is FALSIFIED when
+   track slopes amplify the sub-eps x-offset past eps.  Fix, kept:
+   caps emit only at PAIR-CANONICAL criticals (ci == li+1) - the
+   in-run cap's content is the canonical cap's, re-derived; one cap
+   per adjacent-built-slab pair.  Pin_OneArrangementPerCritical
+   pins the rule.
+2. RESOLVER TWIN DIVERGENCE (fixed): the winding pass constructs
+   T-junction verts exactly and never merges them, so sections
+   carry sub-eps-adjacent twins; the per-exact-vertex resolver
+   could match twins to DIFFERENT tracks, and divergent steep
+   tracks stretch a sub-eps section gap to many eps at the cap.
+   Fix, kept: the resolver resolves per EPS-CLUSTER (one ball, one
+   track - the same one-entity rule as the vert merges).
+3. CROSS-DERIVATION NOISE FLOOR (kept, with honest scope): cap
+   arrangements and chain subdivision run at capEps = 8 eps - the
+   un-amplified kernel-noise floor for twice-constructed inputs.
+   This is a floor, not a bound: it does NOT close the class.
+4. THE IRREDUCIBLE REMAINDER (diagnosed, named, deferred): on real
+   steep-track geometry the L and R limits can DISAGREE about a
+   junction's position by 10-100 eps (observed: two retained loops
+   splitting hairs across a 10-eps micro-edge; L's boundary through
+   one twin, R's through the other).  The closure argument's "equal
+   limit locally" premise fails at sub-cluster scale, and no
+   constant radius fixes it - the amplification is unbounded.
+   Closing it requires PROVENANCE-EXACT closure: strips consuming
+   the retained cap graph's edges per input piece (with
+   partial-retention semantics) instead of geometric chain
+   reconstruction - the recorded per-input-edge upgrade, now
+   promoted from future work to the demonstrated requirement, and
+   the natural companion of the hulls' near-coplanar arc.
+
+The corpus fixtures stand as recorded contracts
+(Corpus_*_Recorded): a named guard or a true resolve, never silent
+garbage.  Full suite green with all three landed changes.
