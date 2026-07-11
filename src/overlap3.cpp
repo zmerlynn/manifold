@@ -45,6 +45,16 @@ StageResult<std::vector<SlabResult>> BuildSlabs(const ArrangementGeometry& arr,
 
 namespace {
 
+// A fail-closed outcome for the emission stages (caps/strips): a reason plus
+// detail, or nullopt on success.  These stages produce no product - only the
+// possibility of failing closed - so they return MaybeFatal rather than a
+// StageResult<T>.
+struct Fatal {
+  FatalReason reason;
+  std::string detail;
+};
+using MaybeFatal = std::optional<Fatal>;
+
 // ---------------------------------------------------------------------------
 // Seams-stage helpers: seam segments and in-plane crossing computation.
 // ---------------------------------------------------------------------------
@@ -649,9 +659,9 @@ struct StripChains {
 // sides bound (its own xHi is always its pair's canonical; its lo is bound at
 // the preceding gap's canonical), with one chain per piece - attribution
 // failures fail closed in EmitCaps before this runs.
-std::optional<std::pair<FatalReason, std::string>> EmitStrips(
-    std::vector<OutTri3D>& out, const std::vector<SlabResult>& slabs,
-    const std::vector<StripChains>& chains) {
+MaybeFatal EmitStrips(std::vector<OutTri3D>& out,
+                      const std::vector<SlabResult>& slabs,
+                      const std::vector<StripChains>& chains) {
   for (int si = 0; si < static_cast<int>(slabs.size()); ++si) {
     if (!slabs[si].built) continue;
     const StripChains& ch = chains[si];
@@ -664,15 +674,13 @@ std::optional<std::pair<FatalReason, std::string>> EmitStrips(
     if (ch.lo.size() != nPieces || ch.hi.size() != nPieces) {
       DEBUG_ASSERT(false, logicErr,
                    "strip chain count disagrees with piece count");
-      return std::make_pair(
-          FatalReason::NonManifoldEmission,
-          std::string("strip chain count disagrees with piece count"));
+      return Fatal{FatalReason::NonManifoldEmission,
+                   "strip chain count disagrees with piece count"};
     }
     for (size_t k = 0; k < ch.lo.size(); ++k) {
       if (ch.lo[k].empty() || ch.hi[k].empty()) {
         DEBUG_ASSERT(false, logicErr, "empty strip chain");
-        return std::make_pair(FatalReason::NonManifoldEmission,
-                              std::string("empty strip chain"));
+        return Fatal{FatalReason::NonManifoldEmission, "empty strip chain"};
       }
       ZipperEmit(out, slabs[si].xLo, slabs[si].xHi, ch.lo[k], ch.hi[k]);
     }
@@ -779,13 +787,15 @@ CapEdgeSet BuildCapEdgeSet(const SlabResult* leftSlab,
 // `rightChains`, when bound, receive one chain per slab piece (positions from
 // r.verts bitwise); a single-vert chain is a piece that vanished at this
 // critical.
-// Returns nullopt on success, or the fatal (reason, detail) to propagate.
-std::optional<std::pair<FatalReason, std::string>> ComputeCap(
-    std::vector<OutTri3D>& out, std::vector<std::vector<vec2>>* leftChains,
-    std::vector<std::vector<vec2>>* rightChains, Overlap3Counters& cnt,
-    const SlabResult* leftSlab, const SlabResolver* leftResolver,
-    const SlabResult* rightSlab, const SlabResolver* rightResolver, double xCap,
-    double eps) {
+// Returns nullopt on success, or the fatal to propagate.
+MaybeFatal ComputeCap(std::vector<OutTri3D>& out,
+                      std::vector<std::vector<vec2>>* leftChains,
+                      std::vector<std::vector<vec2>>* rightChains,
+                      Overlap3Counters& cnt, const SlabResult* leftSlab,
+                      const SlabResolver* leftResolver,
+                      const SlabResult* rightSlab,
+                      const SlabResolver* rightResolver, double xCap,
+                      double eps) {
   const CapEdgeSet ces =
       BuildCapEdgeSet(leftSlab, leftResolver, rightSlab, rightResolver, xCap);
   // Pre-size bound chain outputs so every piece has a slot.
@@ -827,21 +837,18 @@ std::optional<std::pair<FatalReason, std::string>> ComputeCap(
     trisOk = TriangulateCap(out, cm, xCap, /*flipWinding=*/true, eps);
   }
   if (!loopsClosed)
-    return std::make_pair(FatalReason::NonManifoldEmission,
-                          std::string("cap boundary walk failed to close"));
+    return Fatal{FatalReason::NonManifoldEmission,
+                 "cap boundary walk failed to close"};
   if (!trisOk)
-    return std::make_pair(
-        FatalReason::NonManifoldEmission,
-        std::string("cap triangulation returned invalid indices"));
+    return Fatal{FatalReason::NonManifoldEmission,
+                 "cap triangulation returned invalid indices"};
 
   if (!leftChains && !rightChains) return std::nullopt;
   // Strip chains are PROVENANCE-EXACT (spec PROVENANCE CHAINS): each piece's
   // chain is the engine's own subdivision of that input edge (edgeSubdiv,
   // index-aligned with `edges` = L pieces then R pieces).  Coincident L/R
   // pieces (shared merged endpoints) get identical interior sequences by
-  // construction, so strips pair across the critical exactly.  This replaces
-  // the geometric on-chord projection (ChainSplitVerts), which diverged from
-  // the retained cap graph on steep-track junction clusters (corpus-falsified).
+  // construction, so strips pair across the critical exactly.
   const size_t nL = ces.lPiece2RawVerts.size();
   if (leftChains)
     for (size_t k = 0; k < nL; ++k) (*leftChains)[k] = edgeSubdiv[k];
@@ -866,11 +873,11 @@ std::optional<std::pair<FatalReason, std::string>> ComputeCap(
 // one arrangement must own the seam.  The run's other caps are emitted from
 // their own arrangements but are sub-eps slivers that collapse in the
 // assembly weld.
-std::optional<std::pair<FatalReason, std::string>> EmitCaps(
-    std::vector<OutTri3D>& out, std::vector<StripChains>& chains,
-    Overlap3Counters& cnt, const std::vector<SlabResult>& slabs,
-    const std::vector<SlabResolver>& resolvers,
-    const std::vector<double>& crits, double eps) {
+MaybeFatal EmitCaps(std::vector<OutTri3D>& out,
+                    std::vector<StripChains>& chains, Overlap3Counters& cnt,
+                    const std::vector<SlabResult>& slabs,
+                    const std::vector<SlabResolver>& resolvers,
+                    const std::vector<double>& crits, double eps) {
   const int nSlabs = static_cast<int>(slabs.size());
   for (int ci = 0; ci < static_cast<int>(crits.size()); ++ci) {
     int li = ci - 1;
@@ -1181,14 +1188,14 @@ Overlap3Result SweepEmit(ArrangementGeometry& arr, double eps,
   std::vector<StripChains> chains(slabs.size());
   if (auto capFatal =
           EmitCaps(emitted, chains, cnt, slabs, resolvers, crits, eps)) {
-    result.fatal = capFatal->first;
-    result.detail = std::move(capFatal->second);
+    result.fatal = capFatal->reason;
+    result.detail = std::move(capFatal->detail);
     result.counters = cnt;
     return result;
   }
   if (auto stripFatal = EmitStrips(emitted, slabs, chains)) {
-    result.fatal = stripFatal->first;
-    result.detail = std::move(stripFatal->second);
+    result.fatal = stripFatal->reason;
+    result.detail = std::move(stripFatal->detail);
     result.counters = cnt;
     return result;
   }
