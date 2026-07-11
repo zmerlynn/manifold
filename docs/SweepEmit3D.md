@@ -698,3 +698,40 @@ with disjoint fans and no shared edge is already tolerated
 topologically) but the splitter separates it anyway - matching
 Boolean3's output shape.  Gate4c is unaffected (its guard fires
 before emission).
+
+## Corpus measurement (2026-07-11)
+
+The real-mesh corpus (test/models: four left/right operand pairs,
+the hull pair, four Offset singles, openscad-nonmanifold-crash,
+self_intersect A/B) through RemoveOverlaps3D, one subprocess per
+case, timeout-bounded, oracle = Boolean3 where it round-trips.
+
+RESOLVED, ORACLE-TRUE: the Cray pair (the first real operand pair
+end-to-end) and three of four Offset singles.
+
+FAIL-CLOSED, by class:
+- NEAR-COPLANAR GUARD (EngineIdConflict): the hull pair and one
+  Generic_Twin pair.  The known class: planes crossing at shallow
+  angles coincide in section locally where the global grouping
+  test cannot see them.
+- EMISSION-CLOSURE DEFECT (NonManifoldEmission, unbalanced fan):
+  one Generic_Twin pair and Havocglass8.  Instrumentation shows
+  the sheet splitter's UNBALANCED arm (1F/0B, 1F/2B): the emitted
+  triangulation itself has an unpaired edge - a missing or extra
+  strip/cap triangle upstream, not a splitter limitation.  A new,
+  distinct correctness residual on real geometry.
+
+TIMEOUT (the performance wall, deferred by design): Offset1,
+openscad-nonmanifold-crash, self_intersect A/B.  Diagnosed, not
+guessed: the openscad case builds slabs in seconds but produces
+half a million retained pieces across ~9k slabs (24k criticalXs
+from CSG-dense in-plane structure), and assembly's quadratic
+weld does the rest.  The perf campaign's first targets are known:
+spatial-hash the assembly weld, bound the chain-split scans, and
+consider criticals thinning.
+
+The histogram's reading: the pipeline is correct-or-honest on
+every case - nothing resolved wrong (zero ORACLE-OFF) - and the
+residual work splits three ways: the near-coplanar guard (known),
+one new emission-closure defect class (new, needs a minimized
+fixture), and the deferred performance campaign.

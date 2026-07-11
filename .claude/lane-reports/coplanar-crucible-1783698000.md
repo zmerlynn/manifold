@@ -472,3 +472,40 @@ contact (FP noise breaks alternation above the tie guard - still
 the correct posture), 1e-4+ resolves. Pinched-vertex single-mesh
 scratch case: valid 2-component output. Touching-contacts arc
 CLOSED with zero folds.
+
+## Step 12: corpus histogram (user: "get that histogram now")
+
+Corpus = test/models/ (the RSI-era real meshes): 4 left/right
+operand pairs (Cray, 2x Generic_Twin, Havocglass8) + hull
+body/mask + 4 Offset singles + openscad-nonmanifold-crash +
+self_intersectA/B. Driver: one case per subprocess (crash
+isolation, timeout 120s), modes pair (compose, resolve, oracle =
+boolean union) and single (resolve, oracle = input if it round
+trips as a clean Manifold). Outcome classes: RESOLVED-ORACLE-OK /
+RESOLVED-ORACLE-OFF / RESOLVED-NO-ORACLE / FATAL(reason) / THROW /
+TIMEOUT / INPUT-REJECTED.
+
+## Step 12 results: the histogram (12 cases)
+
+RESOLVED-ORACLE-OK: 4 - Cray PAIR (first real operand pair
+end-to-end!), Offset2/3/4.
+FATAL-EngineIdConflict (near-coplanar): 2 - hull pair,
+Generic_Twin_7081.
+FATAL-NonManifoldEmission (unbalanced fan = emission-closure
+defect): 2 - Generic_Twin_7863 (1F/0B), Havocglass8 (1F/2B).
+Instrumented: the splitter's unbalanced arm - the emitted
+triangulation has an unpaired edge BEFORE the splitter; upstream
+strip/cap closure bug on real geometry, NEW class.
+TIMEOUT: 4 - Offset1, openscad, self_intersectA/B. Diagnosed via
+stage probe: openscad = 717 verts -> 3.6s through slabs -> 528,307
+pieces / 8794 slabs / 24k criticalXs -> assembly's quadratic weld
+is the wall (~1M emitted verts, linear-scan getVertIdx). PERF
+class, deferred by design; first targets known (hash the weld,
+bound ChainSplitVerts, criticals thinning).
+ZERO ORACLE-OFF: nothing resolved WRONG anywhere in the corpus.
+
+Next-arc priorities from the data: (1) minimize + fix the
+emission-closure defect (Generic_Twin_7863 is the smaller repro),
+(2) hulls' near-coplanar guard, (3) perf campaign (weld hash
+first). The 900s openscad run left going for slow-vs-hung
+confirmation; result to check next session.
