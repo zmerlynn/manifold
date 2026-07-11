@@ -386,7 +386,7 @@ TEST(Overlap3, Gate1_EventParity_TwoTets) {
 // ---------------------------------------------------------------------------
 
 TEST(Overlap3, Gate2_SectionValidity_SingleCube) {
-  // Single cube: no seams, sentinels-only slabs, all pieces attributed.
+  // Single cube: no seams, all pieces attributed.
   const Manifold::Impl impl(Manifold::Impl::Shape::Cube);
   const double eps = ImplEps(impl);
   const Overlap3Internals h = RemoveOverlaps3D_TestHooks(impl, eps);
