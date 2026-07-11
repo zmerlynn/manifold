@@ -25,6 +25,7 @@
 #include <map>
 #include <set>
 #include <tuple>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -1021,17 +1022,56 @@ bool SplitTouchingSheets(std::vector<vec3>& verts, Vec<ivec3>& tv) {
   return true;
 }
 
+// Integer cell key for the assembly weld's uniform hash grid (cell = eps).
+struct GridCell {
+  int64_t x, y, z;
+  bool operator==(const GridCell& o) const {
+    return x == o.x && y == o.y && z == o.z;
+  }
+};
+struct GridCellHash {
+  size_t operator()(const GridCell& c) const {
+    size_t h = 1469598103934665603ull;  // FNV-1a mix of the three coords
+    for (const int64_t v : {c.x, c.y, c.z}) {
+      h = (h ^ static_cast<size_t>(v)) * 1099511628211ull;
+    }
+    return h;
+  }
+};
+
 StageResult<Manifold::Impl> BuildImpl(const std::vector<OutTri3D>& tris,
                                       double eps) {
   if (tris.empty()) return StageResult<Manifold::Impl>::Ok(Manifold::Impl{});
 
-  // Collect verts with an eps-weld.
+  // Collect verts with an eps-weld.  A uniform hash grid (cell = eps) over the
+  // growing vert list makes each query O(1) amortized instead of O(n); it
+  // returns the MINIMUM-INDEX vert within eps, identical to the linear
+  // first-match scan it replaces - a point within eps of the query lies in the
+  // query's cell or one of its 26 neighbours, so the 3x3x3 sweep sees every
+  // candidate and the min-index tie-break reproduces first-match exactly.
   std::vector<vec3> verts;
+  std::unordered_map<GridCell, std::vector<int>, GridCellHash> grid;
+  auto cellOf = [&](vec3 p) -> GridCell {
+    return {static_cast<int64_t>(std::floor(p.x / eps)),
+            static_cast<int64_t>(std::floor(p.y / eps)),
+            static_cast<int64_t>(std::floor(p.z / eps))};
+  };
   auto getVertIdx = [&](vec3 p) -> int {
-    for (int i = 0; i < static_cast<int>(verts.size()); ++i)
-      if (la::length(verts[i] - p) <= eps) return i;
-    int id = static_cast<int>(verts.size());
+    const GridCell c = cellOf(p);
+    int best = -1;
+    for (const int64_t dx : {-1, 0, 1})
+      for (const int64_t dy : {-1, 0, 1})
+        for (const int64_t dz : {-1, 0, 1}) {
+          const auto it = grid.find({c.x + dx, c.y + dy, c.z + dz});
+          if (it == grid.end()) continue;
+          for (const int i : it->second)
+            if ((best < 0 || i < best) && la::length(verts[i] - p) <= eps)
+              best = i;
+        }
+    if (best >= 0) return best;
+    const int id = static_cast<int>(verts.size());
     verts.push_back(p);
+    grid[c].push_back(id);
     return id;
   };
 
