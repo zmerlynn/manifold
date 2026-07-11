@@ -846,3 +846,79 @@ near-coplanar arc; the provenance chains are its necessary
 foundation, landed and pinned.  Corpus gates remain recorded
 contracts, with the residual now named as twin-position divergence
 rather than mis-subdivision.
+
+## 3D-IDENTITY EXTENSION (main-agent, 2026-07-11)
+
+The twin-position divergence named at the PROVENANCE CHAINS close was
+attacked with the coplanar mechanism-3 "3D-IDENTITY PREFERENCE": snap the
+divergent extensions of one junction to their SHARED CANONICAL 3D point.
+This section records the instrumented finding, the mechanism, the A/B/C
+adjudication, and the honest residual - the mechanism did NOT close the
+corpus gates; the residual is deeper than divergence and stays recorded.
+
+THE INSTRUMENTED JUNCTION (Havocglass8 + GenericTwin7863, env-gated dumps).
+Every failing junction is a NEAR-DEGENERATE arr.verts cluster:
+- The cap critical c sits SUB-EPS from the true 3D vertex V (V.x - c is
+  0.3-0.5 eps - a sub-eps critical pair, so the slab between c and V.x is
+  unbuilt).  A section vert on a STEEP track (observed slopes ~6 to ~125)
+  amplifies that sub-eps x-offset into 60-200 eps at c: some incident tracks
+  land on V, others extrapolate 60 eps past it, and forced-through welds
+  freeze at their section position.  The cap keeps the spread as a micro-edge
+  -> sliver/unbalanced fan -> fail closed.
+- The SHARED CANONICAL is V itself: an arr.verts vertex, computed identically
+  by L and R (same arr.verts).  Snapping every image of V to V.yz collapses
+  the micro-edge by construction.
+
+THE MECHANISM EXPLORED (candidate A, cap-input snap).  For each cap at x=c,
+snap each extended cap-input vertex to the nearest arr.verts vertex V with
+|V.x - c| <= eps (V on the cap plane), using a VORONOI-SAFE test: snap only
+when the nearest such V is at least twice as close as the second-nearest
+(dist < 0.5 * secondDist).  The Voronoi ratio is a PER-JUNCTION radius (half
+the local vertex spacing), never a global constant - it absorbs an unbounded
+junction spread where V is isolated and REFUSES to snap in dense areas.
+Empirically this is SAFE: the full non-corpus suite stays green at an
+effectively unbounded snap radius (zero regressions on 47 fixtures), because
+the ratio guard alone prevents over-merge - the established constant-radius
+dead end is avoided.
+
+WHY IT DOES NOT CLOSE THE GATES (the refined wall).  Input-snapping resolves
+the PRIMARY divergence but exposes two DEEPER residuals:
+1. CLUSTER-COLLAPSE RE-EMISSION.  Collapsing a junction's images onto one V
+   makes incident pieces VANISH (both endpoints -> V) and can FLIP the cap
+   arrangement's topology (moving a vertex 60 eps crosses a neighboring edge,
+   changing which retained region an edge bounds).  The cap arrangement runs
+   over ALL cap input, so a local snap perturbs the boundary GLOBALLY -
+   GenericTwin7863's snap fixes its steep-track micro-edge but opens a macro
+   hole (an unbalanced fan) elsewhere on the same plane.  Load-bearing cap
+   slivers cannot simply be dropped (that opens macro holes directly).
+   Closing this needs COORDINATED cap+strip re-emission around a collapsed
+   junction - a local re-mesh, not an input snap.
+2. DISTINCT-VS-SPREAD AMBIGUITY.  Dense clusters carry MULTIPLE true vertices
+   within a few hundred eps on one (sub-eps-adjacent) cap plane
+   (Havocglass8: two canonical vertices ~300 eps apart, plus a near-x-
+   degenerate track).  Their tracks already land on their own vertices - the
+   defect is the emission AROUND two near-coincident-but-distinct vertices,
+   and "which vertex does this image belong to" is ill-posed at the
+   construction-noise scale.  This is the same eps-scale disambiguation the
+   near-coplanar arc faces.
+
+ADJUDICATION (A vs B vs C).  (A) 3D-identity snap is the correct shape for the
+PRIMARY divergence and the shared canonical is unambiguous (arr.verts V), but
+input-snapping alone is insufficient (residual 1).  (B) cross-side cap
+unification shares A's input-snapping limits and additionally cannot
+distinguish spread-of-one from distinct-near-degenerate vertices (residual
+2 - the core hard problem).  (C) extend-through-the-junction has no single
+constructible crossing in a dense cluster, and welds/degenerate tracks
+self-locate nothing.  All three reduce to the same eps-scale re-emission and
+disambiguation problem.
+
+RESIDUAL, HONESTLY.  The Voronoi-safe 3D-identity snap is a SAFE, principled
+partial that resolves the primary steep-track divergence, but the corpus
+gates need coordinated re-emission around collapsed/near-degenerate junction
+clusters and eps-scale spread-vs-distinct disambiguation - the research-grade
+remainder, the companion of the near-coplanar arc.  The exploratory snap is
+NOT landed (it trades sliver-overlaps for holes and its correctness pin
+cannot be met via the gates); the mechanism and its instrumented evidence are
+recorded here so the re-emission successor can rebuild on it.  Corpus gates
+stay recorded contracts, with the residual refined from "twin-position
+divergence" to "near-degenerate cluster re-emission".

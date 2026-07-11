@@ -1541,16 +1541,19 @@ static void CorpusPairGate(const char* leftName, const char* rightName,
   const Manifold::Impl impl = ComposeImpl(a, b);
   const double eps = ImplEps(impl);
   const Overlap3Result result = RemoveOverlaps3D(impl, eps);
-  // Recorded contract.  Provenance-exact strip chains (the per-input-edge
-  // subdivision channel) fixed the unpaired-edge class these meshes hit, but
-  // NOT the residual blocker: at a critical the L and R extensions of one
-  // junction diverge by 60-200 eps (a forced-through weld frozen at its
-  // section position vs its track-extended twin landing on the junction).  The
-  // cap arrangement keeps both as a micro-edge -> sliver cap triangles or a
-  // strip-less cap edge -> fail closed.  Closing needs a NON-constant-radius
-  // provenance junction unification (3D-identity extension), the research-grade
-  // remainder companion of the near-coplanar arc; a constant radius is a floor,
-  // not a bound.  Until then: a named guard or a true resolve, never garbage.
+  // Recorded contract.  The residual is a DENSE near-degenerate junction
+  // cluster at the cap plane (docs/SweepEmit3D.md 3D-IDENTITY EXTENSION): the
+  // cap critical sits sub-eps from the true 3D vertex, steep tracks amplify
+  // that offset into 60-200 eps, and multiple canonical vertices lie within a
+  // few hundred eps on sub-eps-adjacent cap planes.  A Voronoi-safe snap to
+  // the shared 3D vertex resolves the primary divergence (validated: no suite
+  // regressions at unbounded radius) but cannot close these gates alone -
+  // collapsing a cluster onto one vertex creates vanishing/degenerate pieces
+  // and perturbs the cap arrangement globally, and distinct near-degenerate
+  // vertices are indistinguishable from a single spread junction at the noise
+  // scale.  Closing needs coordinated cap+strip RE-EMISSION around collapsed
+  // junctions, the research-grade remainder (companion of the near-coplanar
+  // arc).  Until then: a named guard or a true resolve, never garbage.
   if (result.fatal.has_value()) {
     EXPECT_EQ(*result.fatal, FatalReason::NonManifoldEmission)
         << tag << " wrong guard: " << static_cast<int>(*result.fatal) << " "
