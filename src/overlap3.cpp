@@ -828,14 +828,17 @@ MaybeFatal ComputeCap(std::vector<OutTri3D>& out,
       (leftChains || rightChains) ? &edgeSubdiv : nullptr);
   bool loopsClosed = true;
   bool trisOk = true;
-  if (!r.edges.empty()) {
-    const Polygons cp = OutEdgesToPolygons(r.verts, r.edges, &loopsClosed);
-    trisOk = TriangulateCap(out, cp, xCap, /*flipWinding=*/false, eps);
-  }
-  if (loopsClosed && trisOk && !negEdges.empty()) {
-    const Polygons cm = OutEdgesToPolygons(r.verts, negEdges, &loopsClosed);
-    trisOk = TriangulateCap(out, cm, xCap, /*flipWinding=*/true, eps);
-  }
+  // Emit one signed cap side: walk its retained boundary into loops and
+  // triangulate at x=xCap.  cap_plus (L - R) faces +x; cap_minus (R - L) faces
+  // -x, hence the flipped winding.  Runs only while the prior side stayed
+  // closed and valid; a failure propagates through loopsClosed/trisOk.
+  auto emitCapSide = [&](const std::vector<OutEdge>& capEdges, bool flip) {
+    if (capEdges.empty() || !loopsClosed || !trisOk) return;
+    const Polygons cap = OutEdgesToPolygons(r.verts, capEdges, &loopsClosed);
+    trisOk = TriangulateCap(out, cap, xCap, flip, eps);
+  };
+  emitCapSide(r.edges, /*flip=*/false);
+  emitCapSide(negEdges, /*flip=*/true);
   if (!loopsClosed)
     return Fatal{FatalReason::NonManifoldEmission,
                  "cap boundary walk failed to close"};
