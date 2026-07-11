@@ -415,3 +415,47 @@ inverted stacking - with the remaining boundaries NAMED and pinned
 (near-coplanar shallow-crossing hulls at EngineIdConflict;
 edge-on-face touching at NonManifoldEmission; in-run macro change
 recorded; razor band recorded; flap closed-shell fixture owed).
+
+## Step 11: touching contacts (user: "take it on now")
+
+Boolean3 probe settled the target: union of edge-touching cubes =
+16 verts, Decompose()=2 - coincident geometry, separate topology
+(epsilon-valid). Our BuildImpl weld is geometric, so it fuses
+touching sheets into 4-fan edges + non-disk vertex links.
+
+MECHANISM (SplitTouchingSheets, in BuildImpl before CreateHalfedges):
+1. RADIAL EDGE PAIRING: for every multi-fan edge (kF + kB
+   halfedges), sort incident faces by angle around the edge axis.
+   Orientation algebra (derived, then sanity-checked on P4 + the
+   edge-edge cube case): a forward halfedge (lo->hi) has material
+   just BELOW its angle, a backward just ABOVE -> material wedges
+   alternate with empty ones -> each backward pairs with the NEXT
+   forward CCW. Non-alternating pattern = overlapping material ->
+   fail closed. Angle ties (tangent sheets) -> fail closed
+   (pairing would be a coin flip; wrong pairing keeps volume but
+   garbles topology - which is also why the tests must check
+   component COUNT, not just oracle volume).
+2. VERTEX SPLIT: union-find corners per vert, connected through
+   PAIRED halfedges only; each component gets its own vert copy.
+   Covers edge-on-face, edge-edge, vertex-only touch, and
+   self-touch (C-arms) uniformly.
+|F| != |B| or slivers or ties -> false -> NonManifoldEmission
+(the in-run macro dead zone keeps its guard).
+
+Tests: P4/P4b flip from pinning the fatal to pinning RESOLUTION
+(oracle vs Boolean3 a+b, Decompose()==2); new edge-edge and
+vertex-only cube fixtures with component-count checks.
+
+### Step 11 outcome
+
+All four touching fixtures green on FIRST build of the splitter
+(P4, P4b, EdgeEdge cubes, VertexOnly cubes - each with
+Decompose()==2 + oracle). Full gates 47+1 skip; full suite 593+1.
+Discovery before implementing: vertex-only contact ALREADY passed
+(shared vert, disjoint fans, no shared edge is topologically
+tolerated) - the red class was exactly the 4-fan edges. The
+component-count assertion is the load-bearing check: wrong radial
+pairing preserves volume/SA and would pass a pure oracle test.
+Doc: implementation-close note superseded; new "Touching contacts
+resolved" section. P2c-perp recorded fixture unaffected (its
+failure is upstream of assembly).

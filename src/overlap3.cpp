@@ -906,6 +906,129 @@ std::optional<std::pair<FatalReason, std::string>> EmitCaps(
 // Assembly: weld verts, drop exact-duplicate triangles, build Impl.
 // ---------------------------------------------------------------------------
 
+// Split geometrically-welded touching sheets back into topologically
+// separate manifolds - the epsilon-valid posture Boolean3 itself emits for
+// touching solids (coincident geometry, separate topology).  The eps-weld
+// fuses surfaces that touch on measure-zero sets (edge-on-face, edge-edge,
+// self-touch) into complexes with 2k-halfedge fan edges and non-disk vertex
+// links.  Resolution in two steps:
+//   1. RADIAL PAIRING per fan edge: sort incident faces by angle around the
+//      edge axis.  A forward halfedge (lo->hi) has its material just BELOW
+//      its angle, a backward one just ABOVE (from the outward-normal
+//      convention), so material wedges alternate with empty ones and each
+//      backward halfedge pairs with the NEXT forward one CCW.
+//   2. VERTEX SPLIT: union corners around each vert through PAIRED
+//      halfedges only; each connected component becomes its own vert copy.
+// Returns false (the caller fails closed) when the fan cannot be paired:
+// unbalanced counts, a sliver third-vert on the edge line, radial ties
+// (tangent sheets - either pairing is a coin flip and the wrong one keeps
+// volume while garbling topology), or a non-alternating pattern
+// (overlapping material - upstream resolution failed).
+bool SplitTouchingSheets(std::vector<vec3>& verts, Vec<ivec3>& tv) {
+  const int nTri = static_cast<int>(tv.size());
+  auto heFrom = [&](int h) { return tv[h / 3][h % 3]; };
+  auto heTo = [&](int h) { return tv[h / 3][(h % 3 + 1) % 3]; };
+
+  std::map<std::pair<int, int>, std::vector<int>> edge2He;
+  for (int h = 0; h < 3 * nTri; ++h) {
+    const int a = heFrom(h), b = heTo(h);
+    edge2He[{std::min(a, b), std::max(a, b)}].push_back(h);
+  }
+
+  std::vector<int> pairedHe(3 * nTri, -1);
+  for (const auto& [edge, hes] : edge2He) {
+    std::vector<int> fwd, bwd;
+    for (const int h : hes) (heFrom(h) == edge.first ? fwd : bwd).push_back(h);
+    if (fwd.size() != bwd.size()) return false;
+    if (fwd.size() == 1) {
+      pairedHe[fwd[0]] = bwd[0];
+      pairedHe[bwd[0]] = fwd[0];
+      continue;
+    }
+
+    const vec3 pa = verts[edge.first], pb = verts[edge.second];
+    const vec3 ax = la::normalize(pb - pa);
+    struct RingEntry {
+      double angle;
+      int he;
+      bool fwd;
+    };
+    std::vector<RingEntry> ring;
+    ring.reserve(hes.size());
+    vec3 u(0.0), v(0.0);
+    for (const int h : hes) {
+      const int c = tv[h / 3][(h % 3 + 2) % 3];
+      vec3 d = verts[c] - pa;
+      d -= la::dot(d, ax) * ax;
+      const double len = la::length(d);
+      if (len == 0.0) return false;  // sliver: third vert on the edge line
+      d /= len;
+      if (ring.empty()) {
+        u = d;
+        v = la::cross(ax, u);
+      }
+      double angle = std::atan2(la::dot(d, v), la::dot(d, u));
+      if (angle < 0.0) angle += kTwoPi;
+      ring.push_back({angle, h, heFrom(h) == edge.first});
+    }
+    std::sort(ring.begin(), ring.end(),
+              [](const RingEntry& a, const RingEntry& b) {
+                return a.angle < b.angle;
+              });
+    const int k = static_cast<int>(ring.size());
+    // Ties (including the wraparound pair) and alternation.  Genuine
+    // touching contacts have macro dihedral separation; kAngleTie guards
+    // the tangent-sheet coin flip.
+    constexpr double kAngleTie = 1e-9;
+    for (int i = 0; i < k; ++i) {
+      const RingEntry& cur = ring[i];
+      const RingEntry& nxt = ring[(i + 1) % k];
+      const double gap =
+          (i + 1 < k) ? nxt.angle - cur.angle : nxt.angle + kTwoPi - cur.angle;
+      if (gap < kAngleTie) return false;
+      if (cur.fwd == nxt.fwd) return false;  // material overlap
+    }
+    for (int i = 0; i < k; ++i) {
+      if (ring[i].fwd) continue;
+      const RingEntry& partner = ring[(i + 1) % k];  // next CCW is forward
+      pairedHe[ring[i].he] = partner.he;
+      pairedHe[partner.he] = ring[i].he;
+    }
+  }
+
+  // Vertex split by paired-fan connectivity.
+  DisjointSets cornerUf(3 * nTri);
+  for (int h = 0; h < 3 * nTri; ++h) {
+    const int p = pairedHe[h];
+    if (p < 0) return false;
+    if (p < h) continue;
+    const int t1 = h / 3, i1 = h % 3, t2 = p / 3, i2 = p % 3;
+    cornerUf.unite(3 * t1 + i1, 3 * t2 + (i2 + 1) % 3);  // at heFrom(h)
+    cornerUf.unite(3 * t1 + (i1 + 1) % 3, 3 * t2 + i2);  // at heTo(h)
+  }
+  std::map<std::pair<int, int>, int> vertComp2Out;
+  std::vector<bool> vertKept(verts.size(), false);
+  for (int corner = 0; corner < 3 * nTri; ++corner) {
+    const int t = corner / 3, k = corner % 3;
+    const int vsrc = tv[t][k];
+    const int root = static_cast<int>(cornerUf.find(corner));
+    auto it = vertComp2Out.find({vsrc, root});
+    if (it == vertComp2Out.end()) {
+      int out;
+      if (!vertKept[vsrc]) {
+        vertKept[vsrc] = true;
+        out = vsrc;
+      } else {
+        out = static_cast<int>(verts.size());
+        verts.push_back(verts[vsrc]);
+      }
+      it = vertComp2Out.emplace(std::make_pair(vsrc, root), out).first;
+    }
+    tv[t][k] = it->second;
+  }
+  return true;
+}
+
 StageResult<Manifold::Impl> BuildImpl(const std::vector<OutTri3D>& tris,
                                       double eps) {
   if (tris.empty()) return StageResult<Manifold::Impl>::Ok(Manifold::Impl{});
@@ -951,6 +1074,13 @@ StageResult<Manifold::Impl> BuildImpl(const std::vector<OutTri3D>& tris,
     }
     if (!seenTris.insert({a, b, c}).second) continue;  // exact duplicate
     tv.push_back({v0, v1, v2});
+  }
+
+  // Touching sheets separate BEFORE the topology is built (spec COPLANAR
+  // implementation close: touching contacts).
+  if (!SplitTouchingSheets(verts, tv)) {
+    return StageResult<Manifold::Impl>::Fatal(FatalReason::NonManifoldEmission,
+                                              "unresolvable sheet contact");
   }
 
   Manifold::Impl impl;

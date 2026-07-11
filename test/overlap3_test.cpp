@@ -879,10 +879,10 @@ TEST(Overlap3, EmissionAlgebra_CubeSixFaces) {
 
 // P4: edge-on-face touching contact. Two tetrahedra: tet A (above z=0) has
 // an edge in the z=0 plane whose interior lies inside tet B's z=0 face; B
-// extends below. The union is genuinely non-manifold along the contact line
-// (four faces meet the welded edge), so the pipeline's output gate must fail
-// closed as NonManifoldEmission - a recorded limitation of geometric
-// welding, not a detector (EdgeInPlane retired with the coplanar family).
+// extends below. The regularized union is TWO solids touching on a measure-
+// zero line; the output must be two geometrically-coincident, topologically-
+// separate manifold sheets (the epsilon-valid posture Boolean3 itself emits
+// for touching solids) - the sheet splitter resolves the welded 4-fan.
 //   Tet A: v0=(1,1,0), v1=(3,1,0), v2=(2,3,2), v3=(2,1,3).
 //   Tet B: v0=(0,0,0), v1=(4,0,0), v2=(2,4,0), v3=(2,2,-2).
 TEST(Overlap3, Pin_P4_EdgeOnFace_Touching) {
@@ -902,14 +902,18 @@ TEST(Overlap3, Pin_P4_EdgeOnFace_Touching) {
   // clang-format on
   mgB.runOriginalID.push_back(Manifold::ReserveIDs(1));
 
-  const Manifold::Impl impl = ComposeImpl(Manifold(mgA), Manifold(mgB));
+  const Manifold a(mgA), b(mgB);
+  const Manifold oracle = a + b;
+  const Manifold::Impl impl = ComposeImpl(a, b);
   const double eps = ImplEps(impl);
   const Overlap3Result result = RemoveOverlaps3D(impl, eps);
-  ASSERT_TRUE(result.fatal.has_value())
-      << "expected NonManifoldEmission for edge-on-face touching";
-  EXPECT_EQ(*result.fatal, FatalReason::NonManifoldEmission)
-      << "got fatal=" << static_cast<int>(*result.fatal)
-      << " detail=" << result.detail;
+  ASSERT_FALSE(result.fatal.has_value())
+      << "fatal=" << static_cast<int>(*result.fatal) << " " << result.detail;
+  ASSERT_TRUE(result.impl.has_value());
+  const Manifold ours(GetMeshGLImpl<double, uint64_t>(*result.impl, -1));
+  EXPECT_EQ(ours.Decompose().size(), 2u)
+      << "touching tets must stay two topological components";
+  OracleCompare(*result.impl, oracle, eps, "P4_EdgeOnFace");
 }
 
 // P4b: the off-midpoint variant of the same edge-on-face touching contact.
@@ -938,14 +942,18 @@ TEST(Overlap3, Pin_P4b_EdgeOnFace_OffMidpoint) {
   // clang-format on
   mgB.runOriginalID.push_back(Manifold::ReserveIDs(1));
 
-  const Manifold::Impl impl = ComposeImpl(Manifold(mgA), Manifold(mgB));
+  const Manifold a(mgA), b(mgB);
+  const Manifold oracle = a + b;
+  const Manifold::Impl impl = ComposeImpl(a, b);
   const double eps = ImplEps(impl);
   const Overlap3Result result = RemoveOverlaps3D(impl, eps);
-  ASSERT_TRUE(result.fatal.has_value())
-      << "expected NonManifoldEmission for edge-on-face touching";
-  EXPECT_EQ(*result.fatal, FatalReason::NonManifoldEmission)
-      << "got fatal=" << static_cast<int>(*result.fatal)
-      << " detail=" << result.detail;
+  ASSERT_FALSE(result.fatal.has_value())
+      << "fatal=" << static_cast<int>(*result.fatal) << " " << result.detail;
+  ASSERT_TRUE(result.impl.has_value());
+  const Manifold ours(GetMeshGLImpl<double, uint64_t>(*result.impl, -1));
+  EXPECT_EQ(ours.Decompose().size(), 2u)
+      << "touching tets must stay two topological components";
+  OracleCompare(*result.impl, oracle, eps, "P4b_EdgeOnFace");
 }
 
 // P6: Compose a tet with its winding-reversed copy. Both meshes share the same
@@ -1473,4 +1481,44 @@ TEST(Overlap3, Coplanar_InvertedStacking) {
       << "fatal=" << static_cast<int>(*result.fatal) << " " << result.detail;
   ASSERT_TRUE(result.impl.has_value());
   OracleCompare(*result.impl, a, eps, "Coplanar_InvertedStacking");
+}
+
+// ---------------------------------------------------------------------------
+// Touching contacts (measure-zero): the sheet splitter's fixtures.
+// ---------------------------------------------------------------------------
+
+// Two cubes sharing exactly one edge: the welded 4-fan must split back into
+// two topological components (coincident geometry, separate topology).
+TEST(Overlap3, Touch_EdgeEdge_Cubes) {
+  const Manifold a = Manifold::Cube({1, 1, 1});
+  const Manifold b = Manifold::Cube({1, 1, 1}).Translate({1, 1, 0});
+  const Manifold oracle = a + b;
+  const Manifold::Impl impl = ComposeImpl(a, b);
+  const double eps = ImplEps(impl);
+  const Overlap3Result result = RemoveOverlaps3D(impl, eps);
+  ASSERT_FALSE(result.fatal.has_value())
+      << "fatal=" << static_cast<int>(*result.fatal) << " " << result.detail;
+  ASSERT_TRUE(result.impl.has_value());
+  const Manifold ours(GetMeshGLImpl<double, uint64_t>(*result.impl, -1));
+  EXPECT_EQ(ours.Decompose().size(), 2u)
+      << "edge-touching cubes must stay two topological components";
+  OracleCompare(*result.impl, oracle, eps, "Touch_EdgeEdge");
+}
+
+// Two cubes sharing exactly one corner vertex: no shared edge, so the vertex
+// fan splits into two components directly.
+TEST(Overlap3, Touch_VertexOnly_Cubes) {
+  const Manifold a = Manifold::Cube({1, 1, 1});
+  const Manifold b = Manifold::Cube({1, 1, 1}).Translate({1, 1, 1});
+  const Manifold oracle = a + b;
+  const Manifold::Impl impl = ComposeImpl(a, b);
+  const double eps = ImplEps(impl);
+  const Overlap3Result result = RemoveOverlaps3D(impl, eps);
+  ASSERT_FALSE(result.fatal.has_value())
+      << "fatal=" << static_cast<int>(*result.fatal) << " " << result.detail;
+  ASSERT_TRUE(result.impl.has_value());
+  const Manifold ours(GetMeshGLImpl<double, uint64_t>(*result.impl, -1));
+  EXPECT_EQ(ours.Decompose().size(), 2u)
+      << "vertex-touching cubes must stay two topological components";
+  OracleCompare(*result.impl, oracle, eps, "Touch_VertexOnly");
 }

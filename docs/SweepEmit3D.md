@@ -642,11 +642,10 @@ FINDINGS DURING IMPLEMENTATION, recorded:
   belt matters) as future test surface.
 - Edge-on-face TOUCHING (the former EdgeInPlane P4 pins) welds into
   a genuinely non-manifold union - four faces around the contact
-  line.  BuildImpl now gates on the full 2-manifold check
-  (Is2Manifold, vertex links included) and fails closed as
-  NonManifoldEmission; the pins pin that.  Resolving such contacts
-  would need topological (not geometric) welding - recorded as a
-  limitation.
+  line.  BuildImpl gates on the full 2-manifold check (Is2Manifold,
+  vertex links included).  SUPERSEDED same day: the sheet splitter
+  below resolves the class; the gate remains for what it cannot
+  pair.
 - The in-run macro-change dead zone from the M4 close is now
   REACHABLE: two perpendicular faces sub-eps apart produce macro
   cap content at both criticals of a sub-eps run and fail closed at
@@ -666,3 +665,36 @@ FINDINGS DURING IMPLEMENTATION, recorded:
   remains open test surface (the +2 semantics are covered by the
   same-oriented and triple-group gates; a valid hand-authored
   folded shell is still owed).
+
+## Touching contacts resolved (main-agent, 2026-07-11)
+
+The "topological welding" note is implemented as a SHEET SPLITTER in
+assembly, before topology construction.  Target semantics probed
+first: Boolean3's own union of edge-touching cubes keeps the
+coincident verts as separate topological copies (Decompose() = 2) -
+the epsilon-valid posture; the regularized union of solids touching
+on a measure-zero set is the solids, separate.
+
+Mechanism (SplitTouchingSheets): (1) radial pairing per fan edge -
+sort incident faces by angle around the edge axis; from the
+outward-normal convention a forward halfedge carries material just
+below its angle and a backward one just above, so material wedges
+alternate with empty ones and each backward halfedge pairs with the
+next forward one CCW; (2) vertex split - corners union through
+PAIRED halfedges only, one output vert per connected component.
+Covers edge-on-face, edge-edge, vertex contact, and self-touch
+(same-component arms) uniformly.  Fail-closed arms (returning to
+NonManifoldEmission): unbalanced halfedge counts, sliver third-vert
+on the edge line, radial ties (tangent sheets: either pairing is a
+coin flip, and the WRONG pairing preserves volume while garbling
+topology - which is why the fixtures assert component COUNT, not
+just oracle agreement), and non-alternating patterns (overlapping
+material).
+
+P4/P4b evolve from pinning the fatal to pinning RESOLUTION (oracle
+vs Boolean3, two components); new edge-edge and vertex-only cube
+fixtures.  Vertex-only contact needed no splitting (a shared vert
+with disjoint fans and no shared edge is already tolerated
+topologically) but the splitter separates it anyway - matching
+Boolean3's output shape.  Gate4c is unaffected (its guard fires
+before emission).
