@@ -130,3 +130,56 @@ are all spec-demanded and carry justifications - flagged none as garbage. The
 review-friction wins were: the pair->struct fatal return, the duplicated
 entry-point prefix (with a dead field revived), and the two-cap-side dedup.
 Findings E/F/G/H/(SeamsResult unification) handed to the judge round.
+
+## Fold round
+
+Judge returned NEED-CHANGE with three findings (overall "one design, not patch
+strata"; MaybeFatal/PrepareArrangement/emitCapSide validated as real simplification).
+Fold all three behavior-preserving. Sole editor.
+
+- Fold 1 (about-to): FLATTEN finding E. MergedVert is a single-field {vec3 pos;}
+  wrapper; every use is .pos. Replace ArrangementGeometry::verts with
+  std::vector<vec3> and drop the struct. Use sites (grep-exhaustive, all
+  arr.verts / FindOrAddVert / ComputeSectionSegment param): overlap3.h (struct +
+  field), overlap3.cpp (FindOrAddVert sig+body, resize/assign, ~19 .pos reads),
+  overlap3_sweep.cpp (ComputeSectionSegment param + .pos reads), overlap3_test.cpp
+  white-box hooks (4 .pos reads on h.arr.verts). Verified no unrelated .pos field
+  in these files, so per-file replace_all .pos->'' is safe. Bitwise-identical.
+  boolean2's merge.verts/result.verts are vec2 (unrelated) - untouched.
+- Fold 2 (about-to): stale comments. overlap3.cpp EmitCaps driver (~864) still
+  says "one cap per critical / runs never merged / IEEE-exact duplicates
+  collapse" - retired story. Standing rule is PAIR-CANONICAL (one cap per
+  adjacent-built-slab pair at ci==li+1). Rewrite pithy around current rule. And
+  the BuildImpl duplicate-triangle drop (~1093) narrates the same retired
+  mechanism - reduce to a current-tense reason (post-weld exact dup dropped).
+- Fold 3 (about-to): corpus-test narrative. CorpusPairGate (~1544) and
+  CorpusSingleGate (~1577) carry research-diary + perf history. Reduce each to
+  the contract (named guard or oracle/valid resolve, never silent garbage) plus
+  one pointer to docs/SweepEmit3D.md "3D-IDENTITY EXTENSION". Assertions/fixtures
+  untouched.
+
+### Observed
+
+- Fold 1 (done): struct MergedVert deleted; ArrangementGeometry::verts is now
+  std::vector<vec3>. FindOrAddVert takes std::vector<vec3>& (push_back(pos),
+  verts[i] - pos); the seams assign is arr.verts[i] = canon.mergedVerts[i];
+  every .pos read across overlap3.cpp / overlap3_sweep.cpp / overlap3_test.cpp
+  hooks dropped. grep confirms zero MergedVert / zero .pos left in the four
+  files. boolean2 verts (vec2) untouched.
+- Fold 2 (done): EmitCaps driver comment rewritten to the PAIR-CANONICAL rule
+  (one cap per adjacent-built-slab pair at ci==li+1), retired "one cap per
+  critical / runs never merged / IEEE-exact collapse" story gone. BuildImpl
+  duplicate-drop reduced to the current reason (post-weld exact dup dropped,
+  repeated face breaks 2-manifold); the [R3]/sub-eps-pair narration gone.
+- Fold 3 (done): both corpus comments cut to contract + one doc pointer. Pair =
+  "named guard (NonManifoldEmission) or oracle-correct resolve, never silent
+  garbage"; single = "TERMINATES with a named fail-closed guard or valid-manifold
+  resolve, never a hang, never garbage". Perf/diary (O(n) weld, Voronoi-snap
+  exploration, "four cases timed out", eps magnitudes) dropped. No assertion or
+  fixture touched.
+- format.sh (clang-format 20.1.8) touched only the two changed .cpp; reflowed the
+  now-shorter vert-access lines. gersemi/black absent, fine.
+- Build clean (only overlap3.cpp + overlap3_sweep.cpp recompiled). Filtered gate
+  (Overlap3.*:Boolean2*, slow singles excluded): 85 pass + 1 Gate4c skip = notebook
+  baseline. FULL SUITE: 601 = 600 pass + 1 Gate4c skip, identical to baseline.
+  Behavior preserved. One commit: three folds + this notebook.

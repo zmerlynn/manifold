@@ -150,10 +150,6 @@ struct SlabResult {
 // Seams-stage types.
 // ---------------------------------------------------------------------------
 
-struct MergedVert {
-  vec3 pos;
-};
-
 // A face-pair seam: 3D segment [vertId0, vertId1] at the intersection of
 // two canonical faces.
 struct Seam {
@@ -167,7 +163,7 @@ struct Seam {
 // ---------------------------------------------------------------------------
 
 struct ArrangementGeometry {
-  std::vector<MergedVert> verts;     // all canonical 3D verts
+  std::vector<vec3> verts;           // all canonical 3D verts
   std::vector<CanonicalFace> faces;  // canonical faces
   std::vector<Seam> seams;           // face-pair seam segments
   // Coplanar groups (spec COPLANAR mechanism 1): face2Group[fi] is the

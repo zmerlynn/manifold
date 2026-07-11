@@ -668,7 +668,7 @@ TEST(Overlap3, Pin_M1_TripleCritical) {
         }
       }
       for (size_t vi = 0; !found && vi < h.arr.verts.size(); ++vi) {
-        if (std::abs(h.arr.verts[vi].pos.x - xCross) <= eps) found = true;
+        if (std::abs(h.arr.verts[vi].x - xCross) <= eps) found = true;
       }
       EXPECT_TRUE(found) << "brute-force seam-seam crossing x=" << xCross
                          << " is not a critical (criticalXs or vert x)";
@@ -1303,8 +1303,8 @@ TEST(Overlap3, Pin_InPlaneSkeletonCriticals) {
   for (const auto& f : h.arr.faces) {
     const int vs[3] = {f.verts.x, f.verts.y, f.verts.z};
     for (const int k : {0, 1, 2}) {
-      const vec3 pa = h.arr.verts[vs[k]].pos;
-      const vec3 pb = h.arr.verts[vs[(k + 1) % 3]].pos;
+      const vec3 pa = h.arr.verts[vs[k]];
+      const vec3 pb = h.arr.verts[vs[(k + 1) % 3]];
       if (isZ0(pa) && isZ0(pb)) z0edges.push_back({pa, pb});
     }
   }
@@ -1327,7 +1327,7 @@ TEST(Overlap3, Pin_InPlaneSkeletonCriticals) {
       ++checked;
       bool isCritical = false;
       for (const auto& v : h.arr.verts) {
-        if (std::abs(v.pos.x - xCross) <= eps) {
+        if (std::abs(v.x - xCross) <= eps) {
           isCritical = true;
           break;
         }
@@ -1541,19 +1541,10 @@ static void CorpusPairGate(const char* leftName, const char* rightName,
   const Manifold::Impl impl = ComposeImpl(a, b);
   const double eps = ImplEps(impl);
   const Overlap3Result result = RemoveOverlaps3D(impl, eps);
-  // Recorded contract.  The residual is a DENSE near-degenerate junction
-  // cluster at the cap plane (docs/SweepEmit3D.md 3D-IDENTITY EXTENSION): the
-  // cap critical sits sub-eps from the true 3D vertex, steep tracks amplify
-  // that offset into 60-200 eps, and multiple canonical vertices lie within a
-  // few hundred eps on sub-eps-adjacent cap planes.  A Voronoi-safe snap to
-  // the shared 3D vertex resolves the primary divergence (validated: no suite
-  // regressions at unbounded radius) but cannot close these gates alone -
-  // collapsing a cluster onto one vertex creates vanishing/degenerate pieces
-  // and perturbs the cap arrangement globally, and distinct near-degenerate
-  // vertices are indistinguishable from a single spread junction at the noise
-  // scale.  Closing needs coordinated cap+strip RE-EMISSION around collapsed
-  // junctions, the research-grade remainder (companion of the near-coplanar
-  // arc).  Until then: a named guard or a true resolve, never garbage.
+  // Recorded contract: a named guard (NonManifoldEmission) or an oracle-correct
+  // resolve, never silent garbage.  The unresolved case is the steep-track
+  // near-degenerate junction cluster at the cap plane; see docs/SweepEmit3D.md
+  // "3D-IDENTITY EXTENSION".
   if (result.fatal.has_value()) {
     EXPECT_EQ(*result.fatal, FatalReason::NonManifoldEmission)
         << tag << " wrong guard: " << static_cast<int>(*result.fatal) << " "
@@ -1574,13 +1565,11 @@ TEST(Overlap3, Corpus_GenericTwin7863_Recorded) {
                  "Generic_Twin_7863.1.t0_right.obj", "Corpus_GenericTwin7863");
 }
 
-// Single-mesh self-overlap corpus fixtures: the four cases that timed out in
-// assembly before the weld became O(n) (perf campaign, hash-grid weld).
-// Recorded contract: RemoveOverlaps3D TERMINATES with a named fail-closed
-// guard or a valid-manifold resolve - never a hang, never silent garbage.  All
-// four currently fail closed at NonManifoldEmission (the steep-track
-// junction-spread residual in docs/SweepEmit3D.md), now REACHABLE instead of
-// hung.  The budget is generous by design: self_intersect* run tens of seconds.
+// Single-mesh self-overlap corpus fixtures.
+// Recorded contract: RemoveOverlaps3D TERMINATES with a named fail-closed guard
+// or a valid-manifold resolve - never a hang, never silent garbage.  The
+// unresolved cases carry the steep-track junction residual; see
+// docs/SweepEmit3D.md "3D-IDENTITY EXTENSION".
 static void CorpusSingleGate(const char* name, const char* tag) {
   std::filesystem::path file(__FILE__);
   auto modelDir = file.parent_path() / "models";

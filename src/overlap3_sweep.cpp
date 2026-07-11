@@ -40,9 +40,9 @@ namespace {
 // Returns false if the face does not straddle xMid (< 2 distinct crossings).
 bool ComputeSectionSegment(SectionFaceSegment& segOut, FaceTrack& trackOut,
                            const CanonicalFace& face,
-                           const std::vector<MergedVert>& verts, double xMid) {
+                           const std::vector<vec3>& verts, double xMid) {
   const int vi[3] = {face.verts.x, face.verts.y, face.verts.z};
-  const vec3 p[3] = {verts[vi[0]].pos, verts[vi[1]].pos, verts[vi[2]].pos};
+  const vec3 p[3] = {verts[vi[0]], verts[vi[1]], verts[vi[2]]};
 
   vec2 pts[2];
   vec3 ePair[2][2];  // ePair[k] = {va, vb} for pts[k]
@@ -102,7 +102,7 @@ StageResult<std::vector<SlabResult>> BuildSlabs(const ArrangementGeometry& arr,
   // crossings).
   std::vector<double> crits;
   crits.reserve(arr.verts.size() + arr.criticalXs.size());
-  for (const auto& v : arr.verts) crits.push_back(v.pos.x);
+  for (const auto& v : arr.verts) crits.push_back(v.x);
   for (double x : arr.criticalXs) crits.push_back(x);
   std::sort(crits.begin(), crits.end());
   crits.erase(std::unique(crits.begin(), crits.end()), crits.end());
@@ -145,12 +145,10 @@ StageResult<std::vector<SlabResult>> BuildSlabs(const ArrangementGeometry& arr,
     for (int fi = 0; fi < nFaces; ++fi) {
       const CanonicalFace& face = arr.faces[fi];
       const int vs[3] = {face.verts.x, face.verts.y, face.verts.z};
-      const double xFaceMin =
-          std::min({arr.verts[vs[0]].pos.x, arr.verts[vs[1]].pos.x,
-                    arr.verts[vs[2]].pos.x});
-      const double xFaceMax =
-          std::max({arr.verts[vs[0]].pos.x, arr.verts[vs[1]].pos.x,
-                    arr.verts[vs[2]].pos.x});
+      const double xFaceMin = std::min(
+          {arr.verts[vs[0]].x, arr.verts[vs[1]].x, arr.verts[vs[2]].x});
+      const double xFaceMax = std::max(
+          {arr.verts[vs[0]].x, arr.verts[vs[1]].x, arr.verts[vs[2]].x});
       if (xFaceMax <= slab.xMid || xFaceMin >= slab.xMid) continue;
 
       SectionFaceSegment seg;
@@ -185,8 +183,8 @@ StageResult<std::vector<SlabResult>> BuildSlabs(const ArrangementGeometry& arr,
     // has no crossing in this slab's section (this also excludes constant-x
     // seams, keeping InterpolateSafe's divisor nonzero).
     for (const auto& seam : arr.seams) {
-      const vec3 vA = arr.verts[seam.vertId0].pos;
-      const vec3 vB = arr.verts[seam.vertId1].pos;
+      const vec3 vA = arr.verts[seam.vertId0];
+      const vec3 vB = arr.verts[seam.vertId1];
       const double xLo3D = std::min(vA.x, vB.x);
       const double xHi3D = std::max(vA.x, vB.x);
       if (slab.xMid < xLo3D || slab.xMid > xHi3D) continue;
@@ -213,9 +211,9 @@ StageResult<std::vector<SlabResult>> BuildSlabs(const ArrangementGeometry& arr,
   // sub-eps critical run - fail closed.
   for (int fi = 0; fi < nFaces; ++fi) {
     const CanonicalFace& face = arr.faces[fi];
-    const vec3 p0 = arr.verts[face.verts.x].pos;
-    const vec3 p1 = arr.verts[face.verts.y].pos;
-    const vec3 p2 = arr.verts[face.verts.z].pos;
+    const vec3 p0 = arr.verts[face.verts.x];
+    const vec3 p1 = arr.verts[face.verts.y];
+    const vec3 p2 = arr.verts[face.verts.z];
     const double xFaceMin = std::min({p0.x, p1.x, p2.x});
     const double xFaceMax = std::max({p0.x, p1.x, p2.x});
     if (xFaceMin >= xFaceMax) continue;  // axis-parallel face, OK

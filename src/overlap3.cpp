@@ -177,7 +177,7 @@ std::vector<GroupedEdge> CollectGroupedMemberEdges(
       int a = vs[k], b = vs[(k + 1) % 3];
       if (a > b) std::swap(a, b);
       if (!seen.insert({g, a, b}).second) continue;
-      out.push_back({g, arr.verts[a].pos, arr.verts[b].pos});
+      out.push_back({g, arr.verts[a], arr.verts[b]});
     }
   }
   return out;
@@ -197,11 +197,11 @@ void AppendPairwiseCrossXs(const std::vector<std::pair<vec3, vec3>>& segs,
 }
 
 // Find or add a vert within eps of pos; return its index.
-int FindOrAddVert(std::vector<MergedVert>& verts, vec3 pos, double eps) {
+int FindOrAddVert(std::vector<vec3>& verts, vec3 pos, double eps) {
   for (int i = 0; i < static_cast<int>(verts.size()); ++i)
-    if (la::length(verts[i].pos - pos) <= eps) return i;
+    if (la::length(verts[i] - pos) <= eps) return i;
   const int id = static_cast<int>(verts.size());
-  verts.push_back({pos});
+  verts.push_back(pos);
   return id;
 }
 
@@ -328,16 +328,16 @@ SeamsResult FindSeams(const CanonicalGeometry& canon, double eps,
 
   arr.verts.resize(canon.mergedVerts.size());
   for (int i = 0; i < static_cast<int>(canon.mergedVerts.size()); ++i)
-    arr.verts[i] = {canon.mergedVerts[i]};
+    arr.verts[i] = canon.mergedVerts[i];
   arr.faces = canon.faces;
 
   std::vector<Box> boxes(nFaces);
   std::vector<double> planeDist(nFaces);
   for (int fi = 0; fi < nFaces; ++fi) {
     const auto& f = canon.faces[fi];
-    planeDist[fi] = la::dot(f.normal, arr.verts[f.verts.x].pos);
-    const vec3 p0 = arr.verts[f.verts.x].pos, p1 = arr.verts[f.verts.y].pos,
-               p2 = arr.verts[f.verts.z].pos;
+    planeDist[fi] = la::dot(f.normal, arr.verts[f.verts.x]);
+    const vec3 p0 = arr.verts[f.verts.x], p1 = arr.verts[f.verts.y],
+               p2 = arr.verts[f.verts.z];
     boxes[fi] = Box(la::min(la::min(p0, p1), p2) - vec3(eps),
                     la::max(la::max(p0, p1), p2) + vec3(eps));
   }
@@ -355,9 +355,9 @@ SeamsResult FindSeams(const CanonicalGeometry& canon, double eps,
     auto inPlaneOf = [&](int host, const CanonicalFace& Q) {
       const vec3& n = canon.faces[host].normal;
       const double d = planeDist[host];
-      return std::abs(la::dot(n, arr.verts[Q.verts.x].pos) - d) <= eps &&
-             std::abs(la::dot(n, arr.verts[Q.verts.y].pos) - d) <= eps &&
-             std::abs(la::dot(n, arr.verts[Q.verts.z].pos) - d) <= eps;
+      return std::abs(la::dot(n, arr.verts[Q.verts.x]) - d) <= eps &&
+             std::abs(la::dot(n, arr.verts[Q.verts.y]) - d) <= eps &&
+             std::abs(la::dot(n, arr.verts[Q.verts.z]) - d) <= eps;
     };
     for (int fi = 0; fi < nFaces; ++fi)
       for (int fj = fi + 1; fj < nFaces; ++fj)
@@ -406,12 +406,10 @@ SeamsResult FindSeams(const CanonicalGeometry& canon, double eps,
       }
 
       const vec3 &na = FA.normal, &nb = FB.normal;
-      const vec3 pa0 = arr.verts[FA.verts.x].pos,
-                 pa1 = arr.verts[FA.verts.y].pos,
-                 pa2 = arr.verts[FA.verts.z].pos;
-      const vec3 pb0 = arr.verts[FB.verts.x].pos,
-                 pb1 = arr.verts[FB.verts.y].pos,
-                 pb2 = arr.verts[FB.verts.z].pos;
+      const vec3 pa0 = arr.verts[FA.verts.x], pa1 = arr.verts[FA.verts.y],
+                 pa2 = arr.verts[FA.verts.z];
+      const vec3 pb0 = arr.verts[FB.verts.x], pb1 = arr.verts[FB.verts.y],
+                 pb2 = arr.verts[FB.verts.z];
 
       // Parallel distinct planes: no seam.  (Same-plane pairs were grouped
       // above; a pair reaching here with parallel planes is separated by
@@ -462,10 +460,10 @@ SeamsResult FindSeams(const CanonicalGeometry& canon, double eps,
       if (SA.faceId0 != SB.faceId0 && SA.faceId0 != SB.faceId1 &&
           SA.faceId1 != SB.faceId0 && SA.faceId1 != SB.faceId1)
         continue;
-      const vec3 A0 = arr.verts[SA.vertId0].pos;
-      const vec3 A1 = arr.verts[SA.vertId1].pos;
-      const vec3 B0 = arr.verts[SB.vertId0].pos;
-      const vec3 B1 = arr.verts[SB.vertId1].pos;
+      const vec3 A0 = arr.verts[SA.vertId0];
+      const vec3 A1 = arr.verts[SA.vertId1];
+      const vec3 B0 = arr.verts[SB.vertId0];
+      const vec3 B1 = arr.verts[SB.vertId1];
       const auto xCross = SeamSeamCrossX(A0, A1, B0, B1, eps);
       if (xCross) arr.criticalXs.push_back(*xCross);
     }
@@ -482,8 +480,8 @@ SeamsResult FindSeams(const CanonicalGeometry& canon, double eps,
     for (const GroupedEdge& e : CollectGroupedMemberEdges(arr))
       skeleton[e.group].push_back({e.a, e.b});
     for (const auto& seam : arr.seams) {
-      const std::pair<vec3, vec3> seg = {arr.verts[seam.vertId0].pos,
-                                         arr.verts[seam.vertId1].pos};
+      const std::pair<vec3, vec3> seg = {arr.verts[seam.vertId0],
+                                         arr.verts[seam.vertId1]};
       const int g0 = arr.face2Group[seam.faceId0];
       const int g1 = arr.face2Group[seam.faceId1];
       if (g0 >= 0) skeleton[g0].push_back(seg);
@@ -861,21 +859,14 @@ MaybeFatal ComputeCap(std::vector<OutTri3D>& out,
   return std::nullopt;
 }
 
-// Caps-stage driver: one cap per critical (spec [R3-fold]: runs are never
-// merged; only IEEE-exact duplicate criticals collapse).  Adjacent built
-// slabs are found by INDEX: slab bounds are these exact critical values by
-// construction, so no slack enters the lookup.
-//
-// Chains bind per adjacent-built-slab PAIR, at the pair's canonical critical:
-// the first critical of the gap between the slabs (index li+1, which is the
-// critical itself under direct adjacency - the generic case).  Both sides of
-// the pair consume that ONE arrangement, so the strip-strip weld across a
-// sub-eps run pairs exactly: the two arrangements of a sub-eps critical pair
-// can disagree macroscopically about the subdivision of a shared (cancelled)
-// edge - geometry changes discontinuously at a critical by definition - so
-// one arrangement must own the seam.  The run's other caps are emitted from
-// their own arrangements but are sub-eps slivers that collapse in the
-// assembly weld.
+// Caps-stage driver: PAIR-CANONICAL emission.  Each adjacent-built-slab pair
+// emits exactly ONE cap, at the pair's canonical critical ci == li+1 - the
+// first critical of the gap between the slabs (the critical itself under
+// direct adjacency).  Adjacent built slabs are found by INDEX: slab bounds are
+// these exact critical values by construction, so no slack enters the lookup.
+// Both sides of the pair consume that one arrangement, so strips weld exactly
+// across the critical even where a sub-eps run's two arrangements disagree
+// about a shared cancelled edge (geometry is discontinuous at a critical).
 MaybeFatal EmitCaps(std::vector<OutTri3D>& out,
                     std::vector<StripChains>& chains, Overlap3Counters& cnt,
                     const std::vector<SlabResult>& slabs,
@@ -1090,12 +1081,9 @@ StageResult<Manifold::Impl> BuildImpl(const std::vector<OutTri3D>& tris,
   // Filter degenerate and duplicate triangles.
   // Degenerate: strip quads whose corners collapse within eps produce v0==v1
   // etc., which would crash CreateHalfedges.
-  // Duplicate: per-critical caps (spec [R3-fold]: runs are never merged) mean
-  // a sub-eps critical pair computes the SAME macro difference twice - at
-  // x=c1 and x=c2 with |c2-c1| <= eps - and both triangulations collapse to
-  // identical vertex triples after the weld.  This drop suppresses only
-  // post-weld identical triangles, never distinct caps (the [R3] sentence
-  // "their differences are empty").
+  // Duplicate: after the weld two emitted triangles can share the same vertex
+  // triple; drop exact duplicates (keeping one) - a repeated face would break
+  // the 2-manifold topology.
   Vec<ivec3> tv;
   tv.reserve(tris.size());
   std::set<std::tuple<int, int, int>> seenTris;
