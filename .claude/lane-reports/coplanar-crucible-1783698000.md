@@ -459,3 +459,16 @@ pairing preserves volume/SA and would pass a pure oracle test.
 Doc: implementation-close note superseded; new "Touching contacts
 resolved" section. P2c-perp recorded fixture unaffected (its
 failure is upstream of assembly).
+
+### Step 11 audit: SURVIVE / 0 findings
+
+The lane re-derived the material-side convention independently
+(confirms: backward-pairs-next-forward-CCW IS the non-crossing
+pairing), verified against a cross-pairing counterfactual, built an
+asymmetric 6-fan (three rotated corner cubes -> 3 components,
+vol 3), and swept the tangent band empirically: 5e-10 rad fails in
+the cap walk, 2e-9..1e-7 fails closed as unresolvable sheet
+contact (FP noise breaks alternation above the tie guard - still
+the correct posture), 1e-4+ resolves. Pinched-vertex single-mesh
+scratch case: valid 2-component output. Touching-contacts arc
+CLOSED with zero folds.
