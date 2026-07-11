@@ -1213,6 +1213,24 @@ Overlap3Result SweepEmit(ArrangementGeometry& arr, double eps,
   return result;
 }
 
+// The shared prefix of both entry points: resolve eps (in/out), canonicalize,
+// and find seams.  A SubEpsInput fatal rides SeamsResult.fatal; trivially-empty
+// input (canonicalize dropped every face) returns a fatal-free result whose
+// arr.faces is empty, which the callers emit as an empty manifold.
+SeamsResult PrepareArrangement(const Manifold::Impl& in, double& eps,
+                               Overlap3Counters& cnt) {
+  SeamsResult res;
+  if (eps <= 0.0) eps = EpsilonFromScale(in.bBox_.Scale(), 1000);
+  if (eps <= 0.0 || !std::isfinite(eps)) {
+    res.fatal = FatalReason::SubEpsInput;
+    res.detail = "epsilon not computable";
+    return res;
+  }
+  const CanonicalGeometry canon = Canonicalize(in, eps);
+  if (canon.faces.empty()) return res;  // arr.faces stays empty
+  return FindSeams(canon, eps, cnt);
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -1221,44 +1239,29 @@ Overlap3Result SweepEmit(ArrangementGeometry& arr, double eps,
 
 Overlap3Result RemoveOverlaps3D(const Manifold::Impl& in, double eps) {
   Overlap3Result result;
-  if (eps <= 0.0) eps = EpsilonFromScale(in.bBox_.Scale(), 1000);
-  if (eps <= 0.0 || !std::isfinite(eps)) {
-    result.fatal = FatalReason::SubEpsInput;
-    result.detail = "epsilon not computable";
-    return result;
-  }
-  const CanonicalGeometry canon = Canonicalize(in, eps);
-  if (canon.faces.empty()) {
-    result.impl = Manifold::Impl{};
-    return result;
-  }
-  Overlap3Counters& cnt = result.counters;
-  SeamsResult seams = FindSeams(canon, eps, cnt);
+  SeamsResult seams = PrepareArrangement(in, eps, result.counters);
   if (seams.fatal.has_value()) {
     result.fatal = seams.fatal;
     result.detail = seams.detail;
     return result;
   }
-  return SweepEmit(seams.arr, eps, cnt);
+  if (seams.arr.faces.empty()) {
+    result.impl = Manifold::Impl{};
+    return result;
+  }
+  return SweepEmit(seams.arr, eps, result.counters);
 }
 
 Overlap3Internals RemoveOverlaps3D_TestHooks(const Manifold::Impl& in,
                                              double eps) {
   Overlap3Internals out;
-  if (eps <= 0.0) eps = EpsilonFromScale(in.bBox_.Scale(), 1000);
-  if (eps <= 0.0 || !std::isfinite(eps)) {
-    out.fatal = FatalReason::SubEpsInput;
-    out.detail = "epsilon not computable";
-    return out;
-  }
-  const CanonicalGeometry canon = Canonicalize(in, eps);
-  if (canon.faces.empty()) return out;
-  SeamsResult seams = FindSeams(canon, eps, out.counters);
+  SeamsResult seams = PrepareArrangement(in, eps, out.counters);
   if (seams.fatal.has_value()) {
     out.fatal = seams.fatal;
     out.detail = seams.detail;
     return out;
   }
+  if (seams.arr.faces.empty()) return out;
   out.arr = std::move(seams.arr);
   auto slabRes = BuildSlabs(out.arr, eps, out.counters);
   if (!slabRes.ok()) {
