@@ -593,42 +593,6 @@ struct OutTri3D {
   vec3 v[3];
 };
 
-// The third consumer of the cap arrangement (spec CAPS [R2-fold]): its output
-// verts subdivide the adjacent strip edges.  `arrVerts` is the arrangement's
-// FULL vert set (merged inputs + every collected-arrangement vertex, per the
-// engine's negEdges contract).  Returns the verts lying strictly interior to
-// the chord [p0, p1] (within eps - the tolerance-model on-edge test, same
-// posture as the engine's own incidence rule), sorted by projection parameter
-// (exact ties by lex order).  The returned POSITIONS become the strip edge's
-// chain verts, bitwise equal to the cap triangulation corners they pair with.
-std::vector<vec2> ChainSplitVerts(const std::vector<vec2>& arrVerts, vec2 p0,
-                                  vec2 p1, double eps) {
-  const vec2 segD = p1 - p0;
-  const double segLen2 = la::length2(segD);
-  if (segLen2 <= eps * eps) return {};
-  const double invLen2 = 1.0 / segLen2;
-  const double tEps = eps / std::sqrt(segLen2);
-  std::vector<std::pair<double, vec2>> hits;
-  for (const auto& v : arrVerts) {
-    const double t = la::dot(v - p0, segD) * invLen2;
-    if (t <= tEps || t >= 1.0 - tEps) continue;
-    const vec2 proj = p0 + t * segD;
-    if (la::length(v - proj) > eps) continue;
-    hits.push_back({t, v});
-  }
-  std::sort(
-      hits.begin(), hits.end(),
-      [](const std::pair<double, vec2>& a, const std::pair<double, vec2>& b) {
-        if (a.first != b.first) return a.first < b.first;
-        if (a.second.x != b.second.x) return a.second.x < b.second.x;
-        return a.second.y < b.second.y;
-      });
-  std::vector<vec2> out;
-  out.reserve(hits.size());
-  for (const auto& h : hits) out.push_back(h.second);
-  return out;
-}
-
 // Zipper-triangulate a strip between two chains (position polylines): a at
 // x=xLo, b at x=xHi, each ordered along the strip edge.  A single-vert chain
 // is a piece that vanished at that critical; the strip degenerates to a fan
@@ -843,10 +807,12 @@ std::optional<std::pair<FatalReason, std::string>> ComputeCap(
   // so strip subdivision matches the cap identity model.
   const double capEps = 8 * eps;
   std::vector<OutEdge> negEdges;
+  std::vector<std::vector<vec2>> edgeSubdiv;
   ++cnt.capArrangements;
-  const OverlapResult r =
-      RemoveOverlaps2D(ces.rawVerts, edges, capEps, /*debug=*/false,
-                       WindRule::Add, /*trace=*/nullptr, &negEdges);
+  const OverlapResult r = RemoveOverlaps2D(
+      ces.rawVerts, edges, capEps, /*debug=*/false, WindRule::Add,
+      /*trace=*/nullptr, &negEdges,
+      (leftChains || rightChains) ? &edgeSubdiv : nullptr);
   bool loopsClosed = true;
   bool trisOk = true;
   if (!r.edges.empty()) {
@@ -866,30 +832,19 @@ std::optional<std::pair<FatalReason, std::string>> ComputeCap(
         std::string("cap triangulation returned invalid indices"));
 
   if (!leftChains && !rightChains) return std::nullopt;
-  // The subdivision authority for strip edges is the arrangement's FULL vert
-  // set (r.verts: merged input verts plus every collected-arrangement vertex,
-  // per the engine's negEdges contract).  It cannot be narrowed to
-  // retained-edge verts - where L and R coincide, their edges annihilate and
-  // retention is empty, yet the strips on both sides still need the SAME
-  // subdivision to pair across the critical; the merge/incidence machinery is
-  // exactly what guarantees both sides see the same verts.
-  auto buildChains = [&](const std::vector<std::pair<int, int>>& slots,
-                         std::vector<std::vector<vec2>>& chains) {
-    for (size_t k = 0; k < slots.size(); ++k) {
-      const int m0 = r.inputVert2Merged[slots[k].first];
-      const int m1 = r.inputVert2Merged[slots[k].second];
-      std::vector<vec2>& chain = chains[k];
-      chain.push_back(r.verts[m0]);
-      if (m0 != m1) {
-        for (const vec2& v :
-             ChainSplitVerts(r.verts, r.verts[m0], r.verts[m1], capEps))
-          chain.push_back(v);
-        chain.push_back(r.verts[m1]);
-      }
-    }
-  };
-  if (leftChains) buildChains(ces.lPiece2RawVerts, *leftChains);
-  if (rightChains) buildChains(ces.rPiece2RawVerts, *rightChains);
+  // Strip chains are PROVENANCE-EXACT (spec PROVENANCE CHAINS): each piece's
+  // chain is the engine's own subdivision of that input edge (edgeSubdiv,
+  // index-aligned with `edges` = L pieces then R pieces).  Coincident L/R
+  // pieces (shared merged endpoints) get identical interior sequences by
+  // construction, so strips pair across the critical exactly.  This replaces
+  // the geometric on-chord projection (ChainSplitVerts), which diverged from
+  // the retained cap graph on steep-track junction clusters (corpus-falsified).
+  const size_t nL = ces.lPiece2RawVerts.size();
+  if (leftChains)
+    for (size_t k = 0; k < nL; ++k) (*leftChains)[k] = edgeSubdiv[k];
+  if (rightChains)
+    for (size_t k = 0; k < ces.rPiece2RawVerts.size(); ++k)
+      (*rightChains)[k] = edgeSubdiv[nL + k];
   return std::nullopt;
 }
 

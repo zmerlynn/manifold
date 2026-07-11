@@ -101,10 +101,15 @@ bool IsInside(WindRule rule, int64_t w) {
 
 // Multiplicity + source-id pair. The PolySet2 mapped value (engine extension):
 // m is the signed net multiplicity in lex-normalized direction; srcId is the
-// face id from the 3D caller (0 = unattributed, -1 = conflicted).
+// face id from the 3D caller (0 = unattributed, -1 = conflicted).  classId is
+// a PURE LABEL (the 3D per-input-edge provenance channel): the coincidence
+// class = unordered merged-endpoint pair of the ORIGINAL input edge, carried
+// so the arrangement pass can record each edge's subdivision under its class.
+// It never affects m, erase, or conflict; -1 = untracked (all 2D callers).
 struct PolyVal {
   int64_t m = 0;
   int32_t srcId = 0;
+  int32_t classId = -1;
 };
 
 // Lex-normalized directed-edge key with PolyVal: the PolySet2 of Smith
@@ -159,6 +164,28 @@ bool PolySetAdd(PolySet2& ps, vec2 a, vec2 b, PolyVal pv) {
   return conflict;
 }
 
+// Resolve a set of active (id -> net coverage) contributors to the single
+// contributor id, or -1 if two or more are active.  `sawMulti` reports the
+// multi-contributor case so the srcId caller can count a conflict (the classId
+// caller does not - it is a pure label).
+int32_t ResolveActiveId(const std::map<int32_t, int64_t>& active,
+                        bool& sawMulti) {
+  int32_t resolved = 0;
+  bool have = false;
+  sawMulti = false;
+  for (const auto& a : active) {
+    if (a.second == 0) continue;
+    if (!have) {
+      resolved = a.first;
+      have = true;
+    } else {
+      sawMulti = true;
+      return -1;
+    }
+  }
+  return resolved;
+}
+
 // 7.6.1 footnote 9 (rewritten for per-interval contributor tracking): resolve
 // each x-group of coincident/overlapping vertical edges into signed-coverage
 // segments between consecutive breakpoints. Each emitted interval carries the
@@ -166,16 +193,18 @@ bool PolySetAdd(PolySet2& ps, vec2 a, vec2 b, PolyVal pv) {
 // active in an interval, srcId = -1 and *conflicts is incremented (if
 // non-null). Adjacent same-plane triangles making multi-source vertical groups
 // is ordinary in the 3D use-case, not a corner case. All input breakpoints are
-// preserved.
+// preserved.  classId (provenance label) rides the same per-interval resolve
+// but never counts a conflict.
 void MergeVerticals1D(PolySet2& ps, int* conflicts = nullptr) {
-  using SegEntry = std::tuple<double, double, int64_t, int32_t>;
+  using SegEntry = std::tuple<double, double, int64_t, int32_t, int32_t>;
   std::map<double, std::vector<SegEntry>> groups;
   std::vector<std::pair<vec2, vec2>> toErase;
   for (const auto& kv : ps) {
     if (kv.first.first.x == kv.first.second.x) {
       // PolySet2 lex-normalizes so kv.first.first.y <= kv.first.second.y
       groups[kv.first.first.x].emplace_back(kv.first.first.y, kv.first.second.y,
-                                            kv.second.m, kv.second.srcId);
+                                            kv.second.m, kv.second.srcId,
+                                            kv.second.classId);
       toErase.push_back(kv.first);
     }
   }
@@ -183,53 +212,50 @@ void MergeVerticals1D(PolySet2& ps, int* conflicts = nullptr) {
 
   for (const auto& g : groups) {
     const double x = g.first;
-    // Build delta events: at each y-breakpoint record (delta_m, srcId)
-    std::map<double, std::vector<std::pair<int64_t, int32_t>>> events;
+    // Build delta events: at each y-breakpoint record (delta_m, srcId, classId)
+    std::map<double, std::vector<std::tuple<int64_t, int32_t, int32_t>>> events;
     for (const auto& seg : g.second) {
       double yLo, yHi;
       int64_t m;
-      int32_t srcId;
-      std::tie(yLo, yHi, m, srcId) = seg;
-      events[yLo].emplace_back(m, srcId);
-      events[yHi].emplace_back(-m, srcId);
+      int32_t srcId, classId;
+      std::tie(yLo, yHi, m, srcId, classId) = seg;
+      events[yLo].emplace_back(m, srcId, classId);
+      events[yHi].emplace_back(-m, srcId, classId);
     }
-    // Active contributors: srcId -> net coverage contribution
+    // Active contributors: id -> net coverage, tracked for srcId and classId.
     std::map<int32_t, int64_t> activeSrcs;
+    std::map<int32_t, int64_t> activeClasses;
     int64_t totalCover = 0;
     double prevY = 0.0;
     bool have = false;
     for (const auto& ev : events) {
       if (have && totalCover != 0) {
-        // Determine srcId for this (prevY, ev.first) interval.
-        int32_t resolvedId = 0;
-        bool have_id = false;
-        bool multi = false;
-        for (const auto& as : activeSrcs) {
-          if (as.second != 0) {
-            if (!have_id) {
-              resolvedId = as.first;
-              have_id = true;
-            } else {
-              multi = true;
-              break;
-            }
-          }
-        }
-        if (multi) {
-          resolvedId = -1;
+        // Determine srcId + classId for this (prevY, ev.first) interval.
+        bool srcMulti = false;
+        int32_t resolvedId = ResolveActiveId(activeSrcs, srcMulti);
+        if (srcMulti) {
           if (conflicts) ++(*conflicts);
         } else {
           DEBUG_ASSERT(
-              have_id, logicErr,
+              !activeSrcs.empty(), logicErr,
               "MergeVerticals1D: nonzero totalCover but no active src");
         }
-        PolySetAdd(ps, {x, prevY}, {x, ev.first}, {totalCover, resolvedId});
+        bool classMulti = false;
+        const int32_t resolvedClass =
+            ResolveActiveId(activeClasses, classMulti);
+        PolySetAdd(ps, {x, prevY}, {x, ev.first},
+                   {totalCover, resolvedId, resolvedClass});
       }
       // Apply the delta events at ev.first
       for (const auto& e : ev.second) {
-        activeSrcs[e.second] += e.first;
-        if (activeSrcs[e.second] == 0) activeSrcs.erase(e.second);
-        totalCover += e.first;
+        int64_t dm;
+        int32_t sId, cId;
+        std::tie(dm, sId, cId) = e;
+        activeSrcs[sId] += dm;
+        if (activeSrcs[sId] == 0) activeSrcs.erase(sId);
+        activeClasses[cId] += dm;
+        if (activeClasses[cId] == 0) activeClasses.erase(cId);
+        totalCover += dm;
       }
       prevY = ev.first;
       have = true;
@@ -244,6 +270,7 @@ struct SweepEdge {
   vec2 l, r;
   int64_t m;
   int32_t srcId;
+  int32_t classId;  // provenance label (see PolyVal::classId); -1 = untracked
   uint64_t seq;
 };
 
@@ -257,8 +284,12 @@ enum class SweepMode { Arrangement, Winding };
 class SweepPass {
  public:
   SweepPass(WindRule rule, SweepMode mode,
-            std::vector<SweepCapture>* capture = nullptr)
-      : rule_(rule), mode_(mode), capture_(capture) {}
+            std::vector<SweepCapture>* capture = nullptr,
+            std::vector<std::vector<vec2>>* classSubdiv = nullptr)
+      : rule_(rule),
+        mode_(mode),
+        capture_(capture),
+        classSubdiv_(classSubdiv) {}
 
   void Seed(vec2 a, vec2 b, PolyVal pv) { PendingAdd(a, b, pv); }
 
@@ -368,17 +399,27 @@ class SweepPass {
       ++conflictCount_;
   }
 
+  // Record q as a subdivision vertex of coincidence class `classId` (3D
+  // provenance channel; no-op when untracked or 2D).  Called at each interior
+  // split so a class's chain gets the exact arrangement verts placed on it.
+  void RecordSubdiv(int32_t classId, const vec2& q) {
+    if (classSubdiv_ && classId >= 0 &&
+        classId < static_cast<int>(classSubdiv_->size()))
+      (*classSubdiv_)[classId].push_back(q);
+  }
+
   // 7.4.1: split status edge idx at q; shorten in place, requeue the remainder.
   void SplitAt(size_t idx, const vec2& q) {
     SweepEdge e = status_[idx];
     if (q == e.r) return;
     if (q == e.l) {
       status_.erase(status_.begin() + idx);
-      PendingAdd(q, e.r, {e.m, e.srcId});
+      PendingAdd(q, e.r, {e.m, e.srcId, e.classId});
       return;
     }
+    RecordSubdiv(e.classId, q);  // q is interior to this class's edge
     status_[idx].r = q;
-    PendingAdd(q, e.r, {e.m, e.srcId});
+    PendingAdd(q, e.r, {e.m, e.srcId, e.classId});
     events_.insert(q);
   }
 
@@ -448,7 +489,8 @@ class SweepPass {
         EmitBoundary(e.l, e.r, e.m, below, above, e.srcId);
       } else {  // forced through p (7.6.2): commit [e.l, p], re-enter [p, e.r]
         if (e.l != p) EmitBoundary(e.l, p, e.m, below, above, e.srcId);
-        reinsert.push_back({p, e.r, e.m, e.srcId, seqCounter_++});
+        RecordSubdiv(e.classId, p);  // p subdivides this class's edge
+        reinsert.push_back({p, e.r, e.m, e.srcId, e.classId, seqCounter_++});
       }
     }
     const bool removedAny = hi > lo;
@@ -456,8 +498,8 @@ class SweepPass {
     auto pit = pending_.find(p);
     if (pit != pending_.end()) {
       for (const auto& kv : pit->second)
-        reinsert.push_back(
-            {p, kv.first, kv.second.m, kv.second.srcId, seqCounter_++});
+        reinsert.push_back({p, kv.first, kv.second.m, kv.second.srcId,
+                            kv.second.classId, seqCounter_++});
       pending_.erase(pit);
     }
     std::stable_sort(reinsert.begin(), reinsert.end(), GradientLess);
@@ -478,6 +520,7 @@ class SweepPass {
   WindRule rule_;
   SweepMode mode_;
   std::vector<SweepCapture>* capture_;
+  std::vector<std::vector<vec2>>* classSubdiv_;
   std::set<vec2, LexLess> events_;
   std::map<vec2, std::map<vec2, PolyVal, LexLess>, LexLess> pending_;
   std::vector<SweepEdge> status_;
@@ -490,9 +533,10 @@ class SweepPass {
 // near-concurrences with the block rule, merges coincident verticals, and emits
 // every finalized piece. The result is a true arrangement - every crossing is a
 // shared vertex, no two pieces cross.
-PolySet2 CollectArrangement(PolySet2 arr, WindRule rule,
-                            int* conflicts = nullptr) {
-  SweepPass collect(rule, SweepMode::Arrangement);
+PolySet2 CollectArrangement(
+    PolySet2 arr, WindRule rule, int* conflicts = nullptr,
+    std::vector<std::vector<vec2>>* classSubdiv = nullptr) {
+  SweepPass collect(rule, SweepMode::Arrangement, nullptr, classSubdiv);
   for (const auto& kv : arr)
     collect.Seed(kv.first.first, kv.first.second, kv.second);
   collect.Run();
@@ -511,12 +555,13 @@ PolySet2 CollectArrangement(PolySet2 arr, WindRule rule,
 // duplicates of the first measure's and are not re-counted. When `cleanOut`
 // is non-null it receives the collected arrangement itself (every sub-edge,
 // retained or not).
-PolySet2 CollectThenMeasure(PolySet2 arr, WindRule rule,
-                            std::vector<SweepCapture>* capture = nullptr,
-                            int* conflicts = nullptr,
-                            PolySet2* negOut = nullptr,
-                            PolySet2* cleanOut = nullptr) {
-  PolySet2 clean = CollectArrangement(std::move(arr), rule, conflicts);
+PolySet2 CollectThenMeasure(
+    PolySet2 arr, WindRule rule, std::vector<SweepCapture>* capture = nullptr,
+    int* conflicts = nullptr, PolySet2* negOut = nullptr,
+    PolySet2* cleanOut = nullptr,
+    std::vector<std::vector<vec2>>* classSubdiv = nullptr) {
+  PolySet2 clean =
+      CollectArrangement(std::move(arr), rule, conflicts, classSubdiv);
   SweepPass measure(rule, SweepMode::Winding, capture);
   for (const auto& kv : clean)
     measure.Seed(kv.first.first, kv.first.second, kv.second);
@@ -550,7 +595,9 @@ std::vector<OutEdge> SweepWinding(const std::vector<EdgeM>& edges,
                                   std::vector<vec2>& verts, WindRule rule,
                                   std::vector<SweepCapture>* capture,
                                   int* conflictCount,
-                                  std::vector<OutEdge>* negEdges) {
+                                  std::vector<OutEdge>* negEdges,
+                                  const std::vector<int>* edgeClass,
+                                  std::vector<std::vector<vec2>>* classSubdiv) {
   std::map<std::pair<double, double>, int> vertId;
   for (int v = 0; v < static_cast<int>(verts.size()); ++v)
     vertId.emplace(std::make_pair(verts[v].x, verts[v].y), v);
@@ -571,9 +618,11 @@ std::vector<OutEdge> SweepWinding(const std::vector<EdgeM>& edges,
   // incidences are pre-split by the caller.
   PolySet2 arr;
   int conflicts = 0;
-  for (const auto& e : edges) {
+  for (int i = 0; i < static_cast<int>(edges.size()); ++i) {
+    const EdgeM& e = edges[i];
     if (e.v0 == e.v1) continue;
-    if (PolySetAdd(arr, verts[e.v0], verts[e.v1], {e.mult, e.srcId}))
+    const int32_t cls = edgeClass ? (*edgeClass)[i] : -1;
+    if (PolySetAdd(arr, verts[e.v0], verts[e.v1], {e.mult, e.srcId, cls}))
       ++conflicts;
   }
   MergeVerticals1D(arr, &conflicts);
@@ -581,7 +630,7 @@ std::vector<OutEdge> SweepWinding(const std::vector<EdgeM>& edges,
   PolySet2 negOut, cleanArr;
   const PolySet2 out = CollectThenMeasure(
       std::move(arr), rule, capture, &conflicts, negEdges ? &negOut : nullptr,
-      negEdges ? &cleanArr : nullptr);
+      negEdges ? &cleanArr : nullptr, classSubdiv);
   if (conflictCount) *conflictCount = conflicts;
 
   // Materialize retained boundaries as directed OutEdges via the shared getId,

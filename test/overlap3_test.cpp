@@ -1541,11 +1541,16 @@ static void CorpusPairGate(const char* leftName, const char* rightName,
   const Manifold::Impl impl = ComposeImpl(a, b);
   const double eps = ImplEps(impl);
   const Overlap3Result result = RemoveOverlaps3D(impl, eps);
-  // Recorded contract (spec: emission-closure diagnosis): steep-track
-  // junction spreads break the eps-identity closure on these meshes;
-  // resolution needs provenance-exact strip/cap chains (the recorded
-  // per-input-edge upgrade).  Until then: a named guard or a true resolve,
-  // never silent garbage.
+  // Recorded contract.  Provenance-exact strip chains (the per-input-edge
+  // subdivision channel) fixed the unpaired-edge class these meshes hit, but
+  // NOT the residual blocker: at a critical the L and R extensions of one
+  // junction diverge by 60-200 eps (a forced-through weld frozen at its
+  // section position vs its track-extended twin landing on the junction).  The
+  // cap arrangement keeps both as a micro-edge -> sliver cap triangles or a
+  // strip-less cap edge -> fail closed.  Closing needs a NON-constant-radius
+  // provenance junction unification (3D-identity extension), the research-grade
+  // remainder companion of the near-coplanar arc; a constant radius is a floor,
+  // not a bound.  Until then: a named guard or a true resolve, never garbage.
   if (result.fatal.has_value()) {
     EXPECT_EQ(*result.fatal, FatalReason::NonManifoldEmission)
         << tag << " wrong guard: " << static_cast<int>(*result.fatal) << " "

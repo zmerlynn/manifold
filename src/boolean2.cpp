@@ -20,6 +20,7 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <map>
 #include <numeric>
 #include <utility>
 #include <vector>
@@ -479,6 +480,50 @@ VertexMerge MergeVerts(const std::vector<vec2>& in, double eps) {
   return {std::move(inputVert2Merged), std::move(verts)};
 }
 
+namespace {
+
+// Assemble one provenance chain (3D cap consumer): the ordered vertex polyline
+// from p0 to p1 through the class's interior subdivision verts.  `interior` is
+// the raw recorded set for this edge's class (incidence verts + arrangement
+// crossings, possibly with duplicates); it is deduplicated, restricted to the
+// strictly-interior span of [p0, p1], and sorted by projection parameter (exact
+// ties by lex order).  Endpoints are the merged-vert positions, so coincident
+// input edges yield identical interior sequences (reversed by orientation).
+std::vector<vec2> AssembleChain(vec2 p0, vec2 p1, std::vector<vec2> interior) {
+  std::vector<vec2> chain;
+  chain.push_back(p0);
+  if (p0 == p1) return chain;  // vanished piece: single-vert chain
+  const vec2 d = p1 - p0;
+  const double len2 = la::dot(d, d);
+  if (len2 > 0.0 && !interior.empty()) {
+    manifold::stable_sort(interior.begin(), interior.end(), [](vec2 a, vec2 b) {
+      return a.x < b.x || (a.x == b.x && a.y < b.y);
+    });
+    interior.erase(std::unique(interior.begin(), interior.end()),
+                   interior.end());
+    std::vector<std::pair<double, vec2>> hits;
+    hits.reserve(interior.size());
+    for (const vec2& v : interior) {
+      if (v == p0 || v == p1) continue;
+      const double t = la::dot(v - p0, d) / len2;
+      if (t <= 0.0 || t >= 1.0) continue;
+      hits.push_back({t, v});
+    }
+    std::sort(
+        hits.begin(), hits.end(),
+        [](const std::pair<double, vec2>& a, const std::pair<double, vec2>& b) {
+          if (a.first != b.first) return a.first < b.first;
+          if (a.second.x != b.second.x) return a.second.x < b.second.x;
+          return a.second.y < b.second.y;
+        });
+    for (const auto& h : hits) chain.push_back(h.second);
+  }
+  chain.push_back(p1);
+  return chain;
+}
+
+}  // namespace
+
 // Drop edges whose endpoints map to the same vertex after MergeVerts.
 std::vector<EdgeM> RemapAndCollapse(const std::vector<EdgeM>& edges,
                                     const std::vector<int>& inputVert2Merged) {
@@ -804,7 +849,8 @@ void CollectIntersectionPairs(const std::vector<EdgeM>& edges,
 OverlapResult RemoveOverlaps2D(const std::vector<vec2>& vertsIn,
                                const std::vector<EdgeM>& edgesIn, double eps,
                                bool debug, WindRule pred, Trace* trace,
-                               std::vector<OutEdge>* edgesNeg) {
+                               std::vector<OutEdge>* edgesNeg,
+                               std::vector<std::vector<vec2>>* edgeSubdiv) {
   auto& P = GlobalPhases();
   ScopedTiming totalTiming(P.totalNs);
   TraceRecorder traceRecorder(trace, eps, pred);
@@ -854,28 +900,81 @@ OverlapResult RemoveOverlaps2D(const std::vector<vec2>& vertsIn,
     incidenceLists =
         BuildIncidenceLists(edges, merge.verts, eps, intersectionPairs);
   }
+  // Provenance channel (3D cap consumer only; nulled for 2D): assign each
+  // collapsed edge a coincidence class = unordered merged-endpoint pair, seed
+  // classSubdiv with the incidence-split interior verts, and carry the class
+  // per sub-edge so the arrangement pass can append its crossings.
+  std::map<std::pair<int, int>, int> classDedup;
+  std::vector<int> subEdgeClass;
+  std::vector<std::vector<vec2>> classSubdiv;
+  auto edgeClassOf = [&](int mv0, int mv1) {
+    const auto key = std::make_pair(std::min(mv0, mv1), std::max(mv0, mv1));
+    auto it = classDedup.find(key);
+    if (it != classDedup.end()) return it->second;
+    const int id = static_cast<int>(classDedup.size());
+    classDedup.emplace(key, id);
+    return id;
+  };
   {
     std::vector<EdgeM> subEdges;
     subEdges.reserve(edges.size());
+    if (edgeSubdiv) subEdgeClass.reserve(edges.size());
     for (size_t e = 0; e < edges.size(); ++e) {
+      const int cls = edgeSubdiv ? edgeClassOf(edges[e].v0, edges[e].v1) : -1;
       int prev = edges[e].v0;
+      auto pushSub = [&](int a, int b) {
+        subEdges.push_back({a, b, edges[e].mult, edges[e].srcId});
+        if (edgeSubdiv) subEdgeClass.push_back(cls);
+      };
       for (int v : incidenceLists[e]) {
-        if (v != prev)
-          subEdges.push_back({prev, v, edges[e].mult, edges[e].srcId});
+        if (v != prev) pushSub(prev, v);
         prev = v;
       }
-      if (edges[e].v1 != prev)
-        subEdges.push_back({prev, edges[e].v1, edges[e].mult, edges[e].srcId});
+      if (edges[e].v1 != prev) pushSub(prev, edges[e].v1);
+      if (edgeSubdiv) {
+        // Every incidence vert is strictly interior to this class's edge; seed
+        // the class subdivision with them (the sweep appends its crossings).
+        if (static_cast<int>(classSubdiv.size()) <= cls)
+          classSubdiv.resize(cls + 1);
+        for (int v : incidenceLists[e])
+          classSubdiv[cls].push_back(merge.verts[v]);
+      }
     }
     edges = std::move(subEdges);
   }
+  // classSubdiv must be sized to the full class count: a class with no
+  // incidence verts still receives sweep crossings by index.
+  if (edgeSubdiv && static_cast<int>(classSubdiv.size()) <
+                        static_cast<int>(classDedup.size()))
+    classSubdiv.resize(classDedup.size());
   // Smith sweep-line arrangement + winding over the incidence-split sub-edges.
   std::vector<OutEdge> out;
   {
     ScopedTiming timing(P.filterWindingNs);
-    out = SweepWinding(edges, merge.verts, pred, nullptr, nullptr, edgesNeg);
+    out = SweepWinding(edges, merge.verts, pred, nullptr, nullptr, edgesNeg,
+                       edgeSubdiv ? &subEdgeClass : nullptr,
+                       edgeSubdiv ? &classSubdiv : nullptr);
   }
   traceRecorder.RecordFilteredOutput(merge.verts, out);
+  // Assemble per-input-edge provenance chains from the class subdivisions.
+  if (edgeSubdiv) {
+    edgeSubdiv->assign(edgesIn.size(), {});
+    for (size_t i = 0; i < edgesIn.size(); ++i) {
+      const int mv0 = merge.inputVert2Merged[edgesIn[i].v0];
+      const int mv1 = merge.inputVert2Merged[edgesIn[i].v1];
+      if (mv0 == mv1) {
+        (*edgeSubdiv)[i] = {merge.verts[mv0]};
+        continue;
+      }
+      const auto it = classDedup.find({std::min(mv0, mv1), std::max(mv0, mv1)});
+      std::vector<vec2> interior;
+      if (it != classDedup.end() &&
+          it->second < static_cast<int>(classSubdiv.size()))
+        interior = classSubdiv[it->second];
+      (*edgeSubdiv)[i] = AssembleChain(merge.verts[mv0], merge.verts[mv1],
+                                       std::move(interior));
+    }
+  }
   CountTimingCase();
   return {std::move(merge.verts), std::move(out),
           std::move(merge.inputVert2Merged), numMerged};

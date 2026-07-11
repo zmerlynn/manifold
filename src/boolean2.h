@@ -197,11 +197,19 @@ enum class WindRule {
 // not) - the 3D cap consumer's subdivision authority (one arrangement, two
 // signed measures). 2D callers pass nullptr for all three, leaving behavior
 // unchanged.
-std::vector<OutEdge> SweepWinding(const std::vector<EdgeM>& edges,
-                                  std::vector<vec2>& verts, WindRule rule,
-                                  std::vector<SweepCapture>* capture = nullptr,
-                                  int* conflictCount = nullptr,
-                                  std::vector<OutEdge>* negEdges = nullptr);
+// `edgeClass`, when non-null, is a per-input-edge coincidence-class label
+// (index-aligned with `edges`); the arrangement pass carries it as a pure
+// provenance label and appends each class's constructed subdivision vertices
+// (crossings + block-rule forced-through points) to `classSubdiv[classId]`.
+// `classSubdiv` must be pre-sized to the class count.  The 3D cap consumer uses
+// this to subdivide strip edges by provenance instead of geometric projection.
+// 2D callers pass nullptr for both, leaving behavior unchanged.
+std::vector<OutEdge> SweepWinding(
+    const std::vector<EdgeM>& edges, std::vector<vec2>& verts, WindRule rule,
+    std::vector<SweepCapture>* capture = nullptr, int* conflictCount = nullptr,
+    std::vector<OutEdge>* negEdges = nullptr,
+    const std::vector<int>* edgeClass = nullptr,
+    std::vector<std::vector<vec2>>* classSubdiv = nullptr);
 
 struct OverlapResult {
   std::vector<vec2> verts;
@@ -214,12 +222,18 @@ struct OverlapResult {
 // eps-only; tolerance-scale decimation is Simplify's job, as in boolean3.
 // `edgesNeg`, when non-null, receives the retained boundary of the negated
 // measure over the same arrangement (see SweepWinding).
-OverlapResult RemoveOverlaps2D(const std::vector<vec2>& vertsIn,
-                               const std::vector<EdgeM>& edgesIn, double eps,
-                               bool debug = false,
-                               WindRule pred = WindRule::Add,
-                               Trace* trace = nullptr,
-                               std::vector<OutEdge>* edgesNeg = nullptr);
+// `edgeSubdiv`, when non-null, receives one ordered vertex-POSITION polyline
+// per INPUT edge (index-aligned with `edgesIn`): the arrangement's exact
+// subdivision of that edge, from its start merged vert through every interior
+// arrangement vertex on it to its end merged vert, oriented v0->v1.  Coincident
+// input edges (shared merged endpoints) get identical interior subdivisions by
+// construction.  The 3D cap consumer uses these as provenance-exact strip
+// chains.  Null for all 2D callers.
+OverlapResult RemoveOverlaps2D(
+    const std::vector<vec2>& vertsIn, const std::vector<EdgeM>& edgesIn,
+    double eps, bool debug = false, WindRule pred = WindRule::Add,
+    Trace* trace = nullptr, std::vector<OutEdge>* edgesNeg = nullptr,
+    std::vector<std::vector<vec2>>* edgeSubdiv = nullptr);
 
 double InferEps(const Polygons& a, const Polygons& b);
 

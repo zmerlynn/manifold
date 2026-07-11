@@ -778,3 +778,71 @@ the next):
 The corpus fixtures stand as recorded contracts
 (Corpus_*_Recorded): a named guard or a true resolve, never silent
 garbage.  Full suite green with all three landed changes.
+
+## PROVENANCE CHAINS (main-agent, 2026-07-11)
+
+The per-input-edge subdivision upgrade named at the emission-closure
+crucible is implemented.  The mechanism and its adjudications:
+
+THE CHANNEL (engine).  RemoveOverlaps2D gains an optional out-param
+`edgeSubdiv`: one ordered vertex-POSITION polyline per INPUT edge -
+that edge's exact arrangement subdivision, from its start merged vert
+through every interior arrangement vertex on it to its end merged
+vert, oriented v0->v1.  It is keyed by a COINCIDENCE CLASS = the
+unordered merged-endpoint pair of the original input edge (a pure
+label `classId` riding PolyVal/SweepEdge exactly as srcId does; -1 for
+all 2D callers; null-defaulted; the arrangement geometry is BITWISE
+unchanged - classId never touches m, erase, or conflict).  Interior
+verts come from two sources: the incidence pre-split (seeded in the
+driver) and the arrangement pass's own crossings + block-rule
+forced-through points (recorded in SplitAt/ProcessEvent against the
+edge's class; MergeVerticals1D preserves the class through the
+vertical resolve).  The 3D cap (ComputeCap) consumes edgeSubdiv
+directly as the strip chains (L pieces then R pieces, index-aligned),
+retiring the geometric on-chord projection (ChainSplitVerts, deleted).
+Pin: Boolean2.EdgeSubdivProvenanceChannel (coincident-class agreement
++ crossing capture, mutation-verified red against an endpoints-only
+stub).
+
+WHY CLASS-KEYING answers the design questions.  (a) partial
+retention: the subdivision covers the WHOLE input edge (incidence
+breakpoints + crossings), independent of which sub-edges are retained,
+so a strip subdivided where a cancelled neighbor breaks it still pairs
+with that neighbor.  (b) coincident chords (L + R anti-oriented, same
+merged endpoints): identical class -> identical interior sequence by
+construction (the twin-selection ambiguity that plagued the geometric
+projection cannot arise - a twin on a DIFFERENT line has a different
+class and is excluded; a real crossing is included by provenance).
+(c) a vanished piece (merged endpoints equal) yields a single-vert
+chain.  (d) determinism: std::map ordering + deterministic seed order;
+2D fences (111 + the new pin) unchanged, default paths zero-cost.
+
+WHAT IT FIXED, AND THE WALL IT EXPOSED.  The chains close the
+UNPAIRED-EDGE class (Havocglass8's first-hit failure: strips that
+mis-subdivided relative to the retained cap graph now consume it
+exactly).  They do NOT close the corpus gates, because the true
+blocker is one layer deeper and ORTHOGONAL to subdivision: at a
+critical the L and R extensions of ONE junction can land 60-200 eps
+apart (instrumented on Havocglass8: a forced-through WELD frozen at
+its section position vs its track-extended twin landing on the
+junction; the section itself already carries the pair ~60 eps apart,
+below the resolver's eps cluster, so one finds a track and the other
+welds, and the extension amplifies the gap).  Design question (b)'s
+premise - "coincident L/R map to ONE arrangement sub-edge" - REQUIRES
+those endpoints to merge; at 60-200 eps > capEps they do not, so L/R
+become two sub-edges with a MICRO-EDGE between them, and no
+subdivision scheme repairs a POSITION divergence.  The cap arrangement
+keeps the micro-edge -> sliver cap triangles (Havocglass8, k=4
+material-overlap) or a strip-less cap edge (GenericTwin7863, 1F/0B),
+each failing closed at the sheet splitter.  This is exactly the
+crucible's "irreducible remainder": no constant radius fixes it
+(capEps is a floor, established prior), so closing it needs a
+NON-constant-radius provenance junction unification - a true
+3D-IDENTITY extension that snaps L and R endpoints of one 3D junction
+to the same point (the coplanar mechanism-3 preference, unimplemented
+in Extend, which currently interpolates and never snaps).  That is the
+research-grade next step and the natural companion of the hulls'
+near-coplanar arc; the provenance chains are its necessary
+foundation, landed and pinned.  Corpus gates remain recorded
+contracts, with the residual now named as twin-position divergence
+rather than mis-subdivision.

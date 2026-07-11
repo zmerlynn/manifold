@@ -577,6 +577,38 @@ TEST(Boolean2, CleanupPassMatchesValidAddSinglePass) {
   EXPECT_NEAR(TotalSignedArea(pass1Polys), TotalSignedArea(pass2Polys), 1e-12);
 }
 
+// Pin for the per-input-edge provenance channel (3D cap consumer, spec
+// PROVENANCE CHAINS): edgeSubdiv returns each input edge's exact arrangement
+// subdivision.  Two coincident edges share their interior subdivision by
+// construction (the coincidence-class key), and a proper crossing is captured
+// by PROVENANCE, not by geometric projection.  Red-first against a stub that
+// returns only endpoints (the interior crossing would be missing).
+TEST(Boolean2, EdgeSubdivProvenanceChannel) {
+  // Two coincident +1 horizontal edges (0,0)->(10,0) and a diagonal edge
+  // crossing them at (5,0).
+  std::vector<vec2> verts = {{0, 0}, {10, 0}, {0, 0}, {10, 0}, {4, -5}, {6, 5}};
+  std::vector<EdgeM> edges = {{0, 1, 1}, {2, 3, 1}, {4, 5, 1}};
+  const double eps = EpsilonFromScale(10.0);
+  std::vector<std::vector<vec2>> edgeSubdiv;
+  RemoveOverlaps2D(verts, edges, eps, /*debug=*/false, WindRule::Add,
+                   /*trace=*/nullptr, /*edgesNeg=*/nullptr, &edgeSubdiv);
+  ASSERT_EQ(edgeSubdiv.size(), 3u);
+  // Both coincident edges: endpoints plus the captured crossing (5,0).
+  ASSERT_EQ(edgeSubdiv[0].size(), 3u);
+  EXPECT_EQ(edgeSubdiv[1], edgeSubdiv[0]);  // identical by coincidence class
+  EXPECT_DOUBLE_EQ(edgeSubdiv[0][0].x, 0.0);
+  EXPECT_DOUBLE_EQ(edgeSubdiv[0][2].x, 10.0);
+  EXPECT_NEAR(edgeSubdiv[0][1].x, 5.0, 1e-9);
+  EXPECT_NEAR(edgeSubdiv[0][1].y, 0.0, 1e-9);
+  // The diagonal is split at the same crossing.
+  ASSERT_EQ(edgeSubdiv[2].size(), 3u);
+  EXPECT_NEAR(edgeSubdiv[2][1].x, 5.0, 1e-9);
+  EXPECT_NEAR(edgeSubdiv[2][1].y, 0.0, 1e-9);
+  // The crossing position is bitwise shared across all three edges (one
+  // arrangement vertex, one position - the provenance guarantee).
+  EXPECT_EQ(edgeSubdiv[2][1], edgeSubdiv[0][1]);
+}
+
 TEST(Boolean2, OffsetRoundUsesRequestedSegments) {
   SimplePolygon square = {{0, 0}, {20, 0}, {20, 20}, {0, 20}};
   const int segments = 20;
