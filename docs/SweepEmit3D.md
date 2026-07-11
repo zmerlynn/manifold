@@ -150,17 +150,17 @@ pair can disagree macroscopically about the subdivision of a shared
 critical by definition.
 
 DEGENERATE SLABS (width <= eps): no section is built; the slab
-contributes no strips; the caps at its two bounding criticals are
-computed from the NEAREST BUILT slabs on each side extended to the
-respective critical. [R3-fold] EVERY critical gets its own cap,
-including criticals inside an unbuilt run (each computed from the
-same flanking built slabs extended to that critical's x) - runs are
-NOT merged to one plane, because chained runs can span arbitrarily
-far (gaps <= eps, span unbounded); adjacent in-run caps then differ
-only by what happens between them, which is exactly nothing
-visible (no built section) - their differences are empty and the
-nonempty caps sit at the run's ends, correct by the same
-arithmetic. One rule, no anchor propagation, no starvation class. [R1-fold - the dissolution claim was WRONG, convergent
+contributes no strips. [R3-fold, AMENDED at the emission-closure
+crucible] The original rule - every critical gets its own cap,
+in-run copies collapsing by exact post-weld identity - was
+corpus-falsified: track slopes amplify the in-run x-offsets past
+eps and the copies stop being identical.  The standing rule: ONE
+cap per adjacent-built-slab pair, at the pair-canonical critical
+(ci == li+1, where the strip chains bind); criticals interior to
+an unbuilt run emit nothing, since their content is the canonical
+cap's L-R difference re-derived at a nearby x.  A macro geometry
+change interior to a run remains the recorded fail-closed dead
+zone (SubEpsFeature territory), not silently-covered content. One rule, no anchor propagation, no starvation class. [R1-fold - the dissolution claim was WRONG, convergent
 finding] A feature living ENTIRELY inside a merged run appears in
 neither flanking section and would vanish silently - macroscopic
 sub-eps-thin chains are real (the proofed R1'-2 class). ONE guard

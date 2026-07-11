@@ -540,3 +540,18 @@ scale). Named requirement: provenance-exact strip/cap closure
 (per-input-edge retained chains + partial-retention semantics).
 Corpus gates -> Recorded contracts; Pin_OneArrangementPerCritical
 updated to the canonical rule. Full suite 595+1 skip (596 total).
+
+### Step 13 audit: NEED-CHANGE/1 (prose) -> folded -> CLOSED
+
+The lane's attacks on all three landed changes SURVIVED (cluster
+root determinism verified against DisjointSets' tie rules; no
+mixed-scale consumer; exterior runs resolve; right-end run variant
+fails closed as recorded; Pin_PerCriticalCaps oracle-true; fences
+111/111). It INDEPENDENTLY confirmed the no-bounded-provenance-fix
+read: srcId seeding dies at cancellations - per-input-edge chains
+need partial-retention semantics = the design arc. The one finding:
+stale R3 doc text + pin banner still claimed every-critical caps
+with identity dedup - folded (R3 AMENDED in doc, pin banner
+rewritten). Emission-closure crucible CLOSED: 2 structural fixes +
+1 scoped floor landed, remainder diagnosed/named/recorded, corpus
+fixtures as recorded contracts.

@@ -1097,10 +1097,9 @@ TEST(Overlap3, Pin_P12_InteriorIsland_StampThroughFace) {
 // Per-critical-cap pin: sub-eps critical pairs handled without duplicate caps.
 // ---------------------------------------------------------------------------
 
-// Pins the "per-critical cap" property: each critical in arr.verts gets its
-// own cap computation, even when two criticals c1 and c2 (|c2-c1| < eps)
-// share the same adjacent built-slab pair.  BuildImpl deduplicates the
-// resulting identical triangles, so the output is manifold and oracle-correct.
+// Pins the pair-canonical cap rule on a sub-eps critical pair: the pair
+// emits ONE cap (at the canonical critical, where the strip chains bind) and
+// the output is manifold and oracle-correct.
 // Gate3_ThreeOverlappingBoxes checks only manifold; this also checks oracle.
 TEST(Overlap3, Pin_PerCriticalCaps) {
   const Manifold a = Manifold::Cube({2, 0.5, 0.5}, true);
