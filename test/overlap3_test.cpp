@@ -1573,4 +1573,48 @@ TEST(Overlap3, Corpus_GenericTwin7863_Recorded) {
   CorpusPairGate("Generic_Twin_7863.1.t0_left.obj",
                  "Generic_Twin_7863.1.t0_right.obj", "Corpus_GenericTwin7863");
 }
+
+// Single-mesh self-overlap corpus fixtures: the four cases that timed out in
+// assembly before the weld became O(n) (perf campaign, hash-grid weld).
+// Recorded contract: RemoveOverlaps3D TERMINATES with a named fail-closed
+// guard or a valid-manifold resolve - never a hang, never silent garbage.  All
+// four currently fail closed at NonManifoldEmission (the steep-track
+// junction-spread residual in docs/SweepEmit3D.md), now REACHABLE instead of
+// hung.  The budget is generous by design: self_intersect* run tens of seconds.
+static void CorpusSingleGate(const char* name, const char* tag) {
+  std::filesystem::path file(__FILE__);
+  auto modelDir = file.parent_path() / "models";
+  std::ifstream fin((modelDir / name).string());
+  if (!fin.is_open()) GTEST_SKIP() << "model not found";
+  const MeshGL64 mesh = ReadOBJ(fin);
+  const Manifold::Impl impl(mesh);
+  const double eps = ImplEps(impl);
+  const Overlap3Result result = RemoveOverlaps3D(impl, eps);
+  if (result.fatal.has_value()) {
+    SUCCEED() << tag << " fail-closed guard " << static_cast<int>(*result.fatal)
+              << " " << result.detail;
+    return;
+  }
+  ASSERT_TRUE(result.impl.has_value());
+  const Manifold ours(GetMeshGLImpl<double, uint64_t>(*result.impl, -1));
+  EXPECT_EQ(ours.Status(), Manifold::Error::NoError)
+      << tag << " resolved output must be a valid manifold";
+}
+
+TEST(Overlap3, Corpus_Offset1_Recorded) {
+  CorpusSingleGate("Offset1.obj", "Corpus_Offset1");
+}
+
+TEST(Overlap3, Corpus_OpenscadNonmanifold_Recorded) {
+  CorpusSingleGate("openscad-nonmanifold-crash.obj",
+                   "Corpus_OpenscadNonmanifold");
+}
+
+TEST(Overlap3, Corpus_SelfIntersectA_Recorded) {
+  CorpusSingleGate("self_intersectA.obj", "Corpus_SelfIntersectA");
+}
+
+TEST(Overlap3, Corpus_SelfIntersectB_Recorded) {
+  CorpusSingleGate("self_intersectB.obj", "Corpus_SelfIntersectB");
+}
 #endif
