@@ -922,3 +922,54 @@ cannot be met via the gates); the mechanism and its instrumented evidence are
 recorded here so the re-emission successor can rebuild on it.  Corpus gates
 stay recorded contracts, with the residual refined from "twin-position
 divergence" to "near-degenerate cluster re-emission".
+
+## Corpus fail-closed attribution (main-agent, 2026-07-11)
+
+The four SINGLE-mesh corpus fixtures (Offset1, openscad-nonmanifold-crash,
+self_intersect A/B) all fail closed at NonManifoldEmission / "unresolvable
+sheet contact" (the sheet splitter's arm).  The performance campaign, which
+made them terminate, ASSUMED this was the steep-track junction-spread residual
+(the "3D-IDENTITY EXTENSION" wall).  Instrumentation refutes that: the
+dominant defect is a DIFFERENT, already-recorded class.
+
+WHAT THE INSTRUMENTATION SHOWED.  The splitter's failing edges are
+overwhelmingly BOUNDARY edges (a single halfedge = an open hole), and those
+holes are MACRO (length orders of magnitude above eps, whole-face scale), not
+the micro (eps-to-hundreds-of-eps) micro-edges of the steep-track wall.  Every
+hole lies in a CAP plane, and each open cap-plane endpoint has a PARTNER vertex
+at the same (y, z) but a few eps away in x.  That partner is the far-side strip
+endpoint of a SUB-EPS RUN whose TOTAL x-width exceeds eps: the assembly weld
+(3D distance within eps) cannot fuse two points more than eps apart in x, so
+the shared cap-plane loop tears into open boundary edges.
+
+THE CLASS.  This is the M4-close KNOWN DEAD ZONE (c) - "multi-sliver runs
+(total gap > eps) weld strip-to-strip across more than eps" - recorded there
+as inherited and unreachable in the suite.  On dense near-x-perpendicular real
+geometry (offset walls, self-intersection sheets) it is PERVASIVELY reachable:
+the vast majority of criticals collapse into sub-eps runs and many runs sum to
+more than eps.  The canonical cap cannot bridge the gap - it fills only where
+the two limits' regions DIFFER, but here the two flanking sections are the SAME
+loop at two x-planes a few eps apart, so the cap is (correctly) empty.  A
+CONTROL confirms the empty cap is normal, not the defect: the resolving Offset
+singles have empty caps at essentially every critical too, and they close by
+strip-to-strip weld.
+
+WALL A co-occurs as a MINORITY.  A small tail of micro cap edges (tangent-sheet
+ties, non-alternating fans, a few micro holes) is the steep-track junction
+family, and the pipeline happens to trip on one of those first in edge order;
+but even absent that first edge the surface carries macro dead-zone-(c) holes
+throughout.  openscad is a richer variant of the same class (part of its caps
+emit a small partial fill; its holes come in both cap-present and strip-present
+flavors); its input imports as a VALID manifold despite the "nonmanifold"
+filename, so the failure is ours, not the input's.  None of the four is WALL B
+(no engine id-conflict fires).
+
+FIX DIRECTION (recorded, not implemented).  Two shapes: (1) BOUND THE RUN -
+when a sub-eps run's total width exceeds eps, stop treating it as one gap; the
+SubEpsFeature guard today catches only a single face living ENTIRELY inside a
+run, missing content distributed across straddling faces, which is why these
+report NonManifoldEmission rather than SubEpsFeature.  (2) WELD ACROSS THE RUN
+by run-provenance - the far-side strip endpoints share (y, z) with the near
+side (the partner search finds them exactly), so bind them by provenance rather
+than by eps-distance.  Dead-zone (c) is the dominant blocker; the co-located
+WALL A micro tail still needs the 3D-identity work afterward.
