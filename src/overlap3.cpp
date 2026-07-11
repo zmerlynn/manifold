@@ -511,13 +511,15 @@ SeamsResult FindSeams(const CanonicalGeometry& canon, double eps,
 class SlabResolver {
  public:
   SlabResolver() = default;
-  SlabResolver(const SlabResult& slab, const ArrangementGeometry& arr,
-               double eps)
+  // groupedEdges is the arr-constant CollectGroupedMemberEdges result, hoisted
+  // out of the per-slab loop by the caller (it does not depend on the slab).
+  SlabResolver(const SlabResult& slab,
+               const std::vector<GroupedEdge>& groupedEdges, double eps)
       : eps_(eps) {
     if (!slab.built) return;
     // Class-iii candidates: edges of grouped faces crossing this slab's
     // section plane (all three edges per member; over-inclusion harmless).
-    for (const GroupedEdge& e : CollectGroupedMemberEdges(arr)) {
+    for (const GroupedEdge& e : groupedEdges) {
       if (e.a.x == e.b.x) continue;  // no crossing trajectory
       if (std::min(e.a.x, e.b.x) > slab.xMid ||
           std::max(e.a.x, e.b.x) < slab.xMid)
@@ -1171,7 +1173,9 @@ Overlap3Result SweepEmit(ArrangementGeometry& arr, double eps,
   // caps on both sides of a slab consume the same resolution table.
   std::vector<SlabResolver> resolvers;
   resolvers.reserve(slabs.size());
-  for (const SlabResult& slab : slabs) resolvers.emplace_back(slab, arr, eps);
+  const std::vector<GroupedEdge> groupedEdges = CollectGroupedMemberEdges(arr);
+  for (const SlabResult& slab : slabs)
+    resolvers.emplace_back(slab, groupedEdges, eps);
 
   std::vector<OutTri3D> emitted;
   std::vector<StripChains> chains(slabs.size());
