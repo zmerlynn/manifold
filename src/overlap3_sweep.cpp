@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>  // TEMP PROBE (OV3_STRICTFP): getenv; reverted before landing
 #include <map>
 #include <vector>
 
@@ -143,7 +144,16 @@ StageResult<std::vector<SlabResult>> BuildSlabs(const ArrangementGeometry& arr,
     slab.xHi = crits[si + 1];
     slab.xMid = (slab.xLo + slab.xHi) * 0.5;
 
-    if (slab.xHi - slab.xLo <= eps) {
+    // TEMP PROBE (OV3_STRICTFP): strict-FP slab-width gate.  Build every slab
+    // whose midpoint is strictly between its bounds in double arithmetic
+    // (the true FP floor: an unbuilt slab is then ~1 ulp wide), instead of the
+    // eps-width gate.  Env-gated for Phase A measurement; reverted before the
+    // landing commit.
+    static const bool kStrictFp = std::getenv("OV3_STRICTFP") != nullptr;
+    const bool degenerate =
+        kStrictFp ? !(slab.xLo < slab.xMid && slab.xMid < slab.xHi)
+                  : (slab.xHi - slab.xLo <= eps);
+    if (degenerate) {
       slab.built = false;
       continue;
     }
