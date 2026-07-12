@@ -1386,6 +1386,44 @@ bad vertex twins underneath.
   but only thinning is bounded-and-safe; collapse is folded into the coordinated
   re-emission family in THE IRREDUCIBLE COUPLING, not into the thinning lever.
 
+- SUB-EPS-X CAP-PLANE UNIFICATION (the correctly-aimed candidate for the case-(1)
+  fan twin - PROBED, KILLED).  The twin's two images come from two cap planes only
+  sub-eps apart in x (ANATOMY part 1), so the natural bounded shortcut is to let
+  ONE cap plane own the junction: merge two criticals whose x-separation is sub-eps
+  for cap-emission, emit the pair-canonical cap at one x, and let both flanks' strips
+  bind there through the EXISTING chain-plane machinery (StripChains loX/hiX already
+  place strip corners at cap planes).  Probed minimally and env-gated (demote a
+  built slab narrower than a threshold-times-eps to unbuilt, so EmitCaps merges its
+  two bounding criticals into one canonical cap and the chain-plane rule spans the
+  sub-eps gap - composing with that rule, not rewriting it; thresholds a tenth-eps
+  and one-eps).  RESULT: the fan does NOT close on ANY of the four fan carriers -
+  each still fails NonManifoldEmission ("unresolvable sheet contact"), even at the
+  threshold that demotes roughly half the slabs (the ~hundredth-eps twin slab among
+  them).  KILLED, by two independently measured legs:
+  (1) Cap-plane unification is INSUFFICIENT.  The merged cap runs ONE arrangement
+  over both flanks at the construction-noise radius (well above the twin's few-eps
+  spread), yet the twin survives.  Unifying the cap PLANE (a shared x) does not
+  unify the junction POSITION: the two flanks still extend the junction
+  independently and self-locate at different transverse points at that one x.  This
+  is THE IRREDUCIBLE COUPLING below, now shown at the cap-PLACEMENT stage - a shared
+  x is not the shared constructible point the fix needs.
+  (2) The demoted BUILT slabs carry REAL content - the M4 disagreement, now with a
+  BUILT slab.  The M4-close adjudication kept sub-eps critical pairs distinct
+  because their arrangements disagree macroscopically about cancelled-edge
+  subdivision; that was decided across UNBUILT gaps under the retired eps gate.
+  Under strict-FP there is a BUILT slab between these criticals, and the
+  disagreement STILL manifests: at the wider threshold a carrier trips the
+  chain-plane wide-run FIDELITY BACKSTOP ("macro cap content over a skipped run
+  wider than eps"), i.e. the flanks disagree macroscopically about the demoted run's
+  content; and the resolving controls (the Offset trio) shift volume by ULPs when
+  their sub-eps slabs are demoted - dropping that content MOVES the surface.  So the
+  M4 adjudication EXTENDS to strict-FP and kills this family too: a built sub-eps
+  slab is not over-inclusion to drop, it is real geometry.  This is exactly the
+  BUNDLE-COLLAPSE-vs-THINNING line above - C2 thinning is resolve-preserving because
+  it removes only CROSSINGS (over-inclusion); demoting built slabs moves geometry.
+  The correctly-aimed fix remains the coordinated re-emission below (one shared
+  junction vertex by construction), not any cap-placement merge.
+
 ### VALIDATED-SAFE, NOT LANDED: crossing-bundle thinning (the density sub-class).
 
 Because crossings are the "over-inclusion is harmless" set (SEAMS: only their x is
