@@ -128,10 +128,13 @@ StageResult<std::vector<SlabResult>> BuildSlabs(const ArrangementGeometry& arr,
   // the wall-A arc).  Calibrated heuristic:
   //   - 64*nFaces: a clean mesh retains O(nFaces) pieces, so scale the ceiling
   //     with input size and never trip on large well-behaved geometry.
-  //   - FLOOR 4M: clears the legitimate corpus maximum (~1.8M pieces on the
-  //     self-intersection pair, which COMPLETE this stage) with margin, while
-  //     staying far under GT7081's ~30M need (fails closed in ~24s / ~1.35GB).
-  //     A 1M floor false-trips the self-intersection pair - do not lower it.
+  //   - FLOOR 4M: clears the completing corpus maximum under the strict-FP
+  //     gate (~1.3M pieces; Offset1/openscad complete this stage) with margin,
+  //     far under GT7081's ~30M uncapped need (which fails closed fast here
+  //     instead of swap-thrashing).  The self-intersection pair completed at
+  //     ~1.8M under the retired eps-width gate but now sections its dense
+  //     near-coplanar bands and legitimately refuses here - the same density
+  //     this ceiling exists to bound, not a false trip.
   const size_t kPerFaceBudget = 64;
   const size_t kPieceBudget = std::max<size_t>(
       size_t{4} << 20, kPerFaceBudget * static_cast<size_t>(nFaces));

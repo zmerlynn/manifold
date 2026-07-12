@@ -150,7 +150,10 @@ pair can disagree macroscopically about the subdivision of a shared
 critical by definition.
 
 DEGENERATE SLABS (width <= eps): no section is built; the slab
-contributes no strips. [R3-fold, AMENDED at the emission-closure
+contributes no strips. (SUPERSEDED in threshold by STRICT-FP SLAB
+BUILDING: unbuilt slabs are now only adjacent-double critical
+pairs, so "degenerate" reads ulp-scale, not eps-scale; the cap and
+chain rules below are unchanged.) [R3-fold, AMENDED at the emission-closure
 crucible] The original rule - every critical gets its own cap,
 in-run copies collapsing by exact post-weld identity - was
 corpus-falsified: track slopes amplify the in-run x-offsets past
@@ -1058,6 +1061,14 @@ placement.
 
 ## WALL-B: EngineIdConflict retired (main-agent, 2026-07-12)
 
+NOTE (superseded in part by STRICT-FP SLAB BUILDING below): the residuals
+recorded here moved under the strict-FP gate.  The hull no longer lands on the
+chain-plane wide-run guard: its verified-real in-run content now SECTIONS, the
+sections are dense enough to retain past the piece ceiling, and it refuses as
+ArrangementBudget (Gate4c's skip is pinned to that detail).  The real-content
+finding below stays accurate for the eps-gate regime it was measured under.
+Read the STRICT-FP section for the current class map.
+
 DECISION.  The EngineIdConflict fatal is RETIRED: BuildSlabs now counts a
 section source-id conflict into cnt.engineIdConflicts (a benign diagnostic) and
 CONTINUES instead of failing closed, and FatalReason::EngineIdConflict is
@@ -1162,11 +1173,16 @@ b-square transition the eps gate merged) flips from a SubEpsFeature refusal to a
 oracle-true RESOLVE - the principled cure (remove the CAUSE, build the slabs) as
 opposed to the chain-plane arc's finding that merely DISABLING the wide-run guard
 resolved the same fixture WRONG.  Fidelity gate held everywhere: zero oracle-wrong
-resolves across the corpus and synthetic suite in either mode; the clean pairs
-(Cray, Offset2/3/4) resolve BITWISE-identically with 2-2.5x more built slabs.
+resolves across the corpus and synthetic suite in either mode.  Cray resolves
+bitwise-identically with 2-2.5x more built slabs; Offset2/3/4 shift by a few ulps
+(deterministic, oracle-correct within the eps bound - the extra slabs re-associate
+the arithmetic).  (Verification-round correction: the original "bitwise" claim
+here and in the sub-eps probe came from a fixed-precision print; only Cray
+survives an exact comparison.)
 
 EVIDENCE (per-case class map, old eps gate -> strict-FP):
-- Cray / Offset2 / Offset3 / Offset4: RESOLVE -> RESOLVE, bitwise volumes.
+- Cray / Offset2 / Offset3 / Offset4: RESOLVE -> RESOLVE (Cray bitwise; the
+  Offsets shift by ulps, oracle-correct).
 - Coplanar_PerpFacesSubEps: SubEpsFeature -> RESOLVE oracle-true [STRENGTHEN].
 - Pin_InPlaneSkeleton / Gate4a_Wedges8: RESOLVE -> RESOLVE (the probe-era
   EngineIdConflict breakage is gone with the demotion).
@@ -1181,33 +1197,51 @@ EVIDENCE (per-case class map, old eps gate -> strict-FP):
 - GenericTwin7081: ArrangementBudget -> ArrangementBudget (unchanged).
 
 WHAT DISSOLVES.  Nothing, and this CORRECTS the sub-eps probe's prediction that
-the run machinery would delete.  Unbuilt runs do NOT vanish - they persist at ULP
-scale (measured widest interior run across the corpus: < 0.001 eps; multi-slab
-runs still occur, e.g. hundreds of non-canonical criticals on Offset2).  So:
+the run machinery would delete.  Unbuilt runs do NOT vanish - an unbuilt slab is
+exactly an adjacent-double critical pair, and runs CHAIN: hundreds of
+non-canonical criticals on Offset2, a run of thousands of ulp slabs spanning
+half an eps on degenerate corpus (GT7081), and a valid-manifold construction
+pushes a run past eps.  (Verification-round correction: the earlier "widest run
+well under eps" figure was measured only on cases that complete.)  So:
 - CHAIN-PLANE RULE placement: STILL LOAD-BEARING.  Empirically deleting it (emit
   strips at slab bounds) regresses PerpFaces from RESOLVE to a fail-closed
   "unresolvable sheet contact" - a 1-ulp displacement between the post-run strip
-  corner and the cap corner does NOT reliably weld into a paired sheet.  Kept;
-  the probe assumed loX/hiX degenerate to slab bounds (a no-op), which is FALSE.
-- WIDE-RUN GUARD: unreachable on realistic input (a run > eps needs ~1000
-  consecutive adjacent-double criticals).  Kept as the chain-plane rule's fidelity
-  BACKSTOP - deleting it, with the interpolating rule retained, would let a
-  pathological wide run resolve silently oracle-wrong.  No fixture reaches it now.
+  corner and the cap corner does NOT reliably weld into a paired sheet.  Root
+  cause (verification round): the slab-bound placement truncates a
+  constant-(y,z) sliver strip's x-width across the eps weld threshold - the weld
+  collapses the sliver's verts, the degenerate triangles drop, and boundary
+  holes open.  The chain-plane placement is the correct connect-to-the-cap-plane
+  choice, not a workaround.  Kept; the probe assumed loX/hiX degenerate to slab
+  bounds (a no-op), which is FALSE.
+- WIDE-RUN GUARD: REACHABLE in precondition, budget-shadowed in fire
+  (verification-round correction of "unreachable": a run wider than eps needs
+  tens of thousands of consecutive adjacent-double criticals, and degenerate
+  clusters DO produce them - observed at half an eps on real corpus, past eps by
+  construction; but the same clustering trips the retained-piece budget or the
+  flank cap's arrangement before the guard's critical is reached).  Kept as the
+  chain-plane rule's fidelity BACKSTOP - deleting it, with the interpolating
+  rule retained, would let a pathological wide run resolve silently oracle-wrong
+  if the shadowing ever thins.
 - NON-CANONICAL CAP SKIP (ci != li+1) and the single-face COVERAGE guard: both
   still exercised / reachable (multi-slab ulp runs; a near-x-perpendicular macro
   face landing wholly in a ulp run).  Kept.
 
 WHAT REMAINS AND WHY (residuals, honest).  The former wide-run-guard cases
-(GT7863, openscad, hull) and the self-intersection pair now fail closed DEEPER:
-having processed their in-run content, they hit the steep-track wall-A sheet fan
-(NonManifoldEmission) or, when the section is dense enough, the retained-piece
-ceiling (ArrangementBudget).  Both are honest refusals in the same wall-A /
+split: GT7863 and openscad now fail closed DEEPER - having processed their
+in-run content, they hit the steep-track wall-A sheet fan (NonManifoldEmission).
+The hull and the self-intersection pair fail closed EARLIER in the pipeline but
+for an honest reason: their sections are now dense enough that the retained-piece
+ceiling refuses during slab construction (ArrangementBudget).  Both are honest refusals in the same wall-A /
 arrangement-robustness territory the earlier arcs named; strict-FP exposed what
 the eps gate's early refusal masked, it did not create them.  The BUDGET is NOT
 recalibrated up for the new ArrangementBudget cases: relaxing it would run them to
-the emission blowup and STILL fail (NonManifold), strictly worse.  PERF: building
-2-2.5x more slabs (clean cases) up to ~1.5x more (dense) costs the O(nSlabs*nFaces)
-BuildSlabs straddle loop proportionally; measured within the suite's perf budget.
+the emission blowup and STILL fail (NonManifold), strictly worse.  PERF: net
+suite time is near parity, but that is a REDISTRIBUTION, not a free lunch -
+clean cases build 2-2.5x more slabs at proportional O(nSlabs*nFaces) cost, dense
+cases slow several-fold before their refusal (the hull roughly triples), and the
+self-intersection pair's early budget refusal offsets both.  The sub-eps probe's
+order-of-magnitude projection assumed those cases ran to completion; the budget
+truncates them.  No single test approaches the suite bound.
 
 Tests: Coplanar_PerpFacesSubEpsApart promoted to MUST-RESOLVE (red-first: it
 fatals under the eps gate; mutation-verified as the chain-plane rule's pin -
