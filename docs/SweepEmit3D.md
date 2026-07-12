@@ -925,6 +925,13 @@ divergence" to "near-degenerate cluster re-emission".
 
 ## Corpus fail-closed attribution (main-agent, 2026-07-11)
 
+NOTE (superseded by STRICT-FP SLAB BUILDING): the dominant dead-zone-c class
+below is a consequence of the eps-width slab gate merging sub-eps runs.  Under
+the strict-FP gate those runs build, so dead-zone-c does not arise; the residuals
+move (openscad -> NonManifoldEmission, self_intersect A/B -> ArrangementBudget).
+The steep-track wall-A fan and the arrangement-density budget remain the true
+residuals.  Read the STRICT-FP section for the current class map.
+
 The four SINGLE-mesh corpus fixtures (Offset1, openscad-nonmanifold-crash,
 self_intersect A/B) all fail closed at NonManifoldEmission / "unresolvable
 sheet contact" (the sheet splitter's arm).  The performance campaign, which
@@ -998,6 +1005,12 @@ geometry changes inside the skipped interval.  This is the adjudicated next
 mechanism, not landed work.
 
 ## CHAIN-PLANE RULE (main-agent, 2026-07-12)
+
+NOTE (superseded in part by STRICT-FP SLAB BUILDING below): the wide-run guard
+this section adds is UNREACHABLE under the strict-FP slab gate (runs shrink to
+ulp scale), and the recorded PerpFaces fixture RESOLVES rather than fails closed.
+The chain-plane rule's placement itself is UNCHANGED and remains load-bearing.
+Read the STRICT-FP section for the current regime.
 
 The dead-zone-c fix adjudicated above is implemented.  MECHANISM: a strip's
 c-side chain emits at the PAIR-CANONICAL critical's x - the plane where its cap
@@ -1127,3 +1140,80 @@ chain-plane guard); the other former EngineIdConflict OR-list fixtures (Gate4d/e
 /f, Coplanar_RazorBand, Coplanar_PerpFacesSubEpsApart) resolve or hit an accepted
 named guard with EngineIdConflict dropped from their contracts; Boolean2 (2D
 always seeds srcId 0, never conflicts) is unchanged.
+
+## STRICT-FP SLAB BUILDING (main-agent, 2026-07-12)
+
+DECISION.  The BuildSlabs slab-width gate lowers from the eps-width test
+(xHi - xLo <= eps, which skipped whole runs of sub-eps slabs) to the strict-FP
+floor: build every slab whose midpoint is strictly between its bounds in double
+arithmetic (xLo < xMid < xHi).  An unbuilt slab is then only where the two
+criticals are one ulp apart (their midpoint rounds onto a bound), so a section
+plane never coincides with a critical.  The prior EngineIdConflict demotion
+([WALL-B]) and the retained-section budget ([WALL-B]) are the two arcs that
+unblocked this: the former near-coplanar attribution fatal (which the sub-eps
+slabs surface pervasively) is now benign, and the budget bounds the denser
+sections that building every slab produces.
+
+WHY - the PRIZE is correctness, not a smaller gate.  The eps gate MERGED sub-eps
+critical runs into single unbuilt gaps and refused their content (SubEpsFeature)
+or collapsed it.  Strict-FP SECTIONS that content faithfully.  The money fixture
+Coplanar_PerpFacesSubEps (two cubes ~0.5 eps apart in x, a macro a-square ->
+b-square transition the eps gate merged) flips from a SubEpsFeature refusal to an
+oracle-true RESOLVE - the principled cure (remove the CAUSE, build the slabs) as
+opposed to the chain-plane arc's finding that merely DISABLING the wide-run guard
+resolved the same fixture WRONG.  Fidelity gate held everywhere: zero oracle-wrong
+resolves across the corpus and synthetic suite in either mode; the clean pairs
+(Cray, Offset2/3/4) resolve BITWISE-identically with 2-2.5x more built slabs.
+
+EVIDENCE (per-case class map, old eps gate -> strict-FP):
+- Cray / Offset2 / Offset3 / Offset4: RESOLVE -> RESOLVE, bitwise volumes.
+- Coplanar_PerpFacesSubEps: SubEpsFeature -> RESOLVE oracle-true [STRENGTHEN].
+- Pin_InPlaneSkeleton / Gate4a_Wedges8: RESOLVE -> RESOLVE (the probe-era
+  EngineIdConflict breakage is gone with the demotion).
+- GenericTwin7863 / openscad: SubEpsFeature (wide-run guard) -> NonManifoldEmission
+  (the formerly-refused in-run content now processes to the wall-A sheet fan).
+- hull: SubEpsFeature (wide-run guard) -> ArrangementBudget (its dense
+  near-coplanar bands retain past the ceiling once every ulp slab builds).
+- self_intersectA / self_intersectB: NonManifoldEmission -> ArrangementBudget
+  (same density reason; FASTER - fails closed during slab build, not after a full
+  section run).
+- Offset1 / Havocglass8: NonManifoldEmission -> NonManifoldEmission (unchanged).
+- GenericTwin7081: ArrangementBudget -> ArrangementBudget (unchanged).
+
+WHAT DISSOLVES.  Nothing, and this CORRECTS the sub-eps probe's prediction that
+the run machinery would delete.  Unbuilt runs do NOT vanish - they persist at ULP
+scale (measured widest interior run across the corpus: < 0.001 eps; multi-slab
+runs still occur, e.g. hundreds of non-canonical criticals on Offset2).  So:
+- CHAIN-PLANE RULE placement: STILL LOAD-BEARING.  Empirically deleting it (emit
+  strips at slab bounds) regresses PerpFaces from RESOLVE to a fail-closed
+  "unresolvable sheet contact" - a 1-ulp displacement between the post-run strip
+  corner and the cap corner does NOT reliably weld into a paired sheet.  Kept;
+  the probe assumed loX/hiX degenerate to slab bounds (a no-op), which is FALSE.
+- WIDE-RUN GUARD: unreachable on realistic input (a run > eps needs ~1000
+  consecutive adjacent-double criticals).  Kept as the chain-plane rule's fidelity
+  BACKSTOP - deleting it, with the interpolating rule retained, would let a
+  pathological wide run resolve silently oracle-wrong.  No fixture reaches it now.
+- NON-CANONICAL CAP SKIP (ci != li+1) and the single-face COVERAGE guard: both
+  still exercised / reachable (multi-slab ulp runs; a near-x-perpendicular macro
+  face landing wholly in a ulp run).  Kept.
+
+WHAT REMAINS AND WHY (residuals, honest).  The former wide-run-guard cases
+(GT7863, openscad, hull) and the self-intersection pair now fail closed DEEPER:
+having processed their in-run content, they hit the steep-track wall-A sheet fan
+(NonManifoldEmission) or, when the section is dense enough, the retained-piece
+ceiling (ArrangementBudget).  Both are honest refusals in the same wall-A /
+arrangement-robustness territory the earlier arcs named; strict-FP exposed what
+the eps gate's early refusal masked, it did not create them.  The BUDGET is NOT
+recalibrated up for the new ArrangementBudget cases: relaxing it would run them to
+the emission blowup and STILL fail (NonManifold), strictly worse.  PERF: building
+2-2.5x more slabs (clean cases) up to ~1.5x more (dense) costs the O(nSlabs*nFaces)
+BuildSlabs straddle loop proportionally; measured within the suite's perf budget.
+
+Tests: Coplanar_PerpFacesSubEpsApart promoted to MUST-RESOLVE (red-first: it
+fatals under the eps gate; mutation-verified as the chain-plane rule's pin -
+reverting ZipperEmit to slab bounds reds it).  Pin_ChainPlaneRule_WideRunResolves
+RETIRED: its RingedBox's eps-scale ring gaps all BUILD under strict-FP, so it can
+no longer construct a wide interior run; the rule is now pinned by PerpFaces at
+ulp scale.  Gate4c accepts ArrangementBudget (pinned to its detail).  The corpus
+single-gate residual comments updated (self-intersection pair -> ArrangementBudget,
+openscad -> NonManifoldEmission).
