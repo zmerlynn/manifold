@@ -149,3 +149,164 @@ FINDINGS (structural death adjudication input):
 
 Probe checkpoint commit; heavy cases wrapped (ulimit -v; timeout). Budget guard
 (in tree) bounded every heavy run - no OOM, no 434s blowup.
+
+### Step 4: PHASE B structural-death experiment (DONE) - the probe's dissolution hope is REFUTED
+
+Made the gate unconditional (strict-FP), rebuilt. Full Overlap3 suite = 54 pass,
+2 fail (Gate4c budget re-label; Pin_ChainPlaneRule white-box). Gate change alone
+is sound; every MUST-RESOLVE test still resolves (only Recorded tests could mask
+a degrade, checked below).
+
+Then DELETED the two run-spanning mechanisms (chain-plane loX/hiX placement +
+wide-run guard) to test the probe's "they degenerate to no-ops" prediction:
+- Suite stayed 54 pass / 2 fail (no NEW test failures) - BUT:
+- The MONEY FIXTURE REGRESSED SILENTLY: PerpFaces RESOLVE(vol=2) -> FATAL
+  NonManifoldEmission. The Recorded contract accepts the fatal, so the suite
+  masked it; the driver caught it.
+
+DIAGNOSIS. Removing a fatal (the wide-run guard) CANNOT create a fatal, so the
+culprit is provably the CHAIN-PLANE PLACEMENT (ZipperEmit at slab bounds vs at
+the cap plane). Under strict-FP, PerpFaces has a single 1-ULP interior run; the
+chain-plane rule makes the post-run strip's lo corner BITWISE the cap corner,
+and that exact coincidence is LOAD-BEARING for closure - the 1-ulp displacement
+at slab bounds does NOT reliably weld (the sheet splitter leaves an unpaired
+fan -> "unresolvable sheet contact"). The probe ASSUMED loX/hiX == slab bounds
+under strict-FP (a no-op); RUNSTATS shows they differ by the ulp-scale run width,
+and PerpFaces proves that difference matters. "Verify rather than assume" earned
+its keep here.
+
+VERDICT on structural death (evidence-driven, corrects the probe):
+- CHAIN-PLANE RULE (loX/hiX placement): NOT dead - LOAD-BEARING at ulp scale
+  (PerpFaces). KEEP. Runs shrink from eps-scale to ulp-scale but do not vanish,
+  and the rule's exact-coincidence closure is still required.
+- WIDE-RUN GUARD: empirically UNREACHABLE (widest run 0.0007 eps; a >eps run needs
+  ~1000 consecutive adjacent-double criticals). Deleting it is a no-op on all real
+  input. BUT with the chain-plane rule KEPT (it spans runs by linear interp), the
+  guard is the ONLY thing converting a pathological wide-run macro change from a
+  silent oracle-WRONG resolve into a fail-closed. Fidelity gate is ABSOLUTE ->
+  KEEP as the rule's coupled safety net (honest comment: unreachable-in-practice).
+- NON-CANONICAL SKIP (ci != li+1): ALIVE (multi-slab ulp runs; deletion -> doubled
+  caps). KEEP.
+- COVERAGE GUARD (single-face SubEpsFeature): dormant (no corpus case trips it ON)
+  but not structurally dead (a near-x-perpendicular macro face landing wholly in a
+  ulp run has no built-slab coverage). KEEP.
+
+So NO run machinery is structurally dead. The arc's CORE prize - content in
+formerly-skipped runs gets PROCESSED (PerpFaces resolves oracle-true; GT7863/
+openscad process into emission) - is delivered by the GATE CHANGE ALONE. The
+probe's hoped-for machinery dissolution does not happen; the residual ulp-scale
+runs still need the rule + guard. Restored overlap3.cpp to all-machinery-present.
+
+### Step 5: PHASE B adoption shape (DECIDED)
+
+- ADOPTION: FP-floor RETENTION (keep a minimal `xLo < xMid < xHi` gate) - forced,
+  since 1-ulp slabs cannot be built (xMid would coincide with a critical plane).
+  Gate removal is not a thing.
+- BUDGET INTERPLAY (C3): hull/self_A/self_B flip NonManifoldEmission/SubEpsFeature
+  -> ArrangementBudget (they genuinely retain >4M pieces once every ulp slab in
+  the dense near-coplanar bands builds). DO NOT recalibrate up: relaxing the
+  budget would let them run to the 434s emission blowup and STILL fail
+  (NonManifold) - strictly worse. Accept the re-label as an equally-honest,
+  FASTER refusal (self_A 36->13s, self_B 29->12s). 4M floor stays.
+- CLASS MAP (old -> new):
+  Cray/Offset2/3/4: RESOLVE -> RESOLVE (bitwise).
+  PerpFaces: SubEpsFeature(fail) -> RESOLVE oracle-true. [STRENGTHEN - money]
+  InPlaneSkel/Gate4a: RESOLVE -> RESOLVE (probe's EngineIdConflict breakage gone
+    via wall-B demotion).
+  GT7863/openscad: SubEpsFeature(wide-run guard) -> NonManifoldEmission (wall-A
+    fan; formerly-refused content now processed).
+  hull: SubEpsFeature(wide-run guard) -> ArrangementBudget.
+  self_A/self_B: NonManifoldEmission -> ArrangementBudget.
+  Offset1/Havoc: NonManifoldEmission -> NonManifoldEmission (same).
+  GT7081: ArrangementBudget -> ArrangementBudget (same).
+- TEST/PIN plan: (a) promote Coplanar_PerpFacesSubEpsApart to MUST-RESOLVE (red-
+  first: it fatals under the eps gate, resolves under strict-FP; doubles as the
+  chain-plane rule's mutation pin). (b) RETIRE Pin_ChainPlaneRule (RingedBox's
+  eps-scale ring gaps all BUILD under strict-FP -> no interior run to exercise;
+  the rule is now pinned by PerpFaces at ulp scale). (c) Gate4c: accept
+  ArrangementBudget. (d) corpus comments: self_A/B residual now ArrangementBudget.
+
+### Step 6: PHASE C implement (DONE)
+
+Gate change unconditional (overlap3_sweep.cpp strict-FP gate, cstdlib probe
+include removed). overlap3.cpp: ALL machinery KEPT (verified: git diff is
+comments-only); comments on the chain-plane rule / wide-run guard / StripChains /
+EmitStrips updated to the ulp-scale + fidelity-backstop framing. Tests:
+- Coplanar_PerpFacesSubEpsApart_Resolves: promoted to MUST-RESOLVE. RED-FIRST
+  verified (eps gate: fatal=1 wide-run guard). MUTATION verified (revert ZipperEmit
+  to slab bounds: fatal=2 unresolvable sheet contact) - confirms the chain-plane
+  rule is load-bearing at ulp scale.
+- Pin_ChainPlaneRule_WideRunResolves + RingedBox helper: DELETED.
+- Gate4c: skip clause -> ArrangementBudget (pinned to detail).
+- Corpus comments (single-gate header, Offset1/openscad/self_A/self_B, pair gate).
+Spec (C4): new STRICT-FP SLAB BUILDING section (decision/evidence/what-dissolves-
+nothing/residuals/tests) + superseding notes on CHAIN-PLANE RULE and Corpus
+fail-closed attribution.
+
+Full Overlap3 suite: 55 tests = 54 PASS + 1 SKIP (Gate4c, arrangement budget).
+Every heavy case bounded by the 4M budget (no OOM). C3 budget: NOT recalibrated
+(relaxing would run self_A/B to the emission blowup and still fail - worse);
+re-label accepted as equally-honest + faster.
+
+### Step 7: PHASE D perf (DONE) - within bound, no optimization needed
+
+Overlap3 + Boolean2 filtered suite: 90 PASS + 1 SKIP, ZERO failures, 103.5s.
+Slowest single test GT7081 29.7s (< 120s cap). Boolean2 fully green + unchanged
+(2D seeds srcId 0). Per-case vs baseline:
+| case | base | strictFP | ratio |
+| self_A | 33.6 | 12.5 | 0.37x | self_B | 29.3 | 11.8 | 0.40x |
+| GT7081 | 22.7 | 29.7 | 1.31x | hull/Gate4c | ~9 | 27.4 | 3.0x |
+| openscad | ~4.5 | 16.3 | 3.6x | Offset1 | 1.5 | 3.9 | 2.6x |
+Corpus subtotal ~101s -> ~102s (~1.02x): the self_A/B early-budget-trip speedups
+offset the hull/openscad slab-count slowdowns. Suite total within 2x, no single
+test over 120s -> the pre-profiled BuildSlabs face-range sweep is NOT needed
+(recorded as an available future optimization if a denser case pushes hull/openscad
+past the cap). Fidelity gate: zero oracle-wrong resolves anywhere, both modes.
+
+## VERDICT (Phase E)
+
+STRICT-FP SLAB BUILDING ADOPTED. The BuildSlabs gate lowers from eps-width to the
+FP floor (xLo < xMid < xHi). The PRIZE is delivered: content in formerly-skipped
+sub-eps runs is now SECTIONED, not refused - the money fixture PerpFaces flips
+SubEpsFeature-refusal -> oracle-true RESOLVE (red-first + mutation verified), and
+GT7863/openscad process their in-run content into emission. Zero oracle-wrong
+resolves anywhere; clean pairs bitwise. The eps gate was NOT load-bearing for
+correctness - only for containing near-coplanar density (now handled by the
+wall-B demotion + budget).
+
+MACHINERY DELTA: ZERO deletions, ZERO additions. This CORRECTS the sub-eps probe's
+central prediction. Unbuilt runs do not vanish - they persist at ulp scale, and
+the empirical test refutes the "chain-plane rule degenerates to a no-op" claim:
+deleting the placement reds PerpFaces (1-ulp displacement does not reliably weld).
+Chain-plane rule KEPT (load-bearing at ulp scale); wide-run guard KEPT (unreachable
+but the rule's fidelity backstop); non-canonical skip + coverage guard KEPT (alive).
+
+CLASS MAP (eps -> strict-FP): Cray/Offset2/3/4 resolve->resolve (bitwise);
+PerpFaces SubEpsFeature->resolve; InPlaneSkel/Gate4a resolve->resolve;
+GT7863/openscad SubEpsFeature->NonManifoldEmission; hull SubEpsFeature->
+ArrangementBudget; self_A/self_B NonManifoldEmission->ArrangementBudget;
+Offset1/Havoc NonManifoldEmission (same); GT7081 ArrangementBudget (same).
+
+SUITE: Overlap3 55 = 54 pass + 1 skip (Gate4c on budget). Overlap3+Boolean2 = 90
+pass + 1 skip, 0 fail, 103.5s (~1.02x baseline, max single test 29.7s). Boolean2
+unchanged. overlap3.h enum untouched -> no other suite affected.
+
+COMMIT RANGE: 4115351e (TEMP PROBE, marked; env-gating reverted in the landing)
+.. HEAD. Landing = 94eb88df (gate+tests+comments), 0075c473 (spec), + this
+notebook. Branch explore/sweep-plane-3d-v3, local only.
+
+OPEN RISKS (plain):
+- The wide-run guard is now UNTESTED (no fixture reaches it under strict-FP) and
+  unreachable on realistic input. It is retained on a fidelity argument, not a
+  test. A future reviewer could reasonably challenge keeping unreachable code;
+  the counter is that deleting it, with the interpolating chain-plane rule kept,
+  opens a pathological silent-oracle-wrong path.
+- hull/self_A/self_B ArrangementBudget re-label: honest but it means these no
+  longer reach their emission residual (masked behind the budget). If the wall-A
+  arrangement arc later reduces density, they would surface NonManifoldEmission.
+- The chain-plane placement's ulp-scale load-bearingness suggests a latent weld/
+  closure fragility (a 1-ulp gap that should weld but does not pair into a sheet).
+  Not investigated here - the rule papers over it correctly. A future arc could
+  root-cause that and THEN the rule might genuinely delete.
+- Perf headroom is thin on hull/openscad (3x, ~16-27s). A denser future corpus
+  case could push past 120s; the BuildSlabs face-range sweep is the ready fix.
