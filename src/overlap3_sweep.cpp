@@ -19,7 +19,6 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
-#include <cstdlib>  // TEMP PROBE (OV3_STRICTFP): getenv; reverted before landing
 #include <map>
 #include <vector>
 
@@ -144,16 +143,15 @@ StageResult<std::vector<SlabResult>> BuildSlabs(const ArrangementGeometry& arr,
     slab.xHi = crits[si + 1];
     slab.xMid = (slab.xLo + slab.xHi) * 0.5;
 
-    // TEMP PROBE (OV3_STRICTFP): strict-FP slab-width gate.  Build every slab
-    // whose midpoint is strictly between its bounds in double arithmetic
-    // (the true FP floor: an unbuilt slab is then ~1 ulp wide), instead of the
-    // eps-width gate.  Env-gated for Phase A measurement; reverted before the
-    // landing commit.
-    static const bool kStrictFp = std::getenv("OV3_STRICTFP") != nullptr;
-    const bool degenerate =
-        kStrictFp ? !(slab.xLo < slab.xMid && slab.xMid < slab.xHi)
-                  : (slab.xHi - slab.xLo <= eps);
-    if (degenerate) {
+    // STRICT-FP slab-width gate (spec STRICT-FP SLAB BUILDING).  Build every
+    // slab whose midpoint is strictly between its bounds in double arithmetic -
+    // the true FP floor.  An unbuilt slab is then only where xMid rounds onto a
+    // bound (bounds one ulp apart), so a face's section plane never coincides
+    // with a critical.  The former eps-width gate (xHi - xLo <= eps) skipped
+    // whole runs of sub-eps slabs and required run-spanning machinery (the
+    // chain-plane rule, the wide-run cap guard); those runs now shrink to the
+    // ulp scale that the assembly eps-weld closes for free.
+    if (!(slab.xLo < slab.xMid && slab.xMid < slab.xHi)) {
       slab.built = false;
       continue;
     }

@@ -648,13 +648,17 @@ void ZipperEmit(std::vector<OutTri3D>& out, double xLo, double xHi,
 // like slab.pieces.  Written by the cap at the corresponding critical.
 // loX/hiX are the cap PLANE x's at which each side's chains were bound (the
 // pair-canonical critical) - not necessarily the slab's own xLo/xHi.  A slab
-// following a run of unbuilt (sub-eps) slabs has its lo side bound at the
-// run's canonical critical (the preceding built slab's xHi), so its lo strip
-// edge spans the skipped run back to that plane (spec CHAIN-PLANE RULE): the
-// cap and both adjacent strip boundaries then share one exact plane and
-// closure is constructional, not weld-dependent.  Set by EmitCaps at bind
-// time; a built slab whose sides were not bound trips the count check in
-// EmitStrips before these are read.
+// following a run of unbuilt slabs has its lo side bound at the run's canonical
+// critical (the preceding built slab's xHi), so its lo strip edge spans the
+// skipped run back to that plane (spec CHAIN-PLANE RULE): the cap and both
+// adjacent strip boundaries then share one exact plane and closure is
+// constructional, not weld-dependent.  Under the strict-FP slab gate the
+// spanned run is only ulp-scale, but that exact placement is STILL load-bearing
+// (spec STRICT-FP SLAB BUILDING): the money fixture Coplanar_PerpFacesSubEps
+// resolves only because the post-run strip corner is placed bitwise at the cap
+// plane - emitting at the slab bound leaves the sheet splitter an unpaired fan
+// even at an ulp gap.  Set by EmitCaps at bind time; a built slab whose sides
+// were not bound trips the count check in EmitStrips before these are read.
 struct StripChains {
   std::vector<std::vector<vec2>> lo, hi;
   double loX = 0.0, hiX = 0.0;
@@ -694,7 +698,9 @@ MaybeFatal EmitStrips(std::vector<OutTri3D>& out,
       // slab's own boundary: a post-gap slab's lo edge spans back across the
       // skipped run to the pair-canonical critical so its corners are bitwise
       // the cap's.  hiX is always the slab's xHi (a slab is the left member of
-      // its own pair); only loX can differ, when a sub-eps run precedes.
+      // its own pair); only loX can differ, when an unbuilt run precedes -
+      // which under the strict-FP slab gate is ulp-scale but still load-bearing
+      // for closure (spec STRICT-FP SLAB BUILDING).
       ZipperEmit(out, ch.loX, ch.hiX, ch.lo[k], ch.hi[k]);
     }
   }
@@ -800,12 +806,17 @@ CapEdgeSet BuildCapEdgeSet(const SlabResult* leftSlab,
 // `rightChains`, when bound, receive one chain per slab piece (positions from
 // r.verts bitwise); a single-vert chain is a piece that vanished at this
 // critical.
-// `wideRun` is true when a run of unbuilt (sub-eps) slabs wider than eps in
-// total separates the two built slabs (spec CHAIN-PLANE RULE guard): the
-// chain-plane rule then spans that run by linear interpolation, which is exact
-// only for a COINCIDENT transition (cap empty).  A non-empty cap here is a
-// genuine macro geometry change collapsed into a sub-eps interval - fail closed
-// as SubEpsFeature.
+// `wideRun` is true when a run of unbuilt slabs wider than eps in total
+// separates the two built slabs (spec CHAIN-PLANE RULE guard): the chain-plane
+// rule then spans that run by linear interpolation, which is exact only for a
+// COINCIDENT transition (cap empty).  A non-empty cap here is a genuine macro
+// geometry change collapsed into a sub-eps-per-slab interval - fail closed as
+// SubEpsFeature.  Under the strict-FP slab gate (spec STRICT-FP SLAB BUILDING)
+// an unbuilt slab is ulp-wide, so a run exceeds eps only for a pathological
+// pile of ~1000 consecutive adjacent-double criticals; wideRun is therefore
+// unreachable on realistic input and this guard is retained as the chain-plane
+// rule's fidelity backstop (the alternative would be a silent oracle-wrong
+// resolve there), not a boundary any fixture reaches.
 // Returns nullopt on success, or the fatal to propagate.
 MaybeFatal ComputeCap(std::vector<OutTri3D>& out,
                       std::vector<std::vector<vec2>>* leftChains,
@@ -933,12 +944,11 @@ MaybeFatal EmitCaps(std::vector<OutTri3D>& out,
     if (right) chains[ri].loX = crits[ci];
     // A WIDE skipped run separates two BUILT slabs when the gap between the
     // left slab's xHi (= crits[li+1], the cap plane) and the right slab's xLo
-    // (= crits[ri]) exceeds eps (spec CHAIN-PLANE RULE guard).  Dust runs
-    // (criticals sub-eps apart, total width <= eps) bridge eps-validly and are
-    // NOT guarded; only a run wider than eps can hide a macro transition the
-    // linear span cannot carry.  Exterior caps (one flank null) are the genuine
-    // geometry end - never guarded.  The corpus dead-zone-c runs ARE wide but
-    // their flanks coincide (empty cap), so ComputeCap lets them through.
+    // (= crits[ri]) exceeds eps (spec CHAIN-PLANE RULE guard).  Under the
+    // strict-FP slab gate every unbuilt run is ulp-scale, so this is
+    // unreachable on realistic input (see ComputeCap) and evaluates false; it
+    // is kept as the chain-plane rule's fidelity backstop.  Exterior caps (one
+    // flank null) are the genuine geometry end - never guarded.
     const bool wideRun = left && right && crits[ri] - crits[li + 1] > eps;
     if (auto fatal = ComputeCap(out, left ? &chains[li].hi : nullptr,
                                 right ? &chains[ri].lo : nullptr, cnt, left,
