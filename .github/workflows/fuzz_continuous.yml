@@ -38,8 +38,9 @@ name: fuzz-continuous
 
 on:
   schedule:
-    # Hourly. Cron is best-effort; expect occasional skipped slots.
-    - cron: '0 * * * *'
+    # Every 3 hours. Gives ~90 min of slack after the ~90 min job window,
+    # so per-target concurrency queues clear before the next run starts.
+    - cron: '0 */3 * * *'
   workflow_dispatch:
 
 permissions:
