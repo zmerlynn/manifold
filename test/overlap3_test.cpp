@@ -577,13 +577,17 @@ TEST(Overlap3, Gate4c_HullMask_MustResolve) {
   const Manifold::Impl impl = ComposeImpl(body, mask);
   const double eps = ImplEps(impl);
   const Overlap3Result result = RemoveOverlaps3D(impl, eps);
-  // The coplanar family is in scope; the remaining honest boundaries on real
-  // hull geometry are the near-coplanar guard (sections coinciding from
-  // faces whose planes cross at a shallow angle - locally within eps,
-  // globally outside the grouping test) and the output manifold gate.
-  // Skip-eligible until those classes land; anything else is a regression.
-  if (result.fatal == FatalReason::EngineIdConflict) {
-    GTEST_SKIP() << "Gate4c hull: near-coplanar guard: " << result.detail;
+  // The coplanar family is in scope.  EngineIdConflict retired (spec [WALL-B]):
+  // the former near-coplanar attribution guard was a dead diagnostic (srcId has
+  // no 3D consumer), so the hull now runs past it and lands on the CHAIN-PLANE
+  // wide-run guard - a real honest boundary (macro cap content over a skipped
+  // run wider than eps, verified: nonempty plus/minus cap edges after 8*eps
+  // noise annihilation).  The output manifold gate is the other honest
+  // boundary. Skip-eligible until those classes land; anything else is a
+  // regression.
+  if (result.fatal == FatalReason::SubEpsFeature) {
+    GTEST_SKIP() << "Gate4c hull: chain-plane wide-run guard: "
+                 << result.detail;
   }
   if (result.fatal == FatalReason::NonManifoldEmission) {
     GTEST_SKIP() << "Gate4c hull: output gate: " << result.detail;
@@ -613,8 +617,7 @@ TEST(Overlap3, Gate4d_NearParallel_ResolveOrFailClosed) {
 
   const Overlap3Result result = RemoveOverlaps3D(impl, eps);
   if (result.fatal.has_value()) {
-    EXPECT_TRUE(*result.fatal == FatalReason::SubEpsFeature ||
-                *result.fatal == FatalReason::EngineIdConflict)
+    EXPECT_TRUE(*result.fatal == FatalReason::SubEpsFeature)
         << "Gate4d wrong guard: " << static_cast<int>(*result.fatal) << " "
         << result.detail;
   } else {
@@ -638,8 +641,7 @@ TEST(Overlap3, Gate4e_SubResolutionChain_FailClosed) {
 
   const Overlap3Result result = RemoveOverlaps3D(impl, eps_target);
   if (result.fatal.has_value()) {
-    EXPECT_TRUE(*result.fatal == FatalReason::SubEpsFeature ||
-                *result.fatal == FatalReason::EngineIdConflict)
+    EXPECT_TRUE(*result.fatal == FatalReason::SubEpsFeature)
         << "Gate4e wrong guard: " << static_cast<int>(*result.fatal) << " "
         << result.detail;
   }
@@ -657,7 +659,6 @@ TEST(Overlap3, Gate4f_Wedges_TinyOffset_FailClosed) {
   const Overlap3Result result = RemoveOverlaps3D(impl, eps);
   if (result.fatal.has_value()) {
     EXPECT_TRUE(*result.fatal == FatalReason::SubEpsFeature ||
-                *result.fatal == FatalReason::EngineIdConflict ||
                 *result.fatal == FatalReason::NonManifoldEmission)
         << "Gate4f wrong guard: " << static_cast<int>(*result.fatal) << " "
         << result.detail;
@@ -1474,8 +1475,7 @@ TEST(Overlap3, Coplanar_RazorBand_Recorded) {
   const double eps = ImplEps(impl);
   const Overlap3Result result = RemoveOverlaps3D(impl, eps);
   if (result.fatal.has_value()) {
-    EXPECT_TRUE(*result.fatal == FatalReason::EngineIdConflict ||
-                *result.fatal == FatalReason::SubEpsFeature ||
+    EXPECT_TRUE(*result.fatal == FatalReason::SubEpsFeature ||
                 *result.fatal == FatalReason::NonManifoldEmission)
         << "razor band wrong guard: " << static_cast<int>(*result.fatal) << " "
         << result.detail;
@@ -1502,8 +1502,7 @@ TEST(Overlap3, Coplanar_PerpFacesSubEpsApart_Recorded) {
   const Overlap3Result result = RemoveOverlaps3D(impl, eps);
   if (result.fatal.has_value()) {
     EXPECT_TRUE(*result.fatal == FatalReason::NonManifoldEmission ||
-                *result.fatal == FatalReason::SubEpsFeature ||
-                *result.fatal == FatalReason::EngineIdConflict)
+                *result.fatal == FatalReason::SubEpsFeature)
         << "wrong guard: " << static_cast<int>(*result.fatal) << " "
         << result.detail;
   } else {
@@ -1673,33 +1672,6 @@ TEST(Overlap3, Corpus_Havocglass8_Recorded) {
 TEST(Overlap3, Corpus_GenericTwin7863_Recorded) {
   CorpusPairGate("Generic_Twin_7863.1.t0_left.obj",
                  "Generic_Twin_7863.1.t0_right.obj", "Corpus_GenericTwin7863");
-}
-
-// TEMP PROBE (wall-B): report GT7081's outcome + oracle volume delta.
-TEST(Overlap3, TEMP_GT7081_Probe) {
-  std::filesystem::path file(__FILE__);
-  auto modelDir = file.parent_path() / "models";
-  std::ifstream fL((modelDir / "Generic_Twin_7081.1.t0_left.obj").string());
-  std::ifstream fR((modelDir / "Generic_Twin_7081.1.t0_right.obj").string());
-  if (!fL.is_open() || !fR.is_open()) GTEST_SKIP() << "models not found";
-  const Manifold a = Manifold::ReadOBJ(fL);
-  const Manifold b = Manifold::ReadOBJ(fR);
-  const Manifold oracle = a + b;
-  const Manifold::Impl impl = ComposeImpl(a, b);
-  const double eps = ImplEps(impl);
-  const Overlap3Result result = RemoveOverlaps3D(impl, eps);
-  if (result.fatal.has_value()) {
-    std::fprintf(stderr, "[GT7081] fatal=%d %s\n",
-                 static_cast<int>(*result.fatal), result.detail.c_str());
-    return;
-  }
-  ASSERT_TRUE(result.impl.has_value());
-  const Manifold ours(GetMeshGLImpl<double, uint64_t>(*result.impl, -1));
-  std::fprintf(stderr,
-               "[GT7081] RESOLVED status=%d ourVol=%.10g oracleVol=%.10g "
-               "decompose=%zu is2mf=%d\n",
-               static_cast<int>(ours.Status()), ours.Volume(), oracle.Volume(),
-               ours.Decompose().size(), result.impl->Is2Manifold());
 }
 
 // Single-mesh self-overlap corpus fixtures.

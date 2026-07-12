@@ -49,7 +49,6 @@ struct CanonicalFace {
 enum class FatalReason {
   SubEpsInput,          // eps <= 0 or degenerate input geometry
   SubEpsFeature,        // macro-scale face in merged sub-eps critical run
-  EngineIdConflict,     // 2D engine source-id conflict in a slab
   NonManifoldEmission,  // emitted triangulation is not 2-manifold
 };
 

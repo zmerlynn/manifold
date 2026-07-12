@@ -1042,3 +1042,70 @@ keep resolving at unchanged volumes (zero runs wider than eps).  A red-first pin
 chained run wider than eps with coincident flanks) fails closed without the rule
 and resolves oracle-true with it, mutation-verified against slab-boundary strip
 placement.
+
+## WALL-B: EngineIdConflict retired (main-agent, 2026-07-12)
+
+DECISION.  The EngineIdConflict fatal is RETIRED: BuildSlabs now counts a
+section source-id conflict into cnt.engineIdConflicts (a benign diagnostic) and
+CONTINUES instead of failing closed, and FatalReason::EngineIdConflict is
+deleted (it had a single fire site).  This supersedes every earlier section that
+treats EngineIdConflict as a live near-coplanar guard (Corpus measurement,
+COPLANAR mechanism-5 skip narrowing, the touching-flap defense).
+
+WHY IT IS SOUND - attribution is UNCONSUMED.  The conflict is raised by the 2D
+engine when two distinct valid source ids coincide on one directed section edge
+with nonzero net multiplicity: MergeSrcId sets srcId to -1 and reports the
+event, but PolySetAdd sums the multiplicities and keeps the geometry REGARDLESS
+(cancellation to net zero erases with no conflict; same-orientation content sums
+and survives).  The 3D pipeline reads srcId NOWHERE: the SlabResolver keys and
+matches pieces by POSITION, and winding retention is multiplicity-based.  So the
+emitted boundary is byte-for-byte identical whether or not the conflict is
+counted - the fatal guarded a label no consumer reads.  Grep-verified: the only
+srcId/sourceId writer is the group-id seeding in BuildSlabs; there is no reader.
+
+WHAT WOULD MAKE IT UNSOUND.  If a future change gives srcId a 3D CONSUMER (e.g.
+per-source property transfer or provenance-attributed emission), a -1 conflicted
+label would corrupt that consumer's input, and this demotion must be
+re-adjudicated - the guard would again be load-bearing, and both the flap
+re-adjudication and the residuals below would need review.
+
+THE FLAP.  The touching-flap defense (audit round) rested on the hazardous
+same-winding shared-edge flap "failing closed downstream via EngineIdConflict".
+That backstop was already SUPERSEDED by the coplanar grouping pre-pass, which
+unions coplanar faces INCLUDING shared-edge pairs into one group before any
+exemption: a flap's two coincident faces then carry the SAME group source id, so
+they never conflict - anti-oriented cancels, same-oriented sums to +2 and the
+winding regularizes it to a single unit-boundary cover.  The demotion is
+therefore ORTHOGONAL to the flap.  Pins: Coplanar_SameOriented_Oracle (two
+same-oriented cubes composed into ONE input solid - a single self-overlapping
+shell whose coplanar faces coincide same-winding over the overlap, resolving to
+the union: the closed-shell folded-flap realization for the earlier [D2-4]
+requirement) and Pin_TouchingDisjoint (the legal opposite-diagonal shared-edge
+arm that cancels to net zero).  A bespoke doubled-coplanar-face fixture was tried
+and REJECTED: a zero-volume doubled sheet is a degenerate input with no
+well-defined winding oracle (it resolves empty), so it tests nothing.
+
+RESIDUALS, honest - both out of scope, sibling to the wall-A emission arc:
+- HULL (Gate4c).  With the fatal gone the hull runs past the former conflict and
+  lands on the CHAIN-PLANE wide-run guard (SubEpsFeature) - the SAME honest
+  boundary GenericTwin7863 trips.  Verified firing on REAL in-run content: the
+  cap arrangement (run at 8*eps, so sub-8*eps construction noise has already
+  annihilated) carries nonempty minus-side macro cap edges over a run wider than
+  eps.  Gate4c's skip narrows from {EngineIdConflict, NonManifoldEmission} to
+  {SubEpsFeature, NonManifoldEmission}; red-first verified (the swapped skip reds
+  while the fatal is armed, greens once it is demoted).
+- GENERIC_TWIN_7081.  Its section conflicts are whole-segment near-degenerate
+  junctions (three faces meeting on a near-point edge across several built-slab
+  bands, correctly ungrouped - the dihedrals are macroscopic).  Demoted, it
+  passes BuildSlabs and SubEpsFeature and enters emission, where it EXHAUSTS
+  memory (bad_alloc) - a pre-existing downstream emission blowup on its
+  near-degenerate geometry that the early fatal was incidentally masking.  Not
+  wall-B, not a clean named guard; it is emission / wall-A-shaped territory, out
+  of scope.  Consequence: 7081 is NOT pinned as a corpus fixture (a pin would
+  OOM, violating "never hang"); no test runs it.
+
+Blast radius: the full Overlap3 suite stays green (Gate4c skips on the
+chain-plane guard); the other former EngineIdConflict OR-list fixtures (Gate4d/e
+/f, Coplanar_RazorBand, Coplanar_PerpFacesSubEpsApart) resolve or hit an accepted
+named guard with EngineIdConflict dropped from their contracts; Boolean2 (2D
+always seeds srcId 0, never conflicts) is unchanged.
