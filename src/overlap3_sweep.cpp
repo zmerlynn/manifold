@@ -19,7 +19,10 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>   // TEMP PROBE (wall-B instrumentation)
+#include <cstdlib>  // TEMP PROBE (wall-B instrumentation)
 #include <map>
+#include <set>  // TEMP PROBE (wall-B instrumentation)
 #include <vector>
 
 #include "boolean2.h"
@@ -199,10 +202,82 @@ StageResult<std::vector<SlabResult>> BuildSlabs(const ArrangementGeometry& arr,
 
     if (conflictCount > 0) {
       cnt.engineIdConflicts += conflictCount;
-      return StageResult<std::vector<SlabResult>>::Fatal(
-          FatalReason::EngineIdConflict,
-          "coincident sections from unrelated faces (near-coplanar geometry "
-          "outside the grouping eps)");
+      // TEMP PROBE (wall-B instrumentation): characterize the conflict.
+      static const bool kDbg = std::getenv("OV3_WALLB_DBG") != nullptr;
+      if (kDbg) {
+        // Whole-segment coincident-key scan over the raw section edges: group
+        // edges by their unordered (v0,v1) vertex pair (getVid already deduped
+        // positions -> identical pair == exact section coincidence). A group
+        // with >1 distinct srcId and nonzero net multiplicity is a
+        // whole-segment conflict; if these don't total conflictCount, the
+        // remainder is partial/subdivision conflict the engine found.
+        std::map<std::pair<int, int>, std::vector<std::pair<int, int64_t>>>
+            byKey;
+        for (const EdgeM& e : edges) {
+          int a = e.v0, b = e.v1;
+          int64_t m = e.mult;
+          if (a > b) {
+            std::swap(a, b);
+            m = -m;
+          }
+          byKey[{a, b}].push_back({e.srcId, m});
+        }
+        int wholeSeg = 0;
+        std::fprintf(stderr, "[WALLB] slab %d w=%.3e eps=%.3e engineConf=%d\n",
+                     si, slab.xHi - slab.xLo, eps, conflictCount);
+        for (const auto& kv : byKey) {
+          std::set<int> srcs;
+          int64_t netM = 0;
+          for (const auto& sm : kv.second) {
+            srcs.insert(sm.first);
+            netM += sm.second;
+          }
+          if (srcs.size() < 2 || netM == 0) continue;
+          ++wholeSeg;
+          // dihedral between the two ungrouped faces (srcId == faceId when
+          // < nFaces); grouped ids (>= nFaces) shouldn't reach here.
+          int f0 = -1, f1 = -1;
+          for (int s : srcs) {
+            if (s >= 0 && s < nFaces) {
+              if (f0 < 0)
+                f0 = s;
+              else if (f1 < 0)
+                f1 = s;
+            }
+          }
+          double dihedral = -1.0;
+          if (f0 >= 0 && f1 >= 0) {
+            const vec3 n0 = arr.faces[f0].normal;
+            const vec3 n1 = arr.faces[f1].normal;
+            const double c = std::min(1.0, std::abs(la::dot(n0, n1)));
+            dihedral = std::acos(c) * 180.0 / 3.14159265358979323846;
+          }
+          const vec2 pa = secVerts[kv.first.first];
+          const vec2 pb = secVerts[kv.first.second];
+          const double span = la::length(pb - pa);
+          std::fprintf(stderr,
+                       "  key(%d,%d) nsrc=%zu faces(%d,%d) dih=%.6fdeg "
+                       "netM=%lld span=%.3e contribs=",
+                       kv.first.first, kv.first.second, srcs.size(), f0, f1,
+                       dihedral, static_cast<long long>(netM), span);
+          for (const auto& sm : kv.second)
+            std::fprintf(stderr, "(s%d,m%lld)", sm.first,
+                         static_cast<long long>(sm.second));
+          std::fprintf(stderr, "\n");
+        }
+        std::fprintf(stderr, "  wholeSegConflicts=%d (vs engineConf=%d)\n",
+                     wholeSeg, conflictCount);
+      }
+      // TEMP PROBE (wall-B): tolerate mode counts and continues instead of
+      // failing closed. Pieces are already computed (winding is id-blind).
+      static const bool kTolerate =
+          std::getenv("MANIFOLD_TOLERATE_IDCONFLICT") != nullptr;
+      if (!kTolerate) {
+        return StageResult<std::vector<SlabResult>>::Fatal(
+            FatalReason::EngineIdConflict,
+            "coincident sections from unrelated faces (near-coplanar geometry "
+            "outside the grouping eps)");
+      }
     }
   }
 

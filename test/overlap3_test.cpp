@@ -1675,6 +1675,33 @@ TEST(Overlap3, Corpus_GenericTwin7863_Recorded) {
                  "Generic_Twin_7863.1.t0_right.obj", "Corpus_GenericTwin7863");
 }
 
+// TEMP PROBE (wall-B): report GT7081's outcome + oracle volume delta.
+TEST(Overlap3, TEMP_GT7081_Probe) {
+  std::filesystem::path file(__FILE__);
+  auto modelDir = file.parent_path() / "models";
+  std::ifstream fL((modelDir / "Generic_Twin_7081.1.t0_left.obj").string());
+  std::ifstream fR((modelDir / "Generic_Twin_7081.1.t0_right.obj").string());
+  if (!fL.is_open() || !fR.is_open()) GTEST_SKIP() << "models not found";
+  const Manifold a = Manifold::ReadOBJ(fL);
+  const Manifold b = Manifold::ReadOBJ(fR);
+  const Manifold oracle = a + b;
+  const Manifold::Impl impl = ComposeImpl(a, b);
+  const double eps = ImplEps(impl);
+  const Overlap3Result result = RemoveOverlaps3D(impl, eps);
+  if (result.fatal.has_value()) {
+    std::fprintf(stderr, "[GT7081] fatal=%d %s\n",
+                 static_cast<int>(*result.fatal), result.detail.c_str());
+    return;
+  }
+  ASSERT_TRUE(result.impl.has_value());
+  const Manifold ours(GetMeshGLImpl<double, uint64_t>(*result.impl, -1));
+  std::fprintf(stderr,
+               "[GT7081] RESOLVED status=%d ourVol=%.10g oracleVol=%.10g "
+               "decompose=%zu is2mf=%d\n",
+               static_cast<int>(ours.Status()), ours.Volume(), oracle.Volume(),
+               ours.Decompose().size(), result.impl->Is2Manifold());
+}
+
 // Single-mesh self-overlap corpus fixtures.
 // Recorded contract: RemoveOverlaps3D TERMINATES with a named fail-closed guard
 // or a valid-manifold resolve - never a hang, never silent garbage.  The
