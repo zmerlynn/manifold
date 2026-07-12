@@ -1569,10 +1569,11 @@ TEST(Overlap3, Corpus_GenericTwin7863_Recorded) {
 // Recorded contract: RemoveOverlaps3D TERMINATES with a named fail-closed guard
 // or a valid-manifold resolve - never a hang, never silent garbage.  Diagnosed
 // (docs/SweepEmit3D.md "Corpus fail-closed attribution"): all four fail closed
-// at NonManifoldEmission/"unresolvable sheet contact", root-caused NOT to the
-// steep-track WALL A but to the multi-sliver-run strip-weld gap (M4-close
-// dead-zone (c)) - macro cap-plane holes where flanking strips sit > eps apart
-// in x across a sub-eps run whose total width exceeds eps.
+// at NonManifoldEmission/"unresolvable sheet contact".  Dominant emitted-
+// surface defect: M4-close dead-zone (c), chained-run strip displacement -
+// macro cap-plane holes whose flanking strips sit a few eps apart in x across
+// a skipped sub-eps run wider than eps.  A steep-track wall-A micro tail
+// co-occurs, and the first-failing edge may belong to either class.
 static void CorpusSingleGate(const char* name, const char* tag) {
   std::filesystem::path file(__FILE__);
   auto modelDir = file.parent_path() / "models";
@@ -1593,26 +1594,27 @@ static void CorpusSingleGate(const char* name, const char* tag) {
       << tag << " resolved output must be a valid manifold";
 }
 
-// Diagnosed class: DEAD-ZONE (c) (multi-sliver-run strip-weld gap); offset
-// walls pack criticals into eps-thin x-bands, 100% of canonical caps empty.
+// Dominant class: DEAD-ZONE (c) chained-run strip displacement; a wall-A micro
+// tail co-occurs and the first-failing edge may be either class.
 TEST(Overlap3, Corpus_Offset1_Recorded) {
   CorpusSingleGate("Offset1.obj", "Corpus_Offset1");
 }
 
-// Diagnosed class: DEAD-ZONE (c); input imports as a valid manifold despite the
-// name (inStatus NoError), so the failure is ours; richer variant (part of the
-// caps emit a partial fill, mixed cap-present/strip-present holes).
+// Dominant class: DEAD-ZONE (c); wall-A tail co-occurs (first-fail edge may be
+// either); input imports as a VALID manifold despite the name - failure ours.
 TEST(Overlap3, Corpus_OpenscadNonmanifold_Recorded) {
   CorpusSingleGate("openscad-nonmanifold-crash.obj",
                    "Corpus_OpenscadNonmanifold");
 }
 
-// Diagnosed class: DEAD-ZONE (c); self-intersection sheets, 100% empty caps.
+// Dominant class: DEAD-ZONE (c) chained-run strip displacement on
+// self-intersection sheets; wall-A tail co-occurs (first-fail edge either).
 TEST(Overlap3, Corpus_SelfIntersectA_Recorded) {
   CorpusSingleGate("self_intersectA.obj", "Corpus_SelfIntersectA");
 }
 
-// Diagnosed class: DEAD-ZONE (c); self-intersection sheets, 100% empty caps.
+// Dominant class: DEAD-ZONE (c) chained-run strip displacement on
+// self-intersection sheets; wall-A tail co-occurs (first-fail edge either).
 TEST(Overlap3, Corpus_SelfIntersectB_Recorded) {
   CorpusSingleGate("self_intersectB.obj", "Corpus_SelfIntersectB");
 }

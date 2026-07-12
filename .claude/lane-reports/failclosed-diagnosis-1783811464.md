@@ -338,3 +338,38 @@ DEAD ENDS / corrections recorded (crucible discipline):
   do-not-spiral cap; the four corpus singles are recorded reproducers and this
   maps to the already-documented dead-zone (c)). Construction shape recorded
   in Step 5 for the fix-arc.
+
+## Verification fold (2026-07-12, fold round @ f970f6a5)
+
+An adversarial verification lane independently re-instrumented two of the four
+cases and returned three corrections plus one confirmation. This fold records
+them and rewrites the doc subsection + the four fixture comments accordingly
+(text-only: comments, doc, notebook; no code or assertion changes).
+
+PER-CASE NUANCE (disputed, then confirmed). The verifier DISPUTED the
+"primary/first-failure DEAD-ZONE-C" phrasing: on both re-run cases the literal
+FIRST splitter return is a wall-A-shaped micro fan (non-alternating) - the
+minority co-occurring tail - not a macro hole. The dominant EMITTED-SURFACE
+defect was then independently CONFIRMED as dead-zone (c): roughly 1.5k
+cap-plane boundary holes per case, every sampled one carrying the
+displaced-partner signature (same (y, z), ~1.2-2.5 eps displaced in x across a
+skipped run). Corrected semantics, now in doc + comments: dominant class
+DEAD-ZONE-C (chained-run strip displacement); wall-A micro tail co-occurs; the
+first-failing edge may be either.
+
+CONFOUND CORRECTION (control scoping). The Step-4 control (resolving
+Offset2/3/4 also show ~100% empty caps) refutes "empty caps == failure" but
+was CONFOUNDED as a discriminator - both populations share the empty-cap
+trait. The verifier found the real discriminator: the resolving controls have
+ZERO skipped runs wider than eps, while each of the failing four has several.
+Run total-width, not cap emptiness, separates resolve from fail; the doc's
+control sentence now states that stronger form.
+
+FIX-SHAPE VERDICT (bounded). The verifier assessed the leading fix - strip
+c-side chain verts placed at the pair-canonical critical's x, so the cap and
+both adjacent strip boundaries share one exact plane and closure becomes
+constructional rather than weld-dependent - as SOUND and BOUNDED
+(mechanism-sized, not research-grade), with one named scope requirement: the
+far slab's strip then spans the skipped run, so a run-width/SubEpsFeature
+guard must own genuine macro geometry changes inside the skipped interval.
+Recorded in the doc as the adjudicated next mechanism, NOT landed work.

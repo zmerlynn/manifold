@@ -930,39 +930,52 @@ self_intersect A/B) all fail closed at NonManifoldEmission / "unresolvable
 sheet contact" (the sheet splitter's arm).  The performance campaign, which
 made them terminate, ASSUMED this was the steep-track junction-spread residual
 (the "3D-IDENTITY EXTENSION" wall).  Instrumentation refutes that: the
-dominant defect is a DIFFERENT, already-recorded class.
+dominant defect is a DIFFERENT, already-recorded class.  An adversarial
+verification lane independently re-instrumented two of the four cases
+(2026-07-12) and confirmed that class, with two corrections folded in below:
+the first-failure nuance and the control scoping.
 
-WHAT THE INSTRUMENTATION SHOWED.  The splitter's failing edges are
-overwhelmingly BOUNDARY edges (a single halfedge = an open hole), and those
-holes are MACRO (length orders of magnitude above eps, whole-face scale), not
-the micro (eps-to-hundreds-of-eps) micro-edges of the steep-track wall.  Every
-hole lies in a CAP plane, and each open cap-plane endpoint has a PARTNER vertex
-at the same (y, z) but a few eps away in x.  That partner is the far-side strip
-endpoint of a SUB-EPS RUN whose TOTAL x-width exceeds eps: the assembly weld
-(3D distance within eps) cannot fuse two points more than eps apart in x, so
-the shared cap-plane loop tears into open boundary edges.
+WHAT THE INSTRUMENTATION SHOWED.  Audited over the whole EMITTED SURFACE, the
+defective edges are overwhelmingly BOUNDARY edges (a single halfedge = an open
+hole), and those holes are MACRO (length orders of magnitude above eps,
+whole-face scale), not the micro (eps-to-hundreds-of-eps) edges of the
+steep-track wall - on the order of a thousand cap-plane holes per re-run case.
+Every sampled hole carries the same displaced-partner signature: an open
+cap-plane endpoint with a PARTNER vertex at the same (y, z) but a few eps away
+in x, across a skipped run.  That partner is the far-side strip endpoint of a
+SUB-EPS RUN whose TOTAL x-width exceeds eps: the assembly weld (3D distance
+within eps) cannot fuse two points more than eps apart in x, so the shared
+cap-plane loop tears into open boundary edges.  This dominant emitted-surface
+defect is distinct from the literal FIRST edge the splitter returns (below).
 
-THE CLASS.  This is the M4-close KNOWN DEAD ZONE (c) - "multi-sliver runs
-(total gap > eps) weld strip-to-strip across more than eps" - recorded there
-as inherited and unreachable in the suite.  On dense near-x-perpendicular real
-geometry (offset walls, self-intersection sheets) it is PERVASIVELY reachable:
-the vast majority of criticals collapse into sub-eps runs and many runs sum to
-more than eps.  The canonical cap cannot bridge the gap - it fills only where
-the two limits' regions DIFFER, but here the two flanking sections are the SAME
-loop at two x-planes a few eps apart, so the cap is (correctly) empty.  A
-CONTROL confirms the empty cap is normal, not the defect: the resolving Offset
-singles have empty caps at essentially every critical too, and they close by
-strip-to-strip weld.
+THE CLASS: dead-zone (c), CHAINED-RUN STRIP DISPLACEMENT.  This is the
+M4-close KNOWN DEAD ZONE (c) - "multi-sliver runs (total gap > eps) weld
+strip-to-strip across more than eps" - recorded there as inherited and
+unreachable in the suite.  On dense near-x-perpendicular real geometry (offset
+walls, self-intersection sheets) it is PERVASIVELY reachable: the vast
+majority of criticals collapse into sub-eps runs and many runs sum to more
+than eps.  The canonical cap cannot bridge the gap - it fills only where the
+two limits' regions DIFFER, but here the two flanking sections are the SAME
+loop at two x-planes a few eps apart, so the cap is (correctly) empty.
+CONTROL, AS CORRECTED BY THE VERIFICATION LANE.  The first-pass control - the
+resolving Offset singles also have empty caps at essentially every critical -
+refutes "empty caps == failure" but was CONFOUNDED as a discriminator, since
+both populations share the empty-cap trait.  The real discriminator is run
+width: the resolving controls have ZERO skipped runs wider than eps, while
+each of the failing four has several.  Run width, not cap emptiness, separates
+resolve from fail.
 
-WALL A co-occurs as a MINORITY.  A small tail of micro cap edges (tangent-sheet
-ties, non-alternating fans, a few micro holes) is the steep-track junction
-family, and the pipeline happens to trip on one of those first in edge order;
-but even absent that first edge the surface carries macro dead-zone-(c) holes
-throughout.  openscad is a richer variant of the same class (part of its caps
-emit a small partial fill; its holes come in both cap-present and strip-present
-flavors); its input imports as a VALID manifold despite the "nonmanifold"
-filename, so the failure is ours, not the input's.  None of the four is WALL B
-(no engine id-conflict fires).
+WALL A co-occurs as a MINORITY tail.  A small set of micro cap edges
+(tangent-sheet ties, non-alternating fans, a few micro holes) is the
+steep-track junction family.  The literal FIRST edge the splitter trips on is
+NOT diagnostic of the dominant class - it may belong to EITHER class; on the
+re-instrumented cases it was a wall-A-shaped micro fan (non-alternating), not
+a macro hole - and even absent that first edge the surface carries macro
+dead-zone-(c) holes throughout.  openscad is a richer variant of the same
+class (part of its caps emit a small partial fill; its holes come in both
+cap-present and strip-present flavors); its input imports as a VALID manifold
+despite the "nonmanifold" filename, so the failure is ours, not the input's.
+None of the four is WALL B (no engine id-conflict fires).
 
 FIX DIRECTION (recorded, not implemented).  Two shapes: (1) BOUND THE RUN -
 when a sub-eps run's total width exceeds eps, stop treating it as one gap; the
@@ -973,3 +986,13 @@ by run-provenance - the far-side strip endpoints share (y, z) with the near
 side (the partner search finds them exactly), so bind them by provenance rather
 than by eps-distance.  Dead-zone (c) is the dominant blocker; the co-located
 WALL A micro tail still needs the 3D-identity work afterward.
+
+FIX-SHAPE ADJUDICATION (verification lane; recorded, not landed).  The leading
+fix - place the strips' c-side chain verts at the pair-canonical critical's x,
+so the cap and both adjacent strip boundaries share one exact plane and
+closure becomes constructional rather than weld-dependent - is assessed SOUND
+and BOUNDED (mechanism-sized, not research-grade), with one named scope
+requirement: the far slab's strip then spans the skipped run, so a
+run-width/SubEpsFeature guard (shape (1)'s bound) must own genuine macro
+geometry changes inside the skipped interval.  This is the adjudicated next
+mechanism, not landed work.
