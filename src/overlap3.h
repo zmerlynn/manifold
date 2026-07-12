@@ -50,12 +50,20 @@ enum class FatalReason {
   SubEpsInput,          // eps <= 0 or degenerate input geometry
   SubEpsFeature,        // macro-scale face in merged sub-eps critical run
   NonManifoldEmission,  // emitted triangulation is not 2-manifold
+  // Arrangement too dense/degenerate to section within a sane resource budget -
+  // a refusal, not an error.  The whole slab decomposition is held in memory at
+  // once, so a near-degenerate input packing thousands of faces into each of
+  // tens of thousands of thin slabs would swap-thrash into bad_alloc; the slabs
+  // stage fails closed here instead (spec [WALL-B]).
+  ArrangementBudget,
 };
 
 // Non-fatal counter accumulator.
 struct Overlap3Counters {
   int subEpsContactsDropped = 0;  // point-like skipped contacts
-  int engineIdConflicts = 0;      // total engine id-conflict events
+  int engineIdConflicts = 0;      // total engine id-conflict events; benign
+                                  // diagnostic (srcId is unconsumed in 3D) -
+                                  // see spec [WALL-B]
   int capArrangements = 0;        // 2D arrangements run by the caps stage
                                   // (one per critical with cap input - the
                                   // M4 pin)

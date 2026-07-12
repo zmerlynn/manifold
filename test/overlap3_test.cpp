@@ -1674,6 +1674,39 @@ TEST(Overlap3, Corpus_GenericTwin7863_Recorded) {
                  "Generic_Twin_7863.1.t0_right.obj", "Corpus_GenericTwin7863");
 }
 
+// GenericTwin7081: a near-degenerate pair whose seams cross at a combinatorial
+// pile of near-coincident x's, so the arrangement explodes (critical x's tens
+// of times the face count) into tens of thousands of thin slabs.  BuildSlabs
+// would retain tens of millions of section pieces at once and swap-thrash into
+// bad_alloc - a de-facto hang (spec [WALL-B], GENERIC_TWIN_7081).  The
+// retained-section budget converts that into a fast recorded REFUSAL, so the
+// contract here is the SPECIFIC named guard, not the generic pair contract:
+// this input is too dense to section within a sane resource budget.  Fixing the
+// arrangement so it does not explode is the wall-A arc; this pin only
+// guarantees termination.  Runtime is seconds at ~a gigabyte, comparable to the
+// self-intersection fixtures - CI-safe.
+TEST(Overlap3, Corpus_GenericTwin7081_Recorded) {
+  std::filesystem::path file(__FILE__);
+  auto modelDir = file.parent_path() / "models";
+  std::ifstream fL((modelDir / "Generic_Twin_7081.1.t0_left.obj").string());
+  std::ifstream fR((modelDir / "Generic_Twin_7081.1.t0_right.obj").string());
+  if (!fL.is_open() || !fR.is_open()) GTEST_SKIP() << "models not found";
+  const Manifold a = Manifold::ReadOBJ(fL);
+  const Manifold b = Manifold::ReadOBJ(fR);
+  const Manifold::Impl impl = ComposeImpl(a, b);
+  const double eps = ImplEps(impl);
+  const Overlap3Result result = RemoveOverlaps3D(impl, eps);
+  ASSERT_TRUE(result.fatal.has_value())
+      << "GenericTwin7081 must fail closed on the arrangement budget, not run "
+         "the section to exhaustion";
+  EXPECT_TRUE(*result.fatal == FatalReason::ArrangementBudget)
+      << "Corpus_GenericTwin7081 wrong guard: "
+      << static_cast<int>(*result.fatal) << " " << result.detail;
+  EXPECT_NE(result.detail.find("retained section content exceeds budget"),
+            std::string::npos)
+      << "Corpus_GenericTwin7081 detail: " << result.detail;
+}
+
 // Single-mesh self-overlap corpus fixtures.
 // Recorded contract: RemoveOverlaps3D TERMINATES with a named fail-closed guard
 // or a valid-manifold resolve - never a hang, never silent garbage.  The

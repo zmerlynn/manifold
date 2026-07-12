@@ -1085,24 +1085,42 @@ arm that cancels to net zero).  A bespoke doubled-coplanar-face fixture was trie
 and REJECTED: a zero-volume doubled sheet is a degenerate input with no
 well-defined winding oracle (it resolves empty), so it tests nothing.
 
-RESIDUALS, honest - both out of scope, sibling to the wall-A emission arc:
+RESIDUALS, honest - siblings to the wall-A arrangement arc:
 - HULL (Gate4c).  With the fatal gone the hull runs past the former conflict and
   lands on the CHAIN-PLANE wide-run guard (SubEpsFeature) - the SAME honest
   boundary GenericTwin7863 trips.  Verified firing on REAL in-run content: the
   cap arrangement (run at 8*eps, so sub-8*eps construction noise has already
   annihilated) carries nonempty minus-side macro cap edges over a run wider than
   eps.  Gate4c's skip narrows from {EngineIdConflict, NonManifoldEmission} to
-  {SubEpsFeature, NonManifoldEmission}; red-first verified (the swapped skip reds
-  while the fatal is armed, greens once it is demoted).
+  {SubEpsFeature, NonManifoldEmission} and is pinned to the chain-plane guard's
+  detail (any other SubEpsFeature must fail, not skip); red-first verified (the
+  swapped skip reds while the fatal is armed, greens once it is demoted).
 - GENERIC_TWIN_7081.  Its section conflicts are whole-segment near-degenerate
   junctions (three faces meeting on a near-point edge across several built-slab
-  bands, correctly ungrouped - the dihedrals are macroscopic).  Demoted, it
-  passes BuildSlabs and SubEpsFeature and enters emission, where it EXHAUSTS
-  memory (bad_alloc) - a pre-existing downstream emission blowup on its
-  near-degenerate geometry that the early fatal was incidentally masking.  Not
-  wall-B, not a clean named guard; it is emission / wall-A-shaped territory, out
-  of scope.  Consequence: 7081 is NOT pinned as a corpus fixture (a pin would
-  OOM, violating "never hang"); no test runs it.
+  bands, correctly ungrouped - the dihedrals are macroscopic).  DIAGNOSIS
+  (instrumented, correcting an earlier mislocation to "downstream emission"): the
+  blowup is in the SLABS stage, not emission.  FindSeams emits an arrangement
+  explosion on this near-degenerate geometry - critical x's numbering tens of
+  times the face count out of only a few thousand seams - which dedups into tens
+  of thousands of thin slabs.  BuildSlabs then both loops O(nSlabs*nFaces)
+  straddle checks (the multi-minute cost) and RETAINS every built slab's section
+  data (segments, edges, verts, pieces) simultaneously for the caps+strips
+  stages, so cumulative retained pieces climb into the tens of millions and it
+  dies by allocation roughly two-fifths through the slab loop; EmitCaps /
+  EmitStrips / BuildImpl are NEVER reached.  HONESTY: the unbounded-retention +
+  arrangement-explosion STRUCTURE is pre-existing (wall-A territory), but the
+  EXPOSURE is demotion-created - the old fatal aborted this input in seconds, and
+  removing it lets BuildSlabs run into the dense bands.  std::bad_alloc
+  propagates as a clean catchable exception, but the swap-thrash before it is a
+  de-facto hang, a regression against "never hang".  GUARD (spec [WALL-B]): the
+  slabs stage now budgets cumulative retained pieces (FatalReason::
+  ArrangementBudget, a refusal that the arrangement is too dense/degenerate to
+  section within a sane resource budget - see kPieceBudget for the calibration).
+  7081 fails closed fast (seconds, ~a gigabyte) instead of swap-thrashing, and is
+  PINNED as a corpus fixture (Corpus_GenericTwin7081_Recorded) asserting that
+  refusal.  The budget converts a de-facto hang into a recorded refusal; the real
+  fix - arrangement robustness so the section does not explode - remains the
+  wall-A arc.
 
 Blast radius: the full Overlap3 suite stays green (Gate4c skips on the
 chain-plane guard); the other former EngineIdConflict OR-list fixtures (Gate4d/e

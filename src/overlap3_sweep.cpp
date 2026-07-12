@@ -116,6 +116,27 @@ StageResult<std::vector<SlabResult>> BuildSlabs(const ArrangementGeometry& arr,
   const int nSlabs = static_cast<int>(crits.size()) - 1;
   std::vector<SlabResult> slabs(nSlabs);
 
+  // Retained-section budget (spec [WALL-B]).  Every built slab keeps its
+  // segments/edges/verts/pieces in `slabs` for the downstream caps+strips
+  // stages, so the whole decomposition is resident at once.  A near-degenerate
+  // arrangement (seams crossing at a combinatorial pile of near-coincident x's)
+  // multiplies into tens of thousands of thin slabs each straddling thousands
+  // of faces, and the retained pieces explode - GT7081 needs ~30M pieces / tens
+  // of GB and swap-thrashes into bad_alloc.  Fail closed on cumulative retained
+  // pieces instead: a refusal that the input is too dense to section within a
+  // sane resource budget, not an error (the real fix is arrangement-robustness,
+  // the wall-A arc).  Calibrated heuristic:
+  //   - 64*nFaces: a clean mesh retains O(nFaces) pieces, so scale the ceiling
+  //     with input size and never trip on large well-behaved geometry.
+  //   - FLOOR 4M: clears the legitimate corpus maximum (~1.8M pieces on the
+  //     self-intersection pair, which COMPLETE this stage) with margin, while
+  //     staying far under GT7081's ~30M need (fails closed in ~24s / ~1.35GB).
+  //     A 1M floor false-trips the self-intersection pair - do not lower it.
+  const size_t kPerFaceBudget = 64;
+  const size_t kPieceBudget = std::max<size_t>(
+      size_t{4} << 20, kPerFaceBudget * static_cast<size_t>(nFaces));
+  size_t retainedPieces = 0;
+
   for (int si = 0; si < nSlabs; ++si) {
     SlabResult& slab = slabs[si];
     slab.xLo = crits[si];
@@ -205,6 +226,18 @@ StageResult<std::vector<SlabResult>> BuildSlabs(const ArrangementGeometry& arr,
     // pipeline.  So the conflict is a pure attribution diagnostic - count it
     // and continue rather than fail closed.
     cnt.engineIdConflicts += conflictCount;
+
+    // Retained-section budget (see kPieceBudget above): fail closed once the
+    // cumulative retained pieces exceed the ceiling.  One check at this
+    // per-slab boundary bounds resident memory and converts a de-facto hang on
+    // a near-degenerate arrangement into a fast, recorded refusal.
+    retainedPieces += slab.pieces.size();
+    if (retainedPieces > kPieceBudget) {
+      return StageResult<std::vector<SlabResult>>::Fatal(
+          FatalReason::ArrangementBudget,
+          "retained section content exceeds budget (arrangement too "
+          "dense/degenerate to section)");
+    }
   }
 
   // SubEpsFeature guard: any face whose x-extent has no coverage from a built
