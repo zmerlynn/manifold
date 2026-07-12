@@ -1276,14 +1276,26 @@ eps-ball, not thousands).  The tie gaps are EXACTLY zero, not near the kAngleTie
 threshold, and the non-tie fans sit far above it: the ties are two ANGULARLY
 COINCIDENT sheets, not a marginal near-tangency.  The geometry: at a failing fan,
 one 3D junction appears as a TWIN PAIR of emitted vertices that landed JUST over
-the assembly weld eps (order one-to-a-few eps apart, dominated by the steep
-coordinate) and so did NOT merge; the caps of two ADJACENT slabs each emitted the
-junction at its own extended position, producing a near-coincident twin cap sheet
-(the non-alternating overlap) bounded by a micro-edge between the twins (the
-gap-zero tie).  This is the 3D-IDENTITY EXTENSION wall's near-degenerate arr.verts
-cluster (one 3D junction = two verts kept distinct by Canonicalize because they
-are more than eps apart in x while sub-eps in the transverse plane), now
-manifesting at the assembly gate rather than as a cap micro-edge.
+the assembly weld eps and so did NOT merge; the caps of two ADJACENT slabs each
+emitted the junction at its own extended position, producing a near-coincident
+twin cap sheet (the non-alternating overlap) bounded by a micro-edge between the
+twins (the gap-zero tie).  The twin separation is TRANSVERSE-DOMINATED, and its
+axis is load-bearing for the kills below.  Measured on the failing Havocglass8 fan
+(twice, independently, by both verification lanes): the two images sit SUB-eps in x
+(order a hundredth of eps) and order a half eps to an eps-and-a-half apart in the
+two transverse coordinates - a few eps in 3D, just over the weld.  This is NOT a
+macro x-separation.  It is STEEP-TRACK amplification (order a hundredfold) of the
+sub-eps x-offset between the two adjacent cap planes: TriangulateCap emits each cap
+vertex at exactly its cap-plane x, so two criticals a sub-eps apart in x place two
+cap images of the ONE junction at two distinct x's, and the steep extension track
+magnifies that sub-eps x-gap into a super-eps transverse divergence.  The images
+are kept distinct by the ASSEMBLY eps-weld - they live in SEPARATE cap arrangements
+and meet only at assembly - NOT by Canonicalize.  This is the assembly-gate face of
+the 3D-IDENTITY EXTENSION wall's near-degenerate cluster, in its case-(1) SPREAD
+form (one arr.vert imaged twice), DISTINCT from the case-(2) DISTINCT pair (two
+canonical verts kept apart by Canonicalize at a macro x-separation) that the
+anisotropic-canonicalize kill below addresses.  Confusing the two axes mis-aims
+that kill; the split is drawn explicitly there.
 
 ### ANATOMY, part 2: the budget cases are the same wall, plus over-inclusion.
 
@@ -1317,19 +1329,62 @@ bad vertex twins underneath.
 
 - OUTPUT WELD-RADIUS BUMP / twin merge (BuildImpl).  The twins are only a few eps
   apart, tantalisingly close to the weld radius.  Bumping the assembly weld to
-  merge them was probed to several times eps and does NOT resolve any sheet-fan
+  merge them was probed to several times eps and does NOT resolve the sheet-fan
   case: merging the twin images trades the micro-edge for degenerate cap
   triangles that drop and reopen the fan elsewhere - the 3D-IDENTITY EXTENSION
   "cluster collapse creates vanishing pieces and flips topology", now confirmed at
   the OUTPUT (assembly) stage, not only at cap input.  A bounded output weld is
-  the naked snap by another name.  KILLED.
+  the naked snap by another name.  KILLED.  SCOPE (verification round): the
+  mechanism was measured on 2 of the 4 fan carriers - Havocglass8 directly (no
+  resolve at 1.8x/2.5x/4x; cap triangles drop and the fan shrinks but never closes)
+  and GT7863 via the identity-extension input-snap corroboration ("fixes the
+  micro-edge, opens a macro hole elsewhere"); Offset1 and openscad were not
+  separately weld-bumped, so the kill is a sample of the fan population, not a
+  census.
 
 - ANISOTROPIC CANONICALIZE (merge near-degenerate verts in the transverse plane,
-  ignoring x).  KILLED by geometry: the near-degenerate arr.verts PAIR is a real
-  MACRO separation in x (order tens of eps) on a steep track - two distinct points,
-  not one coincident junction.  Merging them in the transverse plane collapses
-  real x-extent and moves a critical, which is exactly the topology flip the
-  identity-extension snap hit.
+  ignoring x).  KILLED by geometry - but for the case-(2) DISTINCT pair ONLY: that
+  near-degenerate arr.verts pair is a real MACRO separation in x (order tens of eps)
+  on a steep track - two distinct points, not one coincident junction.  Merging them
+  in the transverse plane collapses real x-extent and moves a critical, which is
+  exactly the topology flip the identity-extension snap hit.  SCOPE (verification
+  round): this kill does NOT reach the case-(1) fan twin of ANATOMY part 1.  That
+  twin is SUB-eps in x, not tens-of-eps, so a yz-merge there collapses no macro
+  x-extent - the kill's premise is absent.  The fan twin's transverse merge is
+  killed instead by the output weld-bump above (a yz-merge is a subset of the
+  any-axis weld-bump that failed on Havocglass8) and by the cluster-collapse
+  relocation in THE IRREDUCIBLE COUPLING below; the sub-eps-x cap-plane unification
+  candidate below routes the same family through the cap-placement stage.
+
+- PROVENANCE-IDENTITY TWIN MERGE (thread a junction label through emission, merge
+  twins by label-equality).  The natural next idea after the provenance chains
+  landed: if the two cap images "know" they are the SAME arr.vert, weld them by
+  identity rather than by distance, sidestepping the >eps gap.  KILLED by
+  RELOCATION, established by a code trace: the emission path is POSITIONS-ONLY
+  end-to-end.  OutTri3D carries a bare vec3 triple (no id); the strip-chain
+  edgeSubdiv is positions (vector<vector<vec2>>); the cap arrangement's
+  RemoveOverlaps2D takes no edge-class/id argument (its public signature does not
+  even accept one - class data lives on the internal winding pass); BuildSlabs'
+  section call passes no class subdivision; and the assembly weld is an eps hash
+  grid over vec3 (positions, radius eps).  So merging by identity requires threading
+  a new label through slab -> cap -> edgeSubdiv -> OutTri3D -> weld, touching every
+  emission structure.  And even granting the label, it changes only the SELECTION
+  criterion (which images to merge, now robust to the >eps gap) - the merge ACTION
+  still collapses a super-eps transverse divergence to one point, which doubles or
+  degenerates the two cap sheets and reopens the fan exactly as the output weld-bump
+  did.  This is the RSI-#3 relocation test: the shortcut moves the coupling into
+  the emission plumbing without dissolving it.  Recorded as killed-by-relocation;
+  the coordinated-re-emission fix below carries the identity already, by construction.
+
+- BUNDLE COLLAPSE vs THINNING (a distinction, not a new lever).  Crossing-bundle
+  thinning (below) removes bundle-INTERIOR criticals while keeping representatives
+  at least eps apart, so no bounding vertex - hence no macro feature - moves or
+  vanishes; it is over-inclusion pruning.  COLLAPSE-TO-ONE-CANONICAL of a wider-
+  than-eps VERTEX cluster is a DIFFERENT shape: it MOVES a load-bearing vertex to a
+  single canonical position, which is the 2D block-rule collapse lifted to 3D and
+  the fan's actual root.  The two are easy to conflate ("just merge the cluster")
+  but only thinning is bounded-and-safe; collapse is folded into the coordinated
+  re-emission family in THE IRREDUCIBLE COUPLING, not into the thinning lever.
 
 ### VALIDATED-SAFE, NOT LANDED: crossing-bundle thinning (the density sub-class).
 
@@ -1342,11 +1397,18 @@ and no macro feature can vanish - its bounding vertices survive).  Probed as a
 sort-and-collapse of the crossing criticals to eps-spaced representatives:
 
 - CORRECTNESS FENCE (strong): the full synthetic oracle suite stays green; the
-  oracle pair (Cray) resolves oracle-true bitwise at every thinning tolerance; the
-  resolving single meshes (the Offset trio) resolve to BITWISE-IDENTICAL volume
-  with and without thinning at every tolerance.  So on every case with a
-  reference, thinning is resolve-preserving - the removed crossings genuinely
-  contributed nothing (pure over-inclusion, as the design claims).
+  oracle pair (Cray) resolves ORACLE-BITWISE at every thinning tolerance - identical
+  volume bits with and without thinning, verified by exact uint64 comparison; the
+  resolving single meshes (the Offset trio) resolve to volumes identical TO ULPs
+  with and without thinning.  Note the Offset trio is NOT uniformly bitwise:
+  Offset3 is bitwise, but Offset2 shifts by ULPs (and drops one vertex) and Offset4
+  by one ULP - all still oracle-correct, none moving a macro feature.  So on every
+  case with a reference, thinning is resolve-preserving; the removed crossings
+  genuinely contributed nothing (pure over-inclusion, as the design claims).  (A
+  STANDING CAUTION recorded here because this is its second recurrence on the
+  branch: a "bitwise" claim requires an EXACT bit comparison, never a fixed-precision
+  print - fixed-precision output hid the Offset2/4 ULP shifts until an exact
+  comparator was run, exactly as it did once before on the strict-FP arc.)
 - EFFECT: self_intersectA and self_intersectB flip from the retained-piece budget
   refusal to a VALID resolve, TOL-INVARIANT (identical volume across a wide
   thinning range) and matching each other (two self-intersection meshes of the
@@ -1360,14 +1422,16 @@ This is RECORDED, NOT LANDED, on the Voronoi-snap precedent (validated-safe,
 documented, deferred).  Reasons: it flips NO oracle-bearing carrier - the only
 flips are the single meshes, which have no a+b oracle (validity + tol-invariance
 only), and asserting a resolve that cannot be oracle-checked violates the absolute
-zero-oracle-wrong posture; it converts hull from a fast budget refusal into a
-slower emission-stage refusal (the strict-FP arc's "do not run budget cases to the
-emission blowup" holds for hull, though self_A/B refute it for themselves); and a
-core-stage change with recorded-contract churn belongs to owner review.  It is the
-density sub-class's landable mechanism for a successor - once an oracle for the
-single meshes exists, or once it is combined with the fix below that closes hull's
-fan.  (The perf-campaign journal already named "criticals thinning" as a target;
-this is its correctness-fenced instance.)
+zero-oracle-wrong posture; and a core-stage change with recorded-contract churn
+belongs to owner review.  (An earlier draft also cited hull turning a fast budget
+refusal into a SLOWER emission-stage refusal.  The verification round did not
+reproduce the slowdown - wall-time parity on repeated runs - so that leg is
+dropped.  Thinning does still change hull's refusal from the retained-piece budget
+to the cap-plane sheet fan, but it is a DIFFERENT fail-closed refusal at the same
+cost, not a worse one.)  It is the density sub-class's landable mechanism for a
+successor - once an oracle for the single meshes exists, or once it is combined
+with the fix below that closes hull's fan.  (The perf-campaign journal already
+named "criticals thinning" as a target; this is its correctness-fenced instance.)
 
 ### THE IRREDUCIBLE COUPLING, and the real fix.
 
@@ -1393,3 +1457,19 @@ for the whole cluster before re-emission, not per image.  The provenance chains
 its cluster disambiguation are the research remainder, the companion of the
 near-coplanar arrangement arc.  Corpus gates stay recorded contracts; the residual
 is now anatomised as far as bounded mechanisms reach.
+
+### REPRODUCTION NOTES (for a successor rebuilding the probes).
+
+The probes above were env-gated and reverted; the notebooks record them by
+mechanism and location, not exact diff.  Two details a reconstructor must recover
+(a verification lane had to recover both by output-matching - recorded here so the
+next one does not repeat the archaeology):
+
+- The fan histogram (SplitTouchingSheets, whole-surface classification) counts TIE
+  and NON-ALTERNATING as INDEPENDENT arms: a single edge can be both, so the two
+  counters are not a partition and must be tallied separately - only then do the
+  per-case histogram totals reproduce.
+- The output weld-bump (BuildImpl getVertIdx) must scale the grid CELL along with
+  the weld radius.  The weld is an eps hash grid with a 3x3x3 neighbor sweep; if
+  only the radius grows while the cell stays at eps, the sweep misses candidates
+  now inside the enlarged radius and the bump under-merges.  Scale both together.
