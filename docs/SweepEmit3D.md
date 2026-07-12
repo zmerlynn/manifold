@@ -1251,3 +1251,145 @@ no longer construct a wide interior run; the rule is now pinned by PerpFaces at
 ulp scale.  Gate4c accepts ArrangementBudget (pinned to its detail).  The corpus
 single-gate residual comments updated (self-intersection pair -> ArrangementBudget,
 openscad -> NonManifoldEmission).
+
+## WALL-A: the last correctness wall (anatomy, killed probes, the real fix)
+
+The strict-FP class map leaves two fail-closed clusters: the sheet-fan
+NonManifoldEmission cases (GT7863, openscad, Offset1, Havocglass8) and the
+ArrangementBudget cases (hull, self_intersectA/B, GT7081).  This section records
+the full three-part anatomy of that residual, every bounded shortcut probed and
+killed with its evidence, the irreducible coupling the shortcuts all reduce to,
+and the shape and preconditions of the real fix.  The prior adjudication (the
+3D-IDENTITY EXTENSION section, the identity-extension notebook) named this
+research-grade; the record below EARNS that verdict by killed probes rather than
+assuming it, and refines the wall's anatomy under the strict-FP gate.
+
+### ANATOMY, part 1: the sheet fan is the near-degenerate cluster, not a hole.
+
+Under strict-FP the emitted surface of the four NonManifoldEmission cases carries
+NO open boundary holes - the dead-zone-c macro holes the eps gate produced (the
+old failclosed-diagnosis) are GONE, building the former sub-eps runs cured them.
+The residual is FAN-INTERNAL: SplitTouchingSheets trips on radial TIES and
+NON-ALTERNATING material, overwhelmingly on CAP-plane triangles (same-x), at a
+small set of distinct junction clusters per case (order tens to hundreds by
+eps-ball, not thousands).  The tie gaps are EXACTLY zero, not near the kAngleTie
+threshold, and the non-tie fans sit far above it: the ties are two ANGULARLY
+COINCIDENT sheets, not a marginal near-tangency.  The geometry: at a failing fan,
+one 3D junction appears as a TWIN PAIR of emitted vertices that landed JUST over
+the assembly weld eps (order one-to-a-few eps apart, dominated by the steep
+coordinate) and so did NOT merge; the caps of two ADJACENT slabs each emitted the
+junction at its own extended position, producing a near-coincident twin cap sheet
+(the non-alternating overlap) bounded by a micro-edge between the twins (the
+gap-zero tie).  This is the 3D-IDENTITY EXTENSION wall's near-degenerate arr.verts
+cluster (one 3D junction = two verts kept distinct by Canonicalize because they
+are more than eps apart in x while sub-eps in the transverse plane), now
+manifesting at the assembly gate rather than as a cap micro-edge.
+
+### ANATOMY, part 2: the budget cases are the same wall, plus over-inclusion.
+
+The critical set is dominated by seam-seam CROSSING x's, not vertex endpoints -
+crossings are the large majority of criticals on every case, resolving and failing
+alike.  Crossings form dense BUNDLES (the 2D near-concurrence lifted to 3D: many
+near-concurrent seams crossing pairwise pile their x's into a tiny band).  The
+discriminator between resolve and fail is NOT bundle existence (the resolving
+controls have bundles too) but bundle SPREAD: the resolving controls' crossing
+bundles span well under eps, while every failing case has bundles wider than eps.
+GT7081 is this at explosion scale - a single near-concurrent seam bundle piling on
+the order of a million pairwise crossings (tens of times the face count) into a
+band spanning a hundred-plus eps, from roughly a thousand near-concurrent seams;
+the section cannot retain that many slabs and the retained-piece budget refuses
+before emission.  hull and self_intersectA/B are NOT explosions - their crossing
+ratio matches the resolving controls; they are merely LARGE, and the budget
+refuses on cumulative retained pieces.  CROSS-ANATOMY verdict: wall A is ONE
+degeneracy (near-concurrent-seam / near-degenerate-vertex clusters) on a SCALE
+CONTINUUM.  hull, given enough budget to section, lands on the SAME cap-plane
+sheet fan.  GT7081 is the fan degeneracy at a density that refuses before
+emission.  self_intersectA/B are the far end: pure crossing over-inclusion with no
+bad vertex twins underneath.
+
+### KILLED PROBES (bounded shortcuts, each with its killing evidence).
+
+- RADIAL-TIE RESOLUTION / kAngleTie tuning.  KILLED by the anatomy: the tie gaps
+  are exactly zero (two coincident sheets = the twin over-emission), not a
+  near-threshold spread, and the surviving fans are far above the threshold.  No
+  maintained-order pairing exists for two coincident sheets - the fix is to remove
+  the twin, not to pair it.  Tuning or replacing kAngleTie changes nothing.
+
+- OUTPUT WELD-RADIUS BUMP / twin merge (BuildImpl).  The twins are only a few eps
+  apart, tantalisingly close to the weld radius.  Bumping the assembly weld to
+  merge them was probed to several times eps and does NOT resolve any sheet-fan
+  case: merging the twin images trades the micro-edge for degenerate cap
+  triangles that drop and reopen the fan elsewhere - the 3D-IDENTITY EXTENSION
+  "cluster collapse creates vanishing pieces and flips topology", now confirmed at
+  the OUTPUT (assembly) stage, not only at cap input.  A bounded output weld is
+  the naked snap by another name.  KILLED.
+
+- ANISOTROPIC CANONICALIZE (merge near-degenerate verts in the transverse plane,
+  ignoring x).  KILLED by geometry: the near-degenerate arr.verts PAIR is a real
+  MACRO separation in x (order tens of eps) on a steep track - two distinct points,
+  not one coincident junction.  Merging them in the transverse plane collapses
+  real x-extent and moves a critical, which is exactly the topology flip the
+  identity-extension snap hit.
+
+### VALIDATED-SAFE, NOT LANDED: crossing-bundle thinning (the density sub-class).
+
+Because crossings are the "over-inclusion is harmless" set (SEAMS: only their x is
+consumed) and are the density's dominant source, thinning them is a bounded,
+correctness-preserving lever - PROVIDED it touches only crossing x's (never
+vertex endpoints, which bound every macro face) and keeps representatives at least
+eps apart (so section resolution is never coarser than the fundamental tolerance,
+and no macro feature can vanish - its bounding vertices survive).  Probed as a
+sort-and-collapse of the crossing criticals to eps-spaced representatives:
+
+- CORRECTNESS FENCE (strong): the full synthetic oracle suite stays green; the
+  oracle pair (Cray) resolves oracle-true bitwise at every thinning tolerance; the
+  resolving single meshes (the Offset trio) resolve to BITWISE-IDENTICAL volume
+  with and without thinning at every tolerance.  So on every case with a
+  reference, thinning is resolve-preserving - the removed crossings genuinely
+  contributed nothing (pure over-inclusion, as the design claims).
+- EFFECT: self_intersectA and self_intersectB flip from the retained-piece budget
+  refusal to a VALID resolve, TOL-INVARIANT (identical volume across a wide
+  thinning range) and matching each other (two self-intersection meshes of the
+  same object resolving to matching volumes) - strong corroboration the resolves
+  are geometrically real, not thinning artifacts.  GT7081's crossings thin by
+  nearly two orders of magnitude, but its ENDPOINT clusters (the near-degenerate
+  arr.verts - the sheet-fan root itself) remain dense, so it still refuses.  hull
+  sections once thinned and lands on its cap-plane sheet fan.
+
+This is RECORDED, NOT LANDED, on the Voronoi-snap precedent (validated-safe,
+documented, deferred).  Reasons: it flips NO oracle-bearing carrier - the only
+flips are the single meshes, which have no a+b oracle (validity + tol-invariance
+only), and asserting a resolve that cannot be oracle-checked violates the absolute
+zero-oracle-wrong posture; it converts hull from a fast budget refusal into a
+slower emission-stage refusal (the strict-FP arc's "do not run budget cases to the
+emission blowup" holds for hull, though self_A/B refute it for themselves); and a
+core-stage change with recorded-contract churn belongs to owner review.  It is the
+density sub-class's landable mechanism for a successor - once an oracle for the
+single meshes exists, or once it is combined with the fix below that closes hull's
+fan.  (The perf-campaign journal already named "criticals thinning" as a target;
+this is its correctness-fenced instance.)
+
+### THE IRREDUCIBLE COUPLING, and the real fix.
+
+Every bounded shortcut reduces to the same problem: ONE 3D junction is emitted
+INDEPENDENTLY by two adjacent slabs' cap computations, at extended positions that
+diverge past the weld radius; there is no single constructible point both sides
+compute identically (welds and degenerate tracks self-locate nothing), and no
+input snap or output weld can merge the images without collapsing load-bearing
+pieces or flipping the cap arrangement's topology globally.  Closing it requires
+the two caps to SHARE the junction vertex BY CONSTRUCTION - a cross-critical
+identity - which means COORDINATED cap+strip re-emission around a near-degenerate
+junction cluster: recognize the cluster as ONE entity, and rebuild its caps and
+all incident strips together so both flanks consume one shared subdivision AND one
+shared junction vertex.  This is the 2D law ("a dense near-concurrence collapses
+to one shared vertex, and everything downstream re-emits through the maintained
+order") lifted to 3D - and the same epistemic class as the June RSI-#3 arrangement
+completion.  Its precondition, and the reason it is more than a local re-mesh, is
+the spread-vs-distinct disambiguation the identity-extension arc named: a dense
+cluster can carry MULTIPLE true vertices within a few hundred eps of construction
+noise, so "which junction does this image belong to" must be decided coherently
+for the whole cluster before re-emission, not per image.  The provenance chains
+(landed) are the necessary subdivision foundation; the coordinated re-emission and
+its cluster disambiguation are the research remainder, the companion of the
+near-coplanar arrangement arc.  Corpus gates stay recorded contracts; the residual
+is now anatomised as far as bounded mechanisms reach.
