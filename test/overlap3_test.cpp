@@ -585,7 +585,15 @@ TEST(Overlap3, Gate4c_HullMask_MustResolve) {
   // noise annihilation).  The output manifold gate is the other honest
   // boundary. Skip-eligible until those classes land; anything else is a
   // regression.
-  if (result.fatal == FatalReason::SubEpsFeature) {
+  //
+  // SubEpsFeature has two fire sites (chain-plane wide-run guard, ComputeCap;
+  // single-face coverage guard, BuildSlabs).  Pin the skip to the chain-plane
+  // guard's detail substring - the landing's specific claim is that the hull
+  // lands THERE.  A future regression that instead trips the single-face guard
+  // (or any other SubEpsFeature) must FAIL this test, not skip silently.
+  if (result.fatal == FatalReason::SubEpsFeature &&
+      result.detail.find("macro cap content over a skipped run") !=
+          std::string::npos) {
     GTEST_SKIP() << "Gate4c hull: chain-plane wide-run guard: "
                  << result.detail;
   }
