@@ -996,3 +996,49 @@ requirement: the far slab's strip then spans the skipped run, so a
 run-width/SubEpsFeature guard (shape (1)'s bound) must own genuine macro
 geometry changes inside the skipped interval.  This is the adjudicated next
 mechanism, not landed work.
+
+## CHAIN-PLANE RULE (main-agent, 2026-07-12)
+
+The dead-zone-c fix adjudicated above is implemented.  MECHANISM: a strip's
+c-side chain emits at the PAIR-CANONICAL critical's x - the plane where its cap
+bound it - not the strip's own slab boundary.  StripChains carries loX/hiX per
+side; EmitCaps records crits[ci] at bind; ZipperEmit places each side there.  A
+slab's hi side is always its own xHi (a slab is the left member of its pair), so
+only the lo side of a slab following a skipped run moves: it spans back across
+the run to the run's canonical critical, where the cap and the left slab's hi
+edge already live.  Cap and both adjacent strip boundaries then share ONE exact
+plane, so the shared cap loop closes CONSTRUCTIONALLY, not by an eps-weld the
+run width can exceed.
+
+GUARD ADJUDICATION.  The rule spans a skipped run by linear interpolation of the
+two flanking sections.  That is EXACT only when they coincide (region(L) ==
+region(R), empty cap - interpolating one loop reproduces it, at any width).  The
+corpus dead-zone-c runs are exactly this (the same loop at two x-planes), so
+they close with no guard.  But a run wider than eps whose flanks DIFFER
+macroscopically (non-empty cap) is a real macro geometry change squeezed into a
+sub-eps-per-slab interval that no linear span can carry - the slip-through the
+single-face SubEpsFeature guard (BuildSlabs) misses, because its content is
+distributed across straddling faces, not one face living wholly in the run.  ONE
+guard closes it: ComputeCap fails closed SubEpsFeature when the cap is non-empty
+over a run wider than eps (both flanks built; exterior end caps exempt).  The
+run-width gate is load-bearing - without it the guard over-fires on DUST runs
+(criticals sub-eps apart from vertex jitter) that carry legitimate box-end caps
+and bridge eps-validly.  The recorded Coplanar_PerpFacesSubEpsApart fixture is
+the constructed slip-through (offset squares across an ~eps run): before the
+rule it fails closed by weld tear; with the rule alone it resolves oracle-WRONG
+(an eps-displaced end face the winding grid samples); the guard restores a named
+fail-closed.
+
+RESIDUALS, honest.  The four single-mesh corpus fixtures no longer emit
+dead-zone-c holes (instrumented to zero on Offset1 and self_intersectA/B, the
+dominant class from the diagnosis).  Offset1 and self_intersectA/B still fail
+closed at the sheet splitter on a co-occurring steep-track wall-A FAN (no open
+boundary holes remain; out of scope, the 3D-identity research arc); openscad's
+richer variant trips the new wide-run guard (SubEpsFeature).  GenericTwin7863
+likewise trips it early (its pair gate now accepts that named guard alongside
+NonManifoldEmission); Havocglass8 is unchanged.  The Cray pair and Offset2/3/4
+keep resolving at unchanged volumes (zero runs wider than eps).  A red-first pin
+(Pin_ChainPlaneRule_WideRunResolves: a ringed box whose long edges carry a
+chained run wider than eps with coincident flanks) fails closed without the rule
+and resolves oracle-true with it, mutation-verified against slab-boundary strip
+placement.

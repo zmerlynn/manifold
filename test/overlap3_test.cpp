@@ -248,6 +248,65 @@ Manifold::Impl MakeKWedges(int k, double axisOffset) {
   return Manifold::Impl(combined);
 }
 
+// A [0,2]x[0,1]x[0,1] box carrying a ring of 4 verts on its long edges near
+// x=1, at x = 1 + {-0.6,-0.2,+0.2,+0.6}*g (so adjacent criticals are 0.4*g
+// apart).  With g in (eps, 2.5*eps) each gap is sub-eps yet the ring spans
+// more than eps: a CHAINED skipped run wider than eps.  The ring verts sit on
+// four different long edges, so they differ macroscopically in (y,z) and the
+// canonicalize merge keeps them distinct.  The box cross-section is constant,
+// so the flanking built sections COINCIDE (empty cap) and the run resolves by
+// the chain-plane rule alone (no guard).  The side faces span the whole box,
+// so no single face lives entirely inside the run (the BuildSlabs SubEpsFeature
+// guard is not the mechanism under test).  Tris auto-orient outward from the
+// centroid (the solid is convex).
+Manifold::Impl RingedBox(double g) {
+  const std::vector<vec3> V = {
+      {0, 0, 0},           {0, 1, 0},
+      {0, 1, 1},           {0, 0, 1},  // 0..3  x=0 cap A,B,C,D
+      {2, 0, 0},           {2, 1, 0},
+      {2, 1, 1},           {2, 0, 1},  // 4..7  x=2 cap
+      {1 - 0.6 * g, 0, 0}, {1 - 0.2 * g, 1, 0},
+      {1 + 0.2 * g, 1, 1}, {1 + 0.6 * g, 0, 1}};  // 8..11 ring RA,RB,RC,RD
+  const int A = 0, B = 1, C = 2, D = 3, QA = 4, QB = 5, QC = 6, QD = 7, RA = 8,
+            RB = 9, RC = 10, RD = 11;
+  std::vector<ivec3> T;
+  auto cap = [&](int a, int b, int c, int d) {
+    T.push_back({a, b, c});
+    T.push_back({a, c, d});
+  };
+  cap(A, B, C, D);
+  cap(QA, QB, QC, QD);
+  // Zipper a side face between its two long edges e1=[l1,r1,h1], e2=[l2,r2,h2].
+  auto zip = [&](int l1, int r1, int h1, int l2, int r2, int h2) {
+    T.push_back({l1, r1, l2});
+    T.push_back({r1, r2, l2});
+    T.push_back({r1, h1, r2});
+    T.push_back({h1, h2, r2});
+  };
+  zip(A, RA, QA, B, RB, QB);  // bottom z=0
+  zip(B, RB, QB, C, RC, QC);  // right y=1
+  zip(C, RC, QC, D, RD, QD);  // top z=1
+  zip(D, RD, QD, A, RA, QA);  // left y=0
+  const vec3 ctr(1, 0.5, 0.5);
+  MeshGL64 m;
+  m.numProp = 3;
+  for (const vec3& v : V) {
+    m.vertProperties.push_back(v.x);
+    m.vertProperties.push_back(v.y);
+    m.vertProperties.push_back(v.z);
+  }
+  for (ivec3 t : T) {
+    const vec3 p0 = V[t.x], p1 = V[t.y], p2 = V[t.z];
+    if (la::dot(la::cross(p1 - p0, p2 - p0), (p0 + p1 + p2) / 3.0 - ctr) < 0)
+      std::swap(t.y, t.z);  // outward normal
+    m.triVerts.push_back(t.x);
+    m.triVerts.push_back(t.y);
+    m.triVerts.push_back(t.z);
+  }
+  m.runOriginalID.push_back(Manifold::ReserveIDs(1));
+  return Manifold::Impl(m);
+}
+
 // ---------------------------------------------------------------------------
 // Section validity helper (gate 2)
 // ---------------------------------------------------------------------------
@@ -1453,6 +1512,53 @@ TEST(Overlap3, Coplanar_PerpFacesSubEpsApart_Recorded) {
   }
 }
 
+// CHAIN-PLANE RULE red-first pin (spec docs/SweepEmit3D.md "CHAIN-PLANE RULE").
+// A chained skipped run WIDER than eps whose strips must cross it (see
+// RingedBox).  Before the rule the left slab's strips end at the run's near
+// side and the right slab's start at its far side, > eps apart in x, so the
+// assembly weld tears the shared cap loop into open holes (dead-zone-c) and
+// RemoveOverlaps3D fails closed at the sheet splitter.  Under the rule both
+// sides emit at the pair-canonical critical - closure is constructional and the
+// box resolves oracle-true.  Mutation-verified: reverting ZipperEmit to
+// slabs[si].xLo/xHi reds this (fails closed at "unresolvable sheet contact").
+TEST(Overlap3, Pin_ChainPlaneRule_WideRunResolves) {
+  const double eps0 = EpsilonFromScale(2.0, 1000);
+  const Manifold::Impl impl = RingedBox(1.5 * eps0);
+  const double eps = ImplEps(impl);
+  const Manifold oracle = Manifold::Cube({2, 1, 1});
+
+  // White-box: the fixture MUST carry a skipped interior run wider than eps
+  // (else it would not exercise the chain-plane rule).
+  const Overlap3Internals h = RemoveOverlaps3D_TestHooks(impl, eps);
+  ASSERT_FALSE(h.fatal.has_value()) << "pre-emission fatal: " << h.detail;
+  double widestInteriorRun = 0.0;
+  const int nSlabs = static_cast<int>(h.slabs.size());
+  for (int si = 0; si < nSlabs;) {
+    if (h.slabs[si].built) {
+      ++si;
+      continue;
+    }
+    int sj = si;
+    while (sj < nSlabs && !h.slabs[sj].built) ++sj;
+    if (si > 0 && sj < nSlabs)  // run flanked by built slabs on both sides
+      widestInteriorRun =
+          std::max(widestInteriorRun, h.slabs[sj - 1].xHi - h.slabs[si].xLo);
+    si = sj;
+  }
+  EXPECT_GT(widestInteriorRun, eps) << "fixture has no wide interior run; not "
+                                       "exercising the chain-plane rule";
+
+  const Overlap3Result result = RemoveOverlaps3D(impl, eps);
+  ASSERT_FALSE(result.fatal.has_value())
+      << "Pin_ChainPlaneRule fatal=" << static_cast<int>(*result.fatal) << " "
+      << result.detail;
+  ASSERT_TRUE(result.impl.has_value());
+  EXPECT_TRUE(result.impl->IsManifold())
+      << "Pin_ChainPlaneRule: dead-zone-c weld gap left the surface "
+         "non-manifold";
+  OracleCompare(*result.impl, oracle, eps, "Pin_ChainPlaneRule");
+}
+
 // Subtract-encoded inverted solid stacked on a normal one, sharing the z=1
 // plane: B's shell is inverted (winding -1 inside), so the positive-region
 // output is A alone.
@@ -1541,12 +1647,16 @@ static void CorpusPairGate(const char* leftName, const char* rightName,
   const Manifold::Impl impl = ComposeImpl(a, b);
   const double eps = ImplEps(impl);
   const Overlap3Result result = RemoveOverlaps3D(impl, eps);
-  // Recorded contract: a named guard (NonManifoldEmission) or an oracle-correct
-  // resolve, never silent garbage.  The unresolved case is the steep-track
-  // near-degenerate junction cluster at the cap plane; see docs/SweepEmit3D.md
-  // "3D-IDENTITY EXTENSION".
+  // Recorded contract: a named guard or an oracle-correct resolve, never
+  // silent garbage.  Two honest guards can fire on this near-coplanar geometry:
+  // NonManifoldEmission (the steep-track near-degenerate junction cluster at
+  // the cap plane, docs/SweepEmit3D.md "3D-IDENTITY EXTENSION"), or
+  // SubEpsFeature (the CHAIN-PLANE RULE guard catching a macro cap over a
+  // skipped run wider than eps before it reaches the splitter - GenericTwin7863
+  // trips this early).
   if (result.fatal.has_value()) {
-    EXPECT_EQ(*result.fatal, FatalReason::NonManifoldEmission)
+    EXPECT_TRUE(*result.fatal == FatalReason::NonManifoldEmission ||
+                *result.fatal == FatalReason::SubEpsFeature)
         << tag << " wrong guard: " << static_cast<int>(*result.fatal) << " "
         << result.detail;
     return;
@@ -1567,13 +1677,16 @@ TEST(Overlap3, Corpus_GenericTwin7863_Recorded) {
 
 // Single-mesh self-overlap corpus fixtures.
 // Recorded contract: RemoveOverlaps3D TERMINATES with a named fail-closed guard
-// or a valid-manifold resolve - never a hang, never silent garbage.  Diagnosed
-// (docs/SweepEmit3D.md "Corpus fail-closed attribution"): all four fail closed
-// at NonManifoldEmission/"unresolvable sheet contact".  Dominant emitted-
-// surface defect: M4-close dead-zone (c), chained-run strip displacement -
-// macro cap-plane holes whose flanking strips sit a few eps apart in x across
-// a skipped sub-eps run wider than eps.  A steep-track wall-A micro tail
-// co-occurs, and the first-failing edge may belong to either class.
+// or a valid-manifold resolve - never a hang, never silent garbage.  The
+// diagnosed DOMINANT defect (docs/SweepEmit3D.md "Corpus fail-closed
+// attribution") was M4-close dead-zone (c), chained-run strip displacement:
+// order-thousands of macro cap-plane boundary holes per case whose flanking
+// strips sat a few eps apart in x across a skipped sub-eps run wider than eps.
+// The CHAIN-PLANE RULE closes that class: instrumented, the dead-zone-c hole
+// count drops to ZERO on Offset1 and self_intersectA/B.  What remains is the
+// co-occurring residual, per case below - a steep-track wall-A fan (out of
+// scope, research arc) or the chain-plane guard firing on a genuine wide-run
+// macro cap.
 static void CorpusSingleGate(const char* name, const char* tag) {
   std::filesystem::path file(__FILE__);
   auto modelDir = file.parent_path() / "models";
@@ -1594,27 +1707,31 @@ static void CorpusSingleGate(const char* name, const char* tag) {
       << tag << " resolved output must be a valid manifold";
 }
 
-// Dominant class: DEAD-ZONE (c) chained-run strip displacement; a wall-A micro
-// tail co-occurs and the first-failing edge may be either class.
+// Dead-zone-c closed (no open boundary holes).  Residual: a wall-A fan at the
+// sheet splitter (NonManifoldEmission on a >2-halfedge fan, no open holes).
 TEST(Overlap3, Corpus_Offset1_Recorded) {
   CorpusSingleGate("Offset1.obj", "Corpus_Offset1");
 }
 
-// Dominant class: DEAD-ZONE (c); wall-A tail co-occurs (first-fail edge may be
-// either); input imports as a VALID manifold despite the name - failure ours.
+// Residual: the CHAIN-PLANE guard fires (SubEpsFeature, "macro cap content over
+// a skipped run wider than eps") - the richer variant has genuine wide-run
+// macro caps.  Input imports as a VALID manifold despite the name - failure
+// ours.
 TEST(Overlap3, Corpus_OpenscadNonmanifold_Recorded) {
   CorpusSingleGate("openscad-nonmanifold-crash.obj",
                    "Corpus_OpenscadNonmanifold");
 }
 
-// Dominant class: DEAD-ZONE (c) chained-run strip displacement on
-// self-intersection sheets; wall-A tail co-occurs (first-fail edge either).
+// Dead-zone-c closed (no open boundary holes).  Residual: a wall-A fan at the
+// sheet splitter (NonManifoldEmission on a >2-halfedge fan) on
+// self-intersection sheets.
 TEST(Overlap3, Corpus_SelfIntersectA_Recorded) {
   CorpusSingleGate("self_intersectA.obj", "Corpus_SelfIntersectA");
 }
 
-// Dominant class: DEAD-ZONE (c) chained-run strip displacement on
-// self-intersection sheets; wall-A tail co-occurs (first-fail edge either).
+// Dead-zone-c closed (no open boundary holes).  Residual: a wall-A fan at the
+// sheet splitter (NonManifoldEmission on a >2-halfedge fan) on
+// self-intersection sheets.
 TEST(Overlap3, Corpus_SelfIntersectB_Recorded) {
   CorpusSingleGate("self_intersectB.obj", "Corpus_SelfIntersectB");
 }

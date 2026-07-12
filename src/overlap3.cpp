@@ -646,8 +646,18 @@ void ZipperEmit(std::vector<OutTri3D>& out, double xLo, double xHi,
 
 // Per built slab: the strip-edge chains at each boundary critical, indexed
 // like slab.pieces.  Written by the cap at the corresponding critical.
+// loX/hiX are the cap PLANE x's at which each side's chains were bound (the
+// pair-canonical critical) - not necessarily the slab's own xLo/xHi.  A slab
+// following a run of unbuilt (sub-eps) slabs has its lo side bound at the
+// run's canonical critical (the preceding built slab's xHi), so its lo strip
+// edge spans the skipped run back to that plane (spec CHAIN-PLANE RULE): the
+// cap and both adjacent strip boundaries then share one exact plane and
+// closure is constructional, not weld-dependent.  Set by EmitCaps at bind
+// time; a built slab whose sides were not bound trips the count check in
+// EmitStrips before these are read.
 struct StripChains {
   std::vector<std::vector<vec2>> lo, hi;
+  double loX = 0.0, hiX = 0.0;
 };
 
 // Strips stage: each strip zips its two c-side chains, built by the cap
@@ -680,7 +690,12 @@ MaybeFatal EmitStrips(std::vector<OutTri3D>& out,
         DEBUG_ASSERT(false, logicErr, "empty strip chain");
         return Fatal{FatalReason::NonManifoldEmission, "empty strip chain"};
       }
-      ZipperEmit(out, slabs[si].xLo, slabs[si].xHi, ch.lo[k], ch.hi[k]);
+      // Emit at the chains' CAP PLANE x's (spec CHAIN-PLANE RULE), not the
+      // slab's own boundary: a post-gap slab's lo edge spans back across the
+      // skipped run to the pair-canonical critical so its corners are bitwise
+      // the cap's.  hiX is always the slab's xHi (a slab is the left member of
+      // its own pair); only loX can differ, when a sub-eps run precedes.
+      ZipperEmit(out, ch.loX, ch.hiX, ch.lo[k], ch.hi[k]);
     }
   }
   return std::nullopt;
@@ -785,6 +800,12 @@ CapEdgeSet BuildCapEdgeSet(const SlabResult* leftSlab,
 // `rightChains`, when bound, receive one chain per slab piece (positions from
 // r.verts bitwise); a single-vert chain is a piece that vanished at this
 // critical.
+// `wideRun` is true when a run of unbuilt (sub-eps) slabs wider than eps in
+// total separates the two built slabs (spec CHAIN-PLANE RULE guard): the
+// chain-plane rule then spans that run by linear interpolation, which is exact
+// only for a COINCIDENT transition (cap empty).  A non-empty cap here is a
+// genuine macro geometry change collapsed into a sub-eps interval - fail closed
+// as SubEpsFeature.
 // Returns nullopt on success, or the fatal to propagate.
 MaybeFatal ComputeCap(std::vector<OutTri3D>& out,
                       std::vector<std::vector<vec2>>* leftChains,
@@ -793,7 +814,7 @@ MaybeFatal ComputeCap(std::vector<OutTri3D>& out,
                       const SlabResolver* leftResolver,
                       const SlabResult* rightSlab,
                       const SlabResolver* rightResolver, double xCap,
-                      double eps) {
+                      bool wideRun, double eps) {
   const CapEdgeSet ces =
       BuildCapEdgeSet(leftSlab, leftResolver, rightSlab, rightResolver, xCap);
   // Pre-size bound chain outputs so every piece has a slot.
@@ -824,6 +845,22 @@ MaybeFatal ComputeCap(std::vector<OutTri3D>& out,
       ces.rawVerts, edges, capEps, /*debug=*/false, WindRule::Add,
       /*trace=*/nullptr, &negEdges,
       (leftChains || rightChains) ? &edgeSubdiv : nullptr);
+
+  // CHAIN-PLANE RULE guard (spec).  Over a run wider than eps the chain-plane
+  // rule spans the gap by linear interpolation of the flanking sections; that
+  // is exact only when they COINCIDE (region(L) == region(R), so both cap
+  // measures are empty - the corpus dead-zone-c case, where interpolating one
+  // loop reproduces it).  A NON-EMPTY cap means the flanks differ macro-
+  // scopically: a real geometry change squeezed into a sub-eps-per-slab
+  // interval wider than eps that no linear span can carry.  Fail closed by
+  // name - the single-face SubEpsFeature guard (BuildSlabs) misses this because
+  // the change is distributed across straddling faces.  Sub-capEps noise
+  // already annihilated in the arrangement, so only genuine macro differences
+  // reach here.
+  if (wideRun && (!r.edges.empty() || !negEdges.empty()))
+    return Fatal{FatalReason::SubEpsFeature,
+                 "macro cap content over a skipped run wider than eps"};
+
   bool loopsClosed = true;
   bool trisOk = true;
   // Emit one signed cap side: walk its retained boundary into loops and
@@ -888,11 +925,26 @@ MaybeFatal EmitCaps(std::vector<OutTri3D>& out,
     // defect).  One cap per adjacent-built-slab pair, at the critical where
     // the chains bind.
     if (ci != li + 1) continue;
-    if (auto fatal =
-            ComputeCap(out, left ? &chains[li].hi : nullptr,
-                       right ? &chains[ri].lo : nullptr, cnt, left,
-                       li >= 0 ? &resolvers[li] : nullptr, right,
-                       ri < nSlabs ? &resolvers[ri] : nullptr, crits[ci], eps))
+    // Record the cap PLANE x for the strip chains this cap binds (spec
+    // CHAIN-PLANE RULE): the left slab's hi edge and the right slab's lo edge
+    // both live at crits[ci], so their strips emit there and share the cap's
+    // plane exactly - even when a skipped sub-eps run separates the slabs.
+    if (left) chains[li].hiX = crits[ci];
+    if (right) chains[ri].loX = crits[ci];
+    // A WIDE skipped run separates two BUILT slabs when the gap between the
+    // left slab's xHi (= crits[li+1], the cap plane) and the right slab's xLo
+    // (= crits[ri]) exceeds eps (spec CHAIN-PLANE RULE guard).  Dust runs
+    // (criticals sub-eps apart, total width <= eps) bridge eps-validly and are
+    // NOT guarded; only a run wider than eps can hide a macro transition the
+    // linear span cannot carry.  Exterior caps (one flank null) are the genuine
+    // geometry end - never guarded.  The corpus dead-zone-c runs ARE wide but
+    // their flanks coincide (empty cap), so ComputeCap lets them through.
+    const bool wideRun = left && right && crits[ri] - crits[li + 1] > eps;
+    if (auto fatal = ComputeCap(out, left ? &chains[li].hi : nullptr,
+                                right ? &chains[ri].lo : nullptr, cnt, left,
+                                li >= 0 ? &resolvers[li] : nullptr, right,
+                                ri < nSlabs ? &resolvers[ri] : nullptr,
+                                crits[ci], wideRun, eps))
       return fatal;
   }
   return std::nullopt;
