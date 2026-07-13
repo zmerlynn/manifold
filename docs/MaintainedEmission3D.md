@@ -52,6 +52,17 @@ cap sheet plus a micro-edge, which the sheet splitter fails to pair. The density
 variant (GT7081, hull, self-intersection pair) is the same near-concurrence at a
 scale that refuses at the retained-piece budget before emission.
 
+(SUPERSEDED mechanism note, v4 round-1 density measurement - see
+.claude/lane-reports/v4plan-verify-density-*. Where this memo attributes the
+density blowup to seam-seam crossing bundles / a combinatorial crossing pile, the
+measurement corrects it: on GT7081, selfA, and selfB the dense criticals are
+99.99%+ DEGENERATE CONTACTS - near-tangent face pairs, seamLen <= eps - with ZERO
+M1 seam-seam triple points. The "crossing bundle" language should read
+"degenerate-contact clusters". The mechanism arguments transfer verbatim - contact
+x's are consumed x-only exactly as crossing x's were, so the thinning safety
+argument is unchanged - but there is no triple-point completion to fear, and folding
+the full contact set into junction identities stays bounded at vertex scale.)
+
 Five bounded shortcuts are killed in that memo, all by RELOCATION: weld-radius
 bump, naked/Voronoi input snap, anisotropic canonicalize, provenance-label twin
 merge, sub-eps cap-plane unification. The named real fix is COORDINATED cap+strip
