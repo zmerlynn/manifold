@@ -2265,9 +2265,6 @@ void FoldCoplanarClusters(std::vector<OutTri3D>& out, const Manifold::Impl& in,
       vec2 p0, p1, p2;
       int s;
     };
-    struct Seg {
-      int a, b;
-    };
     std::vector<FaceTri> ftris;
     // Directed triangle-boundary edges; an edge shared by two triangles of the
     // SAME member facet (a quad's diagonal) appears in both directions and is
@@ -2286,16 +2283,22 @@ void FoldCoplanarClusters(std::vector<OutTri3D>& out, const Manifold::Impl& in,
       const int s = (la::dot(A.faceN[f], nHat) > 0.0) ? 1 : -1;
       ftris.push_back({verts2[i0], verts2[i1], verts2[i2], s});
     }
-    std::vector<Seg> segs;
+    std::vector<EdgeM> segEdges;
     for (const auto& [e, net] : dir)
-      if (net != 0) segs.push_back({e.first, e.second});  // boundary edges only
+      if (net != 0)
+        segEdges.push_back({e.first, e.second, 1});  // boundary only
 
-    // Build the 2D arrangement DIRECTLY: coplanar member triangles overlap, so
-    // their boundary segments cross in-plane (RemoveOverlaps2D does not split
-    // overlapping coplanar input).  Collect the input verts + every proper
-    // pairwise segment crossing, dedup within eps, split each segment at the
-    // crossings on it.  Every arrangement vertex lies in this exact plane, so
-    // its 3D image is a0 + x*e1 + y*e2 (an input vert keeps its canonical 3D).
+    // ARRANGEMENT via RemoveOverlaps2D (the same primitive the seamed path
+    // reuses at EmitSeamedFace): the member triangles' boundary edges overlap
+    // in-plane, and edgeSubdiv splits each input edge at BOTH proper crossings
+    // AND T-junctions / collinear incidences (a hand-rolled pairwise-crossing
+    // arrangement would miss the T-junctions, splitting one edge without
+    // splitting the edge that ends on it - RO2DProbe, reg3d-s4-verify Audit
+    // 2a). The winding rule is irrelevant here (we consume only the
+    // subdivision). Every arrangement vertex lies in this exact plane, so a NEW
+    // crossing position's 3D image is a0 + x*e1 + y*e2 (an input vert keeps its
+    // canonical 3D via getP; the eps-box match folds a merged endpoint back
+    // onto its input vert).
     std::vector<vec2> pts = verts2;
     std::vector<vec3> pts3 = canon3;
     auto getP = [&](const vec2& q) {
@@ -2307,43 +2310,15 @@ void FoldCoplanarClusters(std::vector<OutTri3D>& out, const Manifold::Impl& in,
       pts3.push_back(a0 + q.x * e1 + q.y * e2);
       return id;
     };
-    auto cr = [](const vec2& u, const vec2& v) {
-      return u.x * v.y - u.y * v.x;
-    };
-    std::vector<std::vector<int>> onSeg(segs.size());  // vert ids on each seg
-    for (size_t s = 0; s < segs.size(); ++s) {
-      onSeg[s].push_back(segs[s].a);
-      onSeg[s].push_back(segs[s].b);
-    }
-    for (size_t s = 0; s < segs.size(); ++s)
-      for (size_t t = s + 1; t < segs.size(); ++t) {
-        const vec2 p1 = verts2[segs[s].a], p2 = verts2[segs[s].b];
-        const vec2 p3 = verts2[segs[t].a], p4 = verts2[segs[t].b];
-        const double d = cr(p2 - p1, p4 - p3);
-        if (std::abs(d) < 1e-30) continue;  // parallel/collinear
-        const double ta = cr(p3 - p1, p4 - p3) / d;
-        const double tb = cr(p3 - p1, p2 - p1) / d;
-        if (ta <= 1e-12 || ta >= 1.0 - 1e-12 || tb <= 1e-12 ||
-            tb >= 1.0 - 1e-12)
-          continue;  // not a proper interior crossing
-        const int v = getP(p1 + ta * (p2 - p1));
-        onSeg[s].push_back(v);
-        onSeg[t].push_back(v);
-      }
+    std::vector<std::vector<vec2>> edgeSubdiv;
+    RemoveOverlaps2D(verts2, segEdges, eps, /*debug=*/false, WindRule::Add,
+                     /*trace=*/nullptr, /*edgesNeg=*/nullptr, &edgeSubdiv);
     std::vector<std::pair<int, int>> uedges;
-    for (size_t s = 0; s < segs.size(); ++s) {
-      const vec2 base = verts2[segs[s].a], dir = verts2[segs[s].b] - base;
-      const double len2 = la::dot(dir, dir);
-      std::sort(onSeg[s].begin(), onSeg[s].end(), [&](int p, int q) {
-        return la::dot(pts[p] - base, dir) < la::dot(pts[q] - base, dir);
-      });
-      onSeg[s].erase(std::unique(onSeg[s].begin(), onSeg[s].end()),
-                     onSeg[s].end());
-      (void)len2;
-      for (size_t k = 0; k + 1 < onSeg[s].size(); ++k)
-        if (onSeg[s][k] != onSeg[s][k + 1])
-          uedges.push_back({onSeg[s][k], onSeg[s][k + 1]});
-    }
+    for (const std::vector<vec2>& poly : edgeSubdiv)
+      for (size_t k = 0; k + 1 < poly.size(); ++k) {
+        const int i0 = getP(poly[k]), i1 = getP(poly[k + 1]);
+        if (i0 != i1) uedges.push_back({i0, i1});
+      }
 
     std::vector<std::vector<int>> cells, holeLoops;
     if (!ExtractCells(pts, uedges, cells, &holeLoops)) {
