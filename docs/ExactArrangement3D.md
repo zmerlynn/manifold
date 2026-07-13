@@ -136,6 +136,23 @@ UNMEASURED cell (production gate requirement).  Epsilon-valid output remains the
 library's standing contract, so the un-repaired fold is acceptable where callers
 already accept it; the B pass is the strict mode.
 
+OWNER DECISION (supersedes the fold): candidate A's Boolean fold is DROPPED.
+The production usage model is RemoveOverlaps at the END of operation chains -
+any wanted cross-component union has already happened upstream (the chain's
+operations ARE Booleans), so what arrives is one or a few epsilon-valid
+manifolds whose only unresolved defect is internal self-overlap (the pair
+corpus decomposes only because the fixtures were built by composition - BR4's
+fixture-artifact warning, confirmed).  A reduces to its gate: DECOMPOSE by
+connectivity, TEST each component (valid + non-self-intersecting), EARLY-EXIT
+clean components, route self-intersecting ones to B per component, compose
+back.  This is also a SEMANTIC choice: per-component B regularizes each object
+and never fuses separate overlapping components (whole-soup {w>=1} would);
+fusion remains the Boolean's job - matching the touching-contacts posture.
+Consequences: the corpus PAIR gates tested union semantics and become B stress
+fixtures (deliberate one-soup treatment, test-only); the production shape is
+the self_intersect class.  Residue kept: B's double-rounded output passes the
+same gate once (rounding can self-cross at eps scale).
+
 MEASURED (probeA/probeA2/probeGT, scratchpad; the fold is instant everywhere):
 
   carrier   decomposes to        candidate-A verdict
