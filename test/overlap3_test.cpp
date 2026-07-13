@@ -27,6 +27,7 @@
 #include <cstring>
 #include <map>
 #include <optional>
+#include <random>
 #include <set>
 #include <vector>
 
@@ -1923,4 +1924,140 @@ TEST(Overlap3, Regularize_BMechanism_SelfIntersectB) {
       {8.1568456297999994, 7.8764903549999996, 10.74691606},
       {225.69857201970999, -125.15321454389999, 97.788207489599998},
       {-347.93884238262996, 237.8741813569, -173.12363447680002});
+}
+
+// ===========================================================================
+// Regularization axis: NEGATIVE WINDING (openscad / subtraction class).
+// docs/Regularize3D.md open item "negative winding / subtraction, untested".
+// Witness theorem (general form): for an oriented mult-1 face w_below =
+// w_above + 1 UNIVERSALLY, so a cell is on d{w_S>=1} iff EXACTLY ONE side has
+// w>=1, which reduces to w_above==0; a negative w_above means BOTH sides are
+// exterior (w_below = w_above+1 <= 0), so the cell is DROPPED, never
+// fail-closed.  B previously fail-closed on w_above<0; this axis removes that.
+// ===========================================================================
+
+// Independent generalized winding number (Van Oosterom-Strackee solid-angle
+// sum) over an oriented triangle soup - a genuinely different algorithm from
+// B's ray-crossing WindingAt, so it is a real cross-check, not a tautology.
+static double GWN(const std::vector<std::array<vec3, 3>>& tris, const vec3& p) {
+  double sum = 0.0;
+  for (const auto& t : tris) {
+    const vec3 a = t[0] - p, b = t[1] - p, c = t[2] - p;
+    const double la_ = la::length(a), lb = la::length(b), lc = la::length(c);
+    const double det = la::dot(a, la::cross(b, c));
+    const double den = la_ * lb * lc + la::dot(a, b) * lc +
+                       la::dot(b, c) * la_ + la::dot(c, a) * lb;
+    sum += 2.0 * std::atan2(det, den);
+  }
+  return sum / (4.0 * 3.14159265358979323846);
+}
+
+static std::vector<std::array<vec3, 3>> SoupTris(const Manifold::Impl& in) {
+  std::vector<std::array<vec3, 3>> out(in.NumTri());
+  for (int t = 0; t < static_cast<int>(in.NumTri()); ++t)
+    for (int k = 0; k < 3; ++k)
+      out[t][k] = in.vertPos_[in.halfedge_.Start(3 * t + k)];
+  return out;
+}
+
+// A single connected VALID 2-manifold that self-intersects AND reaches negative
+// soup winding: a sphere with its top cap pushed straight DOWN through the body
+// and out the bottom (an inverted cap = a w_S<0 region), then a small (2%)
+// smooth generic warp to put it in GENERAL POSITION.  The warp is load-bearing:
+// without it the UV-sphere's shared meridian/parallel planes trip the
+// exact-zero (SoS) pierce-tie gate BEFORE the winding classifier - negative
+// winding and cross-operand exact-zero ties are ENTANGLED in structured
+// fixtures, so a generic-position carrier is needed to exercise the
+// negative-winding axis alone (reg3d-s3 lane; the axis-aligned openscad carrier
+// stays fail-closed at SoS).
+static Manifold::Impl PushedCapSphere() {
+  const Manifold s = Manifold::Sphere(1.0, 16);
+  Manifold p = s.Warp([](vec3& v) {
+    if (v.z > 0.5) v.z -= 3.0;
+  });
+  p = p.Warp([](vec3& v) {
+    v += 0.02 * vec3(std::sin(3.1 * v.y + 1.2 * v.z),
+                     std::sin(2.7 * v.z + 0.9 * v.x),
+                     std::sin(3.3 * v.x + 1.7 * v.y));
+  });
+  return Manifold::Impl(p.GetMeshGL64());
+}
+
+TEST(Overlap3, Regularize_NegativeWinding_PushedCapSphere) {
+  const Manifold::Impl in = PushedCapSphere();
+  ASSERT_TRUE(in.IsManifold() && in.Is2Manifold())
+      << "fixture must be a valid 2-manifold";
+  ASSERT_TRUE(in.IsSelfIntersecting())
+      << "fixture must self-intersect (a dirty component)";
+  const auto inTris = SoupTris(in);
+
+  // Sample the bbox once; store input GWN (double + rounded).  Require the
+  // fixture to REACH negative soup winding - else it would not exercise the
+  // axis (a mutation that removes the inverted cap would red here).
+  const Box bb = in.bBox_;
+  const vec3 lo = bb.min, hi = bb.max;
+  std::mt19937 rng(20260713u);
+  std::uniform_real_distribution<double> ux(lo.x, hi.x), uy(lo.y, hi.y),
+      uz(lo.z, hi.z);
+  const int N = 40000;
+  std::vector<vec3> qs;
+  std::vector<double> giD;
+  qs.reserve(N);
+  giD.reserve(N);
+  int neg = 0, nIn = 0;
+  for (int i = 0; i < N; ++i) {
+    const vec3 q(ux(rng), uy(rng), uz(rng));
+    const double g = GWN(inTris, q);
+    qs.push_back(q);
+    giD.push_back(g);
+    const long gr = std::lround(g);
+    if (gr < 0) ++neg;
+    if (gr >= 1) ++nIn;
+  }
+  ASSERT_GT(neg, N / 100)
+      << "fixture must reach negative winding (the axis under test)";
+
+  const double eps = ImplEps(in);
+  const RegularizeResult r = RegularizeImpl(in, eps);
+  ASSERT_FALSE(r.fatal.has_value())
+      << "negative winding must be absorbed, not fail-closed: " << r.detail;
+  ASSERT_TRUE(r.impl.has_value());
+  EXPECT_EQ(r.counters.dirty, 1);
+  EXPECT_EQ(r.counters.regularized, 1);
+  EXPECT_EQ(r.counters.failClosed, 0);
+
+  const Manifold out(GetMeshGLImpl<double, uint64_t>(*r.impl, -1));
+  EXPECT_EQ(out.Status(), Manifold::Error::NoError)
+      << "output is not a valid manifold";
+  EXPECT_FALSE(r.impl->IsSelfIntersecting()) << "output still self-intersects";
+  EXPECT_EQ(out.Decompose().size(), 1u) << "{w>=1} must be one solid";
+
+  // INDEPENDENT ORACLE: emitted volume matches vol{w_S>=1}, and MEMBERSHIP
+  // (round(GWN_input)>=1) == (round(GWN_output)>=1) at every unambiguous point
+  // (a subtly-wrong resolve that passes the wide volume band still disagrees).
+  const auto outTris = SoupTris(*r.impl);
+  const double bbVol = (hi.x - lo.x) * (hi.y - lo.y) * (hi.z - lo.z);
+  const double gwnVol = bbVol * nIn / N;
+  EXPECT_NEAR(out.Volume(), gwnVol, 0.04 * gwnVol)
+      << "emitted volume must match the independent {w>=1} GWN volume";
+  int checked = 0, disagree = 0;
+  for (int i = 0; i < N; ++i) {
+    if (std::abs(giD[i] - std::round(giD[i])) > 0.05) continue;  // near in-surf
+    const double go = GWN(outTris, qs[i]);
+    if (std::abs(go - std::round(go)) > 0.05) continue;  // near out-surf
+    ++checked;
+    if ((std::lround(giD[i]) >= 1) != (std::lround(go) >= 1)) ++disagree;
+  }
+  EXPECT_EQ(disagree, 0) << "input {w>=1} vs output solid disagree at "
+                         << disagree << " of " << checked
+                         << " unambiguous points";
+
+  // TOL-INVARIANCE: topology decided from input data, so volume is weld-radius
+  // invariant.
+  const RegularizeResult r2 = RegularizeImpl(in, eps * 0.5);
+  ASSERT_FALSE(r2.fatal.has_value()) << "tol-variant run fatal: " << r2.detail;
+  ASSERT_TRUE(r2.impl.has_value());
+  const Manifold out2(GetMeshGLImpl<double, uint64_t>(*r2.impl, -1));
+  EXPECT_NEAR(out.Volume(), out2.Volume(), 1e-3 * out.Volume())
+      << "emitted volume is not tol-invariant";
 }

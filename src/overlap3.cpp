@@ -1923,11 +1923,20 @@ void EmitSeamedFace(std::vector<OutTri3D>& out, const BuildArrangement& A,
         3.0;
     const vec3 cen3 = a + cen2.x * e1 + cen2.y * e2;
     const std::optional<int> g = RobustWinding(in, cen3 + eps * nHat, seeds);
-    if (!g || *g < 0) {  // filter-uncertain / negative winding: known-open
+    if (!g) {  // filter-uncertain deciding predicate (SoS axis): fail closed
       ok = false;
       return;
     }
-    if (*g != 0) continue;  // cell is buried in the solid interior: drop
+    // Witness theorem, general form: for an oriented mult-1 face w_below =
+    // w_above + 1 universally (the +/-1 crossing delta, seed-independent), so a
+    // cell is on d{w_S>=1} iff EXACTLY ONE side has w>=1, which for mult-1 is
+    // exactly w_above == 0 (w_above<=0 && w_above+1>=1).  A negative w_above
+    // means w_below = w_above+1 <= 0: BOTH sides exterior to {w_S>=1}, so the
+    // cell is dropped, NOT failed closed (openscad/subtraction absorption).
+    // The solid, when retained, is always on the -n_f side -> original
+    // orientation, flip-free.
+    if (*g != 0)
+      continue;  // w_above != 0: buried (>=1) or exterior (<=0): drop
     // Retained: emit at canonical 3D, 2D-CCW -> +nHat = original orientation.
     for (const ivec3& t : tris)
       out.push_back({canon3[t.x], canon3[t.y], canon3[t.z]});
@@ -1960,7 +1969,11 @@ bool EmitCleanFaces(std::vector<OutTri3D>& out, const Manifold::Impl& in,
       if (!(nLen > 0.0)) return false;
       const vec3 nHat = A.faceN[t] / nLen;
       const std::optional<int> g = RobustWinding(in, cen + eps * nHat, seeds);
-      if (!g || *g < 0) return false;  // SoS / negative winding: known-open
+      if (!g)
+        return false;  // filter-uncertain deciding predicate (SoS): closed
+      // Same witness rule as the seamed path: keep iff w_above == 0.  A
+      // negative w_above (subtraction / openscad-class) is exterior on both
+      // sides -> drop (keep=0), NOT a fail-closed.
       keep = (*g == 0) ? 1 : 0;
       patchKeep.emplace(root, keep);
     } else {
@@ -1991,17 +2004,18 @@ StageResult<Manifold::Impl> RunCandidateBBuild(const Manifold::Impl& in,
   if (!ok)
     // B declined to build this face's arrangement exactly: a >2-sheet triple
     // point, a coplanar/degenerate projection, a malformed cell walk, or a
-    // negative-winding / filter-uncertain classify probe (all named opens).
-    // Fail closed - never emit geometry B could not verify.
+    // filter-uncertain classify probe (the SoS axis).  Negative winding is NOT
+    // a decline - the witness rule absorbs it (w_above==0 retain).  Fail closed
+    // - never emit geometry B could not verify.
     return StageResult<Manifold::Impl>::Fatal(
         FatalReason::DirtyComponentUnresolved,
         "candidate B: seam sub-face arrangement not exactly resolvable "
-        "(triple point / degenerate / negative-winding) - fail-closed");
+        "(triple point / degenerate / filter-uncertain) - fail-closed");
   if (!EmitCleanFaces(emitted, in, A, seeds, eps))
     return StageResult<Manifold::Impl>::Fatal(
         FatalReason::DirtyComponentUnresolved,
-        "candidate B: clean-face winding probe hit a negative-winding / "
-        "filter-uncertain patch (subtraction / SoS) - fail-closed");
+        "candidate B: clean-face winding probe was filter-uncertain (SoS) - "
+        "fail-closed");
   return BuildImpl(emitted, eps);
 }
 
