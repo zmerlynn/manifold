@@ -110,6 +110,18 @@ If the input soup decomposes by connectivity into components that are each a
 valid, non-self-intersecting manifold, fold-union them through the EXISTING
 Boolean = the oracle itself, as a front-end path inside RemoveOverlaps3D.
 
+OUTPUT-CONTRACT CAVEAT (owner review): the Boolean's output is epsilon-valid -
+guaranteed manifold, NOT guaranteed self-intersection-free (rounding can create
+eps-scale self-crossings; accumulation across chained operations is the original
+motivation for this whole campaign).  So A's fold output gets the SAME gate as
+its inputs (validity + self-intersection check), and a fold output that fails
+routes back through candidate B as a single dirty component - A and B form a
+small fixed-point loop, not a one-way pipe.  The corpus fold outputs below were
+verified valid-manifold at oracle volumes; their self-intersection audit is an
+UNMEASURED cell (production gate requirement).  Epsilon-valid output remains the
+library's standing contract, so the un-repaired fold is acceptable where callers
+already accept it; the B pass is the strict mode.
+
 MEASURED (probeA/probeA2/probeGT, scratchpad; the fold is instant everywhere):
 
   carrier   decomposes to        candidate-A verdict
