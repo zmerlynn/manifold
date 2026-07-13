@@ -18,6 +18,7 @@
 
 #pragma once
 
+#include <climits>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -257,5 +258,23 @@ struct Overlap3Internals {
 // for gate-2.
 Overlap3Internals RemoveOverlaps3D_TestHooks(const Manifold::Impl& in,
                                              double eps = 0.0);
+
+// Candidate B mechanism probe (docs/Regularize3D.md "B's mechanism"), exposed
+// so the port of the validated fragment (enumeration + coupled winding) is
+// tested directly against the fragment's recorded numbers.  seamCount = genuine
+// non-adjacent self-crossings; boundaryTouchPairs = pairs whose deciding
+// predicate hit an exact-zero / static-filter-uncertain boundary (the
+// single-global-SoS axis); probeWinding[i] = coupled soup winding w_S at
+// probes[i] cast to `seed` (kWindingUncertain if a deciding predicate was
+// filter-uncertain).
+struct CandidateBProbe {
+  int seamCount = 0;
+  int boundaryTouchPairs = 0;
+  std::vector<int> probeWinding;
+};
+constexpr int kWindingUncertain = INT_MIN;
+CandidateBProbe RegularizeB_Probe(const Manifold::Impl& dirty,
+                                  const std::vector<vec3>& probes,
+                                  const vec3& seed);
 
 }  // namespace manifold

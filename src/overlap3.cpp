@@ -1417,18 +1417,184 @@ GateVerdict GateComponent(const Manifold::Impl& comp) {
   return GateVerdict::Clean;
 }
 
+// ---------------------------------------------------------------------------
+// Candidate B mechanism (docs/Regularize3D.md "B's mechanism"), ported from the
+// FRAGMENT-VALIDATED reference (v5b fragment drivers + v5b-r3/r4 notebooks):
+// operand-agnostic ENUMERATION (level-0 pierce predicates through a static
+// Shewchuk filter) + coupled integer-delta WINDING.  Every crossing DECISION is
+// a level-0 orient3d on INPUT coordinates.  These are the substrate of B; the
+// cell-complex + halfedge {w_S>=1} boundary EMISSION (THE BUILD) sits on top
+// and is the doc's named largest-unbuilt-piece.
+// ---------------------------------------------------------------------------
+
+// orient3d on double INPUT coords through the Shewchuk STATIC error-bound
+// filter (o3derrboundA = (7 + 56u)u, u = 2^-53).  Returns the CERTIFIED sign
+// (+/-1) when |det| exceeds the permanent-scaled error bound; returns 0 when
+// the filtered sign is UNCERTAIN (sub-bound or exact-zero).  The exact-Fraction
+// fallback that the fragment used for the 0 case is NOT ported (net-new exact
+// kernel); B treats an uncertain deciding predicate as a fail-closed boundary
+// rather than guess a sign.  On the corpus single-shell self-intersectors this
+// filter certifies every enumeration predicate (v5b-r4: siA/siB 100% certified,
+// zero fallback).
+inline int Orient3DFilterSign(const vec3& a, const vec3& b, const vec3& c,
+                              const vec3& d) {
+  const vec3 ad = a - d, bd = b - d, cd = c - d;
+  const double bc = bd.y * cd.z, cb = cd.y * bd.z;
+  const double ca = cd.y * ad.z, ac = ad.y * cd.z;
+  const double ab = ad.y * bd.z, ba = bd.y * ad.z;
+  const double det = ad.x * (bc - cb) + bd.x * (ca - ac) + cd.x * (ab - ba);
+  const double perm = (std::abs(bc) + std::abs(cb)) * std::abs(ad.x) +
+                      (std::abs(ca) + std::abs(ac)) * std::abs(bd.x) +
+                      (std::abs(ab) + std::abs(ba)) * std::abs(cd.x);
+  constexpr double u = 0x1p-53;
+  const double errb = (7.0 + 56.0 * u) * u * perm;
+  if (errb > 0.0 && std::abs(det) > errb) return det > 0.0 ? 1 : -1;
+  return 0;  // uncertain -> exact fallback (unbuilt); caller fails closed
+}
+
+// Does edge (u,v) pierce the INTERIOR of triangle (a,b,c)?  Level-0, decomposed
+// into the D1 straddle (orient3d of the plane vs each endpoint) and the D3
+// edge-edge z-order (orient3d of the edge vs each triangle edge) - the v5b-r4
+// P4 centerpiece.  Returns 1 (genuine pierce), 0 (no pierce), or -1 (a deciding
+// predicate was filter-uncertain / an exact-zero boundary: the SoS axis).
+int EdgePiercesTri(const vec3& u, const vec3& v, const vec3& a, const vec3& b,
+                   const vec3& c) {
+  const int su = Orient3DFilterSign(a, b, c, u);
+  const int sv = Orient3DFilterSign(a, b, c, v);
+  if (su == 0 || sv == 0) return -1;  // endpoint on/near the plane
+  if (su == sv) return 0;             // both same side -> no straddle
+  const int o1 = Orient3DFilterSign(u, v, a, b);
+  const int o2 = Orient3DFilterSign(u, v, b, c);
+  const int o3 = Orient3DFilterSign(u, v, c, a);
+  if (o1 == 0 || o2 == 0 || o3 == 0) return -1;
+  return (o1 == o2 && o2 == o3) ? 1 : 0;
+}
+
+struct BEnumeration {
+  int seamCount = 0;  // genuine non-adjacent self-crossings
+  int boundaryTouchPairs =
+      0;  // pairs hitting an exact-zero/uncertain predicate
+};
+
+// Enumerate the component's genuine self-crossing arrangement: bbox broadphase
+// + shared-vertex (self-adjacency) skip + level-0 pierce test.  Reproduces the
+// fragment's seam set (v5b-r4: siA/siB = 338 seams, 0 boundary-touch).  Brute
+// bbox broadphase is O(F^2) (17k tris ~0.2s); the collider_ broadphase is the
+// perf path (unbuilt here - correctness-first).
+BEnumeration EnumerateSelfCrossings(const Manifold::Impl& in) {
+  BEnumeration out;
+  const int nTri = static_cast<int>(in.NumTri());
+  std::vector<std::array<vec3, 3>> tri(nTri);
+  std::vector<std::array<int, 3>> vid(nTri);
+  std::vector<vec3> lo(nTri), hi(nTri);
+  for (int t = 0; t < nTri; ++t) {
+    for (int k = 0; k < 3; ++k) {
+      vid[t][k] = in.halfedge_.Start(3 * t + k);
+      tri[t][k] = in.vertPos_[vid[t][k]];
+    }
+    lo[t] = la::min(la::min(tri[t][0], tri[t][1]), tri[t][2]);
+    hi[t] = la::max(la::max(tri[t][0], tri[t][1]), tri[t][2]);
+  }
+  auto bboxOverlap = [&](int i, int j) {
+    return !(hi[i].x < lo[j].x || hi[j].x < lo[i].x || hi[i].y < lo[j].y ||
+             hi[j].y < lo[i].y || hi[i].z < lo[j].z || hi[j].z < lo[i].z);
+  };
+  auto sharesVert = [&](int i, int j) {
+    for (int a = 0; a < 3; ++a)
+      for (int b = 0; b < 3; ++b)
+        if (vid[i][a] == vid[j][b]) return true;
+    return false;
+  };
+  for (int i = 0; i < nTri; ++i) {
+    for (int j = i + 1; j < nTri; ++j) {
+      if (!bboxOverlap(i, j)) continue;
+      if (sharesVert(i, j)) continue;  // self-adjacency skip (S4a)
+      const auto& A = tri[i];
+      const auto& B = tri[j];
+      bool genuine = false, boundary = false;
+      for (int e = 0; e < 3 && !genuine; ++e) {
+        const int r = EdgePiercesTri(A[e], A[(e + 1) % 3], B[0], B[1], B[2]);
+        if (r == 1) genuine = true;
+        if (r == -1) boundary = true;
+      }
+      for (int e = 0; e < 3 && !genuine; ++e) {
+        const int r = EdgePiercesTri(B[e], B[(e + 1) % 3], A[0], A[1], A[2]);
+        if (r == 1) genuine = true;
+        if (r == -1) boundary = true;
+      }
+      if (genuine)
+        ++out.seamCount;
+      else if (boundary)
+        ++out.boundaryTouchPairs;
+    }
+  }
+  return out;
+}
+
+// Coupled soup winding w_S(p): the signed count of oriented-face crossings on
+// the ray p->seed, every crossing decided by level-0 orient3d through the
+// static filter (the Winding03 discipline, boolean3.cpp:388).  The delta per
+// crossed face is sign(dot(seed-p, n_f)) on the input normal - a +/-1 integer,
+// FP-safe by construction.  Returns nullopt if any deciding predicate was
+// filter-uncertain (grazed a vertex/edge): the caller re-seeds or fails closed.
+std::optional<int> WindingAt(const Manifold::Impl& in, const vec3& p,
+                             const vec3& seed) {
+  int w = 0;
+  const int nTri = static_cast<int>(in.NumTri());
+  for (int t = 0; t < nTri; ++t) {
+    const vec3 a = in.vertPos_[in.halfedge_.Start(3 * t)];
+    const vec3 b = in.vertPos_[in.halfedge_.Start(3 * t + 1)];
+    const vec3 c = in.vertPos_[in.halfedge_.Start(3 * t + 2)];
+    const int da = Orient3DFilterSign(a, b, c, p);
+    const int db = Orient3DFilterSign(a, b, c, seed);
+    if (da == 0 || db == 0) return std::nullopt;
+    if (da == db) continue;  // p and seed on the same side of the plane
+    const int o1 = Orient3DFilterSign(p, seed, a, b);
+    const int o2 = Orient3DFilterSign(p, seed, b, c);
+    const int o3 = Orient3DFilterSign(p, seed, c, a);
+    if (o1 == 0 || o2 == 0 || o3 == 0) return std::nullopt;
+    if (o1 == o2 && o2 == o3) {
+      const vec3 n = la::cross(b - a, c - a);
+      w += (la::dot(seed - p, n) > 0.0) ? 1 : -1;
+    }
+  }
+  return w;
+}
+
 // Candidate B (docs/Regularize3D.md "B's mechanism") - the dirty-core resolver.
-// Stage 1 ships the DISPATCH skeleton only; B's production core (arrangement +
-// per-cell w_S + halfedge {w_S >= 1} boundary emission) is not yet built, so
-// this stub FAILS CLOSED with a named reason.  When B lands it returns either a
-// clean Impl (which the caller re-gates) or a real fatal.
+// The validated MECHANISM (enumeration + coupled winding) is ported and runs
+// here; the cell-complex + halfedge {w_S>=1} boundary EMISSION (THE BUILD, the
+// doc's largest-unbuilt-piece) sits on top and is not yet built.  So B
+// enumerates the arrangement and then FAILS CLOSED with a mechanism-backed
+// named reason - never a silent wrong result.  A predicate that hits an
+// exact-zero tie routes to the single-global-SoS axis (GT7863-class), also
+// unbuilt.
 StageResult<Manifold::Impl> RunCandidateB(const Manifold::Impl& dirty,
                                           double eps) {
-  (void)dirty;
   (void)eps;
+  const BEnumeration enu = EnumerateSelfCrossings(dirty);
+  if (enu.boundaryTouchPairs > 0) {
+    // A deciding pierce predicate hit an exact-zero / filter-uncertain
+    // boundary: the cross-operand exact-zero tie family the single-global SoS
+    // convention resolves (GT7863-class) is SPECIFIED but UNBUILT; guessing a
+    // sign would risk an oracle-wrong resolve.  Fail closed.
+    return StageResult<Manifold::Impl>::Fatal(
+        FatalReason::DirtyComponentUnresolved,
+        "candidate B: arrangement predicate hit an exact-zero tie; "
+        "single-global "
+        "SoS (GT7863-class) unbuilt - fail-closed");
+  }
+  // The self-crossing arrangement is enumerated and the coupled winding is
+  // available (the fragment-validated mechanism); the {w_S>=1} halfedge
+  // boundary EMISSION (THE BUILD - per-face constrained retriangulation +
+  // winding classify + manifold weld) is unbuilt.  Fail closed with the
+  // arrangement measured, never a silent wrong result.
   return StageResult<Manifold::Impl>::Fatal(
       FatalReason::DirtyComponentUnresolved,
-      "candidate B (dirty-core resolver) not yet built - fail-closed stub");
+      "candidate B: self-crossing arrangement enumerated (" +
+          std::to_string(enu.seamCount) +
+          " seams); {w_S>=1} halfedge boundary emission (THE BUILD) unbuilt - "
+          "fail-closed");
 }
 
 // Compose the surviving components back into one Impl by CONCATENATION - no
@@ -1544,6 +1710,23 @@ RegularizeResult RegularizeImpl(const Manifold::Impl& in, double eps) {
   // 6. COMPOSE BACK by concatenation (no fusion).
   result.impl = ComposeComponents(outComponents);
   return result;
+}
+
+// Test hook: exercise B's ported mechanism directly (enumeration + coupled
+// winding) so it can be graded against the fragment's recorded numbers.
+CandidateBProbe RegularizeB_Probe(const Manifold::Impl& dirty,
+                                  const std::vector<vec3>& probes,
+                                  const vec3& seed) {
+  CandidateBProbe out;
+  const BEnumeration enu = EnumerateSelfCrossings(dirty);
+  out.seamCount = enu.seamCount;
+  out.boundaryTouchPairs = enu.boundaryTouchPairs;
+  out.probeWinding.reserve(probes.size());
+  for (const vec3& p : probes) {
+    const std::optional<int> w = WindingAt(dirty, p, seed);
+    out.probeWinding.push_back(w.has_value() ? *w : kWindingUncertain);
+  }
+  return out;
 }
 
 }  // namespace manifold

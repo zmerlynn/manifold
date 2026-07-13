@@ -1864,3 +1864,63 @@ TEST(Overlap3, DISABLED_Regularize_SelfIntersectA_Regularized) {
 TEST(Overlap3, DISABLED_Regularize_SelfIntersectB_Regularized) {
   ExpectSelfIntersectorRegularizes("self_intersectB.obj", 0.130, 0.160);
 }
+
+// ---------------------------------------------------------------------------
+// Candidate B mechanism (docs/Regularize3D.md "B's mechanism") - white-box port
+// verification against the FRAGMENT-VALIDATED numbers (v5b-r3/r4 notebooks).
+// These pins are NOT disabled: they prove the ported ENUMERATION and coupled
+// WINDING (the substrate B runs today, on top of which THE BUILD is unbuilt)
+// are correct, independent of the boundary-emission wall.  Anchor points carry
+// their winding from the independent MC oracle (reg3d-s2 notebook),
+// cocycle-stable across two unrelated seeds.
+// ---------------------------------------------------------------------------
+static void ExpectBMechanism(const char* name, int expectSeams, vec3 w1,
+                             vec3 w2, vec3 far, vec3 seed, vec3 seed2) {
+  std::filesystem::path file(__FILE__);
+  std::ifstream fin((file.parent_path() / "models" / name).string());
+  if (!fin.is_open()) GTEST_SKIP() << "model not found";
+  const MeshGL64 mesh = ReadOBJ(fin);
+  const Manifold::Impl in(mesh);
+
+  // ENUMERATION: the ported level-0 pierce enumeration reproduces the
+  // fragment's genuine self-crossing count exactly, with no exact-zero ties
+  // (safe-by-margin, so the single-global-SoS axis is not exercised on the
+  // corpus).
+  const std::vector<vec3> probes = {far, w1, w2};
+  const CandidateBProbe p = RegularizeB_Probe(in, probes, seed);
+  EXPECT_EQ(p.seamCount, expectSeams) << name << " enumeration seam count";
+  EXPECT_EQ(p.boundaryTouchPairs, 0)
+      << name << " must be safe-by-margin (no exact-zero tie)";
+
+  // WINDING: exterior (0), single-cover (1), and the w=2 self-overlap stratum.
+  ASSERT_EQ(p.probeWinding.size(), 3u);
+  EXPECT_EQ(p.probeWinding[0], 0) << name << " exterior winding must be 0";
+  EXPECT_EQ(p.probeWinding[1], 1) << name << " single-cover winding must be 1";
+  EXPECT_EQ(p.probeWinding[2], 2) << name << " double-cover (w=2) winding";
+
+  // PATH-INDEPENDENCE (cocycle): an unrelated second seed reproduces the w=2
+  // classification (the coupled winding is single-valued off-surface).
+  const CandidateBProbe p2 = RegularizeB_Probe(in, {w2}, seed2);
+  ASSERT_EQ(p2.probeWinding.size(), 1u);
+  EXPECT_EQ(p2.probeWinding[0], 2) << name << " winding not path-independent";
+}
+
+TEST(Overlap3, Regularize_BMechanism_SelfIntersectA) {
+  ExpectBMechanism(
+      "self_intersectA.obj", 338,
+      {-0.84405223113934791, 0.50434676505537546, 1.3952491390912483},
+      {0.088618132029630078, 0.23160096832022406, 0.59518845825120714},
+      {8.8552219880000003, 5.7315517699999994, 11.819220435},
+      {226.70071018299998, -89.319086551699996, 109.69480060789999},
+      {-347.737426747, 170.0367771507, -195.02711216070003});
+}
+
+TEST(Overlap3, Regularize_BMechanism_SelfIntersectB) {
+  ExpectBMechanism(
+      "self_intersectB.obj", 338,
+      {-1.5288847346363044, 0.55692625122266082, 1.4831033934933748},
+      {-0.60008906037949228, 0.26029227470132027, 0.74852618084744027},
+      {8.1568456297999994, 7.8764903549999996, 10.74691606},
+      {225.69857201970999, -125.15321454389999, 97.788207489599998},
+      {-347.93884238262996, 237.8741813569, -173.12363447680002});
+}
