@@ -110,6 +110,14 @@ If the input soup decomposes by connectivity into components that are each a
 valid, non-self-intersecting manifold, fold-union them through the EXISTING
 Boolean = the oracle itself, as a front-end path inside RemoveOverlaps3D.
 
+WHY THE GATE IS LOAD-BEARING (owner review): the Boolean does not check or
+reject anything - a self-intersecting operand is accepted SILENTLY and the
+output is silently wrong (often still a valid manifold, so undetectable
+downstream); that invisible failure is the original motivation of this whole
+campaign.  The per-component gate here is a check that exists nowhere in the
+library today: it converts the Boolean's unenforced precondition into a
+detected and (via candidate B) repairable one.
+
 OUTPUT-CONTRACT CAVEAT (owner review): the Boolean's output is epsilon-valid -
 guaranteed manifold, NOT guaranteed self-intersection-free (rounding can create
 eps-scale self-crossings; accumulation across chained operations is the original
