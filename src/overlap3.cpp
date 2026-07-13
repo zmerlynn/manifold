@@ -1561,19 +1561,463 @@ std::optional<int> WindingAt(const Manifold::Impl& in, const vec3& p,
   return w;
 }
 
+// Robust soup winding: try the coupled ray winding from a few unrelated seeds
+// and take the first that grazes no vertex/edge (the winding is single-valued
+// off-surface, so any certified seed is authoritative).  nullopt only if EVERY
+// seed hit a filter-uncertain deciding predicate (SoS / near-degenerate).
+std::optional<int> RobustWinding(const Manifold::Impl& in, const vec3& p,
+                                 const std::vector<vec3>& seeds) {
+  for (const vec3& s : seeds) {
+    const std::optional<int> w = WindingAt(in, p, s);
+    if (w) return w;
+  }
+  return std::nullopt;
+}
+
+// ---------------------------------------------------------------------------
+// THE BUILD: {w_S>=1} halfedge-boundary EMISSION by per-face 2D arrangement.
+// The steer's reuse (ComputeCap already runs this exact shape for the sweep's
+// caps): each crossed face projects its triangle boundary + its seam segments
+// into the face plane; RemoveOverlaps2D (the Smith sweep) arranges them and the
+// Add winding rule retains the sub-region on the {w_S>=1} boundary; the
+// retained loops triangulate and emit at canonical 3D positions.
+//
+// Retention rule (uniform, derived): a sub-face of an oriented mult-1 face f is
+// on d{w_S>=1} iff w_S on the +n_f side == 0, kept with the ORIGINAL
+// orientation
+// - because w_below = w_above + 1 always, so the solid is always on the -n_f
+// side at a retained face (no flips).  Encoded as a 2D winding: triangle
+// boundary CCW mult +1, each seam mult -1 with its higher-winding
+// (inside-the-other-lump) side on the LEFT, so Add (net > 0) keeps {1 - G(q) >
+// 0} = {G(q) == 0}.  The seam sign is DERIVED from the crossing face's normal
+// (not a hand global sign); the output is re-gated + volume-checked, so a wrong
+// sign fails closed, never wrong.
+//
+// ONCE-ONLY construction (doc R1): each seam endpoint is a pierce point keyed
+// by (undirected mesh edge, pierced triangle), built ONCE and shared by both
+// faces of the seam AND by the two seams that chain at it; it lies on the two
+// faces' plane-intersection line, so its 2D projection is exact in either face
+// and the cross-face weld is bit-identical.  The winding half stays
+// exact-by-integer.
+// ---------------------------------------------------------------------------
+
+// One seam segment as seen from a specific face: its two canonical 3D endpoints
+// (on this face's plane) and the OUTWARD normal of the crossing face (the sign
+// source that orients the 2D edge's winding contribution).  p*Interior flags an
+// endpoint that lies in this face's INTERIOR (the crossing face's edge pierced
+// this triangle) rather than on this face's boundary edge - the marker the spur
+// prune reads (an interior degree-1 end dangles and does not bound {G==0}).
+struct BuildSeam {
+  vec3 p0, p1;
+  vec3 nOther;
+  bool p0Interior, p1Interior;
+};
+
+using PierceKey =
+    std::tuple<int, int, int>;  // (min edge vert, max, pierced tri)
+
+// The intersection point of segment (u,v) with the plane of triangle (a,b,c).
+// Precondition: the segment straddles the plane (EdgePiercesTri == 1), so the
+// denominator is nonzero.
+vec3 SegPlanePoint(const vec3& u, const vec3& v, const vec3& a, const vec3& b,
+                   const vec3& c) {
+  const vec3 n = la::cross(b - a, c - a);
+  const double du = la::dot(u - a, n);
+  const double dv = la::dot(v - a, n);
+  return u + (du / (du - dv)) * (v - u);
+}
+
+struct BuildArrangement {
+  std::vector<std::array<vec3, 3>> tri;
+  std::vector<std::array<int, 3>> vid;
+  std::vector<vec3> faceN;  // la::cross(b-a,c-a), unnormalized outward
+  std::vector<std::vector<BuildSeam>> faceSeams;
+  std::vector<char> seamed;
+  bool boundaryTouch = false;
+  bool ok = true;  // false = a structural anomaly (fail closed)
+};
+
+// Enumerate the self-crossing arrangement AND record each seam's canonical 3D
+// segment per incident face (the geometry EnumerateSelfCrossings only counted).
+BuildArrangement RecordSeams(const Manifold::Impl& in) {
+  BuildArrangement A;
+  const int nTri = static_cast<int>(in.NumTri());
+  A.tri.resize(nTri);
+  A.vid.resize(nTri);
+  A.faceN.resize(nTri);
+  A.faceSeams.resize(nTri);
+  A.seamed.assign(nTri, 0);
+  std::vector<vec3> lo(nTri), hi(nTri);
+  for (int t = 0; t < nTri; ++t) {
+    for (int k = 0; k < 3; ++k) {
+      A.vid[t][k] = in.halfedge_.Start(3 * t + k);
+      A.tri[t][k] = in.vertPos_[A.vid[t][k]];
+    }
+    A.faceN[t] =
+        la::cross(A.tri[t][1] - A.tri[t][0], A.tri[t][2] - A.tri[t][0]);
+    lo[t] = la::min(la::min(A.tri[t][0], A.tri[t][1]), A.tri[t][2]);
+    hi[t] = la::max(la::max(A.tri[t][0], A.tri[t][1]), A.tri[t][2]);
+  }
+  std::map<PierceKey, vec3> cache;
+  auto pierce = [&](int edgeV0, int edgeV1, int piercedTri) -> vec3 {
+    const PierceKey key{std::min(edgeV0, edgeV1), std::max(edgeV0, edgeV1),
+                        piercedTri};
+    auto it = cache.find(key);
+    if (it != cache.end()) return it->second;
+    const vec3 p = SegPlanePoint(in.vertPos_[edgeV0], in.vertPos_[edgeV1],
+                                 A.tri[piercedTri][0], A.tri[piercedTri][1],
+                                 A.tri[piercedTri][2]);
+    cache.emplace(key, p);
+    return p;
+  };
+  auto bboxOverlap = [&](int i, int j) {
+    return !(hi[i].x < lo[j].x || hi[j].x < lo[i].x || hi[i].y < lo[j].y ||
+             hi[j].y < lo[i].y || hi[i].z < lo[j].z || hi[j].z < lo[i].z);
+  };
+  auto sharesVert = [&](int i, int j) {
+    for (int a = 0; a < 3; ++a)
+      for (int b = 0; b < 3; ++b)
+        if (A.vid[i][a] == A.vid[j][b]) return true;
+    return false;
+  };
+  for (int i = 0; i < nTri; ++i) {
+    for (int j = i + 1; j < nTri; ++j) {
+      if (!bboxOverlap(i, j)) continue;
+      if (sharesVert(i, j)) continue;
+      const auto& T0 = A.tri[i];
+      const auto& T1 = A.tri[j];
+      // Collect the up-to-two seam endpoints: i's edges piercing tri j (keyed
+      // to plane j) and j's edges piercing tri i (keyed to plane i).  Every
+      // endpoint lands on the plane-i/\plane-j intersection line, so it is
+      // exact in both faces' bases.
+      std::array<vec3, 4> pts;
+      std::array<int, 4> ptTri;  // piercedTri per endpoint (interiority source)
+      int nPts = 0;
+      bool boundary = false;
+      for (int e = 0; e < 3; ++e) {
+        const int r =
+            EdgePiercesTri(T0[e], T0[(e + 1) % 3], T1[0], T1[1], T1[2]);
+        if (r == 1 && nPts < 4) {
+          ptTri[nPts] = j;  // pierces tri j -> on i's edge, interior to j
+          pts[nPts++] = pierce(A.vid[i][e], A.vid[i][(e + 1) % 3], j);
+        } else if (r == -1)
+          boundary = true;
+      }
+      for (int e = 0; e < 3; ++e) {
+        const int r =
+            EdgePiercesTri(T1[e], T1[(e + 1) % 3], T0[0], T0[1], T0[2]);
+        if (r == 1 && nPts < 4) {
+          ptTri[nPts] = i;  // pierces tri i -> on j's edge, interior to i
+          pts[nPts++] = pierce(A.vid[j][e], A.vid[j][(e + 1) % 3], i);
+        } else if (r == -1)
+          boundary = true;
+      }
+      if (boundary) {
+        A.boundaryTouch = true;
+        continue;
+      }
+      if (nPts == 0) continue;  // no genuine crossing
+      if (nPts != 2) {
+        // A genuine seam has exactly two endpoints; anything else is a
+        // degenerate incidence the level-0 filter did not flag - fail closed.
+        A.ok = false;
+        continue;
+      }
+      // Interior-to-face flag: an endpoint is interior to face i iff it was
+      // built by piercing tri i (ptTri==i), else it lies on face i's edge.
+      A.faceSeams[i].push_back(
+          {pts[0], pts[1], A.faceN[j], ptTri[0] == i, ptTri[1] == i});
+      A.faceSeams[j].push_back(
+          {pts[0], pts[1], A.faceN[i], ptTri[0] == j, ptTri[1] == j});
+      A.seamed[i] = 1;
+      A.seamed[j] = 1;
+    }
+  }
+  return A;
+}
+
+// Extract the bounded CELLS of a planar subdivision: undirected `uedges` over
+// `pts` (no interior crossings on this corpus).  Dangling spurs (degree-1
+// chains) bound no cell and are pruned first (so triangulation sees no
+// zero-area spike).  Returns one CCW vertex-index loop per bounded cell (the
+// unbounded outer face is dropped by its negative signed area), or false on a
+// malformed walk.  Standard DCEL face traversal: the outgoing half-edges at
+// each vertex are angularly ordered and next(u->v) is the outgoing edge at v
+// immediately CLOCKWISE from v->u, which keeps the cell interior on the left.
+bool ExtractCells(const std::vector<vec2>& pts,
+                  const std::vector<std::pair<int, int>>& uedges,
+                  std::vector<std::vector<int>>& cells) {
+  const int n = static_cast<int>(pts.size());
+  std::vector<std::set<int>> nbr(n);
+  for (const auto& e : uedges) {
+    if (e.first == e.second) continue;
+    nbr[e.first].insert(e.second);
+    nbr[e.second].insert(e.first);
+  }
+  for (bool changed = true; changed;) {  // prune degree-1 spurs
+    changed = false;
+    for (int v = 0; v < n; ++v)
+      if (nbr[v].size() == 1) {
+        const int w = *nbr[v].begin();
+        nbr[v].clear();
+        nbr[w].erase(v);
+        changed = true;
+      }
+  }
+  std::vector<std::vector<int>> order(n);  // CCW-sorted neighbors
+  std::vector<std::unordered_map<int, int>> at(n);
+  for (int v = 0; v < n; ++v) {
+    order[v].assign(nbr[v].begin(), nbr[v].end());
+    std::sort(order[v].begin(), order[v].end(), [&](int p, int q) {
+      return std::atan2(pts[p].y - pts[v].y, pts[p].x - pts[v].x) <
+             std::atan2(pts[q].y - pts[v].y, pts[q].x - pts[v].x);
+    });
+    for (int k = 0; k < static_cast<int>(order[v].size()); ++k)
+      at[v][order[v][k]] = k;
+  }
+  std::set<std::pair<int, int>> visited;
+  for (int s0 = 0; s0 < n; ++s0)
+    for (const int s1 : order[s0]) {
+      if (visited.count({s0, s1})) continue;
+      std::vector<int> loop;
+      int u = s0, v = s1;
+      bool bad = false;
+      do {
+        visited.insert({u, v});
+        loop.push_back(u);
+        const auto it = at[v].find(u);
+        if (it == at[v].end()) {
+          bad = true;
+          break;
+        }
+        const int deg = static_cast<int>(order[v].size());
+        const int w = order[v][(it->second - 1 + deg) % deg];
+        u = v;
+        v = w;
+      } while (!(u == s0 && v == s1) &&
+               loop.size() <= static_cast<size_t>(2 * uedges.size() + 4));
+      if (bad || !(u == s0 && v == s1)) return false;
+      double area = 0.0;
+      for (size_t k = 0; k < loop.size(); ++k) {
+        const vec2 p = pts[loop[k]], q = pts[loop[(k + 1) % loop.size()]];
+        area += p.x * q.y - q.x * p.y;
+      }
+      if (area > 0.0) cells.push_back(std::move(loop));
+    }
+  return true;
+}
+
+// Emit the retained sub-faces of one SEAMED face into `out` (3D triangles at
+// canonical positions), or set ok=false to fail closed.  Reuse RemoveOverlaps2D
+// as the ARRANGEMENT primitive (robust crossing-split + eps-merge via
+// edgeSubdiv), extract the cells, and classify EACH by the real 3D coupled
+// winding: a cell is retained iff w_S on the +n_f side == 0 (the {w_S>=1}
+// boundary criterion, uniform and flip-free for oriented mult-1 faces).
+void EmitSeamedFace(std::vector<OutTri3D>& out, const BuildArrangement& A,
+                    int f, const Manifold::Impl& in,
+                    const std::vector<vec3>& seeds, double eps, bool& ok) {
+  const vec3 a = A.tri[f][0], b = A.tri[f][1], c = A.tri[f][2];
+  const double nLen = la::length(A.faceN[f]);
+  if (!(nLen > 0.0)) {
+    ok = false;
+    return;
+  }
+  const vec3 nHat = A.faceN[f] / nLen;
+  const vec3 e1raw = b - a;
+  const double e1Len = la::length(e1raw);
+  if (!(e1Len > 0.0)) {
+    ok = false;
+    return;
+  }
+  const vec3 e1 = e1raw / e1Len;
+  const vec3 e2 = la::cross(nHat, e1);  // e1 x e2 == nHat: 2D-CCW -> +nHat
+  auto proj = [&](const vec3& P) {
+    return vec2(la::dot(P - a, e1), la::dot(P - a, e2));
+  };
+
+  // Vertices, deduped by canonical 3D bit pattern so shared endpoints (chain
+  // junctions, corners) collapse to one input vertex with one projection.
+  std::vector<vec2> verts2;
+  std::vector<vec3> canon3;
+  std::map<std::tuple<double, double, double>, int> vidx;
+  auto getV = [&](const vec3& P) {
+    const std::tuple<double, double, double> key{P.x, P.y, P.z};
+    auto it = vidx.find(key);
+    if (it != vidx.end()) return it->second;
+    const int id = static_cast<int>(verts2.size());
+    verts2.push_back(proj(P));
+    canon3.push_back(P);
+    vidx.emplace(key, id);
+    return id;
+  };
+  const int iA = getV(a), iB = getV(b), iC = getV(c);
+  const vec2 pa = verts2[iA], pb = verts2[iB], pc = verts2[iC];
+  if (!(0.5 * ((pb.x - pa.x) * (pc.y - pa.y) - (pb.y - pa.y) * (pc.x - pa.x)) >
+        0.0)) {
+    ok = false;  // left-handed basis or degenerate projection
+    return;
+  }
+  std::vector<EdgeM> edges = {{iA, iB, 1}, {iB, iC, 1}, {iC, iA, 1}};
+  for (const BuildSeam& s : A.faceSeams[f]) {
+    const int v0 = getV(s.p0), v1 = getV(s.p1);
+    if (v0 != v1) edges.push_back({v0, v1, 1});
+  }
+
+  // ARRANGEMENT via RemoveOverlaps2D: edgeSubdiv gives the exact per-input-edge
+  // subdivision (triangle edges split at the on-edge seam endpoints; seams
+  // split at any crossing).  The winding rule is irrelevant here (we take only
+  // the subdivision), so any pred works.  eps is the component weld radius; the
+  // canonical seam points are exact-shared, so no extra construction headroom
+  // is needed and a tight eps avoids merging genuinely-distinct sub-eps
+  // features.
+  std::vector<std::vector<vec2>> sub;
+  RemoveOverlaps2D(verts2, edges, eps, /*debug=*/false, WindRule::Add,
+                   /*trace=*/nullptr, /*edgesNeg=*/nullptr, &sub);
+
+  // Reconstruct the planar subdivision, mapping each arrangement position back
+  // to its input vertex bit-exactly.  A position with no input preimage is a
+  // NEW crossing vertex (a >2-sheet triple point, unbuilt) -> fail closed.
+  std::map<std::tuple<double, double>, int> pos2in;
+  for (int k = 0; k < static_cast<int>(verts2.size()); ++k)
+    pos2in.emplace(std::tuple<double, double>{verts2[k].x, verts2[k].y}, k);
+  std::vector<std::pair<int, int>> uedges;
+  for (const auto& poly : sub) {
+    for (size_t k = 0; k + 1 < poly.size(); ++k) {
+      const auto i0 = pos2in.find({poly[k].x, poly[k].y});
+      const auto i1 = pos2in.find({poly[k + 1].x, poly[k + 1].y});
+      if (i0 == pos2in.end() || i1 == pos2in.end()) {
+        ok = false;
+        return;
+      }
+      uedges.push_back({i0->second, i1->second});
+    }
+  }
+
+  std::vector<std::vector<int>> cells;
+  if (!ExtractCells(verts2, uedges, cells)) {
+    ok = false;
+    return;
+  }
+  for (const std::vector<int>& cell : cells) {
+    if (cell.size() < 3) continue;
+    // Triangulate the cell; the largest triangle's centroid is a guaranteed
+    // interior classify point.
+    PolygonsIdx pidx(1);
+    for (int idx : cell) pidx[0].push_back({verts2[idx], idx});
+    const std::vector<ivec3> tris = TriangulateIdx(pidx, eps);
+    if (tris.empty()) continue;
+    int best = 0;
+    double bestArea = -1.0;
+    for (int t = 0; t < static_cast<int>(tris.size()); ++t) {
+      const vec2 p0 = verts2[tris[t].x], p1 = verts2[tris[t].y],
+                 p2 = verts2[tris[t].z];
+      const double ar = std::abs((p1.x - p0.x) * (p2.y - p0.y) -
+                                 (p1.y - p0.y) * (p2.x - p0.x));
+      if (ar > bestArea) {
+        bestArea = ar;
+        best = t;
+      }
+    }
+    const vec2 cen2 =
+        (verts2[tris[best].x] + verts2[tris[best].y] + verts2[tris[best].z]) /
+        3.0;
+    const vec3 cen3 = a + cen2.x * e1 + cen2.y * e2;
+    const std::optional<int> g = RobustWinding(in, cen3 + eps * nHat, seeds);
+    if (!g || *g < 0) {  // filter-uncertain / negative winding: known-open
+      ok = false;
+      return;
+    }
+    if (*g != 0) continue;  // cell is buried in the solid interior: drop
+    // Retained: emit at canonical 3D, 2D-CCW -> +nHat = original orientation.
+    for (const ivec3& t : tris)
+      out.push_back({canon3[t.x], canon3[t.y], canon3[t.z]});
+  }
+}
+
+// Classify + emit the CLEAN (un-seamed) faces.  g_above is constant across any
+// mesh edge that carries no seam transition, and clean-clean edges never do, so
+// clean faces partition into patches of uniform coverage; one winding probe per
+// patch decides keep-whole vs drop.  A negative or filter-uncertain probe is a
+// known-open axis (subtraction / SoS) -> fail closed.
+bool EmitCleanFaces(std::vector<OutTri3D>& out, const Manifold::Impl& in,
+                    const BuildArrangement& A, const std::vector<vec3>& seeds,
+                    double eps) {
+  const int nTri = static_cast<int>(in.NumTri());
+  DisjointSets patches(nTri);
+  for (int h = 0; h < static_cast<int>(in.halfedge_.size()); ++h) {
+    const int t = h / 3, u = in.halfedge_.Pair(h) / 3;
+    if (!A.seamed[t] && !A.seamed[u]) patches.unite(t, u);
+  }
+  std::unordered_map<int, int> patchKeep;  // root -> 0 drop, 1 keep
+  for (int t = 0; t < nTri; ++t) {
+    if (A.seamed[t]) continue;
+    const int root = static_cast<int>(patches.find(t));
+    auto it = patchKeep.find(root);
+    int keep;
+    if (it == patchKeep.end()) {
+      const vec3 cen = (A.tri[t][0] + A.tri[t][1] + A.tri[t][2]) / 3.0;
+      const double nLen = la::length(A.faceN[t]);
+      if (!(nLen > 0.0)) return false;
+      const vec3 nHat = A.faceN[t] / nLen;
+      const std::optional<int> g = RobustWinding(in, cen + eps * nHat, seeds);
+      if (!g || *g < 0) return false;  // SoS / negative winding: known-open
+      keep = (*g == 0) ? 1 : 0;
+      patchKeep.emplace(root, keep);
+    } else {
+      keep = it->second;
+    }
+    if (keep == 1) out.push_back({A.tri[t][0], A.tri[t][1], A.tri[t][2]});
+  }
+  return true;
+}
+
+// THE BUILD driver: enumerate + record seams, emit seamed sub-faces + clean
+// faces, assemble + weld.  Returns the regularized Impl, or a fatal.
+StageResult<Manifold::Impl> RunCandidateBBuild(const Manifold::Impl& in,
+                                               const BuildArrangement& A,
+                                               double eps) {
+  // Winding seeds: a few far points in unrelated directions off the bbox.
+  const vec3 c = in.bBox_.Center();
+  const double L = in.bBox_.Scale() + 1.0;
+  const std::vector<vec3> seeds = {c + L * vec3(3.13, 5.71, 1.37),
+                                   c + L * vec3(-2.71, 1.41, 4.19),
+                                   c + L * vec3(1.73, -3.31, -2.23)};
+
+  std::vector<OutTri3D> emitted;
+  bool ok = true;
+  const int nTri = static_cast<int>(in.NumTri());
+  for (int f = 0; f < nTri && ok; ++f)
+    if (A.seamed[f]) EmitSeamedFace(emitted, A, f, in, seeds, eps, ok);
+  if (!ok)
+    // B declined to build this face's arrangement exactly: a >2-sheet triple
+    // point, a coplanar/degenerate projection, a malformed cell walk, or a
+    // negative-winding / filter-uncertain classify probe (all named opens).
+    // Fail closed - never emit geometry B could not verify.
+    return StageResult<Manifold::Impl>::Fatal(
+        FatalReason::DirtyComponentUnresolved,
+        "candidate B: seam sub-face arrangement not exactly resolvable "
+        "(triple point / degenerate / negative-winding) - fail-closed");
+  if (!EmitCleanFaces(emitted, in, A, seeds, eps))
+    return StageResult<Manifold::Impl>::Fatal(
+        FatalReason::DirtyComponentUnresolved,
+        "candidate B: clean-face winding probe hit a negative-winding / "
+        "filter-uncertain patch (subtraction / SoS) - fail-closed");
+  return BuildImpl(emitted, eps);
+}
+
 // Candidate B (docs/Regularize3D.md "B's mechanism") - the dirty-core resolver.
-// The validated MECHANISM (enumeration + coupled winding) is ported and runs
-// here; the cell-complex + halfedge {w_S>=1} boundary EMISSION (THE BUILD, the
-// doc's largest-unbuilt-piece) sits on top and is not yet built.  So B
-// enumerates the arrangement and then FAILS CLOSED with a mechanism-backed
-// named reason - never a silent wrong result.  A predicate that hits an
-// exact-zero tie routes to the single-global-SoS axis (GT7863-class), also
-// unbuilt.
+// The validated MECHANISM (enumeration + coupled winding) is ported; THE BUILD
+// (the {w_S>=1} halfedge boundary emission) reuses RemoveOverlaps2D per crossed
+// face (RunCandidateBBuild above).  B enumerates + records the seam geometry,
+// runs the build, and re-gates; anything it cannot resolve exactly (an
+// exact-zero pierce tie = single-global SoS, a >2-sheet triple point, a
+// coplanar seam, a negative-winding patch) FAILS CLOSED with a named reason -
+// never a silent wrong result.  The caller re-gates the output once more
+// (IsSelfIntersecting).
 StageResult<Manifold::Impl> RunCandidateB(const Manifold::Impl& dirty,
                                           double eps) {
-  (void)eps;
-  const BEnumeration enu = EnumerateSelfCrossings(dirty);
-  if (enu.boundaryTouchPairs > 0) {
+  const BuildArrangement A = RecordSeams(dirty);
+  if (A.boundaryTouch) {
     // A deciding pierce predicate hit an exact-zero / filter-uncertain
     // boundary: the cross-operand exact-zero tie family the single-global SoS
     // convention resolves (GT7863-class) is SPECIFIED but UNBUILT; guessing a
@@ -1581,20 +2025,15 @@ StageResult<Manifold::Impl> RunCandidateB(const Manifold::Impl& dirty,
     return StageResult<Manifold::Impl>::Fatal(
         FatalReason::DirtyComponentUnresolved,
         "candidate B: arrangement predicate hit an exact-zero tie; "
-        "single-global "
-        "SoS (GT7863-class) unbuilt - fail-closed");
+        "single-global SoS (GT7863-class) unbuilt - fail-closed");
   }
-  // The self-crossing arrangement is enumerated and the coupled winding is
-  // available (the fragment-validated mechanism); the {w_S>=1} halfedge
-  // boundary EMISSION (THE BUILD - per-face constrained retriangulation +
-  // winding classify + manifold weld) is unbuilt.  Fail closed with the
-  // arrangement measured, never a silent wrong result.
-  return StageResult<Manifold::Impl>::Fatal(
-      FatalReason::DirtyComponentUnresolved,
-      "candidate B: self-crossing arrangement enumerated (" +
-          std::to_string(enu.seamCount) +
-          " seams); {w_S>=1} halfedge boundary emission (THE BUILD) unbuilt - "
-          "fail-closed");
+  if (!A.ok) {
+    return StageResult<Manifold::Impl>::Fatal(
+        FatalReason::DirtyComponentUnresolved,
+        "candidate B: a self-crossing pair had a non-2-endpoint seam "
+        "(degenerate incidence) - fail-closed");
+  }
+  return RunCandidateBBuild(dirty, A, eps);
 }
 
 // Compose the surviving components back into one Impl by CONCATENATION - no

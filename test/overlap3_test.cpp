@@ -1857,11 +1857,11 @@ static void ExpectSelfIntersectorRegularizes(const char* name, double volLo,
       << name << " enclosed volume is not tol-invariant";
 }
 
-TEST(Overlap3, DISABLED_Regularize_SelfIntersectA_Regularized) {
+TEST(Overlap3, Regularize_SelfIntersectA_Regularized) {
   ExpectSelfIntersectorRegularizes("self_intersectA.obj", 0.130, 0.158);
 }
 
-TEST(Overlap3, DISABLED_Regularize_SelfIntersectB_Regularized) {
+TEST(Overlap3, Regularize_SelfIntersectB_Regularized) {
   ExpectSelfIntersectorRegularizes("self_intersectB.obj", 0.130, 0.160);
 }
 
