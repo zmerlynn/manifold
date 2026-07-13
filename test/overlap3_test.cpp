@@ -2061,3 +2061,93 @@ TEST(Overlap3, Regularize_NegativeWinding_PushedCapSphere) {
   EXPECT_NEAR(out.Volume(), out2.Volume(), 1e-3 * out.Volume())
       << "emitted volume is not tol-invariant";
 }
+
+// ===========================================================================
+// Regularization axis: CROSS-OPERAND EXACT-ZERO TIES (single-global SoS).
+// docs/Regularize3D.md open items "single global SoS, unexercised" + R
+// (GT7863).
+//
+// When a level-0 pierce predicate is an EXACT ZERO (a vertex exactly on a face,
+// or a pierce exactly on a triangle edge) the static filter returns 0
+// (uncertain) and B has no exact-Fraction fallback, so it FAILS CLOSED with a
+// named reason rather than guess a sign (zero-oracle-wrong absolute).  The
+// single-global symbolic-perturbation convention that would resolve these ties
+// consistently is the doc's specified-but-UNBUILT path.  reg3d-s3 adjudicated
+// it a research-grade wall under zero-oracle-wrong: GT7863's dirty component is
+// COPLANAR-DOMINATED (54 coplanar face pairs across 23 of 216 tris), so even a
+// correct point-SoS turns coplanar faces into sub-eps slivers whose eps-nudged
+// winding classify is unreliable (the doc's separate coplanar axis), and any
+// SoS ordering bug emits oracle-wrong-but-manifold geometry the re-gate cannot
+// catch.  These pins assert the fail-closed CONTRACT is precise and
+// load-bearing: B never silently resolves an exact-tie carrier to (possibly
+// wrong) geometry.
+// ===========================================================================
+
+// Constructed carrier: a SINGLE self-intersecting component with ISOLATED
+// exact-zero ties (vertex-on-plane + pierce-on-edge, NO coplanar overlap - the
+// PokedCube's axis-aligned spike pierces the far faces at exact configs).  A
+// pair of separate overlapping cubes would decompose into two CLEAN components
+// and early-exit, never reaching B, so the carrier is one self-intersecting
+// component (reg3d-s3 adjudication).
+TEST(Overlap3, Regularize_ExactZeroTie_Constructed_FailClosed) {
+  const Manifold::Impl in = PokedCube();
+  ASSERT_TRUE(in.IsManifold() && in.Is2Manifold());
+  ASSERT_TRUE(in.IsSelfIntersecting()) << "carrier must be a dirty component";
+  // The carrier genuinely REACHES an exact-zero pierce tie (else it would not
+  // exercise the axis): B's enumeration reports boundary-touch pairs.
+  const CandidateBProbe p =
+      RegularizeB_Probe(in, {}, in.bBox_.Center() + vec3(97.1, 33.7, 51.3));
+  EXPECT_GT(p.boundaryTouchPairs, 0)
+      << "carrier must reach an exact-zero tie (the axis under test)";
+
+  const RegularizeResult r = RegularizeImpl(in, ImplEps(in));
+  ASSERT_TRUE(r.fatal.has_value())
+      << "an exact-zero tie must fail closed, never a silent resolve";
+  EXPECT_EQ(*r.fatal, FatalReason::DirtyComponentUnresolved);
+  EXPECT_NE(r.detail.find("SoS"), std::string::npos)
+      << "fail-closed reason must name the single-global SoS axis: "
+      << r.detail;
+  EXPECT_FALSE(r.impl.has_value()) << "fail-closed yields no partial output";
+  EXPECT_EQ(r.counters.regularized, 0);
+  EXPECT_EQ(r.counters.failClosed, 1);
+}
+
+// Real carrier: the GT7863 twin pair composed as ONE soup.  It decomposes into
+// 4 components; 3 are clean (early-exit) and ONE (216 tris) is
+// self-intersecting with COPLANAR cross-operand overlap.  The whole compose
+// fail-closes: any component fail-closed suppresses the entire output (no
+// partial resolve).
+TEST(Overlap3, Regularize_ExactZeroTie_GT7863_FailClosed) {
+  std::filesystem::path file(__FILE__);
+  auto load = [&](const char* n) -> std::optional<MeshGL64> {
+    std::ifstream fin((file.parent_path() / "models" / n).string());
+    if (!fin.is_open()) return std::nullopt;
+    return ReadOBJ(fin);
+  };
+  const auto mL = load("Generic_Twin_7863.1.t0_left.obj");
+  const auto mR = load("Generic_Twin_7863.1.t0_right.obj");
+  if (!mL || !mR) GTEST_SKIP() << "model not found";
+  MeshGL64 comb;
+  comb.numProp = 3;
+  auto app = [&](const MeshGL64& m) {
+    const uint64_t base = comb.NumVert();
+    for (double d : m.vertProperties) comb.vertProperties.push_back(d);
+    for (uint64_t t : m.triVerts) comb.triVerts.push_back(t + base);
+  };
+  app(*mL);
+  app(*mR);
+  comb.runOriginalID.push_back(Manifold::ReserveIDs(1));
+  const Manifold::Impl in(comb);
+
+  const RegularizeResult r = RegularizeImpl(in, ImplEps(in));
+  EXPECT_EQ(r.counters.components, 4);
+  EXPECT_EQ(r.counters.clean, 3) << "3 components early-exit clean";
+  EXPECT_EQ(r.counters.dirty, 1) << "1 self-intersecting (coplanar) component";
+  ASSERT_TRUE(r.fatal.has_value())
+      << "the coplanar cross-operand component must fail closed";
+  EXPECT_EQ(*r.fatal, FatalReason::DirtyComponentUnresolved);
+  EXPECT_NE(r.detail.find("SoS"), std::string::npos)
+      << "fail-closed reason must name the SoS axis: " << r.detail;
+  EXPECT_FALSE(r.impl.has_value())
+      << "any component fail-closed suppresses the whole compose (no partial)";
+}
