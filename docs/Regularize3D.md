@@ -86,6 +86,12 @@ kernel-free, reusing boolean3's discipline rather than introducing an exact kern
   across the arrangement (unite non-crossing edges, one seed ray per connected
   cell-component, flood - the Winding03 discipline, boolean3.cpp:388). The deltas are
   +-1 integers, never near-zero, so the winding half is FP-safe by construction.
+  The cost the localizer's dissolution ("the component is the unit of scope") hid:
+  each seed cast is an O(ntri) winding query scoped to the component, so ONE large
+  component pays the whole-component cost - measured at seconds-per-query scale on the
+  largest corpus component (GT7081), with no adaptive orient3d kernel in the tree
+  today, so this is net-new surface area (.claude/lane-reports/
+  v5-verify-probe-1783913337.md).
 
 - ASSEMBLY. Build the arrangement cell complex; radial-order the halfedges around each
   arrangement edge; classify each cell by its integer w_S; emit the oriented boundary
@@ -170,19 +176,40 @@ R1. THE SELECTIVE WELD MAY HAVE BEEN DISSOLVED WRONGLY. B replaces a whole compo
     constructed intersection coordinates, rounded to double, can land sub-eps-distinct.
     If the ordinary assembly weld (the global eps grid) merges two exact-distinct B
     verts it re-manufactures the twin the arrangement just resolved; if it merges a
-    B-interior vert onto a boundary vert it corrupts B's topology. The claim that
-    B-internal welding is "ordinary assembly, re-gated once" is the load-bearing
-    assumption; a bounded/exempt internal weld may still be needed, and the re-gate
-    catches the failure but does not repair it.
+    B-interior vert onto a boundary vert it corrupts B's topology. The re-gate does NOT
+    backstop this failure: when the weld merges two exact-distinct B verts, the
+    triangles straddling the merge now share that vertex position, so
+    IsSelfIntersecting's shares-vertex skip drops the pair - a self-FOLD manufactured by
+    the merge is invisible to it. Only the validity half (IsManifold/Is2Manifold)
+    catches a weld outcome, and only the non-manifold one (a pinch/tear), never a fold.
+    Nor is a constant-radius bounded weld the escape: the wall-A weld-bump probe killed
+    it at every multiplier (too small re-manufactures the twin, too big collapses
+    slivers to holes). R1's honest rebuttal is B's own STRUCTURAL defense, not the gate:
+    the once-only construction rule (each intersection built once, referenced
+    everywhere) never makes two rounded images of one point, and radial assembly (not
+    projection, not self-location) has no O(seam^2) projected twins. The residual that
+    survives - two GENUINELY DISTINCT arrangement points rounding within eps and being
+    merged by the uniform weld - is open, neither cheaply weldable nor reliably
+    re-gated.
 
 R2. THE GATE'S SELF-COLLISION TEST MAY BE MORE EXPENSIVE / DIFFERENT THAN CLAIMED.
     IsSelfIntersecting is a broadphase + tri-tri distance over every component, run
     once per input component AND again on every B output. At GT7081 scale (tens of
-    thousands of tris) "cheap" needs measuring. Worse, its notion of self-intersection
-    (2*eps relaxation, shares-vertex skip) may not agree with B's arrangement notion: a
-    component could pass the gate yet carry a sub-eps self-overlap B should regularize
-    (a missed dirty component - silent), or fail the gate on a contact B would emit as
-    a clean touching boundary (a spurious dirty component - wasteful, not wrong).
+    thousands of tris) "cheap" needs measuring. Worse, the gate is systematically
+    CLEAN-biased: the 2*eps shares-vertex relaxation SUPPRESSES near-miss detection (it
+    returns non-intersecting when an eps normal nudge separates the pair) - it does not
+    flag near-misses - and that bias does not agree with B's arrangement notion. The
+    silent-miss direction is GATE-CLEAN but B-DIRTY: a genuine crossing whose two verts
+    sit in a near-degenerate band just outside the eps weld (distinct enough not to
+    merge, close enough to trip the 2*eps skip) passes the gate, EARLY-EXITS as clean,
+    and carries an unregularized self-overlap through silently - worse than fail-closed,
+    though narrow (it needs a near-degenerate config in that thin band). The reverse
+    (gate-dirty, B finds nothing) is near-empty: B's shared-vertex skip set is a subset
+    of the gate's distance skip set, so nothing the gate robustly flags is skipped by B;
+    the only case is a legitimate touching contact the gate flags and B re-emits clean -
+    wasteful, not wrong. R2(i) (gate-clean/B-dirty) and R1 are the SAME blind spot: the
+    weld-merge fold in R1 manufactures exactly the shared-vertex config the gate skips,
+    so the re-gate that would "catch" R1 IS the clean-biased gate R2 flags.
 
 R3. PER-COMPONENT SEMANTICS VS THE CONNECTIVITY BOUNDARY. Decompose splits by halfedge
     connectivity. Two solids touching at a shared edge or vertex are ONE connected
