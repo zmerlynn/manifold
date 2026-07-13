@@ -2468,11 +2468,13 @@ void FoldCoplanarClusters(std::vector<OutTri3D>& out, const Manifold::Impl& in,
   }
 }
 
-// Classify + emit the CLEAN (un-seamed) faces.  g_above is constant across any
-// mesh edge that carries no seam transition, and clean-clean edges never do, so
-// clean faces partition into patches of uniform coverage; one winding probe per
-// patch decides keep-whole vs drop.  A negative or filter-uncertain probe is a
-// known-open axis (subtraction / SoS) -> fail closed.
+// Classify + emit the CLEAN (un-seamed, un-folded) faces.  g_above is constant
+// across any mesh edge that carries no seam transition, and clean-clean edges
+// never do, so clean faces partition into patches of uniform coverage; one
+// winding probe per patch decides keep-whole vs drop by the SAME witness rule
+// as the seamed path (keep iff w_above == 0).  A NEGATIVE w_above is exterior
+// on both sides and DROPS (the axis-1 subtraction absorption), not a
+// fail-closed; only a filter-uncertain probe (the SoS axis) fails closed.
 bool EmitCleanFaces(std::vector<OutTri3D>& out, const Manifold::Impl& in,
                     const BuildArrangement& A,
                     const std::vector<int>& face2cluster,

@@ -2114,9 +2114,12 @@ TEST(Overlap3, Regularize_ExactZeroTie_Constructed_FailClosed) {
 
 // Real carrier: the GT7863 twin pair composed as ONE soup.  It decomposes into
 // 4 components; 3 are clean (early-exit) and ONE (216 tris) is
-// self-intersecting with COPLANAR cross-operand overlap.  The whole compose
-// fail-closes: any component fail-closed suppresses the entire output (no
-// partial resolve).
+// self-intersecting with COPLANAR cross-operand overlap.  The exact-coplanar
+// FOLD now CONSUMES that coplanar family (the dirty component's coplanar caps
+// cluster and fold), so the component fails closed on the STRICTLY NARROWER
+// residue: the NON-coplanar vertex-on-face / edge-on-edge point-SoS ties (the
+// single-global-SoS axis, PokedCube-class), not the coplanar axis.  The whole
+// compose still fail-closes (any component fail-closed suppresses the output).
 TEST(Overlap3, Regularize_ExactZeroTie_GT7863_FailClosed) {
   std::filesystem::path file(__FILE__);
   auto load = [&](const char* n) -> std::optional<MeshGL64> {
@@ -2143,11 +2146,182 @@ TEST(Overlap3, Regularize_ExactZeroTie_GT7863_FailClosed) {
   EXPECT_EQ(r.counters.components, 4);
   EXPECT_EQ(r.counters.clean, 3) << "3 components early-exit clean";
   EXPECT_EQ(r.counters.dirty, 1) << "1 self-intersecting (coplanar) component";
-  ASSERT_TRUE(r.fatal.has_value())
-      << "the coplanar cross-operand component must fail closed";
+  ASSERT_TRUE(r.fatal.has_value()) << "the point-SoS residue must fail closed";
   EXPECT_EQ(*r.fatal, FatalReason::DirtyComponentUnresolved);
   EXPECT_NE(r.detail.find("SoS"), std::string::npos)
       << "fail-closed reason must name the SoS axis: " << r.detail;
+  EXPECT_NE(r.detail.find("non-coplanar"), std::string::npos)
+      << "the fold consumes the coplanar family; the residue is NON-coplanar: "
+      << r.detail;
   EXPECT_FALSE(r.impl.has_value())
       << "any component fail-closed suppresses the whole compose (no partial)";
+}
+
+// ===========================================================================
+// Regularization axis: EXACT-COPLANAR IN-PLANE FOLD (docs/Regularize3D.md
+// coplanar axis).  Exactly-coplanar overlapping faces are folded in their
+// shared plane with a per-cell signed multiplicity; the generalized retention
+// w_below = w_above + m emits the {w_S>=1} boundary (mult-1 stays the existing
+// w_above==0 rule).  The self-intersection gate does NOT flag a pure coplanar
+// overlap (the doc's R2(i) blind spot), so these carriers are exercised through
+// the RegularizeDirtyDirect hook (candidate B on a soup treated as one dirty
+// component).  Each resolve is checked against an INDEPENDENT generalized
+// winding-number oracle (Van Oosterom-Strackee over the input soup) - a wrong
+// fold lands outside the band or disagrees on membership - plus tol-invariance.
+// ===========================================================================
+
+namespace coplanarfold {
+struct MB {
+  std::vector<double> vp;
+  std::vector<uint64_t> tv;
+  std::map<std::tuple<double, double, double>, uint64_t> idx;
+  uint64_t V(double x, double y, double z) {
+    auto key = std::make_tuple(x, y, z);
+    auto it = idx.find(key);
+    if (it != idx.end()) return it->second;
+    uint64_t id = vp.size() / 3;
+    vp.push_back(x);
+    vp.push_back(y);
+    vp.push_back(z);
+    idx.emplace(key, id);
+    return id;
+  }
+  void Quad(uint64_t a, uint64_t b, uint64_t c, uint64_t d) {
+    tv.push_back(a);
+    tv.push_back(b);
+    tv.push_back(c);
+    tv.push_back(a);
+    tv.push_back(c);
+    tv.push_back(d);
+  }
+  MeshGL64 Mesh() {
+    MeshGL64 m;
+    m.numProp = 3;
+    m.vertProperties = vp;
+    m.triVerts = tv;
+    m.runOriginalID.push_back(Manifold::ReserveIDs(1));
+    return m;
+  }
+};
+
+// Generalized winding number of an oriented triangle SOUP (Van Oosterom-
+// Strackee) - independent of candidate B's ray-crossing winding.
+double GWNsoup(const Manifold::Impl& in, const vec3& p) {
+  double sum = 0.0;
+  const int nTri = static_cast<int>(in.NumTri());
+  for (int t = 0; t < nTri; ++t) {
+    const vec3 A = in.vertPos_[in.halfedge_.Start(3 * t)] - p;
+    const vec3 B = in.vertPos_[in.halfedge_.Start(3 * t + 1)] - p;
+    const vec3 C = in.vertPos_[in.halfedge_.Start(3 * t + 2)] - p;
+    const double la_ = la::length(A), lb = la::length(B), lc = la::length(C);
+    const double det = la::dot(A, la::cross(B, C));
+    const double den = la_ * lb * lc + la::dot(A, B) * lc +
+                       la::dot(B, C) * la_ + la::dot(C, A) * lb;
+    sum += 2.0 * std::atan2(det, den);
+  }
+  return sum / (4.0 * 3.14159265358979323846);
+}
+
+// SLANT-PLUG carrier: box B's footprint STRICTLY inside box A's, both sharing
+// A's flat bottom (z=0) AND slanted top plane zt(x,y) EXACTLY (dyadic 0.5/0.25
+// coefficients over dyadic coords -> bit-exact coplanarity).  Both caps
+// coincide as mult-2 overlaps; B's walls are interior risers (no wall crosses
+// another face), so it is a PURE coplanar overlap - no transversal
+// entanglement. flipB inverts B (anti-oriented, mult-0 cancellation).
+MeshGL64 SlantPlug(bool flipB) {
+  MB b;
+  auto zt = [](double x, double y) { return 1.0 + 0.5 * x + 0.25 * y; };
+  auto sbox = [&](double x0, double x1, double y0, double y1, bool flip) {
+    auto T = [&](double x, double y) { return b.V(x, y, zt(x, y)); };
+    auto B = [&](double x, double y) { return b.V(x, y, 0); };
+    auto Q = [&](uint64_t p, uint64_t q, uint64_t r, uint64_t s) {
+      if (!flip)
+        b.Quad(p, q, r, s);
+      else
+        b.Quad(p, s, r, q);
+    };
+    Q(T(x0, y0), T(x1, y0), T(x1, y1), T(x0, y1));  // slanted top +z
+    Q(B(x0, y0), B(x0, y1), B(x1, y1), B(x1, y0));  // flat bottom -z
+    Q(B(x0, y0), B(x1, y0), T(x1, y0), T(x0, y0));  // -y wall
+    Q(B(x1, y0), B(x1, y1), T(x1, y1), T(x1, y0));  // +x wall
+    Q(B(x1, y1), B(x0, y1), T(x0, y1), T(x1, y1));  // +y wall
+    Q(B(x0, y1), B(x0, y0), T(x0, y0), T(x0, y1));  // -x wall
+  };
+  sbox(0, 3, 0, 2, false);          // A (outer)
+  sbox(0.5, 1.5, 0.5, 1.5, flipB);  // B (inner plug)
+  return b.Mesh();
+}
+
+// Run the fold and grade the resolve against the GWN oracle + tol-invariance.
+static void ExpectFoldResolves(const char* tag, bool flipB, double volLo,
+                               double volHi) {
+  const Manifold::Impl in(SlantPlug(flipB));
+  ASSERT_TRUE(in.IsManifold() && in.Is2Manifold()) << tag;
+  // The coplanar overlap is NOT flagged by the self-intersection gate (R2(i)),
+  // so route it to candidate B directly.  The carrier genuinely REACHES the
+  // fold: its coplanar caps form overlap clusters.
+  const CandidateBProbe p =
+      RegularizeB_Probe(in, {}, in.bBox_.Center() + vec3(97.1, 33.7, 51.3));
+  EXPECT_GT(p.coplanarClusterFaces, 0) << tag << " must reach the fold";
+  const double eps = EpsilonFromScale(in.bBox_.Scale(), 1000);
+
+  const RegularizeResult r = RegularizeDirtyDirect(in, eps);
+  ASSERT_FALSE(r.fatal.has_value())
+      << tag << " fold must resolve, not fail closed: " << r.detail;
+  ASSERT_TRUE(r.impl.has_value());
+  EXPECT_EQ(r.counters.regularized, 1);
+
+  const Manifold out(GetMeshGLImpl<double, uint64_t>(*r.impl, -1));
+  EXPECT_EQ(out.Status(), Manifold::Error::NoError) << tag;
+  EXPECT_FALSE(r.impl->IsSelfIntersecting())
+      << tag << " output self-intersects";
+  EXPECT_EQ(out.Decompose().size(), 1u) << tag << " must be one solid";
+  const double vol = out.Volume();
+  EXPECT_GT(vol, volLo) << tag << " volume below band";
+  EXPECT_LT(vol, volHi) << tag << " volume above band";
+
+  // INDEPENDENT GWN oracle: (w_soup>=1) == (w_out>0) at every unambiguous
+  // point.
+  std::mt19937 rng(0xC0FFEE);
+  const Box bb = out.BoundingBox();
+  const vec3 mn = bb.min - (bb.max - bb.min) * 0.05;
+  const vec3 mx = bb.max + (bb.max - bb.min) * 0.05;
+  std::uniform_real_distribution<double> U(0, 1);
+  std::vector<vec3> qs;
+  for (int k = 0; k < 8000; ++k)
+    qs.push_back(mn + (mx - mn) * vec3(U(rng), U(rng), U(rng)));
+  const auto wOut = out.WindingNumber(qs);
+  int disagree = 0, checked = 0;
+  for (int k = 0; k < static_cast<int>(qs.size()) && disagree < 5; ++k) {
+    const double g = GWNsoup(in, qs[k]);
+    if (std::abs(g - std::round(g)) > 0.15) continue;  // near-surface skip
+    ++checked;
+    if ((std::lround(g) >= 1) != (wOut[k] > 0.5)) {
+      ++disagree;
+      ADD_FAILURE() << tag << " GWN membership disagreement at (" << qs[k].x
+                    << "," << qs[k].y << "," << qs[k].z << ")";
+    }
+  }
+  EXPECT_GT(checked, 1000) << tag << " oracle undersampled";
+
+  // TOL-INVARIANCE: the retained topology is decided from input data, so the
+  // enclosed volume is invariant to the weld radius.
+  const RegularizeResult r2 = RegularizeDirtyDirect(in, eps * 0.5);
+  ASSERT_TRUE(r2.impl.has_value())
+      << tag << " tol-variant fatal: " << r2.detail;
+  const Manifold out2(GetMeshGLImpl<double, uint64_t>(*r2.impl, -1));
+  EXPECT_NEAR(vol, out2.Volume(), 1e-6 * vol) << tag << " not tol-invariant";
+}
+}  // namespace coplanarfold
+
+// Same-oriented mult-2 stack (B inside A, both caps coincident): {w_S>=1} = A
+// (B is buried), volume = 12 exactly.  A no-op or wrong fold fails the oracle.
+TEST(Overlap3, Regularize_CoplanarFold_Mult2_Resolves) {
+  coplanarfold::ExpectFoldResolves("mult2", /*flipB=*/false, 11.9, 12.1);
+}
+
+// Anti-oriented cancellation (B inverted inside A): the coincident caps cancel
+// (mult 0 -> dropped), {w_S>=1} = A minus B, volume = 12 - 1.75 = 10.25.
+TEST(Overlap3, Regularize_CoplanarFold_AntiCancellation_Resolves) {
+  coplanarfold::ExpectFoldResolves("anti", /*flipB=*/true, 10.15, 10.35);
 }
