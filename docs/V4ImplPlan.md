@@ -350,6 +350,33 @@ SEPARABLE / NOT-SEPARABLE verdict written back into stages C/D and the ratchet; 
 reverted (git diff src/ test/ empty). A0 is the go/no-go: stages B/C are scoped by its
 verdict.
 
+RECORDED RESULT (A0 lane, .claude/lane-reports/v4-a0-1783905089.md). VERDICT:
+NOT-SEPARABLE, both carriers (Havocglass8 and GT7863). The predicted outcome holds.
+  - Test (i) SEPARABILITY: NO incidence signature separates must-survive from
+    must-collapse. The signed-multiplicity channel FACT 1 named as the ONLY possible
+    disambiguator is CONSTANT +1 corpus-wide (measured on all A0 fixtures + Offset1,
+    self_intersectA, openscad: every canonical face mult +1, a single +2, NEVER
+    negative) - union/self-overlap windings cancel to zero (dropped at Canonicalize)
+    or stay +1, never a sign marker. Every other incidence channel (seam-degree,
+    nFaces, face-normal spread, per-member face-sharing/jaccard) is IDENTICAL between
+    the anchored clean-collapse control (Havoc's sub-eps dx twin) and the lump-region
+    collapse candidates; the sole distinguishing quantity is the positions-only spread
+    classifier the escape kill already had and proved inseparable. The jaccard
+    candidate is falsified by the population (the safe-collapse control shares the same
+    jaccard bucket as the lump candidates). Havoc's lump bounds on ZERO-incidence
+    right-operand verts; its collapse happens at EMISSION (cap-image clustering, a
+    steep-track transform of arr.vert spacing) below the arr.vert table's reach.
+  - Test (ii) DECISION-RULE: MOOT (no separator). Independently non-closable: Havoc by
+    escape-kill inseparability; GT7863 by the probe-4 dead zone (identity-informed
+    re-emission already tried, no window between the x-residual and the SubEpsFeature
+    macro backstop; the full table's only delta over probe-4 is C1, which does not
+    touch the dead zone).
+  - Test (iii) BLANK-TABLE: the isolated twin's incidence is the SAME degenerate class
+    (all +1) as the carriers, so the table carries no signal it consumes; the escape
+    kill's baseline is positions-only closure. FINDING: pin 4b's blank-table mutation
+    (2) is VACUOUS as specified (no fixture is both table-load-bearing AND closing);
+    pin 4b re-scoped below.
+
 ### Stage A: identity table construction (pass 1)
 
 MECHANISM: a new `BuildIdentityTable(arr, eps)` between FindSeams and BuildSlabs.
@@ -549,6 +576,18 @@ PIN 4 - per-carrier targets.
        TABLE -> the twin REOPENS. Mutation (2) is load-bearing: without it the pin
        validates positions-only closure the escape kill ALREADY proved works WITHOUT
        the table (probe 3's positive result), certifying nothing about the table.
+       A0 FINDING (v4-a0 lane): mutation (2) is VACUOUS as specified. Measured: an
+       isolated case-1 twin's arr.vert incidence is the SAME all-+1 degenerate class as
+       the entangled carriers (synthetic sub-eps twin: all faces mult +1, collapse-
+       cluster jaccard < 1) - the table carries NO signal it consumes for an isolated
+       twin, whose
+       closure is positions-only (escape kill). The table is load-bearing ONLY on
+       entangled clusters, which do NOT close (inseparability / dead zone), so NO
+       fixture is both table-load-bearing AND closing. RE-SCOPE pin 4b: drop mutation
+       (2), OR re-key the pin to the table's FAIL-CLOSED role - the table lets the
+       pipeline REFUSE correctly (a twin the table names one-junction is collapsed
+       oracle-true when isolated; a twin bracketing preserved macro content is refused,
+       not collapsed oracle-wrong) - assert that decision, not a carrier closure.
   (4c) PAIRS get EXACT Boolean oracles (volume + genus + winding): Havoc, GT7863,
        Cray, GT7081, hull. A resolve MUST match; a fail-closed MUST be a named guard.
   (4d) SINGLES get TOL-INVARIANCE contracts (resolve volume identical across a
@@ -605,6 +644,13 @@ ratchet:
     plan's honest deliverable is density wins + match-consistency + machinery
     simplification (section 0) - NOT "some may resolve". Either way the DONE names the
     carrier state-changes; "some may resolve" is removed.
+    A0 VERDICT (recorded): NOT-SEPARABLE for both A0 targets. THE MUST-MOVE SET IS
+    EMPTY. Havocglass8 and GT7863 stay recorded fail-closed (NonManifoldEmission);
+    GT7081 stays ArrangementBudget. No corpus PAIR is a must-move target - none was
+    found separable. Stage C/D's deliverable is therefore density wins (the stage-A
+    thinning subsumption, section 1.3) + match-consistency (pin 6) + machinery
+    simplification (section 0), and the honest fail-closed contracts, NOT carrier
+    resolution.
 
 MUTATION-VERIFICATION DISCIPLINE (every pin): the author re-runs the red against the
 named stub independently. A green claim from a build agent is re-run before it is
