@@ -1784,19 +1784,83 @@ TEST(Overlap3, Regularize_DirtySingleComponent_RoutesToFailClosedStub) {
   EXPECT_FALSE(r.impl.has_value());
 }
 
-// Pin 5 (Stage-2 handoff, RED now / GREEN when B lands): the same dirty single
-// component, once candidate B is built, must be REGULARIZED to the boundary of
-// {w_S >= 1} - fatal-free, a valid manifold, self-intersection removed.  Left
-// DISABLED until B lands; enabling it is the acceptance test for Stage 2.
-TEST(Overlap3, DISABLED_Regularize_DirtySingleComponent_Regularized) {
-  const Manifold::Impl dirty = PokedCube();
-  const RegularizeResult r = RegularizeImpl(dirty, ImplEps(dirty));
-  ASSERT_FALSE(r.fatal.has_value()) << "B must resolve the dirty component";
+// Pin 5 (Stage-2 acceptance, RED now / GREEN when B lands): the corpus single-
+// shell self-intersectors self_intersectA/B - genuine w_S in {0,1,2} dirty
+// components with NO negative winding (the clean, safe-by-margin B target;
+// PokedCube reaches w_S=-1, an openscad-class negative-winding KNOWN-OPEN, so
+// it is deliberately NOT the resolve fixture) - must be REGULARIZED to the
+// boundary of {w_S >= 1}.  The acceptance battery is GEOMETRIC, not just "some
+// clean shape" (the Stage-1 verify lane found the prior pin greened against a
+// stub returning an unrelated clean cube): the emitted boundary must enclose
+// the {w_S>=1} volume within an INDEPENDENT reference band, be one connected
+// solid, and be tol-invariant.
+//
+// Reference figures (independent MC winding-integration oracle, N=4e5, three
+// cocycle-checked seeds; and a grid flood-fill component oracle stable over
+// G=40/56/72 - see reg3d-s2 lane notebook):
+//   self_intersectA: vol(w>=1) = 0.1438 +- 1e-3, {w>=1} = 1 component
+//   self_intersectB: vol(w>=1) = 0.1446 +- 1e-3, {w>=1} = 1 component
+// The volume bands below are wide enough for eps-noise + oracle variance yet
+// reject any clean-but-WRONG B (a unit cube = 1.0, a bbox cube ~3.2 are both
+// decisively outside).  Scalars compared, no coordinate dumps (house
+// discipline).
+static void ExpectSelfIntersectorRegularizes(const char* name, double volLo,
+                                             double volHi) {
+  std::filesystem::path file(__FILE__);
+  std::ifstream fin((file.parent_path() / "models" / name).string());
+  if (!fin.is_open()) GTEST_SKIP() << "model not found";
+  const MeshGL64 mesh = ReadOBJ(fin);
+  const Manifold::Impl in(mesh);
+  ASSERT_TRUE(in.IsManifold() && in.Is2Manifold())
+      << name << " fixture must be a valid 2-manifold";
+  ASSERT_TRUE(in.IsSelfIntersecting())
+      << name << " fixture must be a dirty single component";
+  const double eps = ImplEps(in);
+
+  const RegularizeResult r = RegularizeImpl(in, eps);
+  ASSERT_FALSE(r.fatal.has_value())
+      << name << " B must resolve, not fail closed: " << r.detail;
   ASSERT_TRUE(r.impl.has_value());
+  EXPECT_EQ(r.counters.components, 1);
+  EXPECT_EQ(r.counters.dirty, 1);
   EXPECT_EQ(r.counters.regularized, 1);
   EXPECT_EQ(r.counters.failClosed, 0);
+
+  // Output re-gate: a valid closed 2-manifold with the self-overlap removed.
   const Manifold out(GetMeshGLImpl<double, uint64_t>(*r.impl, -1));
-  EXPECT_EQ(out.Status(), Manifold::Error::NoError);
+  EXPECT_EQ(out.Status(), Manifold::Error::NoError)
+      << name << " output is not a valid manifold";
   EXPECT_FALSE(r.impl->IsSelfIntersecting())
-      << "regularized output must be self-intersection-free";
+      << name << " output still self-intersects";
+
+  // GEOMETRIC CORRECTNESS: the emitted boundary encloses the {w_S>=1} volume
+  // (independent MC oracle band) - a clean-but-WRONG B lands outside and reds.
+  const double vol = out.Volume();
+  EXPECT_GT(vol, volLo) << name << " {w>=1} volume below the reference band";
+  EXPECT_LT(vol, volHi) << name << " {w>=1} volume above the reference band";
+
+  // TOPOLOGY SANITY: {w>=1} is one connected solid (grid oracle); genus finite.
+  EXPECT_EQ(out.Decompose().size(), 1u)
+      << name << " {w>=1} must be exactly one solid";
+  EXPECT_GE(out.Genus(), 0) << name << " degenerate genus";
+
+  // TOL-INVARIANCE: the output TOPOLOGY is decided from input data, not from
+  // rounded positions, so the enclosed volume is invariant to the weld radius.
+  // A second run at a tightened eps must reproduce it (a tol-dependent resolve
+  // would drift).
+  const RegularizeResult r2 = RegularizeImpl(in, eps * 0.5);
+  ASSERT_FALSE(r2.fatal.has_value())
+      << name << " tol-variant run fatal: " << r2.detail;
+  ASSERT_TRUE(r2.impl.has_value());
+  const Manifold out2(GetMeshGLImpl<double, uint64_t>(*r2.impl, -1));
+  EXPECT_NEAR(vol, out2.Volume(), 1e-3 * vol)
+      << name << " enclosed volume is not tol-invariant";
+}
+
+TEST(Overlap3, DISABLED_Regularize_SelfIntersectA_Regularized) {
+  ExpectSelfIntersectorRegularizes("self_intersectA.obj", 0.130, 0.158);
+}
+
+TEST(Overlap3, DISABLED_Regularize_SelfIntersectB_Regularized) {
+  ExpectSelfIntersectorRegularizes("self_intersectB.obj", 0.130, 0.160);
 }
