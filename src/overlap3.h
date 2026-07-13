@@ -270,11 +270,20 @@ Overlap3Internals RemoveOverlaps3D_TestHooks(const Manifold::Impl& in,
 struct CandidateBProbe {
   int seamCount = 0;
   int boundaryTouchPairs = 0;
+  int coplanarClusterFaces = 0;  // faces in an exact-coplanar overlap cluster
   std::vector<int> probeWinding;
 };
 constexpr int kWindingUncertain = INT_MIN;
 CandidateBProbe RegularizeB_Probe(const Manifold::Impl& dirty,
                                   const std::vector<vec3>& probes,
                                   const vec3& seed);
+
+// Test hook: run candidate B (fold + build + re-gate) directly on a soup
+// treated as ONE dirty component, bypassing decompose and the
+// IsSelfIntersecting gate. The self-intersection gate does not flag a pure
+// coplanar overlap, so this hook is the way to exercise the exact-coplanar
+// fold's RESOLVE path on an isolated coplanar cluster (no transversal
+// entanglement).
+RegularizeResult RegularizeDirtyDirect(const Manifold::Impl& soup, double eps);
 
 }  // namespace manifold

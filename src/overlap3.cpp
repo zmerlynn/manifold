@@ -1531,6 +1531,118 @@ BEnumeration EnumerateSelfCrossings(const Manifold::Impl& in) {
   return out;
 }
 
+// EXACT-COPLANAR FOLD, cluster detection (docs/Regularize3D.md coplanar axis).
+// Union non-self-adjacent, bbox-overlapping faces that are EXACTLY coplanar -
+// every vertex of each lies on the other's plane, decided by the level-0
+// orient3d filter (all six cross-checks certified 0).  The filter returns 0
+// only when the vertex is within ~1 ULP (relative) of the plane, i.e. the
+// coplanarity gap is far below eps (the machine weld radius), so projecting the
+// cluster onto one plane is eps-valid.  The NEAR-coplanar thin band (gap above
+// the filter's error bound but below eps) has a NONZERO filter sign, is NOT
+// clustered here, and stays the transversal / fail-closed residue the mission
+// leaves open.  Returns a per-face cluster id, or -1 for a face in no
+// multi-face coplanar cluster (the ordinary transversal path).
+std::vector<int> DetectCoplanarClusters(const Manifold::Impl& in) {
+  const int nTri = static_cast<int>(in.NumTri());
+  std::vector<std::array<vec3, 3>> tri(nTri);
+  std::vector<std::array<int, 3>> vid(nTri);
+  std::vector<vec3> lo(nTri), hi(nTri);
+  for (int t = 0; t < nTri; ++t) {
+    for (int k = 0; k < 3; ++k) {
+      vid[t][k] = in.halfedge_.Start(3 * t + k);
+      tri[t][k] = in.vertPos_[vid[t][k]];
+    }
+    lo[t] = la::min(la::min(tri[t][0], tri[t][1]), tri[t][2]);
+    hi[t] = la::max(la::max(tri[t][0], tri[t][1]), tri[t][2]);
+  }
+  auto bboxOverlap = [&](int i, int j) {
+    return !(hi[i].x < lo[j].x || hi[j].x < lo[i].x || hi[i].y < lo[j].y ||
+             hi[j].y < lo[i].y || hi[i].z < lo[j].z || hi[j].z < lo[i].z);
+  };
+  auto sharesVert = [&](int i, int j) {
+    for (int a = 0; a < 3; ++a)
+      for (int b = 0; b < 3; ++b)
+        if (vid[i][a] == vid[j][b]) return true;
+    return false;
+  };
+  auto coplanar = [&](int i, int j) {
+    for (int k = 0; k < 3; ++k)
+      if (Orient3DFilterSign(tri[i][0], tri[i][1], tri[i][2], tri[j][k]) != 0)
+        return false;
+    for (int k = 0; k < 3; ++k)
+      if (Orient3DFilterSign(tri[j][0], tri[j][1], tri[j][2], tri[i][k]) != 0)
+        return false;
+    return true;
+  };
+  // Do the two coplanar triangles share positive 2D area?  Only genuinely
+  // OVERLAPPING coplanar faces need folding; the coplanar tiles of one flat
+  // face (an annulus, a subdivided facet) merely abut and must NOT cluster - a
+  // vertex strictly inside the other, or a properly-crossing edge pair, is the
+  // area-overlap witness (triangles are convex, so this is exhaustive).
+  auto overlap2D = [&](int i, int j) {
+    const vec3 e1 = la::normalize(tri[i][1] - tri[i][0]);
+    const vec3 nrm = la::cross(tri[i][1] - tri[i][0], tri[i][2] - tri[i][0]);
+    const double nl = la::length(nrm);
+    if (!(nl > 0.0)) return false;
+    const vec3 e2 = la::cross(nrm / nl, e1);
+    const vec3 o = tri[i][0];
+    auto pr = [&](const vec3& P) {
+      return vec2(la::dot(P - o, e1), la::dot(P - o, e2));
+    };
+    vec2 A[3] = {pr(tri[i][0]), pr(tri[i][1]), pr(tri[i][2])};
+    vec2 B[3] = {pr(tri[j][0]), pr(tri[j][1]), pr(tri[j][2])};
+    auto cr = [](const vec2& u, const vec2& v) {
+      return u.x * v.y - u.y * v.x;
+    };
+    auto strictIn = [&](const vec2& p, const vec2* T) {
+      const double d0 = cr(T[1] - T[0], p - T[0]);
+      const double d1 = cr(T[2] - T[1], p - T[1]);
+      const double d2 = cr(T[0] - T[2], p - T[2]);
+      const bool neg = d0 < 0 || d1 < 0 || d2 < 0;
+      const bool pos = d0 > 0 || d1 > 0 || d2 > 0;
+      return !(neg && pos) && d0 != 0 && d1 != 0 && d2 != 0;
+    };
+    for (int k = 0; k < 3; ++k)
+      if (strictIn(A[k], B) || strictIn(B[k], A)) return true;
+    auto proper = [&](const vec2& p1, const vec2& p2, const vec2& p3,
+                      const vec2& p4) {
+      const double d1 = cr(p2 - p1, p3 - p1), d2 = cr(p2 - p1, p4 - p1);
+      const double d3 = cr(p4 - p3, p1 - p3), d4 = cr(p4 - p3, p2 - p3);
+      return ((d1 > 0) != (d2 > 0)) && ((d3 > 0) != (d4 > 0)) && d1 != 0 &&
+             d2 != 0 && d3 != 0 && d4 != 0;
+    };
+    for (int a = 0; a < 3; ++a)
+      for (int b = 0; b < 3; ++b)
+        if (proper(A[a], A[(a + 1) % 3], B[b], B[(b + 1) % 3])) return true;
+    return false;
+  };
+  DisjointSets uf(nTri);
+  bool any = false;
+  for (int i = 0; i < nTri; ++i)
+    for (int j = i + 1; j < nTri; ++j) {
+      if (!bboxOverlap(i, j) || sharesVert(i, j)) continue;
+      if (coplanar(i, j) && overlap2D(i, j)) {
+        uf.unite(i, j);
+        any = true;
+      }
+    }
+  std::vector<int> face2cluster(nTri, -1);
+  if (!any) return face2cluster;
+  std::map<int, int> rootCount;
+  for (int f = 0; f < nTri; ++f) ++rootCount[static_cast<int>(uf.find(f))];
+  std::map<int, int> rootId;
+  int nc = 0;
+  for (int f = 0; f < nTri; ++f) {
+    const int r = static_cast<int>(uf.find(f));
+    if (rootCount[r] > 1) {
+      auto it = rootId.find(r);
+      if (it == rootId.end()) it = rootId.emplace(r, nc++).first;
+      face2cluster[f] = it->second;
+    }
+  }
+  return face2cluster;
+}
+
 // Coupled soup winding w_S(p): the signed count of oriented-face crossings on
 // the ray p->seed, every crossing decided by level-0 orient3d through the
 // static filter (the Winding03 discipline, boolean3.cpp:388).  The delta per
@@ -1639,7 +1751,13 @@ struct BuildArrangement {
 
 // Enumerate the self-crossing arrangement AND record each seam's canonical 3D
 // segment per incident face (the geometry EnumerateSelfCrossings only counted).
-BuildArrangement RecordSeams(const Manifold::Impl& in) {
+// `face2cluster` (from DetectCoplanarClusters) marks exactly-coplanar face
+// groups: same-cluster pairs are SKIPPED here (the in-plane fold resolves them,
+// not the transversal seam machinery), so their exact-zero pierce ties do not
+// raise A.boundaryTouch.  A cross-cluster / non-coplanar exact-zero tie still
+// sets boundaryTouch (the SoS residue).
+BuildArrangement RecordSeams(const Manifold::Impl& in,
+                             const std::vector<int>& face2cluster) {
   BuildArrangement A;
   const int nTri = static_cast<int>(in.NumTri());
   A.tri.resize(nTri);
@@ -1690,10 +1808,23 @@ BuildArrangement RecordSeams(const Manifold::Impl& in) {
         if (A.vid[i][a] == A.vid[j][b]) return true;
     return false;
   };
+  // Vertices used by each coplanar cluster (all lie on that cluster's plane):
+  // an edge touching a folded plane at one of ITS OWN cluster vertices is a
+  // riser vertex, not a transversal vertex-on-face SoS tie.
+  int nClusters = 0;
+  for (int c : face2cluster) nClusters = std::max(nClusters, c + 1);
+  std::vector<std::set<int>> clusterVerts(nClusters);
+  for (int f = 0; f < nTri; ++f)
+    if (face2cluster[f] >= 0)
+      for (int k = 0; k < 3; ++k)
+        clusterVerts[face2cluster[f]].insert(A.vid[f][k]);
   for (int i = 0; i < nTri; ++i) {
     for (int j = i + 1; j < nTri; ++j) {
       if (!bboxOverlap(i, j)) continue;
       if (sharesVert(i, j)) continue;
+      // Same exactly-coplanar cluster: the in-plane fold owns this pair; its
+      // exact-zero pierce ties are not a seam and not an SoS boundary-touch.
+      if (face2cluster[i] >= 0 && face2cluster[i] == face2cluster[j]) continue;
       const auto& T0 = A.tri[i];
       const auto& T1 = A.tri[j];
       // Collect the up-to-two seam endpoints: i's edges piercing tri j (keyed
@@ -1704,13 +1835,82 @@ BuildArrangement RecordSeams(const Manifold::Impl& in) {
       std::array<int, 4> ptTri;  // piercedTri per endpoint (interiority source)
       int nPts = 0;
       bool boundary = false;
+      // An edge of `owner` that only TOUCHES `tgt`'s plane (does not cross it)
+      // is a boundary contact, not a transversal crossing, so it adds no
+      // winding jump.  Two flavors are benign:
+      //  - EDGE-IN-PLANE (both endpoints on the plane): in a valid 2-manifold
+      //  the
+      //    edge lies outside tgt's triangle or on a shared (skipped) boundary,
+      //    so benign when tgt is unfolded; when tgt is a folded cluster face it
+      //    is benign only if the edge is that cluster's own boundary (opposite
+      //    face a cluster member) - a wall rising off the fold, already a
+      //    constraint.
+      //  - CLUSTER-VERTEX-ON-PLANE (one endpoint on the plane, and that
+      //  endpoint
+      //    is one of tgt's cluster's OWN vertices): a riser vertex of the fold,
+      //    not the transversal vertex-on-face SoS tie.
+      // Anything else (a non-cluster vertex on a face, or an edge-edge
+      // crossing) stays the single-global-SoS residue.
+      auto benignInPlane = [&](int owner, int e, int tgt) {
+        const int e1 = (e + 1) % 3;
+        const int su = Orient3DFilterSign(A.tri[tgt][0], A.tri[tgt][1],
+                                          A.tri[tgt][2], A.tri[owner][e]);
+        const int sv = Orient3DFilterSign(A.tri[tgt][0], A.tri[tgt][1],
+                                          A.tri[tgt][2], A.tri[owner][e1]);
+        if (su == 0 && sv == 0) {  // edge-in-plane
+          if (face2cluster[tgt] < 0) return true;
+          const int pairFace =
+              static_cast<int>(in.halfedge_.Pair(3 * owner + e)) / 3;
+          return face2cluster[pairFace] == face2cluster[tgt];
+        }
+        if ((su == 0) != (sv == 0)) {  // vertex-on-plane
+          const int onV = (su == 0) ? A.vid[owner][e] : A.vid[owner][e1];
+          // A cluster vertex on its own folded plane is a fold-owned riser.
+          if (face2cluster[tgt] >= 0 &&
+              clusterVerts[face2cluster[tgt]].count(onV) > 0)
+            return true;
+          // A vertex on tgt's plane but strictly OUTSIDE tgt's triangle does
+          // not touch tgt's face - benign (a valid-manifold corner grazing an
+          // adjacent face's plane).  Only a vertex inside / on tgt's triangle
+          // is the vertex-on-face SoS tie.
+          const vec3& p =
+              A.vid[owner][e] == onV ? A.tri[owner][e] : A.tri[owner][e1];
+          const vec3 n = la::cross(A.tri[tgt][1] - A.tri[tgt][0],
+                                   A.tri[tgt][2] - A.tri[tgt][0]);
+          const double area2 = la::length2(n);
+          if (!(area2 > 0.0)) return false;
+          const double margin = area2 * 1e-9;
+          const double s0 = la::dot(
+              n, la::cross(A.tri[tgt][1] - A.tri[tgt][0], p - A.tri[tgt][0]));
+          const double s1 = la::dot(
+              n, la::cross(A.tri[tgt][2] - A.tri[tgt][1], p - A.tri[tgt][1]));
+          const double s2 = la::dot(
+              n, la::cross(A.tri[tgt][0] - A.tri[tgt][2], p - A.tri[tgt][2]));
+          return s0 < -margin || s1 < -margin || s2 < -margin;
+        }
+        return false;  // edge-edge crossing tie: real
+      };
+      // An edge whose BOTH endpoints are vertices of one coplanar cluster lies
+      // in that cluster's folded plane; its exact-zero grazes are coplanar
+      // in-plane incidences the fold owns (cluster-face edges and the cap edges
+      // of walls rising off the fold).  A genuine transversal cross of a
+      // cluster face is a PIERCE (r==1) recorded as a seam and caught as
+      // entanglement; only a graze OUTSIDE every cluster plane is the SoS
+      // residue.
+      auto edgeInClusterPlane = [&](int owner, int e) {
+        const int a = A.vid[owner][e], b = A.vid[owner][(e + 1) % 3];
+        for (int c = 0; c < nClusters; ++c)
+          if (clusterVerts[c].count(a) && clusterVerts[c].count(b)) return true;
+        return false;
+      };
       for (int e = 0; e < 3; ++e) {
         const int r =
             EdgePiercesTri(T0[e], T0[(e + 1) % 3], T1[0], T1[1], T1[2]);
         if (r == 1 && nPts < 4) {
           ptTri[nPts] = j;  // pierces tri j -> on i's edge, interior to j
           pts[nPts++] = pierce(A.vid[i][e], A.vid[i][(e + 1) % 3], j);
-        } else if (r == -1)
+        } else if (r == -1 && !edgeInClusterPlane(i, e) &&
+                   !benignInPlane(i, e, j))
           boundary = true;
       }
       for (int e = 0; e < 3; ++e) {
@@ -1719,11 +1919,25 @@ BuildArrangement RecordSeams(const Manifold::Impl& in) {
         if (r == 1 && nPts < 4) {
           ptTri[nPts] = i;  // pierces tri i -> on j's edge, interior to i
           pts[nPts++] = pierce(A.vid[j][e], A.vid[j][(e + 1) % 3], i);
-        } else if (r == -1)
+        } else if (r == -1 && !edgeInClusterPlane(j, e) &&
+                   !benignInPlane(j, e, i))
           boundary = true;
       }
       if (boundary) {
-        A.boundaryTouch = true;
+        // A COPLANAR exact-zero tie is never a transversal crossing: the two
+        // faces share a plane, so this is either a folded cluster pair (skipped
+        // above) or a benign non-overlapping coplanar contact.  Only a
+        // NON-coplanar exact-zero tie (a vertex-on-face / edge-on-edge
+        // incidence between transversal faces) is the single-global-SoS
+        // residue.
+        bool coplanar = true;
+        for (int k = 0; k < 3 && coplanar; ++k)
+          if (Orient3DFilterSign(T0[0], T0[1], T0[2], T1[k]) != 0)
+            coplanar = false;
+        for (int k = 0; k < 3 && coplanar; ++k)
+          if (Orient3DFilterSign(T1[0], T1[1], T1[2], T0[k]) != 0)
+            coplanar = false;
+        if (!coplanar) A.boundaryTouch = true;
         continue;
       }
       if (nPts == 0) continue;  // no genuine crossing
@@ -1754,9 +1968,16 @@ BuildArrangement RecordSeams(const Manifold::Impl& in) {
 // malformed walk.  Standard halfedge face traversal: the outgoing half-edges at
 // each vertex are angularly ordered and next(u->v) is the outgoing edge at v
 // immediately CLOCKWISE from v->u, which keeps the cell interior on the left.
+// `holes`, when non-null, receives the CW (negative-area) boundary walks: the
+// unbounded outer face AND any interior hole loops (a face nested inside
+// another, e.g. one coplanar triangle contained in another).  The seamed-face
+// path passes nullptr (its cells are simply connected).  The coplanar fold uses
+// them to triangulate multiply-connected cells so a contained region is not
+// double-covered.
 bool ExtractCells(const std::vector<vec2>& pts,
                   const std::vector<std::pair<int, int>>& uedges,
-                  std::vector<std::vector<int>>& cells) {
+                  std::vector<std::vector<int>>& cells,
+                  std::vector<std::vector<int>>* holes = nullptr) {
   const int n = static_cast<int>(pts.size());
   std::vector<std::set<int>> nbr(n);
   for (const auto& e : uedges) {
@@ -1812,7 +2033,10 @@ bool ExtractCells(const std::vector<vec2>& pts,
         const vec2 p = pts[loop[k]], q = pts[loop[(k + 1) % loop.size()]];
         area += p.x * q.y - q.x * p.y;
       }
-      if (area > 0.0) cells.push_back(std::move(loop));
+      if (area > 0.0)
+        cells.push_back(std::move(loop));
+      else if (holes && loop.size() >= 3)
+        holes->push_back(std::move(loop));
     }
   return true;
 }
@@ -1953,23 +2177,319 @@ void EmitSeamedFace(std::vector<OutTri3D>& out, const BuildArrangement& A,
   }
 }
 
+// 2D point-in-triangle (inclusive), orientation-agnostic: true iff p is on the
+// same side (or on) all three directed edges under either winding.
+bool PointInTri2D(const vec2& p, const vec2& a, const vec2& b, const vec2& c) {
+  auto cr = [](const vec2& u, const vec2& v) { return u.x * v.y - u.y * v.x; };
+  const double d1 = cr(b - a, p - a), d2 = cr(c - b, p - b),
+               d3 = cr(a - c, p - c);
+  const bool neg = d1 < 0.0 || d2 < 0.0 || d3 < 0.0;
+  const bool pos = d1 > 0.0 || d2 > 0.0 || d3 > 0.0;
+  return !(neg && pos);
+}
+
+// EXACT-COPLANAR IN-PLANE FOLD (docs/Regularize3D.md coplanar axis).  Each
+// cluster of exactly-coplanar faces (DetectCoplanarClusters) is overlaid in its
+// shared plane: RemoveOverlaps2D arranges the members' triangle boundaries (an
+// arrangement primitive - coplanar edge crossings ARE new vertices, all exact
+// in-plane reconstructions, unlike a transversal triple point), ExtractCells
+// yields the non-overlapping sub-faces, and each sub-face carries an integer
+// MULT m = the net signed in-plane cover (anti-oriented content cancels, same-
+// oriented sums).  Retention generalizes B's mult-1 rule: with w_below =
+// w_above + m (the 3D winding jump across the plane equals the coincident
+// cover, so it is SELF-CHECKED against the real coupled winding on both sides),
+// a sub-face is on d{w_S>=1} iff EXACTLY ONE side is inside {w>=1}; the solid
+// side fixes the emitted orientation.  m==0 (pure cancellation) drops.  A
+// cluster face that is ALSO transversally seamed is the coplanar/transversal
+// ENTANGLEMENT (a seam line would straddle a cell); that stays fail-closed with
+// its own named reason, distinct from the near-coplanar residue.  Any
+// degenerate projection, malformed cell walk, filter-uncertain winding, or
+// self-check mismatch fails closed (never a silent wrong resolve).
+void FoldCoplanarClusters(std::vector<OutTri3D>& out, const Manifold::Impl& in,
+                          const BuildArrangement& A,
+                          const std::vector<int>& face2cluster,
+                          const std::vector<vec3>& seeds, double eps,
+                          bool& ok) {
+  int nc = 0;
+  for (int c : face2cluster) nc = std::max(nc, c + 1);
+  if (nc == 0) return;
+  std::vector<std::vector<int>> clusters(nc);
+  for (int f = 0; f < static_cast<int>(face2cluster.size()); ++f)
+    if (face2cluster[f] >= 0) clusters[face2cluster[f]].push_back(f);
+
+  for (const std::vector<int>& faces : clusters) {
+    // ENTANGLEMENT: a cluster face pierced transversally by a non-coplanar face
+    // (a seam that would split a fold cell). Fail closed with a distinct
+    // reason.
+    for (int f : faces)
+      if (A.seamed[f]) {
+        ok = false;
+        return;
+      }
+    const int f0 = faces[0];
+    const double nLen = la::length(A.faceN[f0]);
+    if (!(nLen > 0.0)) {
+      ok = false;
+      return;
+    }
+    const vec3 nHat = A.faceN[f0] / nLen;
+    const vec3 a0 = A.tri[f0][0];
+    const vec3 e1raw = A.tri[f0][1] - a0;
+    const double e1Len = la::length(e1raw);
+    if (!(e1Len > 0.0)) {
+      ok = false;
+      return;
+    }
+    const vec3 e1 = e1raw / e1Len;
+    const vec3 e2 = la::cross(nHat, e1);
+    auto proj = [&](const vec3& P) {
+      return vec2(la::dot(P - a0, e1), la::dot(P - a0, e2));
+    };
+
+    // Input verts (dedup by canonical 3D bit pattern) + triangle-boundary
+    // edges; each member triangle carries its signed orientation vs nHat.
+    std::vector<vec2> verts2;
+    std::vector<vec3> canon3;
+    std::map<std::tuple<double, double, double>, int> vidx;
+    auto getV = [&](const vec3& P) {
+      const std::tuple<double, double, double> key{P.x, P.y, P.z};
+      auto it = vidx.find(key);
+      if (it != vidx.end()) return it->second;
+      const int id = static_cast<int>(verts2.size());
+      verts2.push_back(proj(P));
+      canon3.push_back(P);
+      vidx.emplace(key, id);
+      return id;
+    };
+    struct FaceTri {
+      vec2 p0, p1, p2;
+      int s;
+    };
+    struct Seg {
+      int a, b;
+    };
+    std::vector<FaceTri> ftris;
+    // Directed triangle-boundary edges; an edge shared by two triangles of the
+    // SAME member facet (a quad's diagonal) appears in both directions and is
+    // NOT a real arrangement boundary - cancel it, else it would split the fold
+    // caps (crossing another face's outline) without splitting that face's
+    // walls, manufacturing a T-junction.
+    std::map<std::pair<int, int>, int> dir;  // (min,max) -> net signed count
+    for (int f : faces) {
+      const int i0 = getV(A.tri[f][0]), i1 = getV(A.tri[f][1]),
+                i2 = getV(A.tri[f][2]);
+      const int tv[3] = {i0, i1, i2};
+      for (int k = 0; k < 3; ++k) {
+        int a = tv[k], b = tv[(k + 1) % 3];
+        dir[{std::min(a, b), std::max(a, b)}] += (a < b) ? 1 : -1;
+      }
+      const int s = (la::dot(A.faceN[f], nHat) > 0.0) ? 1 : -1;
+      ftris.push_back({verts2[i0], verts2[i1], verts2[i2], s});
+    }
+    std::vector<Seg> segs;
+    for (const auto& [e, net] : dir)
+      if (net != 0) segs.push_back({e.first, e.second});  // boundary edges only
+
+    // Build the 2D arrangement DIRECTLY: coplanar member triangles overlap, so
+    // their boundary segments cross in-plane (RemoveOverlaps2D does not split
+    // overlapping coplanar input).  Collect the input verts + every proper
+    // pairwise segment crossing, dedup within eps, split each segment at the
+    // crossings on it.  Every arrangement vertex lies in this exact plane, so
+    // its 3D image is a0 + x*e1 + y*e2 (an input vert keeps its canonical 3D).
+    std::vector<vec2> pts = verts2;
+    std::vector<vec3> pts3 = canon3;
+    auto getP = [&](const vec2& q) {
+      for (int k = 0; k < static_cast<int>(pts.size()); ++k)
+        if (std::abs(pts[k].x - q.x) <= eps && std::abs(pts[k].y - q.y) <= eps)
+          return k;
+      const int id = static_cast<int>(pts.size());
+      pts.push_back(q);
+      pts3.push_back(a0 + q.x * e1 + q.y * e2);
+      return id;
+    };
+    auto cr = [](const vec2& u, const vec2& v) {
+      return u.x * v.y - u.y * v.x;
+    };
+    std::vector<std::vector<int>> onSeg(segs.size());  // vert ids on each seg
+    for (size_t s = 0; s < segs.size(); ++s) {
+      onSeg[s].push_back(segs[s].a);
+      onSeg[s].push_back(segs[s].b);
+    }
+    for (size_t s = 0; s < segs.size(); ++s)
+      for (size_t t = s + 1; t < segs.size(); ++t) {
+        const vec2 p1 = verts2[segs[s].a], p2 = verts2[segs[s].b];
+        const vec2 p3 = verts2[segs[t].a], p4 = verts2[segs[t].b];
+        const double d = cr(p2 - p1, p4 - p3);
+        if (std::abs(d) < 1e-30) continue;  // parallel/collinear
+        const double ta = cr(p3 - p1, p4 - p3) / d;
+        const double tb = cr(p3 - p1, p2 - p1) / d;
+        if (ta <= 1e-12 || ta >= 1.0 - 1e-12 || tb <= 1e-12 ||
+            tb >= 1.0 - 1e-12)
+          continue;  // not a proper interior crossing
+        const int v = getP(p1 + ta * (p2 - p1));
+        onSeg[s].push_back(v);
+        onSeg[t].push_back(v);
+      }
+    std::vector<std::pair<int, int>> uedges;
+    for (size_t s = 0; s < segs.size(); ++s) {
+      const vec2 base = verts2[segs[s].a], dir = verts2[segs[s].b] - base;
+      const double len2 = la::dot(dir, dir);
+      std::sort(onSeg[s].begin(), onSeg[s].end(), [&](int p, int q) {
+        return la::dot(pts[p] - base, dir) < la::dot(pts[q] - base, dir);
+      });
+      onSeg[s].erase(std::unique(onSeg[s].begin(), onSeg[s].end()),
+                     onSeg[s].end());
+      (void)len2;
+      for (size_t k = 0; k + 1 < onSeg[s].size(); ++k)
+        if (onSeg[s][k] != onSeg[s][k + 1])
+          uedges.push_back({onSeg[s][k], onSeg[s][k + 1]});
+    }
+
+    std::vector<std::vector<int>> cells, holeLoops;
+    if (!ExtractCells(pts, uedges, cells, &holeLoops)) {
+      ok = false;
+      return;
+    }
+    // Signed 2D area (CCW>0) helper, and point-strictly-inside-loop test, to
+    // attach each interior hole loop to the smallest cell that contains it (a
+    // coplanar face fully inside another becomes a hole, not a separate cell).
+    auto loopArea = [&](const std::vector<int>& L) {
+      double ar = 0.0;
+      for (size_t k = 0; k < L.size(); ++k) {
+        const vec2 p = pts[L[k]], q = pts[L[(k + 1) % L.size()]];
+        ar += p.x * q.y - q.x * p.y;
+      }
+      return 0.5 * ar;
+    };
+    auto inLoop = [&](const vec2& p, const std::vector<int>& L) {
+      bool in = false;
+      for (size_t k = 0, j = L.size() - 1; k < L.size(); j = k++) {
+        const vec2 a = pts[L[k]], b = pts[L[j]];
+        if (((a.y > p.y) != (b.y > p.y)) &&
+            (p.x < (b.x - a.x) * (p.y - a.y) / (b.y - a.y) + a.x))
+          in = !in;
+      }
+      return in;
+    };
+    std::vector<double> cellArea(cells.size());
+    for (size_t c = 0; c < cells.size(); ++c) cellArea[c] = loopArea(cells[c]);
+    std::vector<std::vector<int>> cellHoles(cells.size());  // hole loop indices
+    for (int h = 0; h < static_cast<int>(holeLoops.size()); ++h) {
+      // A CW loop is the same edge cycle as the CCW cell on its other side, so
+      // attach it to the smallest cell that STRICTLY contains it (larger area)
+      // - never to the identical cell across the same edges.  Use the loop
+      // centroid for a robust interior probe.
+      vec2 hc(0.0, 0.0);
+      for (int idx : holeLoops[h]) hc += pts[idx];
+      hc /= static_cast<double>(holeLoops[h].size());
+      const double hArea = std::abs(loopArea(holeLoops[h]));
+      int best = -1;
+      double bestA = 0.0;
+      for (size_t c = 0; c < cells.size(); ++c)
+        if (cellArea[c] > hArea * (1.0 + 1e-9) && inLoop(hc, cells[c]) &&
+            (best < 0 || cellArea[c] < bestA)) {
+          best = static_cast<int>(c);
+          bestA = cellArea[c];
+        }
+      if (best >= 0) cellHoles[best].push_back(h);  // else the unbounded face
+    }
+    for (size_t ci = 0; ci < cells.size(); ++ci) {
+      const std::vector<int>& cell = cells[ci];
+      if (cell.size() < 3) continue;
+      PolygonsIdx pgon(1 + cellHoles[ci].size());
+      for (int idx : cell) pgon[0].push_back({pts[idx], idx});
+      for (size_t hh = 0; hh < cellHoles[ci].size(); ++hh)
+        for (int idx : holeLoops[cellHoles[ci][hh]])
+          pgon[hh + 1].push_back({pts[idx], idx});
+      // A malformed cell (degenerate sliver, non-simple loop) makes Triangulate
+      // throw; that is a decline, not a crash.
+      std::vector<ivec3> tris;
+      try {
+        tris = TriangulateIdx(pgon, eps);
+      } catch (...) {
+        ok = false;
+        return;
+      }
+      if (tris.empty()) continue;
+      int best = 0;
+      double bestArea = -1.0;
+      for (int t = 0; t < static_cast<int>(tris.size()); ++t) {
+        const vec2 p0 = pts[tris[t].x], p1 = pts[tris[t].y],
+                   p2 = pts[tris[t].z];
+        const double ar = std::abs((p1.x - p0.x) * (p2.y - p0.y) -
+                                   (p1.y - p0.y) * (p2.x - p0.x));
+        if (ar > bestArea) {
+          bestArea = ar;
+          best = t;
+        }
+      }
+      // Classify at the largest sub-triangle's INCENTER (strictly interior, as
+      // far from every edge as possible), then jitter by a fraction of the
+      // incircle radius in a GENERIC direction so the point does not land on a
+      // member wall's plane (e.g. an axis-aligned overlap boundary), where the
+      // winding orient3d would be near-degenerate and fail closed spuriously.
+      const vec2 va = pts[tris[best].x], vb = pts[tris[best].y],
+                 vc = pts[tris[best].z];
+      const double la0 = la::length(vc - vb), lb = la::length(va - vc),
+                   lc = la::length(vb - va);
+      const double lsum = la0 + lb + lc;
+      vec2 cen2 = lsum > 0.0 ? (la0 * va + lb * vb + lc * vc) / lsum
+                             : (va + vb + vc) / 3.0;
+      const double inrad = lsum > 0.0 ? bestArea / lsum : 0.0;  // 2*area/perim
+      cen2 += 0.25 * inrad * la::normalize(vec2(0.4359, 0.9000));
+      const vec3 cen3 = a0 + cen2.x * e1 + cen2.y * e2;
+      int m = 0;
+      for (const FaceTri& ft : ftris)
+        if (PointInTri2D(cen2, ft.p0, ft.p1, ft.p2)) m += ft.s;
+      if (m == 0) continue;  // net cover cancels: emit nothing
+      const std::optional<int> wa = RobustWinding(in, cen3 + eps * nHat, seeds);
+      const std::optional<int> wb = RobustWinding(in, cen3 - eps * nHat, seeds);
+      if (!wa || !wb) {  // filter-uncertain classify (SoS): fail closed
+        ok = false;
+        return;
+      }
+      if (*wb - *wa != m) {  // 3D winding jump must equal the in-plane cover
+        ok = false;
+        return;
+      }
+      const bool aboveIn = *wa >= 1, belowIn = *wb >= 1;
+      if (aboveIn == belowIn)
+        continue;  // both sides same class: not a boundary
+      // Retained. Solid on the {w>=1} side fixes orientation: solid on the
+      // -nHat side (belowIn) keeps the CCW 2D winding (+nHat); solid on +nHat
+      // reverses.
+      for (const ivec3& t : tris) {
+        if (belowIn)
+          out.push_back({pts3[t.x], pts3[t.y], pts3[t.z]});
+        else
+          out.push_back({pts3[t.x], pts3[t.z], pts3[t.y]});
+      }
+    }
+  }
+}
+
 // Classify + emit the CLEAN (un-seamed) faces.  g_above is constant across any
 // mesh edge that carries no seam transition, and clean-clean edges never do, so
 // clean faces partition into patches of uniform coverage; one winding probe per
 // patch decides keep-whole vs drop.  A negative or filter-uncertain probe is a
 // known-open axis (subtraction / SoS) -> fail closed.
 bool EmitCleanFaces(std::vector<OutTri3D>& out, const Manifold::Impl& in,
-                    const BuildArrangement& A, const std::vector<vec3>& seeds,
-                    double eps) {
+                    const BuildArrangement& A,
+                    const std::vector<int>& face2cluster,
+                    const std::vector<vec3>& seeds, double eps) {
   const int nTri = static_cast<int>(in.NumTri());
+  // A face is "clean" only if it is neither seamed nor part of a coplanar
+  // cluster (the fold owns cluster faces); cluster faces bound the flood so a
+  // patch never crosses into folded content.
+  auto isClean = [&](int t) { return !A.seamed[t] && face2cluster[t] < 0; };
   DisjointSets patches(nTri);
   for (int h = 0; h < static_cast<int>(in.halfedge_.size()); ++h) {
     const int t = h / 3, u = in.halfedge_.Pair(h) / 3;
-    if (!A.seamed[t] && !A.seamed[u]) patches.unite(t, u);
+    if (isClean(t) && isClean(u)) patches.unite(t, u);
   }
   std::unordered_map<int, int> patchKeep;  // root -> 0 drop, 1 keep
   for (int t = 0; t < nTri; ++t) {
-    if (A.seamed[t]) continue;
+    if (!isClean(t)) continue;
     const int root = static_cast<int>(patches.find(t));
     auto it = patchKeep.find(root);
     int keep;
@@ -1994,20 +2514,31 @@ bool EmitCleanFaces(std::vector<OutTri3D>& out, const Manifold::Impl& in,
   return true;
 }
 
-// THE BUILD driver: enumerate + record seams, emit seamed sub-faces + clean
-// faces, assemble + weld.  Returns the regularized Impl, or a fatal.
-StageResult<Manifold::Impl> RunCandidateBBuild(const Manifold::Impl& in,
-                                               const BuildArrangement& A,
-                                               double eps) {
+// THE BUILD driver: fold exactly-coplanar clusters in-plane, emit seamed
+// sub-faces + clean faces, assemble + weld.  Returns the regularized Impl, or a
+// fatal.
+StageResult<Manifold::Impl> RunCandidateBBuild(
+    const Manifold::Impl& in, const BuildArrangement& A,
+    const std::vector<int>& face2cluster, double eps) {
   // Winding seeds: a few far points in unrelated directions off the bbox.
   const vec3 c = in.bBox_.Center();
   const double L = in.bBox_.Scale() + 1.0;
-  const std::vector<vec3> seeds = {c + L * vec3(3.13, 5.71, 1.37),
-                                   c + L * vec3(-2.71, 1.41, 4.19),
-                                   c + L * vec3(1.73, -3.31, -2.23)};
+  const std::vector<vec3> seeds = {
+      c + L * vec3(3.13, 5.71, 1.37),   c + L * vec3(-2.71, 1.41, 4.19),
+      c + L * vec3(1.73, -3.31, -2.23), c + L * vec3(-4.27, -1.19, 2.83),
+      c + L * vec3(2.39, -4.61, 3.07),  c + L * vec3(-1.51, 3.89, -4.43)};
 
   std::vector<OutTri3D> emitted;
   bool ok = true;
+  // Exact-coplanar clusters first (transversal seams on their faces are the
+  // entanglement decline).
+  FoldCoplanarClusters(emitted, in, A, face2cluster, seeds, eps, ok);
+  if (!ok)
+    return StageResult<Manifold::Impl>::Fatal(
+        FatalReason::DirtyComponentUnresolved,
+        "candidate B: exact-coplanar fold declined (coplanar/transversal "
+        "entanglement, degenerate projection, or filter-uncertain classify) - "
+        "fail-closed");
   const int nTri = static_cast<int>(in.NumTri());
   for (int f = 0; f < nTri && ok; ++f)
     if (A.seamed[f]) EmitSeamedFace(emitted, A, f, in, seeds, eps, ok);
@@ -2021,7 +2552,7 @@ StageResult<Manifold::Impl> RunCandidateBBuild(const Manifold::Impl& in,
         FatalReason::DirtyComponentUnresolved,
         "candidate B: seam sub-face arrangement not exactly resolvable "
         "(triple point / degenerate / filter-uncertain) - fail-closed");
-  if (!EmitCleanFaces(emitted, in, A, seeds, eps))
+  if (!EmitCleanFaces(emitted, in, A, face2cluster, seeds, eps))
     return StageResult<Manifold::Impl>::Fatal(
         FatalReason::DirtyComponentUnresolved,
         "candidate B: clean-face winding probe was filter-uncertain (SoS) - "
@@ -2040,16 +2571,21 @@ StageResult<Manifold::Impl> RunCandidateBBuild(const Manifold::Impl& in,
 // (IsSelfIntersecting).
 StageResult<Manifold::Impl> RunCandidateB(const Manifold::Impl& dirty,
                                           double eps) {
-  const BuildArrangement A = RecordSeams(dirty);
+  // Exactly-coplanar face clusters are resolved by the in-plane fold; the
+  // transversal seam enumeration skips their pairs so their exact-zero coplanar
+  // ties do not raise boundaryTouch.
+  const std::vector<int> face2cluster = DetectCoplanarClusters(dirty);
+  const BuildArrangement A = RecordSeams(dirty, face2cluster);
   if (A.boundaryTouch) {
-    // A deciding pierce predicate hit an exact-zero / filter-uncertain
-    // boundary: the cross-operand exact-zero tie family the single-global SoS
-    // convention resolves (GT7863-class) is SPECIFIED but UNBUILT; guessing a
-    // sign would risk an oracle-wrong resolve.  Fail closed.
+    // A deciding pierce predicate hit an exact-zero / filter-uncertain boundary
+    // that the coplanar fold does NOT consume: a NON-coplanar vertex-on-face /
+    // edge-in-face incidence (the residual single-global SoS tie family,
+    // PokedCube-class), or the near-coplanar thin band.  Guessing a sign would
+    // risk an oracle-wrong resolve.  Fail closed.
     return StageResult<Manifold::Impl>::Fatal(
         FatalReason::DirtyComponentUnresolved,
-        "candidate B: arrangement predicate hit an exact-zero tie; "
-        "single-global SoS (GT7863-class) unbuilt - fail-closed");
+        "candidate B: non-coplanar exact-zero tie; single-global SoS "
+        "(PokedCube-class) unbuilt - fail-closed");
   }
   if (!A.ok) {
     return StageResult<Manifold::Impl>::Fatal(
@@ -2057,7 +2593,7 @@ StageResult<Manifold::Impl> RunCandidateB(const Manifold::Impl& dirty,
         "candidate B: a self-crossing pair had a non-2-endpoint seam "
         "(degenerate incidence) - fail-closed");
   }
-  return RunCandidateBBuild(dirty, A, eps);
+  return RunCandidateBBuild(dirty, A, face2cluster, eps);
 }
 
 // Compose the surviving components back into one Impl by CONCATENATION - no
@@ -2193,12 +2729,39 @@ CandidateBProbe RegularizeB_Probe(const Manifold::Impl& dirty,
   const BEnumeration enu = EnumerateSelfCrossings(dirty);
   out.seamCount = enu.seamCount;
   out.boundaryTouchPairs = enu.boundaryTouchPairs;
+  for (int c : DetectCoplanarClusters(dirty))
+    if (c >= 0) ++out.coplanarClusterFaces;
   out.probeWinding.reserve(probes.size());
   for (const vec3& p : probes) {
     const std::optional<int> w = WindingAt(dirty, p, seed);
     out.probeWinding.push_back(w.has_value() ? *w : kWindingUncertain);
   }
   return out;
+}
+
+RegularizeResult RegularizeDirtyDirect(const Manifold::Impl& soup, double eps) {
+  RegularizeResult result;
+  if (eps <= 0.0) eps = EpsilonFromScale(soup.bBox_.Scale(), 1000);
+  result.counters.components = 1;
+  result.counters.dirty = 1;
+  StageResult<Manifold::Impl> bRes = RunCandidateB(soup, eps);
+  if (!bRes.ok()) {
+    ++result.counters.failClosed;
+    result.fatal = bRes.fatal;
+    result.detail = std::move(bRes.detail);
+    return result;
+  }
+  Manifold::Impl bImpl = std::move(*bRes.value);
+  bImpl.epsilon_ = eps;
+  if (GateComponent(bImpl) != GateVerdict::Clean) {
+    ++result.counters.failClosed;
+    result.fatal = FatalReason::NonManifoldEmission;
+    result.detail = "candidate B output failed the re-gate";
+    return result;
+  }
+  ++result.counters.regularized;
+  result.impl = std::move(bImpl);
+  return result;
 }
 
 }  // namespace manifold
