@@ -252,18 +252,25 @@ exact ground truth (S4). The residual has narrowed from the rev-3 keystone to ON
 1D question - PairUp's start-end alternation on the w=2 double-covered stratum -
 plus the first empirical B-resolver fragment. Both are round-3 targets.
 
-B VERDICT (rev 5): EMPIRICALLY VALIDATED AT FRAGMENT SCALE. Round-3 executed both
-targets (see ROUND-3 RESULTS below). The alternation residual is CLOSED - the w=2
-stratum is genuinely non-alternating (measured SSEE) but the coupled winding-delta
-formulation absorbs it by thresholding w_S rather than pairing, so B replaces
-PairUp instead of inheriting it. The first built fragment runs end-to-end on both
-Havoc's composed core AND self_intersectA (a true single-shell self-intersector),
-reproducing exact ground truth with the kernel avoided (static filter certifies
-every deciding predicate; the exact fallback is dead on Havoc, micro-scale and
-sound on siA). The residual is now an ENGINEERING build-out (localizer + selective
-weld + cell-complex/DCEL + component-local seed) plus two specified-but-untested
-axes (single-global SoS for exact-zero carriers, subtraction/negative winding) -
-no mechanism gap remains.
+B VERDICT (rev 6): EMPIRICALLY VALIDATED AT FRAGMENT SCALE, KERNEL-FREE-NESS NOW
+DEMONSTRATED END-TO-END. Round-3 executed both targets (see ROUND-3 RESULTS); the
+alternation residual is CLOSED - the w=2 stratum is genuinely non-alternating
+(measured SSEE) but the coupled winding-delta formulation absorbs it by
+thresholding w_S rather than pairing, so B replaces PairUp instead of inheriting
+it. The first built fragment runs end-to-end on both Havoc's composed core AND
+self_intersectA (a true single-shell self-intersector), reproducing exact ground
+truth. Round-3's one scope caveat - the fragment's ENUMERATION half ran in exact
+rationals while only the WINDING half was filtered doubles - is CLOSED by round 4
+(see ROUND-4 RESULTS): the enumeration decisions (face-pair straddle, edge-plane
+crossing, edge-edge z-order) are rebuilt as LEVEL-0 orient3d on input through the
+static filter, reproduce round-3's exact seam set on both cores, and are certified
+to a fraction of a percent of exact-fallback (all genuine exact-ties on the
+coplanar-contact carrier, zero precision sub-bound, zero sign flips; the z-order
+centerpiece is fully certified everywhere). So the kernel is avoided end-to-end on
+the reachable corpus. The residual is now an ENGINEERING build-out (localizer +
+selective weld + cell-complex/DCEL + component-local seed) plus two
+specified-but-untested axes (single-global SoS for exact-zero/coplanar carriers,
+subtraction/negative winding) - no mechanism gap remains.
 
 ### Candidate C - minimal old-paradigm kernels (boundary fallback, no depth)
 
@@ -540,14 +547,15 @@ R3-i - THE ALTERNATION PROBE: alternation FAILS on the w=2 stratum, and the
 
 R3-ii - THE FIRST EMPIRICAL FRAGMENT: the S4 resolver built and run end-to-end.
   All six spec elements wired with their asserts ACTIVE.  SCOPE CAVEAT
-  (verification round): the level-0-plus-static-filter discipline was
-  demonstrated for the WINDING half only; the fragment's ENUMERATION half ran
-  in exact rational arithmetic throughout (more exact predicates than the
-  filtered winding side, including the constructed-point overlap decisions S2
-  proved restructurable to level-0 but which this fragment computed exactly
-  instead).  B's correctness is demonstrated end-to-end; its kernel-free-ness
-  is demonstrated for winding and rests on S2's proven identities - not yet
-  exercised - for enumeration.  Closing that gap is round 4.
+  (verification round; RESOLVED in ROUND-4 RESULTS below): the
+  level-0-plus-static-filter discipline was demonstrated for the WINDING half
+  only; the fragment's ENUMERATION half ran in exact rational arithmetic
+  throughout (more exact predicates than the filtered winding side, including the
+  constructed-point overlap decisions S2 proved restructurable to level-0 but
+  which this fragment computed exactly instead).  B's correctness is demonstrated
+  end-to-end; its kernel-free-ness was demonstrated for winding and rested on S2's
+  proven identities - not yet exercised - for enumeration.  Round 4 rebuilt the
+  enumeration on those level-0 identities through the filter and closed the gap.
     On HAVOC's dirty core:
       - ENUMERATION (self-adjacency skip) reproduces S3's self-crossing seam count
         bit-for-bit, all cross-operand; every recorded exact w_S (the double-
@@ -593,10 +601,13 @@ build-out plus two specified-but-untested axes. No new wall.
 
 NEXT-STEP ADJUDICATION for the owner (what remains between the fragment and a
 production resolver, sized honestly):
+  DEMONSTRATED in round 4 (was unbuilt at rev 5):
+    - FILTERED ENUMERATION. The level-0-restructured + static-filtered enumeration
+      (S2's proven identities, the edge-edge z-order the centerpiece) is now BUILT
+      and RUN end-to-end on both cores, reproducing round-3's exact seam set
+      seam-for-seam and certified to a fraction-of-a-percent exact-fallback (all
+      genuine exact-ties, zero precision sub-bound, zero flips). See ROUND-4.
   UNBUILT - the v5 preconditions (rev-2), the bulk of the resolver:
-    - FILTERED ENUMERATION. The fragment's enumeration half ran in exact
-      rationals; the level-0-restructured + static-filtered form (S2's proven
-      identities) is designed but undemonstrated - round 4 closes it.
     - LOCALIZER. The fragment is O(ntri) per winding query (whole soup); production
       must bound the query to the flagged dirty submesh. The B-scales-with-input
       vs C-bounds-to-submesh cost adjudication is now concrete (cost is real).
@@ -610,15 +621,92 @@ production resolver, sized honestly):
       one-ray-per-component), with a direction policy that avoids the far-seed
       near-grazing the fragment measured on siA. Micro cost, but must be built.
   SPECIFIED but UNTESTED at fragment scale (named opens, not new walls):
-    - SINGLE GLOBAL SoS (R4). Havoc/siA winding rays hit no exact-zeros, so the
-      fragment did not exercise it; GT7863's coplanar zeros and openscad's
-      coincident verts REQUIRE it. Required + untested here.
+    - SINGLE GLOBAL SoS (R4). The round-3 winding rays hit no exact-zeros, but
+      round-4's filtered ENUMERATION DID: Havoc's coplanar-operand contact drove a
+      fraction-of-a-percent of D1 straddle predicates to exact-zero (level-0
+      predicates evaluating to exactly 0), handled by exact fallback (sign 0) plus
+      a cleanly-piercing sibling edge. A single global SoS is the production
+      requirement to decide those boundary edges deterministically; GT7863's
+      coplanar zeros and openscad's coincident verts REQUIRE it too. Now partly
+      EXERCISED (enumeration), still untested as a unified convention.
     - SUBTRACTION / NEGATIVE WINDING (BR-d). The fragment is all-union (w>=0); the
       alternation probe pinpoints negative winding as PairUp's genuine break and
       the point B's threshold read must absorb - untested on a subtraction carrier.
     - TRIPLE-POINT ONCE-ONLY (BR-b/BR-c). Zero triple points on the corpus, so
       S2c's two-path divergence is unstressed; a synthetic co-axial-3-face carrier
       is the attack that would exercise it.
+
+### ROUND-4 RESULTS: filtered enumeration - the scope caveat resolved (rev 6)
+
+Round 4 (probe lane v5b-r4; scratchpad/v5b_r4_havoc.py + v5b_r4_siA.py +
+v5b_r4_perm.py) closed the R3-ii scope caveat: the ENUMERATION half, which ran in
+exact rationals in round 3, is rebuilt on the S2 LEVEL-0 restructuring through the
+S1 static filter (exact-Fraction fallback armed and counted per class), rerun
+end-to-end on BOTH cores, and graded seam-for-seam against round-3's exact
+enumeration and cell-for-cell against recorded exact ground truth.
+
+THE RESTRUCTURING. Every enumeration decision is expressed as orient3d on INPUT
+coordinates, decomposed into the three decision classes the plan named:
+  - D1 FACE-PAIR OVERLAP (plane straddle): orient3d(face, vertex) - which side of
+    one triangle's plane each of the other's vertices lies on.
+  - D2 EDGE-PLANE CROSSING EXISTENCE: a read of the D1 signs (opposite signs =>
+    the edge crosses the plane); no new predicate.
+  - D3 SEGMENT-vs-TRIANGLE / EDGE-EDGE Z-ORDER (the P4 centerpiece): a genuine
+    transversal crossing is "some edge of one triangle pierces the interior of the
+    other", decided WITHOUT constructing the plane-plane line by orient3d(edge,
+    triangle-edge) x3 (the edge-edge determinant class, det[u-v, ...] on four input
+    vertices). This is the same orient3d shape B already uses+trusts for the winding
+    ray crossing, and is provably equivalent to the exact interval-overlap the
+    round-3 enumeration used (an overlap endpoint is always an interior pierce of
+    one triangle by an edge of the other). It sidesteps the Guigue-Devillers
+    canonical permutation while remaining a level-0-orient3d theorem.
+The filtered enumeration's DECISIONS construct nothing (level-0 on input); only the
+output segment POSITIONS are constructed, in double, once each (once-only,
+zero double-constructions) - decisions level-0, geometry double, exactly the design
+split S2 prescribed.
+
+THE GRADE (both cores). Three genuine-crossing sets - the round-3 exact
+interval-overlap oracle, the exact pierce formulation, and the level-0 FILTERED
+pierce - coincide PAIR-FOR-PAIR on both Havoc and self_intersectA (formulation-
+equivalence, filter-fidelity, and end-to-end all hold; the round-3 seam sets are
+reproduced exactly, all cross-operand on Havoc, all clean 2-sheet self-crossings on
+siA; the >2-sheet radial branch fires zero times). The cell/winding classification
+still matches recorded exact ground truth (Havoc's four recorded cells; siA's w=2
+self-overlap stratum, cocycle-unanimous, double == exact). Input-permutation
+invariance re-checked and stronger than round 3: under triangle-order shuffle AND
+within-triangle vertex rotation+reflection (which flips every face normal and
+reorders the orient3d arguments) the geometric seam set and the filter's zero-flip
+soundness are unchanged.
+
+THE FALLBACK RATE (measured honestly, the caveat's alternative resolution). Across
+the enumeration deciding predicates of both cores, the static filter CERTIFIES
+about 99.8 percent. The centerpiece edge-edge z-order (D3) is 100 percent CERTIFIED
+on BOTH cores - zero fallback, with large margins (min ratio ~3e2 on Havoc, ~7e6 on
+siA) - so the kernel is demonstrably avoided for the z-order decision. The only
+enumeration fallback is a fraction of a percent of Havoc's D1 straddle predicates,
+and every one of them is an EXACT-ZERO (a level-0 predicate evaluating to exactly 0
+because a vertex lies exactly on the other operand's plane - Havoc's L and R share
+coplanar geometry, the coplanar-contact family S1 predicted): ZERO precision
+sub-bound, ZERO sign flips. siA's enumeration (an organic single shell, no
+coplanar-operand degeneracy) is 100 percent certified, zero fallback, the exact
+kernel dead code. No enumeration decision was found that cannot be expressed
+level-0 - the FINDING class is empty.
+
+READING. The exact-zeros are handled by exact fallback (returning sign 0) plus a
+cleanly-piercing sibling edge, which keeps the filtered set exactly equal to the
+oracle; they are the point where a SINGLE GLOBAL SoS (R4, in the specified-untested
+list) is the production requirement to decide the boundary edges deterministically
+rather than leaning on a sibling. That is a named, already-listed open, not a new
+wall and not a level-0-expressibility failure. RESULT: B's kernel-free-ness is now
+DEMONSTRATED END-TO-END on the reachable corpus - enumeration and winding both -
+with the exact fallback either dead (the z-order everywhere; all of siA) or firing
+only on genuine exact ties (Havoc's coplanar contact), never on precision and never
+producing a certified-wrong sign. The remaining production work is unchanged and
+re-sized in the NEXT-STEP list above: the FILTERED ENUMERATION line moves from
+UNBUILT to DEMONSTRATED; the bulk (localizer + selective weld + cell-complex/DCEL +
+boundary emission + component-local seed) and the two specified axes (a unified
+global SoS - now partly exercised on the enumeration - and subtraction/negative
+winding) remain.
 
 ### Risks refreshed to B's current opens (rev 4)
 
