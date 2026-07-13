@@ -39,6 +39,251 @@ carries magnitudes and cites):
   - bvc   : .claude/lane-reports/v5-verify-bvc-1783911600.md   (variant E kill,
             B/C merge, reopen phrasing, staged-sketch stage-0)
 
+The KERNEL-AVOIDANCE ADJUDICATION section below (rev 3) re-adjudicates this
+design's central claim - that an exact kernel is REQUIRED - against pure and deep
+REUSE of the in-tree Boolean. It is grounded in
+.claude/lane-reports/v5b-design-1783914836.md. Read it first: it refines the
+barrier, resolves most carriers with zero new mechanism, and relocates the
+kernel requirement to a much smaller residual than rev 2 claimed.
+
+
+## KERNEL-AVOIDANCE ADJUDICATION (rev 3: can REUSE reach the same outcomes?)
+
+The owner's question: reach v5's outcomes by REUSING existing paradigms and
+machinery - do in 3D what 2D did (STRUCTURE, not a new precision mechanism) -
+and where reuse cannot, draw the boundary honestly. This section supersedes the
+rev-2 "an exact kernel is required" framing IN PLACE: the kernel is not required
+for the winding half and is not required for the common-case arrangement; it
+survives, if at all, only as a rare filtered fallback for one predicate family.
+
+### The refined barrier (the seed, verified)
+
+THE ORACLE IS ALREADY A DOUBLE-PRECISION PROGRAM. boolean3 (src/boolean3.cpp,
+boolean_result.cpp) resolves every two-operand union in the corpus correctly
+TODAY, in doubles, with NO exact arithmetic. Its consistency comes from two
+places, both structural, neither precision:
+  - Shadows(p,q,dir) (shared.h:121): one global symbolic-perturbation convention
+    that breaks EXACT FP ties by a sign. Not higher precision - a shared tie-break.
+  - Winding03 (boolean3.cpp:387-459): winding is NOT probed per vertex. Edges
+    that do not cross the other surface UNITE their endpoints (DisjointSets); one
+    representative per connected component is ray-cast; the value FLOODS the
+    component. Two verts in a component cannot disagree - they are identical by
+    construction. Decisions are COUPLED through mesh connectivity.
+
+So exact-valued decisions are SUFFICIENT (rev 2's probe) but demonstrably NOT
+NECESSARY on these inputs. The barrier statement sharpens:
+
+  rev 2:  the barrier is PRECISION OF DECISIONS.
+  rev 3:  the barrier is precision GIVEN INDEPENDENT decisions. Structural
+          COUPLING is the FP-native alternative - and it is exactly the 2D law
+          (order-free local decisions do not compose; the maintained/coupled
+          structure is load-bearing). The 2D fix was STRUCTURE, not precision.
+
+The reopen already reached the exact-arithmetic version of this (one convention
+makes all probes agree). Rev 3 observes the FP version is the same shape with a
+DIFFERENT consistency mechanism: agreement by COUPLING (one seed cell + integer
+winding deltas propagated across shared faces), not agreement by exactness.
+
+### Candidate A - decompose + Boolean fold (PURE reuse, zero new mechanism)
+
+If the input soup decomposes by connectivity into components that are each a
+valid, non-self-intersecting manifold, fold-union them through the EXISTING
+Boolean = the oracle itself, as a front-end path inside RemoveOverlaps3D.
+
+MEASURED (probeA/probeA2/probeGT, scratchpad; the fold is instant everywhere):
+
+  carrier   decomposes to        candidate-A verdict
+  -------   ------------------   ------------------------------------------
+  Havoc     2 valid operands     RESOLVES (winding-exact vs {w_S>=1} and a+b)
+  GT7863    4 valid components   RESOLVES (INTRINSIC vertex-on-face - FP path
+                                  handles it; not a precision wall)
+  hull      6 valid components   RESOLVES (the SWEEP pipeline fails closed here)
+  Cray      operands valid       RESOLVES (fold == a+b; extreme-scale coords)
+  GT7081    13 valid components  RESOLVES (fold == a+b BIT-EXACT, containment
+                                  agrees; the SWEEP pipeline hangs/budgets here)
+  Offset1   many valid shells    RESOLVES (disjoint; the SWEEP pipeline TIMES OUT)
+  Offset2   many valid shells    RESOLVES (disjoint)
+  Offset3/4 one clean shell      no overlap to resolve
+  openscad  2 comps, w in [-1,3] INSUFFICIENT - negative-multiplicity regime
+                                  (R5): a plain Add-fold overshoots; needs
+                                  per-component orientation (Add vs Subtract)
+  siA/siB   one self-intersecting SINGLE SHELL - INAPPLICABLE (nothing to fold);
+            shell, w in [0,2]     the genuine residual
+
+READING. Candidate A resolves EVERY corpus carrier that decomposes into
+non-self-intersecting components - which is all of them except the single
+self-intersecting shells (siA/siB) and the negative-multiplicity case (openscad,
+fixable by orientation-aware folding). It even covers three carriers the sweep
+pipeline fails-closed or times-out on. The "intrinsic" degeneracies (GT7863's
+vertex exactly on a face) do NOT break the FP+Shadows Boolean.
+
+THE HONEST COST. The pairs and multi-shell singles decompose because they were
+BUILT by composing/offsetting valid parts. A genuinely self-intersecting single
+shell does not decompose. So candidate A is a PRODUCT win (a real front-end that
+delegates a large slice of the corpus to the machinery this campaign set out to
+replace, with zero new code beyond the dispatch) and a research NON-ANSWER for
+true single-shell self-overlap. That residual is candidate B's target.
+
+Kill-table / relocation: A introduces no mechanism, re-attempts no wall-A kill,
+and cannot silently wrong-resolve (it runs the existing validated Boolean or does
+not apply). Its relocation risk is nil - it either resolves fully or defers to B.
+
+### Candidate B - Boolean-paradigm dirty-core resolver (the DEEP reuse)
+
+For the residual (siA/siB, and any flagged region), compute the local arrangement
++ winding using boolean3's OWN discipline in DOUBLES: Shadows-convention
+predicates, intersections via its Kernel shapes, winding propagated through
+connectivity (COUPLED) rather than by independent probes. The localizer and
+selective-weld preconditions (rev 2) apply unchanged. The crux is the self case
+(boolean3 assumes two distinct operands P, Q). Adjudicated by source-level
+enumeration + empirical probe (probeB.py, exact rationals vs double):
+
+WHAT TRANSFERS unchanged (geometry-only, and FP-safe by measurement):
+  - Shadow01 / Kernel02 / Kernel11 / Kernel12 and the Shadows tie-break. They
+    read vertex positions and normals; they are operand-agnostic.
+  - The Winding03 coupling: unite across non-crossing edges, one ray-cast per
+    component, flood fill. The propagated deltas are +-1 INTEGERS (the crossed
+    face's orientation on a robust dominant axis), never a near-zero FP quantity.
+
+WHAT NEEDS SELF-ADAPTATION (bounded, not a wall):
+  - The intersection enumeration (collider) returns an edge's OWN incident faces
+    when P == Q; it must skip self-adjacent (vertex-sharing) faces and keep only
+    genuine non-adjacent crossings.
+  - Winding-of-own-vertex is a 100%-boundary evaluation (every soup vertex lies
+    on the soup). The Shadows expandP perturbation already resolves this per
+    query; boolean3 does the SPARSE cross-operand version today, and GT7863's
+    vertex-exactly-on-a-face (resolved winding-exact by candidate A) is the
+    existence proof that the convention handles the on-surface incidence.
+
+WHAT BREAKS (the keystone - a MECHANISM gap, not precision):
+  - Assembly. PairUp (boolean_result.cpp:285-301) pairs an edge's crossings by
+    1D position along the edge (start-end alternation). Its own comment: if the
+    order is not a clean alternation "this algorithm becomes a heuristic." That
+    holds for two valid operands. A general self-arrangement needs RADIAL
+    ORDERING where more than two sheets meet at an edge (triple points). Generic
+    2-sheet transversal self-intersection reduces to the two-operand shape and
+    PairUp may serve; the >2-sheet junctions do not, and are exactly the June
+    memo's standing serial-seam-matcher / triple-point kill and this doc's own
+    "the radial-order DCEL work REMAINS." This is new mechanism, not reuse.
+
+THE EMPIRICAL CRUX - is PRECISION the barrier for the residual? Measured NO:
+  - Winding SEED anchor: double +z-ray winding equals the recorded exact w_S at
+    every Havoc crux point (lump, centroids, outside). The coupling's absolute
+    anchor is FP-safe.
+  - Coupling CONTENT: on self_intersectA (the genuine residual), double winding
+    equals exact w_S at hundreds of points spanning interior AND near-surface
+    (perturbed to a tiny fraction of eps off-plane), no disagreement, the
+    double-covered w=2 stratum included. The winding decision is FP-safe where
+    it matters.
+  - Input orient3d MARGINS in the dirty cores (Havoc, self_intersectA, and
+    GT7081, the worst near-tangency carrier): across many thousands of
+    near-incidence predicates the minimum relative margin sits around 1e-10, i.e.
+    orders of magnitude (~1e4 to 1e6 x) above the double orient3d error bound.
+    No exact-zero, no sign flip, no sub-errbound case appeared in any sample.
+    The near-tangency is real but the INPUT predicates stay FP-recoverable.
+
+So the rev-2 "barrier is precision" does NOT hold for the winding half or the
+input-predicate half of the residual. The precision concern that survives is the
+rev-2 Stage-3 LEVEL-2 predicate on CONSTRUCTED intersection points (bit-growth) -
+which my probes did NOT exercise (they touched input predicates only), and which
+is SHARED with the exact design (both must construct intersection points). The
+open question is whether Shadows on constructed points stays consistent for the
+self case, as it does for two operands.
+
+B VERDICT: NEEDS-CHANGE, live - iterate. Kernel avoidance is established for the
+winding classification (coupled integer deltas + a robust seed need no exact
+arithmetic) and plausible for the common-case arrangement (input predicates are
+FP-safe with comfortable margins). The two open items are the assembly's radial
+ordering at multi-sheet edges (mechanism) and the constructed-point predicates
+(precision, unmeasured). Neither is refuted; both are the next round's targets.
+
+### Candidate C - minimal old-paradigm kernels (boundary fallback, no depth)
+
+If a worst-case sub-errbound predicate is confirmed (see the named probe in
+Risks), the cheapest acceptable kernel is an ADAPTIVE orient3d: an FP filter with
+an exact fallback that fires only when the filtered sign is uncertain - which, on
+the measured samples, is ~never. The winding coupling needs NO kernel at all.
+This RELOCATES and SHRINKS the rev-2 kernel requirement: not a general exact
+arrangement kernel, but a rarely-triggered filtered fallback for the one
+constructed-point predicate family. Plain big-rational evaluation in the flagged
+region remains the correctness backstop / offline oracle (the B scope of rev 2).
+
+### Per-carrier coverage map (which reuse path resolves each carrier)
+
+  carrier    candidate A (fold)      residual path if A does not fully cover
+  -------    --------------------    ---------------------------------------
+  Havoc      RESOLVES                -
+  GT7863     RESOLVES                -
+  hull       RESOLVES                -
+  Cray       RESOLVES                -
+  GT7081     RESOLVES                -
+  Offset1/2  RESOLVES                -
+  Offset3/4  no overlap              -
+  openscad   INSUFFICIENT (R5)       A + per-component orientation (Add/Sub)
+  siA/siB    INAPPLICABLE            B (dirty-core resolver) - the research case
+
+The reuse front (A) covers the entire pair/multi-shell corpus. The research
+residual (B) is the single self-intersecting shell - and there, precision is
+measurably NOT the barrier; mechanism (self-enumeration + radial assembly) is.
+
+### Staged iteration plan for B (the next round builds/probes these)
+
+  S1. WORST-CASE INPUT PREDICATE. Exhaustively (not sampled) find GT7081's
+      near-coplanar face pairs and evaluate their deciding orient3d exact-vs-
+      double. Confirm or refute a sub-errbound case. Decides whether even the
+      adaptive-orient3d fallback (candidate C) is ever needed. Cheap, no kernel.
+  S2. CONSTRUCTED-POINT PREDICATE CONSISTENCY. Build the local arrangement of one
+      real dirty core (siA) in doubles with Shadows on the constructed
+      intersection points; compare its cell classification to exact w_S
+      (computable per this doc's probe). This is the unmeasured precision axis.
+  S3. RADIAL-ASSEMBLY GAP. On siA, locate self-intersection curves and any triple
+      points; measure how often PairUp's 1D pairing is a clean 2-sheet
+      alternation vs a >2-sheet radial case. Sizes the mechanism gap: if triple
+      points are absent/rare on the real residual, a bounded radial-order fix at
+      those edges may suffice and PairUp serves elsewhere.
+  S4. SELF-ADAPTED ENUMERATION. Prototype the self-adjacency-filtered collider +
+      100%-boundary winding on siA; check it reproduces exact w_S end-to-end.
+  Exit: either a doubles-only dirty-core resolver that matches exact w_S on siA
+  (kernel fully avoided), or a precise BREAK at S2/S3 naming the one predicate or
+  the one junction class that doubles cannot serve - the smallest honest kernel.
+
+### Risks for the kernel-avoidance round (the attack surface)
+
+  BR1. SAMPLED, NOT EXHAUSTIVE INPUT MARGINS. The "input orient3d is FP-safe"
+       finding rests on random samples of the dirty cores, not exhaustive
+       enumeration. GT7081 has many near-coplanar face pairs; a worst case below
+       the double error bound could hide outside the sample. Mitigation = S1
+       (exhaustive). Even if found, it downgrades only to candidate C's rarely-
+       fired adaptive fallback, not to a general kernel - but the "no kernel at
+       all" claim depends on S1.
+  BR2. CONSTRUCTED-POINT PRECISION UNMEASURED. All B probes evaluated predicates
+       on INPUT coordinates. The arrangement's level-2 predicates on CONSTRUCTED
+       intersection points (bit-growth to hundreds of bits) are the rev-2
+       precision concern and were NOT tested. This is the most likely place for a
+       genuine doubles-vs-exact divergence and is B's central open question (S2).
+  BR3. RADIAL-ASSEMBLY GAP MAY PERCOLATE. PairUp's 1D pairing is a two-operand
+       heuristic. If self-intersecting shells carry more than isolated triple
+       points (dense >2-sheet junctions), the radial-order DCEL is needed broadly,
+       not locally - the mechanism gap becomes a rewrite, not a patch (S3 sizes it).
+  BR4. CANDIDATE A IS A FIXTURE ARTIFACT. A resolves the corpus because the
+       fixtures were built by composition/offset. It must NOT be oversold as
+       solving self-overlap; it solves DECOMPOSABLE inputs. The dispatch must
+       detect non-decomposability (a component that is itself self-intersecting)
+       and hand off to B rather than feeding a self-intersecting operand to the
+       Boolean (undefined). Detecting per-component self-intersection is itself
+       work (the library's selfIntersectionChecks path is the candidate hook).
+  BR5. NEGATIVE-MULTIPLICITY REGIME (R5, now concrete). openscad carries winding
+       in [-1, 3]; a plain Add-fold overshoots the {w_S>=1} oracle. Candidate A
+       needs per-component orientation (signed volume -> Add vs Subtract), and the
+       witness theorem {w_S>=1} itself is only validated for all-positive
+       multiplicity - the subtraction regime is unproven for BOTH A and B.
+  BR6. WINDING VALIDATION USED THE SAME RAY CONVENTION. B1/B3 compared a double
+       +z ray-cast to an exact +z ray-cast; both share the projection axis, so a
+       shared axis-aligned degeneracy would be invisible to the comparison. The
+       exact side used rational arithmetic (no rounding) so the check is sound for
+       precision, but a stronger test rotates the ray direction independently
+       (the anatomy lane's 9-direction unanimity already partially covers this).
+
 
 ## The load-bearing probe (run first; it decides whether the arc is live)
 
