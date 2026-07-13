@@ -56,6 +56,13 @@ enum class FatalReason {
   // tens of thousands of thin slabs would swap-thrash into bad_alloc; the slabs
   // stage fails closed here instead (spec [WALL-B]).
   ArrangementBudget,
+  // Regularization operator (docs/Regularize3D.md): a dirty (self-intersecting)
+  // component reached candidate B, but B's production dirty-core resolver is
+  // not yet built.  Stage-1 fail-closed STUB SENTINEL - the honest outcome
+  // while the dirty core is a stub, never a silent wrong result.  When B lands
+  // it is replaced by either a clean re-gated resolve or a real re-gate fatal
+  // (NonManifoldEmission / a self-intersection re-gate failure).
+  DirtyComponentUnresolved,
 };
 
 // Non-fatal counter accumulator.
@@ -199,6 +206,40 @@ struct Overlap3Result {
 
 // eps = 0 -> compute from bounding-box scale.
 Overlap3Result RemoveOverlaps3D(const Manifold::Impl& in, double eps = 0.0);
+
+// ---------------------------------------------------------------------------
+// Regularization operator (docs/Regularize3D.md) - parallel entry point.
+//
+// RegularizeImpl maps a valid oriented face soup to the boundary of the solid
+// {p : w_S(p) >= 1}, PER CONNECTED COMPONENT (it never fuses separate
+// components - fusion is the Boolean's job, already done upstream).  Stage 1 is
+// the GATE + DISPATCH skeleton: DECOMPOSE by connectivity -> per-component GATE
+// (validity + IsSelfIntersecting) -> EARLY-EXIT clean components -> route DIRTY
+// components to candidate B (today a fail-closed stub) -> RE-GATE B's output ->
+// COMPOSE BACK by concatenation.  The v3 sweep entry point RemoveOverlaps3D is
+// untouched; this is an additive second entry point, not a rewrite.
+// ---------------------------------------------------------------------------
+
+// White-box dispatch counters (the Stage-1 pins read these directly).
+struct RegularizeCounters {
+  int components = 0;  // connected components returned by decompose
+  int clean = 0;       // passed the gate; early-exit copied through
+  int dirty = 0;       // failed IsSelfIntersecting; routed to candidate B
+  int regularized =
+      0;               // B produced a clean re-gated output (0 while B is stub)
+  int failClosed = 0;  // components that fail-closed (dirty stub, re-gate, or
+                       // an unexpected non-manifold input component)
+};
+
+struct RegularizeResult {
+  std::optional<Manifold::Impl> impl;  // composed output; absent on any fatal
+  std::optional<FatalReason> fatal;
+  std::string detail;
+  RegularizeCounters counters;
+};
+
+// eps = 0 -> compute from bounding-box scale.
+RegularizeResult RegularizeImpl(const Manifold::Impl& in, double eps = 0.0);
 
 // ---------------------------------------------------------------------------
 // Test hooks (overlap3_test.cpp only).

@@ -24,6 +24,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <map>
 #include <optional>
 #include <set>
@@ -1666,3 +1667,136 @@ TEST(Overlap3, Corpus_SelfIntersectB_Recorded) {
   CorpusSingleGate("self_intersectB.obj", "Corpus_SelfIntersectB");
 }
 #endif
+
+// ===========================================================================
+// Regularization operator (docs/Regularize3D.md) - Stage-1 GATE + DISPATCH.
+// RegularizeImpl is the parallel entry point: decompose by connectivity ->
+// per-component gate (validity + IsSelfIntersecting) -> early-exit clean ->
+// route dirty to candidate B (a fail-closed stub in Stage 1) -> compose back
+// by concatenation.  These pins are authored RED-FIRST (a no-op stub cannot
+// pass any of them) and each is mutation-verified in the lane notebook.
+// ===========================================================================
+
+// Bit-pattern mesh identity: vert positions (raw doubles) and triangle vertex
+// ids, compared exactly.  Returns a bool; never prints the coordinates (house
+// discipline: equality claims by bit-pattern compare, no coordinate dumps).
+static bool BitIdenticalMesh(const Manifold::Impl& a, const Manifold::Impl& b) {
+  if (a.vertPos_.size() != b.vertPos_.size()) return false;
+  if (a.halfedge_.size() != b.halfedge_.size()) return false;
+  for (size_t i = 0; i < a.vertPos_.size(); ++i)
+    if (std::memcmp(&a.vertPos_[i], &b.vertPos_[i], sizeof(vec3)) != 0)
+      return false;
+  for (size_t h = 0; h < a.halfedge_.size(); ++h)
+    if (a.halfedge_.Start(static_cast<int>(h)) !=
+        b.halfedge_.Start(static_cast<int>(h)))
+      return false;
+  return true;
+}
+
+// A single connected VALID 2-manifold that SELF-INTERSECTS: a centered unit
+// cube with one corner dragged PAST the opposite corner, so the three tris
+// incident to that corner sweep across the whole body and pierce the far
+// faces.  The warp leaves topology unchanged (still IsManifold && Is2Manifold);
+// the pierce makes IsSelfIntersecting true (verified: a shallow poke exits
+// through a side and is NOT flagged, so the target is past the far corner).
+// Cheap CI-safe stand-in for the heavy corpus self-intersectors (siA/siB are
+// ~17k tris).
+static Manifold::Impl PokedCube() {
+  const Manifold cube = Manifold::Cube({1, 1, 1}, true);  // [-0.5, 0.5]^3
+  const Manifold poked = cube.Warp([](vec3& v) {
+    if (v.x > 0 && v.y > 0 && v.z > 0) v = vec3(-1.0, -1.0, -1.0);
+  });
+  return Manifold::Impl(poked.GetMeshGL64());
+}
+
+// Pin 1: clean-input identity.  A clean single connected component passes the
+// gate and is copied through BITWISE-unchanged (mesh geometry + topology).
+TEST(Overlap3, Regularize_CleanSingleComponent_BitwisePassThrough) {
+  const Manifold::Impl in(Manifold::Impl::Shape::Cube);
+  const RegularizeResult r = RegularizeImpl(in, ImplEps(in));
+  ASSERT_FALSE(r.fatal.has_value())
+      << "clean cube must not fail closed: " << r.detail;
+  ASSERT_TRUE(r.impl.has_value());
+  EXPECT_EQ(r.counters.components, 1);
+  EXPECT_EQ(r.counters.clean, 1);
+  EXPECT_EQ(r.counters.dirty, 0);
+  EXPECT_EQ(r.counters.failClosed, 0);
+  EXPECT_TRUE(BitIdenticalMesh(*r.impl, in))
+      << "clean single component must pass through bitwise-unchanged";
+}
+
+// Pin 2: multi-component dispatch, all clean.  Two disjoint cubes decompose
+// into two components, both early-exit; composed back without fusion, the
+// output is still two topological components.
+TEST(Overlap3, Regularize_MultiComponent_AllClean_DispatchCounts) {
+  const Manifold a = Manifold::Cube({1, 1, 1});
+  const Manifold b = Manifold::Cube({1, 1, 1}).Translate({3, 0, 0});
+  const Manifold::Impl in = ComposeImpl(a, b);
+  const RegularizeResult r = RegularizeImpl(in, ImplEps(in));
+  ASSERT_FALSE(r.fatal.has_value()) << r.detail;
+  ASSERT_TRUE(r.impl.has_value());
+  EXPECT_EQ(r.counters.components, 2);
+  EXPECT_EQ(r.counters.clean, 2);
+  EXPECT_EQ(r.counters.dirty, 0);
+  EXPECT_EQ(r.counters.failClosed, 0);
+  const Manifold out(GetMeshGLImpl<double, uint64_t>(*r.impl, -1));
+  EXPECT_EQ(out.Decompose().size(), 2u)
+      << "compose-back must not fuse the two components";
+}
+
+// Pin 3: multi-component dispatch, one clean + one dirty.  The clean cube
+// early-exits; the poked (self-intersecting) cube routes to candidate B, which
+// fails closed - so the whole result is the honest fail-closed, with complete
+// dispatch counts (both components gated regardless of decompose order).
+TEST(Overlap3, Regularize_MultiComponent_CleanPlusDirty_DispatchCounts) {
+  const Manifold clean = Manifold::Cube({1, 1, 1}).Translate({3, 0, 0});
+  const Manifold dirtyM(GetMeshGLImpl<double, uint64_t>(PokedCube(), -1));
+  const Manifold::Impl in = ComposeImpl(clean, dirtyM);
+  const RegularizeResult r = RegularizeImpl(in, ImplEps(in));
+  EXPECT_EQ(r.counters.components, 2);
+  EXPECT_EQ(r.counters.clean, 1);
+  EXPECT_EQ(r.counters.dirty, 1);
+  EXPECT_EQ(r.counters.regularized, 0);
+  EXPECT_EQ(r.counters.failClosed, 1);
+  ASSERT_TRUE(r.fatal.has_value())
+      << "a dirty component must fail closed while B is a stub";
+  EXPECT_EQ(*r.fatal, FatalReason::DirtyComponentUnresolved);
+  EXPECT_FALSE(r.impl.has_value()) << "fail-closed yields no partial output";
+}
+
+// Pin 4: a dirty single component routes to candidate B's fail-closed stub with
+// the named reason.  Fixture sanity is asserted first: the poked cube is a
+// VALID 2-manifold that self-intersects (a genuine dirty component).
+TEST(Overlap3, Regularize_DirtySingleComponent_RoutesToFailClosedStub) {
+  const Manifold::Impl dirty = PokedCube();
+  ASSERT_TRUE(dirty.IsManifold() && dirty.Is2Manifold())
+      << "fixture must be a valid 2-manifold";
+  ASSERT_TRUE(dirty.IsSelfIntersecting())
+      << "fixture must self-intersect (else it is not a dirty component)";
+  const RegularizeResult r = RegularizeImpl(dirty, ImplEps(dirty));
+  EXPECT_EQ(r.counters.components, 1);
+  EXPECT_EQ(r.counters.clean, 0);
+  EXPECT_EQ(r.counters.dirty, 1);
+  EXPECT_EQ(r.counters.regularized, 0);
+  EXPECT_EQ(r.counters.failClosed, 1);
+  ASSERT_TRUE(r.fatal.has_value());
+  EXPECT_EQ(*r.fatal, FatalReason::DirtyComponentUnresolved) << r.detail;
+  EXPECT_FALSE(r.impl.has_value());
+}
+
+// Pin 5 (Stage-2 handoff, RED now / GREEN when B lands): the same dirty single
+// component, once candidate B is built, must be REGULARIZED to the boundary of
+// {w_S >= 1} - fatal-free, a valid manifold, self-intersection removed.  Left
+// DISABLED until B lands; enabling it is the acceptance test for Stage 2.
+TEST(Overlap3, DISABLED_Regularize_DirtySingleComponent_Regularized) {
+  const Manifold::Impl dirty = PokedCube();
+  const RegularizeResult r = RegularizeImpl(dirty, ImplEps(dirty));
+  ASSERT_FALSE(r.fatal.has_value()) << "B must resolve the dirty component";
+  ASSERT_TRUE(r.impl.has_value());
+  EXPECT_EQ(r.counters.regularized, 1);
+  EXPECT_EQ(r.counters.failClosed, 0);
+  const Manifold out(GetMeshGLImpl<double, uint64_t>(*r.impl, -1));
+  EXPECT_EQ(out.Status(), Manifold::Error::NoError);
+  EXPECT_FALSE(r.impl->IsSelfIntersecting())
+      << "regularized output must be self-intersection-free";
+}

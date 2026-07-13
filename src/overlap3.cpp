@@ -1326,4 +1326,224 @@ Overlap3Internals RemoveOverlaps3D_TestHooks(const Manifold::Impl& in,
   return out;
 }
 
+// ---------------------------------------------------------------------------
+// Regularization operator (docs/Regularize3D.md) - Stage-1 GATE + DISPATCH.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Split `in` into connected components by halfedge connectivity - the Decompose
+// primitive (constructors.cpp:455) mirrored at the Impl level so the operator
+// never round-trips through the CSG layer.  Each returned component is a
+// finished Impl (bbox/normals/collider) whose epsilon_ is pinned to the
+// resolved global machine scale, so the per-component gate (IsSelfIntersecting
+// reads collider_, faceNormal_, epsilon_) runs directly.  A single connected
+// input returns exactly one component that IS a copy of `in`, so a clean
+// input of one component passes through unchanged.
+std::vector<Manifold::Impl> DecomposeComponents(const Manifold::Impl& in,
+                                                double eps) {
+  std::vector<Manifold::Impl> out;
+  const int numVert = static_cast<int>(in.NumVert());
+  if (numVert == 0 || in.halfedge_.size() == 0) return out;
+
+  DisjointSets uf(numVert);
+  for (size_t e = 0; e < in.halfedge_.size(); ++e)
+    if (in.halfedge_.IsForward(e))
+      uf.unite(in.halfedge_.Start(static_cast<int>(e)),
+               in.halfedge_.End(static_cast<int>(e)));
+  std::vector<int> vertLabel;
+  const int numComponents = uf.connectedComponents(vertLabel);
+
+  if (numComponents == 1) {
+    // The whole input is one component; copy it through unchanged so a clean
+    // single-component input is bitwise pass-through.  Its finished state
+    // (collider/normals from construction) drives the gate; only epsilon_ is
+    // pinned to the resolved machine scale.
+    out.push_back(in);
+    out.back().epsilon_ = eps;
+    return out;
+  }
+
+  const int numTri = static_cast<int>(in.NumTri());
+  for (int c = 0; c < numComponents; ++c) {
+    // Compact this component's verts; vertNew2Old feeds ReindexVerts.
+    Vec<int> vertNew2Old;
+    for (int v = 0; v < numVert; ++v)
+      if (vertLabel[v] == c) vertNew2Old.push_back(v);
+    if (vertNew2Old.empty()) continue;
+
+    // Faces whose first vert carries this label; halfedge connectivity
+    // guarantees all three verts of a face share it.
+    Vec<int> faceNew2Old;
+    for (int f = 0; f < numTri; ++f)
+      if (vertLabel[in.halfedge_.Start(3 * f)] == c) faceNew2Old.push_back(f);
+    if (faceNew2Old.empty()) continue;
+
+    Manifold::Impl comp;
+    comp.vertPos_.resize(vertNew2Old.size());
+    for (size_t i = 0; i < vertNew2Old.size(); ++i)
+      comp.vertPos_[i] = in.vertPos_[vertNew2Old[i]];
+    comp.GatherFaces(in, faceNew2Old);  // halfedges with OLD vert ids
+    comp.ReindexVerts(vertNew2Old, in.NumVert());  // remap to the compacted ids
+    // Finish so the gate has bbox/collider/normals; pin epsilon_ to the global
+    // machine scale for a consistent 2*eps relaxation across components.
+    comp.CalculateBBox();
+    comp.SetEpsilon();
+    comp.SortGeometry();
+    comp.SetNormalsAndCoplanar();
+    comp.epsilon_ = eps;
+    out.push_back(std::move(comp));
+  }
+  return out;
+}
+
+enum class GateVerdict { Clean, Dirty, Invalid };
+
+// The per-component gate (docs/Regularize3D.md step 2): valid AND
+// non-self-intersecting.  Components of a valid oriented 2-manifold are
+// themselves valid, so Invalid is defensive (never expected on a valid input).
+//
+// R2 CLEAN-BIAS CAVEAT (docs/Regularize3D.md R2): IsSelfIntersecting is
+// systematically CLEAN-biased - its 2*eps shares-vertex relaxation SUPPRESSES
+// near-miss detection (it returns non-intersecting when an eps normal nudge
+// separates the pair), it does not flag near-misses.  So a genuine crossing
+// whose two verts sit in the thin band just outside the eps weld can pass the
+// gate, EARLY-EXIT as clean, and carry an unregularized self-overlap through
+// silently (the R2(i) = R1 blind spot).  This gate does not close that narrow
+// hole; it is a recorded open, not a claim of completeness.
+GateVerdict GateComponent(const Manifold::Impl& comp) {
+  if (!comp.IsManifold() || !comp.Is2Manifold()) return GateVerdict::Invalid;
+  if (comp.IsSelfIntersecting()) return GateVerdict::Dirty;
+  return GateVerdict::Clean;
+}
+
+// Candidate B (docs/Regularize3D.md "B's mechanism") - the dirty-core resolver.
+// Stage 1 ships the DISPATCH skeleton only; B's production core (arrangement +
+// per-cell w_S + halfedge {w_S >= 1} boundary emission) is not yet built, so
+// this stub FAILS CLOSED with a named reason.  When B lands it returns either a
+// clean Impl (which the caller re-gates) or a real fatal.
+StageResult<Manifold::Impl> RunCandidateB(const Manifold::Impl& dirty,
+                                          double eps) {
+  (void)dirty;
+  (void)eps;
+  return StageResult<Manifold::Impl>::Fatal(
+      FatalReason::DirtyComponentUnresolved,
+      "candidate B (dirty-core resolver) not yet built - fail-closed stub");
+}
+
+// Compose the surviving components back into one Impl by CONCATENATION - no
+// cross-component weld, no fusion (docs/Regularize3D.md step 6).  A single
+// component is returned as-is (bitwise pass-through for a clean
+// single-component input); multiple components are concatenated through
+// MeshGL64, whose halfedge pairing is per-component (distinct-position verts
+// across components never merge, so touching contacts stay separate).
+Manifold::Impl ComposeComponents(std::vector<Manifold::Impl>& parts) {
+  if (parts.empty()) return Manifold::Impl{};
+  if (parts.size() == 1) return std::move(parts[0]);
+
+  MeshGL64 combined;
+  combined.numProp = 3;
+  for (const Manifold::Impl& p : parts) {
+    const MeshGL64 mg = GetMeshGLImpl<double, uint64_t>(p, -1);
+    const uint64_t base = combined.NumVert();
+    for (size_t i = 0; i < mg.vertProperties.size(); ++i)
+      combined.vertProperties.push_back(mg.vertProperties[i]);
+    for (size_t i = 0; i < mg.triVerts.size(); ++i)
+      combined.triVerts.push_back(mg.triVerts[i] + base);
+  }
+  combined.runOriginalID.push_back(Manifold::ReserveIDs(1));
+  return Manifold::Impl(combined);
+}
+
+}  // namespace
+
+RegularizeResult RegularizeImpl(const Manifold::Impl& in, double eps) {
+  RegularizeResult result;
+
+  // Empty input -> empty output (matches RemoveOverlaps3D's trivially-empty
+  // path).
+  if (in.NumTri() == 0) {
+    result.impl = Manifold::Impl{};
+    return result;
+  }
+
+  // Resolve the machine-scale weld radius once; every component's gate uses it.
+  if (eps <= 0.0) eps = EpsilonFromScale(in.bBox_.Scale(), 1000);
+  if (eps <= 0.0 || !std::isfinite(eps)) {
+    result.fatal = FatalReason::SubEpsInput;
+    result.detail = "epsilon not computable";
+    return result;
+  }
+
+  // 1. DECOMPOSE by connectivity.
+  std::vector<Manifold::Impl> components = DecomposeComponents(in, eps);
+  result.counters.components = static_cast<int>(components.size());
+
+  // 2-5. Gate + dispatch every component.  We gate ALL components (the gate is
+  // cheap) so the white-box dispatch counters are complete regardless of the
+  // decompose order; the first fail-closed is the reported fatal, and no
+  // partial output is composed once any component fails.
+  std::optional<FatalReason> firstFatal;
+  std::string firstDetail;
+  std::vector<Manifold::Impl> outComponents;
+
+  for (Manifold::Impl& comp : components) {
+    const GateVerdict verdict = GateComponent(comp);
+    if (verdict == GateVerdict::Invalid) {
+      // Defensive: a component of a valid input is valid; a non-manifold one is
+      // neither early-exitable nor a case B resolves.  Fail closed.
+      ++result.counters.failClosed;
+      if (!firstFatal) {
+        firstFatal = FatalReason::NonManifoldEmission;
+        firstDetail = "input component is not 2-manifold";
+      }
+      continue;
+    }
+    if (verdict == GateVerdict::Clean) {
+      // 3. EARLY-EXIT: already the boundary of a simple solid.
+      ++result.counters.clean;
+      outComponents.push_back(std::move(comp));
+      continue;
+    }
+
+    // 4. DIRTY -> candidate B.
+    ++result.counters.dirty;
+    StageResult<Manifold::Impl> bRes = RunCandidateB(comp, eps);
+    if (!bRes.ok()) {
+      ++result.counters.failClosed;
+      if (!firstFatal) {
+        firstFatal = bRes.fatal;
+        firstDetail = std::move(bRes.detail);
+      }
+      continue;
+    }
+    // 5. RE-GATE B's output once (same gate as the input; B's coords are
+    // double-rounded).  A clean pass composes in; a failure is the honest
+    // fail-closed, never a silent wrong result.
+    Manifold::Impl bImpl = std::move(*bRes.value);
+    bImpl.epsilon_ = eps;
+    if (GateComponent(bImpl) != GateVerdict::Clean) {
+      ++result.counters.failClosed;
+      if (!firstFatal) {
+        firstFatal = FatalReason::NonManifoldEmission;
+        firstDetail = "candidate B output failed the re-gate";
+      }
+      continue;
+    }
+    ++result.counters.regularized;
+    outComponents.push_back(std::move(bImpl));
+  }
+
+  if (firstFatal) {
+    // Fail-closed: a recorded reason, no partial output.
+    result.fatal = firstFatal;
+    result.detail = std::move(firstDetail);
+    return result;
+  }
+
+  // 6. COMPOSE BACK by concatenation (no fusion).
+  result.impl = ComposeComponents(outComponents);
+  return result;
+}
+
 }  // namespace manifold
