@@ -506,8 +506,10 @@ R3-i - THE ALTERNATION PROBE: alternation FAILS on the w=2 stratum, and the
   (AddNewEdgeVerts sets direction = inclusion<0 and pushes abs(inclusion) copies)
   and pairs by 1D position, assuming a start-end-start-end order. Cast generic
   transversals through Havoc's w=2 lump (mission_lump, right_centroid) and read
-  the exact per-cell soup winding: every line reads 0 -> 1 -> 2 -> 1 -> 0, whose
-  local-sign token order is SSEE - NOT the assumed alternation. PairUp's stated
+  the exact per-cell soup winding: generic lines read 0 -> 1 -> 2 -> 1 -> 0
+  (a small fraction of directions read the longer 0 -> 1 -> 2 -> 1 -> 2 -> 1 -> 0
+  profile - verification round), whose
+  local-sign token order is SSEE (or SSESEE) - NOT the assumed alternation. PairUp's stated
   precondition is literally violated on the double-covered stratum, exactly as
   BR-a feared. But:
     - The coupled winding-delta assembly (S4c) does not pair: it classifies each
@@ -537,8 +539,15 @@ R3-i - THE ALTERNATION PROBE: alternation FAILS on the w=2 stratum, and the
   mechanism, not of B. BR-a is closed.
 
 R3-ii - THE FIRST EMPIRICAL FRAGMENT: the S4 resolver built and run end-to-end.
-  All six spec elements wired with their asserts ACTIVE (level-0 input predicates
-  only, each through the Shewchuk static filter with an exact fallback):
+  All six spec elements wired with their asserts ACTIVE.  SCOPE CAVEAT
+  (verification round): the level-0-plus-static-filter discipline was
+  demonstrated for the WINDING half only; the fragment's ENUMERATION half ran
+  in exact rational arithmetic throughout (more exact predicates than the
+  filtered winding side, including the constructed-point overlap decisions S2
+  proved restructurable to level-0 but which this fragment computed exactly
+  instead).  B's correctness is demonstrated end-to-end; its kernel-free-ness
+  is demonstrated for winding and rests on S2's proven identities - not yet
+  exercised - for enumeration.  Closing that gap is round 4.
     On HAVOC's dirty core:
       - ENUMERATION (self-adjacency skip) reproduces S3's self-crossing seam count
         bit-for-bit, all cross-operand; every recorded exact w_S (the double-
@@ -549,9 +558,11 @@ R3-ii - THE FIRST EMPIRICAL FRAGMENT: the S4 resolver built and run end-to-end.
       - RADIAL: every arrangement line is exactly two distinct planes; the
         >2-sheet branch fires ZERO times. ONCE-ONLY construction: zero double-
         constructions (no triple points to stress).
-      - STATIC FILTER: EVERY level-0 orient3d certified (ratio>1); the exact
-        fallback NEVER fired; min certified ratio ~5e2; zero certified-wrong
-        signs. Havoc is safe-by-margin end-to-end - the kernel is dead code here.
+      - STATIC FILTER: EVERY level-0 WINDING orient3d certified (ratio>1); the
+        exact fallback NEVER fired; min certified ratio ~5e2; zero
+        certified-wrong signs. The winding half is safe-by-margin; the
+        enumeration half's filtered form is the round-4 demonstration (see the
+        scope caveat above).
     On self_intersectA (a TRUE single-shell self-intersector, the genuine residual):
       - ENUMERATION reproduces S3 bit-for-bit: thousands of arrangement lines, ALL
         exactly two distinct planes; genuine multi-sheet edges = ZERO (the
@@ -583,6 +594,9 @@ build-out plus two specified-but-untested axes. No new wall.
 NEXT-STEP ADJUDICATION for the owner (what remains between the fragment and a
 production resolver, sized honestly):
   UNBUILT - the v5 preconditions (rev-2), the bulk of the resolver:
+    - FILTERED ENUMERATION. The fragment's enumeration half ran in exact
+      rationals; the level-0-restructured + static-filtered form (S2's proven
+      identities) is designed but undemonstrated - round 4 closes it.
     - LOCALIZER. The fragment is O(ntri) per winding query (whole soup); production
       must bound the query to the flagged dirty submesh. The B-scales-with-input
       vs C-bounds-to-submesh cost adjudication is now concrete (cost is real).
