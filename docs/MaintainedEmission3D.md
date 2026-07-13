@@ -657,3 +657,26 @@ NEXT (implementation, not adjudication): variant (iii) is now a specified projec
 a global identity collect (RSI-#3 arrangement completion) satisfying R1's two
 preconditions, plus the fenced cluster classifier of probe 3 lifted to 3D. The
 adjudication is closed; the remainder is engineering the identity-carrying pipeline.
+
+## Stage-A0 addendum (measured after this doc converged)
+
+The implementation crucible's stage A0 (V4ImplPlan.md, RECORDED RESULT +
+verification round) answered the sufficiency question this doc left open, and
+the answer sharpens the convergent verdict:
+
+- The identity table's incidence channels are DEGENERATE on the hard carriers:
+  signed multiplicity is constant positive in the union-composed regime, the
+  Canonicalize fold is a pure bijection there (nothing cancels - measured
+  population-wide, calibrated against positive controls), and every other
+  incidence signature is identical between must-survive and must-collapse
+  clusters.  NOT-SEPARABLE at eps quantization, pre-fold and post-fold.
+- No ambiguity witness exists: the oracle union is a pure function of the
+  oriented face soup.  The hard carriers are NOT ill-posed; the deciding
+  winding structure lives at sub-eps scale.  THE BARRIER IS PRECISION, NOT
+  INFORMATION.
+- Consequence for this doc's verdict: variant (iii) at eps precision delivers
+  the independence-coupling dissolution, the density collapse, and the
+  consistency pins - but NOT the hard-carrier resolutions; those require the
+  exact-arithmetic arrangement completion (the RSI-#3 object), which is the
+  named upgrade path, not a defect of the architecture.  Fail-closed remains
+  the honest terminal state for those carriers at this precision model.

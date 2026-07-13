@@ -356,8 +356,10 @@ NOT-SEPARABLE, both carriers (Havocglass8 and GT7863). The predicted outcome hol
     must-collapse. The signed-multiplicity channel FACT 1 named as the ONLY possible
     disambiguator is CONSTANT +1 corpus-wide (measured on all A0 fixtures + Offset1,
     self_intersectA, openscad: every canonical face mult +1, a single +2, NEVER
-    negative) - union/self-overlap windings cancel to zero (dropped at Canonicalize)
-    or stay +1, never a sign marker. Every other incidence channel (seam-degree,
+    negative) - never a sign marker.  (Wording corrected by the verification round:
+    on these carriers NOTHING cancels at Canonicalize - the fold is a pure bijection,
+    see below - so the degeneracy is a property of the input regime, not a fold
+    artifact.) Every other incidence channel (seam-degree,
     nFaces, face-normal spread, per-member face-sharing/jaccard) is IDENTICAL between
     the anchored clean-collapse control (Havoc's sub-eps dx twin) and the lump-region
     collapse candidates; the sole distinguishing quantity is the positions-only spread
@@ -376,6 +378,35 @@ NOT-SEPARABLE, both carriers (Havocglass8 and GT7863). The predicted outcome hol
     kill's baseline is positions-only closure. FINDING: pin 4b's blank-table mutation
     (2) is VACUOUS as specified (no fixture is both table-load-bearing AND closing);
     pin 4b re-scoped below.
+
+VERIFICATION ROUND (two adversarial lanes; a0-verify-prefold-1783909200.md,
+a0-verify-witness-1783911000.md). The verdict HARDENED and acquired its final
+interpretation:
+  - PRE-FOLD CHANNELS ALSO DEGENERATE: tapping Canonicalize's fold before the mult==0
+    drop, population-wide on both carriers, the fold is a pure BIJECTION (zero
+    cancelled faces, zero coincident faces, every fold count one, no degenerate
+    tris) - calibrated by positive controls that DO fire on constructed cancellation
+    and coincidence.  The near-coincident twin never merges into a cancellable pair
+    (its separation is greater-than-eps geometric).  So no pre-fold annotation can
+    separate either; NOT-SEPARABLE extends below the fold.
+  - SCOPE CAVEAT (promoted from the A0 notebook): all of this is measured in the
+    UNION-COMPOSED regime (every mult positive).  Subtraction-composed inputs carry
+    negative mults and are a separate, unmeasured regime.
+  - INPUT-DETERMINES (the witness lane's theorem-shaped result): no ambiguity witness
+    exists - the oracle union is a pure function of the oriented face soup; every
+    construction of two operand partitions with an identical soup yields an identical
+    union, and the only way to change the answer is to change the soup.  Therefore
+    the hard carriers are NOT ill-posed, and the fail-closed adjudication does NOT
+    claim impossibility.  THE BARRIER IS PRECISION, NOT INFORMATION: the winding
+    structure that decides survive-vs-collapse lives at sub-eps scale, below any
+    eps-quantized identity table; an exact-arithmetic arrangement completion recovers
+    it in principle.  That object is the RSI-#3 / full variant-(iii) research
+    program, now reached by measurement from an independent direction.  TERMINAL
+    ADJUDICATION at this architecture's precision model: honest fail-closed, upgrade
+    path named.
+  - PIN-4B VACUITY SCOPED: vacuous for union-regime fixtures; a deliberately
+    constructed subtraction/coincident-face fixture is the route to a non-vacuous
+    blank-table pin, contingent on stage C being built.
 
 ### Stage A: identity table construction (pass 1)
 
@@ -474,7 +505,8 @@ blank-table mutation - the escape's proven bounded partial win, now landed as th
 mechanism AND pinned load-bearing on the table.
 DONE (named-set, not permissive): isolated twin oracle-true (and blank-table-reopens)
 + the ratchet's A0-named must-move carriers changed state as A0 predicted (or, if A0
-returned NOT-SEPARABLE, the must-move set is empty by A0's recorded verdict and the
+returned NOT-SEPARABLE, the must-move set is empty by A0's recorded verdict - in the
+union-composed regime, per the A0 scope caveat - and the
 Havoc-class carriers are recorded fail-closed) + zero oracle-wrong across the corpus +
 suite green. "Some may resolve" is REMOVED; the carrier state-changes are named by A0.
 
