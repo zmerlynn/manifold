@@ -1741,7 +1741,7 @@ BuildArrangement RecordSeams(const Manifold::Impl& in) {
 // chains) bound no cell and are pruned first (so triangulation sees no
 // zero-area spike).  Returns one CCW vertex-index loop per bounded cell (the
 // unbounded outer face is dropped by its negative signed area), or false on a
-// malformed walk.  Standard DCEL face traversal: the outgoing half-edges at
+// malformed walk.  Standard halfedge face traversal: the outgoing half-edges at
 // each vertex are angularly ordered and next(u->v) is the outgoing edge at v
 // immediately CLOCKWISE from v->u, which keeps the cell interior on the left.
 bool ExtractCells(const std::vector<vec2>& pts,
