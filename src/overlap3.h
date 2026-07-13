@@ -212,20 +212,25 @@ Overlap3Result RemoveOverlaps3D(const Manifold::Impl& in, double eps = 0.0);
 // Regularization operator (docs/Regularize3D.md) - parallel entry point.
 //
 // RegularizeImpl maps a valid oriented face soup to the boundary of the solid
-// {p : w_S(p) >= 1}, PER CONNECTED COMPONENT (it never fuses separate
-// components - fusion is the Boolean's job, already done upstream).  Stage 1 is
-// the GATE + DISPATCH skeleton: DECOMPOSE by connectivity -> per-component GATE
-// (validity + IsSelfIntersecting) -> EARLY-EXIT clean components -> route DIRTY
-// components to candidate B (today a fail-closed stub) -> RE-GATE B's output ->
-// COMPOSE BACK by concatenation.  The v3 sweep entry point RemoveOverlaps3D is
-// untouched; this is an additive second entry point, not a rewrite.
+// {p : w_S(p) >= 1}, PER CONNECTED COMPONENT (it never fuses separate DISJOINT
+// components - fusion is the Boolean's job, already done upstream).  The one
+// exception is a genuine COPLANAR self-overlap that connectivity would split (a
+// buried plug with a coincident cap): those components are UNITED at decompose
+// time so the fold sees the overlap as internal (touching/disjoint objects with
+// no 2D-area overlap never merge).  The pipeline: DECOMPOSE by connectivity (+
+// coplanar-overlap merge) -> per-component GATE (validity + IsSelfIntersecting
+// + coplanar overlap) -> EARLY-EXIT clean components -> route DIRTY components
+// to candidate B -> RE-GATE B's output -> COMPOSE BACK by concatenation.  The
+// v3 sweep entry point RemoveOverlaps3D is untouched; this is an additive
+// second entry point, not a rewrite.
 // ---------------------------------------------------------------------------
 
 // White-box dispatch counters (the Stage-1 pins read these directly).
 struct RegularizeCounters {
-  int components = 0;  // connected components returned by decompose
+  int components = 0;  // components after decompose + coplanar-overlap merge
   int clean = 0;       // passed the gate; early-exit copied through
-  int dirty = 0;       // failed IsSelfIntersecting; routed to candidate B
+  int dirty = 0;       // failed the gate (self-intersecting OR coplanar
+                       // overlap); routed to candidate B
   int regularized =
       0;               // B produced a clean re-gated output (0 while B is stub)
   int failClosed = 0;  // components that fail-closed (dirty stub, re-gate, or
