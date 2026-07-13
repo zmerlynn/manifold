@@ -110,13 +110,19 @@ If the input soup decomposes by connectivity into components that are each a
 valid, non-self-intersecting manifold, fold-union them through the EXISTING
 Boolean = the oracle itself, as a front-end path inside RemoveOverlaps3D.
 
-WHY THE GATE IS LOAD-BEARING (owner review): the Boolean does not check or
-reject anything - a self-intersecting operand is accepted SILENTLY and the
-output is silently wrong (often still a valid manifold, so undetectable
-downstream); that invisible failure is the original motivation of this whole
-campaign.  The per-component gate here is a check that exists nowhere in the
-library today: it converts the Boolean's unenforced precondition into a
-detected and (via candidate B) repairable one.
+WHY THE GATE IS LOAD-BEARING (owner review): self-intersection is NOT
+invalidity - a self-intersecting mesh is a valid manifold, and the Boolean
+accepts it and emits another valid manifold.  What the Boolean does not do is
+REGULARIZE: multi-winding regions pass through uninterpreted (a doubly-covered
+lump stays doubly covered), so the output is wrong only relative to the
+boundary-of-a-simple-solid reading downstream consumers assume - an invisible
+mismatch, which is the original motivation of this whole campaign.  (Measured
+fine print: near self-overlap zones PairUp's alternation precondition is
+violated - round 3 - so assembly there can additionally mis-pair.)  The
+per-component gate is a check that exists nowhere in the library today, and
+the system it feeds is best read as the REGULARIZATION OPERATOR the library
+never had: the map from any valid oriented soup to the boundary of {w>=1},
+which is exactly candidate B's specification.
 
 OUTPUT-CONTRACT CAVEAT (owner review): the Boolean's output is epsilon-valid -
 guaranteed manifold, NOT guaranteed self-intersection-free (rounding can create
