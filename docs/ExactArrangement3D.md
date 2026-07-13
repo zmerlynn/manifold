@@ -621,11 +621,13 @@ production resolver, sized honestly):
       one-ray-per-component), with a direction policy that avoids the far-seed
       near-grazing the fragment measured on siA. Micro cost, but must be built.
   SPECIFIED but UNTESTED at fragment scale (named opens, not new walls):
-    - SINGLE GLOBAL SoS (R4). The round-3 winding rays hit no exact-zeros, but
-      round-4's filtered ENUMERATION DID: Havoc's coplanar-operand contact drove a
-      fraction-of-a-percent of D1 straddle predicates to exact-zero (level-0
-      predicates evaluating to exactly 0), handled by exact fallback (sign 0) plus
-      a cleanly-piercing sibling edge. A single global SoS is the production
+    - SINGLE GLOBAL SoS (R4). The round-3 winding rays hit no exact-zeros;
+      round-4's filtered ENUMERATION hit only SAME-operand ones (final
+      verification corrected the attribution: all are intra-mesh vertex-on-plane
+      incidences on NON-CROSSING pairs, LL/RR, zero cross-operand), handled by
+      exact fallback (sign 0). The cross-operand vertex-on-face family that
+      GT7863/openscad need therefore remains fully UNEXERCISED at fragment
+      scale. A single global SoS is the production
       requirement to decide those boundary edges deterministically; GT7863's
       coplanar zeros and openscad's coincident verts REQUIRE it too. Now partly
       EXERCISED (enumeration), still untested as a unified convention.
@@ -684,10 +686,10 @@ about 99.8 percent. The centerpiece edge-edge z-order (D3) is 100 percent CERTIF
 on BOTH cores - zero fallback, with large margins (min ratio ~3e2 on Havoc, ~7e6 on
 siA) - so the kernel is demonstrably avoided for the z-order decision. The only
 enumeration fallback is a fraction of a percent of Havoc's D1 straddle predicates,
-and every one of them is an EXACT-ZERO (a level-0 predicate evaluating to exactly 0
-because a vertex lies exactly on the other operand's plane - Havoc's L and R share
-coplanar geometry, the coplanar-contact family S1 predicted): ZERO precision
-sub-bound, ZERO sign flips. siA's enumeration (an organic single shell, no
+and every one of them is an EXACT-ZERO (a level-0 predicate evaluating to exactly
+0; final verification corrected the attribution: all are SAME-operand intra-mesh
+vertex-on-plane incidences on non-crossing pairs - LL/RR, none cross-operand):
+ZERO precision sub-bound, ZERO sign flips. siA's enumeration (an organic single shell, no
 coplanar-operand degeneracy) is 100 percent certified, zero fallback, the exact
 kernel dead code. No enumeration decision was found that cannot be expressed
 level-0 - the FINDING class is empty.
@@ -700,8 +702,11 @@ rather than leaning on a sibling. That is a named, already-listed open, not a ne
 wall and not a level-0-expressibility failure. RESULT: B's kernel-free-ness is now
 DEMONSTRATED END-TO-END on the reachable corpus - enumeration and winding both -
 with the exact fallback either dead (the z-order everywhere; all of siA) or firing
-only on genuine exact ties (Havoc's coplanar contact), never on precision and never
-producing a certified-wrong sign. The remaining production work is unchanged and
+only on genuine exact ties (Havoc's same-operand incidences), never on precision
+and never producing a certified-wrong sign (final verification added a
+certified-sign audit over every certified predicate: zero wrong; and filter
+tightening up to 1e12x moves no classification). The remaining production work is
+unchanged and
 re-sized in the NEXT-STEP list above: the FILTERED ENUMERATION line moves from
 UNBUILT to DEMONSTRATED; the bulk (localizer + selective weld + cell-complex/DCEL +
 boundary emission + component-local seed) and the two specified axes (a unified
