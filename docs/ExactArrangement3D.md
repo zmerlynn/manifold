@@ -1,5 +1,11 @@
 # Exact-Arithmetic Arrangement for the Hard Carriers (design)
 
+HISTORICAL RECORD. The CURRENT design is docs/Regularize3D.md (RemoveOverlaps3D as a
+regularization operator: decompose by connectivity, per-component gate, run candidate
+B per dirty component, re-gate, compose - never fuse). This document is the campaign
+that reached it, kept for the evidence and the kill tables; read Regularize3D.md for
+the design as it stands.
+
 Status: DESIGN, load-bearing probe validated by two independent algorithms,
 round-1 adversarial review folded (rev 2), kernel-avoidance adjudication folded
 (rev 3), round-2 kernel-avoidance crucible (adversarial verification + S1-S4)
@@ -239,7 +245,7 @@ WHAT BREAKS (the keystone - a MECHANISM gap, not precision):
     2-sheet transversal self-intersection reduces to the two-operand shape and
     PairUp may serve; the >2-sheet junctions do not, and are exactly the June
     memo's standing serial-seam-matcher / triple-point kill and this doc's own
-    "the radial-order DCEL work REMAINS." This is new mechanism, not reuse.
+    "the radial halfedge-ordering work REMAINS." This is new mechanism, not reuse.
     [rev-4: ROUND-2 RESULTS/S3 measured this on the corpus and found ZERO genuine
     >2-sheet junctions on any failing carrier - the keystone DISSOLVES on the
     corpus (the "dense triple points" premise was a sweep-projection artifact, not
@@ -311,7 +317,7 @@ to a fraction of a percent of exact-fallback (all genuine exact-ties on the
 coplanar-contact carrier, zero precision sub-bound, zero sign flips; the z-order
 centerpiece is fully certified everywhere). So the kernel is avoided end-to-end on
 the reachable corpus. The residual is now an ENGINEERING build-out (localizer +
-selective weld + cell-complex/DCEL + component-local seed) plus two
+selective weld + cell-complex + halfedge boundary + component-local seed) plus two
 specified-but-untested axes (single-global SoS for exact-zero/coplanar carriers,
 subtraction/negative winding) - no mechanism gap remains.
 
@@ -655,10 +661,10 @@ production resolver, sized honestly):
       must bound the query to the flagged dirty submesh. The B-scales-with-input
       vs C-bounds-to-submesh cost adjudication is now concrete (cost is real).
     - SELECTIVE WELD. Identify the flagged dirty region + weld the clean boundary.
-    - CELL COMPLEX / DCEL + {w_S>=1} BOUNDARY EMISSION. The fragment did point
+    - CELL COMPLEX + HALFEDGE {w_S>=1} BOUNDARY EMISSION. The fragment did point
       classification of the recorded cells; production must build the arrangement
-      DCEL and emit the retained-solid boundary. S3/S4 spec it and the fragment
-      confirmed it is 2-sheet-only everywhere, but the DCEL build + boundary
+      halfedge structure and emit the retained-solid boundary. S3/S4 spec it and the
+      fragment confirmed it is 2-sheet-only everywhere, but the halfedge build + boundary
       extraction is the largest unbuilt piece.
     - COMPONENT-LOCAL SEED POLICY (Winding03's unite-non-crossing-edges +
       one-ray-per-component), with a direction policy that avoids the far-seed
@@ -751,7 +757,7 @@ certified-sign audit over every certified predicate: zero wrong; and filter
 tightening up to 1e12x moves no classification). The remaining production work is
 unchanged and
 re-sized in the NEXT-STEP list above: the FILTERED ENUMERATION line moves from
-UNBUILT to DEMONSTRATED; the bulk (localizer + selective weld + cell-complex/DCEL +
+UNBUILT to DEMONSTRATED; the bulk (localizer + selective weld + cell-complex + halfedge boundary +
 boundary emission + component-local seed) and the two specified axes (a unified
 global SoS - now partly exercised on the enumeration - and subtraction/negative
 winding) remain.
@@ -933,14 +939,14 @@ premise is removed. All probes evaluate the SAME exact function w_S:
     provides PARITY.
 
 What exactness does NOT provide (rev-1 overclaim, corrected). The rev-1 text said
-the halfedges "pair by construction... the cross-edge coupling the DCEL provided
+the halfedges "pair by construction... the cross-edge coupling the halfedge structure provided
 for free, now provided by exactness." That oversells it. The June memo's durable
-result is that manifold output needs a GLOBAL DCEL with RADIAL ORDERING of the
+result is that manifold output needs a GLOBAL halfedge structure with RADIAL ORDERING of the
 face-sides around each arrangement edge. Exactness gives consistent classification
 and parity; it does NOT give the radial ORDER itself. You still must sort the
 face-sides cyclically around each edge to PAIR the in/out transitions and to
 DETECT genuine non-manifold edges (more than two boundary sectors). The radial-
-ordering DCEL work REMAINS; exactness makes its predicates tie-free, and that
+ordering halfedge work REMAINS; exactness makes its predicates tie-free, and that
 tie-freedom is exactly what removes the June FP-disagreement kill.
 
 REOPEN VERDICT: the FP-disagreement kill does NOT survive exact winding with a
@@ -1008,7 +1014,7 @@ input size), integration (what of v3 survives), and the reopen.
       Subsumed.
 
   (B/C) EXACT ARRANGEMENT WITH A SCOPE DIAL. One mechanism - exact intersection
-      points, complete arrangement, radial-order DCEL, exact per-cell winding
+      points, complete arrangement, radial halfedge order, exact per-cell winding
       classification, extract the {w_S >= 1} boundary, round outputs to double
       behind a validity gate - run at one of two SCOPES. These are NOT rival
       architectures (rev-1 presented them as two variants; that overstated the
@@ -1216,7 +1222,7 @@ STAGE 2 - FLAG + BOUND. The eps pipeline runs unchanged. On a guard fire, the
 
 STAGE 3 - LOCAL EXACT ARRANGEMENT. Compute the exact arrangement of the submesh:
   rational intersection points among its faces, cell decomposition, radial-order
-  DCEL around each internal edge (tie-free predicates - the reopen), classify each
+  halfedge order around each internal edge (tie-free predicates - the reopen), classify each
   half-face by exact w_S (Stage 1), extract the oriented {w_S >= 1} boundary. The
   topology is exact; constructed intersection coordinates round to double only at
   emission, behind a LOCAL validity gate (2-manifold, no self-intersection within
