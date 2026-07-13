@@ -1658,6 +1658,16 @@ BuildArrangement RecordSeams(const Manifold::Impl& in) {
     lo[t] = la::min(la::min(A.tri[t][0], A.tri[t][1]), A.tri[t][2]);
     hi[t] = la::max(la::max(A.tri[t][0], A.tri[t][1]), A.tri[t][2]);
   }
+  // Once-only pierce cache (doc R1): the UNDIRECTED (min,max) edge key makes a
+  // shared mesh edge traversed in opposite order by two adjacent faces resolve
+  // to ONE bit-identical pierce point, so chaining seams meet exactly and the
+  // cross-face weld cannot manufacture a twin.  This is a CORRECTNESS-by-
+  // construction backstop for the near-parallel tail (R1), not a runtime check:
+  // it is verified NON-load-bearing on the shipped corpus (s2-verify) AND on a
+  // broad general-position sphere family (reg3d-s3: bit-identical emitted
+  // volume under a directed-key mutation, the eps weld absorbing the sub-ULP
+  // divergence), so there is no DEBUG_ASSERT to demote it to - it stays as the
+  // R1 backstop.
   std::map<PierceKey, vec3> cache;
   auto pierce = [&](int edgeV0, int edgeV1, int piercedTri) -> vec3 {
     const PierceKey key{std::min(edgeV0, edgeV1), std::max(edgeV0, edgeV1),
@@ -2138,7 +2148,16 @@ RegularizeResult RegularizeImpl(const Manifold::Impl& in, double eps) {
     }
     // 5. RE-GATE B's output once (same gate as the input; B's coords are
     // double-rounded).  A clean pass composes in; a failure is the honest
-    // fail-closed, never a silent wrong result.
+    // fail-closed, never a silent wrong result.  This is a PRODUCTION
+    // fail-closed backstop for the R1/R2 weld-fold blind spot (BuildImpl
+    // already gates non-manifold emission; the re-gate's non-redundant job is
+    // catching a MANIFOLD-but-self-intersecting output = a weld-manufactured
+    // fold).  It is verified UNREACHED on constructible general-position
+    // fixtures (reg3d-s3: 0/180 sphere variants produce re-gate-catchable
+    // output - every bad case is caught earlier by BuildImpl's manifold gate),
+    // i.e. it fires only in the unbuilt weld-fold regime.  It is deliberately
+    // NOT demoted to a DEBUG_ASSERT: it must fail closed in RELEASE, not
+    // compile out and admit wrong geometry.
     Manifold::Impl bImpl = std::move(*bRes.value);
     bImpl.epsilon_ = eps;
     if (GateComponent(bImpl) != GateVerdict::Clean) {
