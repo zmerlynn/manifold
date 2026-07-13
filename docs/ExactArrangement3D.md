@@ -252,6 +252,19 @@ exact ground truth (S4). The residual has narrowed from the rev-3 keystone to ON
 1D question - PairUp's start-end alternation on the w=2 double-covered stratum -
 plus the first empirical B-resolver fragment. Both are round-3 targets.
 
+B VERDICT (rev 5): EMPIRICALLY VALIDATED AT FRAGMENT SCALE. Round-3 executed both
+targets (see ROUND-3 RESULTS below). The alternation residual is CLOSED - the w=2
+stratum is genuinely non-alternating (measured SSEE) but the coupled winding-delta
+formulation absorbs it by thresholding w_S rather than pairing, so B replaces
+PairUp instead of inheriting it. The first built fragment runs end-to-end on both
+Havoc's composed core AND self_intersectA (a true single-shell self-intersector),
+reproducing exact ground truth with the kernel avoided (static filter certifies
+every deciding predicate; the exact fallback is dead on Havoc, micro-scale and
+sound on siA). The residual is now an ENGINEERING build-out (localizer + selective
+weld + cell-complex/DCEL + component-local seed) plus two specified-but-untested
+axes (single-global SoS for exact-zero carriers, subtraction/negative winding) -
+no mechanism gap remains.
+
 ### Candidate C - minimal old-paradigm kernels (boundary fallback, no depth)
 
 If a worst-case sub-errbound predicate is confirmed (see the named probe in
@@ -476,16 +489,138 @@ REQUIRED ADDITIONS for a B build (the design elements S1-S4 pinned):
   - the micro exact-check fallback for the ~2 openscad deciding sub-bound instances
     (candidate C at micro scale - a rarely-fired exact check, not a kernel).
 
+### ROUND-3 RESULTS: alternation + empirical fragment (rev 5)
+
+Round-3 executed the two items the plan named (probe lane v5b-r3;
+scratchpad/alternation_probe.py + fragment_havoc.py + siA_fragment.py, all
+exact-rational with a double mirror). Both resolve in B's favor. Bottom line: the
+alternation residual is CLOSED (the coupled winding-delta formulation replaces
+PairUp rather than inheriting it), and the first BUILT fragment runs end-to-end -
+matching exact ground truth with the kernel avoided - on BOTH a composed dirty
+core (Havoc) and a genuine single-shell self-intersector (siA). B moves from
+paper-verified to EMPIRICALLY VALIDATED AT FRAGMENT SCALE.
+
+R3-i - THE ALTERNATION PROBE: alternation FAILS on the w=2 stratum, and the
+  winding-delta formulation ABSORBS it. PairUp (boolean_result.cpp:285-301) tags
+  each retained crossing start/end by the LOCAL SIGN of its winding inclusion
+  (AddNewEdgeVerts sets direction = inclusion<0 and pushes abs(inclusion) copies)
+  and pairs by 1D position, assuming a start-end-start-end order. Cast generic
+  transversals through Havoc's w=2 lump (mission_lump, right_centroid) and read
+  the exact per-cell soup winding: every line reads 0 -> 1 -> 2 -> 1 -> 0, whose
+  local-sign token order is SSEE - NOT the assumed alternation. PairUp's stated
+  precondition is literally violated on the double-covered stratum, exactly as
+  BR-a feared. But:
+    - The coupled winding-delta assembly (S4c) does not pair: it classifies each
+      cell by the integer w_S and emits the boundary of the solid {w_S>=1}. On the
+      double-cover the interior 1|2 and 2|1 sheets are w>=1 on both sides, so they
+      are NOT boundaries and are DISCARDED; only the outer 0|1 and 1|0 sheets are
+      emitted. This threshold read is indifferent to token order - no alternation
+      is invoked. (Verified against the spec text: "retain the sector whose
+      w_S >= 1.") A naive PairUp self-reuse instead keeps the interior sheets as
+      overlapping doubled edges - two spurious sheets per w=2 line - the wrong
+      output for a clean self-removal boundary.
+    - WHY the two cases differ: two-operand PairUp works because each operand's
+      edges carry inclusion w.r.t. the OTHER operand in {0,1} (clean SESE), and
+      w=2 arises only on composition where the inclusion filter has already
+      dropped the interior. The SELF case has no second operand - the natural
+      field is the TOTAL soup winding, which reaches 2 in ONE field - so
+      local-sign pairing over-emits and B must threshold instead.
+    - On the union corpus the winding stays non-negative (measured: min 0 on every
+      line), so PairUp's abs(inclusion)-copy machinery still yields a
+      manifold-but-doubled result (a ballot/Dyck generalization of alternation,
+      not a crash). The assumption's HARD break is NEGATIVE winding (subtraction;
+      openscad's soup winding reaches -1, BR-d), where the ballot condition fails
+      and local-sign pairing mislabels. The threshold read is indifferent there
+      too. Double == exact on every cell (winding is the validated integer field).
+  ANSWER: B does not inherit PairUp; it REPLACES the 1D position-pairing with a
+  winding threshold. The "1D alternation" open is a property of the retired
+  mechanism, not of B. BR-a is closed.
+
+R3-ii - THE FIRST EMPIRICAL FRAGMENT: the S4 resolver built and run end-to-end.
+  All six spec elements wired with their asserts ACTIVE (level-0 input predicates
+  only, each through the Shewchuk static filter with an exact fallback):
+    On HAVOC's dirty core:
+      - ENUMERATION (self-adjacency skip) reproduces S3's self-crossing seam count
+        bit-for-bit, all cross-operand; every recorded exact w_S (the double-
+        covered lump = 2, the retained control = 1, exterior = 0) is reproduced.
+      - COUPLED WINDING is cocycle-unanimous across several independent exterior
+        seed rays (path-independence violations: zero) and the double seed ray
+        equals exact (FP-safety violations: zero).
+      - RADIAL: every arrangement line is exactly two distinct planes; the
+        >2-sheet branch fires ZERO times. ONCE-ONLY construction: zero double-
+        constructions (no triple points to stress).
+      - STATIC FILTER: EVERY level-0 orient3d certified (ratio>1); the exact
+        fallback NEVER fired; min certified ratio ~5e2; zero certified-wrong
+        signs. Havoc is safe-by-margin end-to-end - the kernel is dead code here.
+    On self_intersectA (a TRUE single-shell self-intersector, the genuine residual):
+      - ENUMERATION reproduces S3 bit-for-bit: thousands of arrangement lines, ALL
+        exactly two distinct planes; genuine multi-sheet edges = ZERO (the
+        >2-sheet radial branch never fires on the single shell either).
+      - The coupled winding classifies the FIRST w=2 SELF-OVERLAP stratum on a
+        genuine single shell (profile 0 -> 1 -> 0 -> 1 -> 2 -> 1 -> 0), cocycle-
+        unanimous and double == exact.
+      - STATIC FILTER: the winding rays touch near-grazing configurations - a
+        MICRO fraction (order 1e-4) fell sub-bound and one double sign flipped -
+        ALL caught by the filter and routed to exact; the classification is
+        correct and the double-only winding also matched (the grazing predicate is
+        non-deciding for the integer winding). So candidate C's micro exact-check
+        is genuinely EXERCISED and SOUND on siA's winding rays (not dead code as on
+        Havoc), never a wrong certified sign (S1's exhaustive soundness holds).
+        Part of the grazing is a probe artifact of a far seed; a component-local
+        seed (Winding03 discipline) shrinks it - a sizing input, not a wall.
+  RESULT: the fragment converts S4's paper-execution into running code and every
+  predicted number holds on both carriers. The kernel is avoided on the reachable
+  corpus; the exact fallback is either dead (Havoc) or micro-scale and sound (siA).
+
+B VERDICT (rev 5): EMPIRICALLY VALIDATED AT FRAGMENT SCALE. Enumeration, once-only
+construction, coupled integer-delta winding + live cocycle, double seed ray +
+FP-safety, the radial 2-sheet rule, and the static filter + micro exact fallback
+all RUN and match exact ground truth on a composed dirty core AND a genuine
+single-shell self-intersector. The residual has moved off MECHANISM entirely
+(triple points dissolved in S3; alternation absorbed in R3-i) onto an ENGINEERING
+build-out plus two specified-but-untested axes. No new wall.
+
+NEXT-STEP ADJUDICATION for the owner (what remains between the fragment and a
+production resolver, sized honestly):
+  UNBUILT - the v5 preconditions (rev-2), the bulk of the resolver:
+    - LOCALIZER. The fragment is O(ntri) per winding query (whole soup); production
+      must bound the query to the flagged dirty submesh. The B-scales-with-input
+      vs C-bounds-to-submesh cost adjudication is now concrete (cost is real).
+    - SELECTIVE WELD. Identify the flagged dirty region + weld the clean boundary.
+    - CELL COMPLEX / DCEL + {w_S>=1} BOUNDARY EMISSION. The fragment did point
+      classification of the recorded cells; production must build the arrangement
+      DCEL and emit the retained-solid boundary. S3/S4 spec it and the fragment
+      confirmed it is 2-sheet-only everywhere, but the DCEL build + boundary
+      extraction is the largest unbuilt piece.
+    - COMPONENT-LOCAL SEED POLICY (Winding03's unite-non-crossing-edges +
+      one-ray-per-component), with a direction policy that avoids the far-seed
+      near-grazing the fragment measured on siA. Micro cost, but must be built.
+  SPECIFIED but UNTESTED at fragment scale (named opens, not new walls):
+    - SINGLE GLOBAL SoS (R4). Havoc/siA winding rays hit no exact-zeros, so the
+      fragment did not exercise it; GT7863's coplanar zeros and openscad's
+      coincident verts REQUIRE it. Required + untested here.
+    - SUBTRACTION / NEGATIVE WINDING (BR-d). The fragment is all-union (w>=0); the
+      alternation probe pinpoints negative winding as PairUp's genuine break and
+      the point B's threshold read must absorb - untested on a subtraction carrier.
+    - TRIPLE-POINT ONCE-ONLY (BR-b/BR-c). Zero triple points on the corpus, so
+      S2c's two-path divergence is unstressed; a synthetic co-axial-3-face carrier
+      is the attack that would exercise it.
+
 ### Risks refreshed to B's current opens (rev 4)
 
 Round-2 closed the rev-3 attack surface: BR1 (input margins) is now exhaustive and
 resolved to the deciding set; BR2 (constructed-point precision) is dissolved for
 decisions; BR3 (dense triple points) is refuted on the corpus. B's current opens:
 
-  BR-a. ALTERNATION UNDER MULTIPLICITY (the narrowed residual). PairUp's clean 1D
-       start-end alternation is untested in the self case on the w=2 double-covered
-       stratum. If it does not hold, the assembly needs a bounded 1D fix at those
-       edges. Round-3 probe (i). This is B's one remaining precision-free open.
+  BR-a. ALTERNATION UNDER MULTIPLICITY (the narrowed residual) - RESOLVED by
+       round-3 probe (i), see ROUND-3 RESULTS/R3-i. PairUp's clean 1D start-end
+       alternation is genuinely VIOLATED on the w=2 stratum (measured SSEE), but B
+       does not pair - it thresholds the coupled w_S and emits the {w_S>=1}
+       boundary, which is indifferent to token order. So B REPLACES PairUp rather
+       than needing a 1D fix; alternation is a property of the retired mechanism.
+       The residue folds into BR-d: the ballot condition (and thus any naive
+       PairUp reuse) breaks only at NEGATIVE winding (subtraction), which the
+       threshold read also absorbs but is untested on a subtraction carrier.
   BR-b. CORPUS-BOUNDED, NOT GENERAL. S3's "zero genuine multi-sheet edges" is a
        measurement of the three residual carriers, not a proof that no
        self-intersecting shell can carry a genuine triple point (a shell with three
