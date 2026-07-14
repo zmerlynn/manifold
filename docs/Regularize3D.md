@@ -23,12 +23,24 @@ interior is multiply covered) and returns the boundary of the region covered at 
 once - the boundary-of-a-simple-solid reading downstream consumers assume.
 
 What it is NOT. It is not the Boolean. It never FUSES separate objects: two disjoint
-components that happen to overlap are each regularized on their own and composed back
+components that happen to touch are each regularized on their own and composed back
 by concatenation, never unioned. Fusion is the Boolean's job, already done upstream in
 any operation chain; what arrives at RemoveOverlaps3D is one or a few epsilon-valid
 manifolds whose only unresolved defect is INTERNAL self-overlap. (Whole-soup {w_S>=1}
 would fuse; per-component {w_S>=1} does not - the deliberate choice, matching the
 touching-contacts posture.)
+
+The one scoped exception is a genuine COPLANAR self-overlap that connectivity would
+split. A buried plug (a box whose coincident cap doubles the cover) is two connectivity
+components with a CROSS-component coplanar overlap, and connecting them into one
+manifold instead forces a transversal entanglement (measured) - so a per-component gate
+can never see the defect. The decompose step therefore UNITES the components that share
+an exactly-coplanar 2D-area overlap cluster (DetectCoplanarClusters' overlap2D witness),
+routing the united super-component to the coplanar fold. This is scoped to a real
+coplanar self-overlap: touching contacts (edge/vertex, zero area) and disjoint objects
+never cluster, so the non-fusion posture holds for everything else. (Owner-review note:
+this widens the per-component boundary for the coplanar-overlap class only; it is the
+change that makes the fold reachable in production instead of test-hook-only.)
 
 Precision contract. Output COORDINATES may be eps-noisy (constructed intersection
 points round to double); the output TOPOLOGY is exact - decided from input data, not
@@ -39,14 +51,20 @@ rounding can create eps-scale self-crossings.
 
 ## The pipeline
 
-1. DECOMPOSE by connectivity. Split the input into connected components (the existing
-   Decompose primitive). The component is the unit of work and the unit of scope.
+1. DECOMPOSE by connectivity, then MERGE coplanar-overlapping components. Split the
+   input into connected components (the existing Decompose primitive), and when there
+   is more than one, unite the components that share an exactly-coplanar 2D-area
+   overlap cluster (see "What it is NOT"). The (possibly merged) component is the unit
+   of work and the unit of scope.
 
 2. PER-COMPONENT GATE. Each component is tested: valid (`IsManifold` &&
-   `Is2Manifold`, overlap3.cpp:1189) and non-self-intersecting
+   `Is2Manifold`, overlap3.cpp:1189), non-self-intersecting
    (`Manifold::Impl::IsSelfIntersecting`, properties.cpp:138 - a Morton/AABB broadphase
    over the collider plus a triangle-triangle distance test, shares-vertex skip,
-   2*eps relaxation).
+   2*eps relaxation), AND free of coplanar overlap (`DetectCoplanarClusters`, which
+   `IsSelfIntersecting` does not flag - R2(i)). A component with a coplanar overlap
+   routes DIRTY even when self-intersection-free, so the exact-coplanar fold reaches
+   it.
 
 3. EARLY-EXIT clean components. A component that passes the gate is already the
    boundary of a simple solid; it is copied through untouched.
