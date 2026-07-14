@@ -1461,102 +1461,45 @@ GateVerdict GateComponent(const Manifold::Impl& comp) {
 
 // ---------------------------------------------------------------------------
 // SINGLE GLOBAL TIE-BREAK CONVENTION (SoS), docs/Regularize3D.md stage 6.
-// One function whose e^0 coefficient is the EXACT orient3d (the "filter
-// fallback") and whose higher-e terms are the Edelsbrunner-Mucke symbolic
-// perturbation, computed by Shewchuk expansion arithmetic over an e-polynomial.
-// Perturb matrix entry (row r, coord c) by e^(2^(rank(r)*3 + (2-c))), rank =
-// order of the four points' GLOBAL vertex indices; the sign is the sign of the
-// lowest-exponent nonzero coefficient.  Monomial exponents are sums of DISTINCT
-// powers of two, and the map (local rank r) -> (global rank G(r)) is strictly
-// monotonic on the bit positions r*3+(2-c), so the leading monomial - hence the
-// sign - is INVARIANT to using local ranks 0..3 in place of the true global
-// ranks.  That is why a per-predicate local computation still decides
-// consistently with ONE global perturbation: any two predicates about the same
-// configuration return the sign they would under that single perturbation.
-// This is the ONLY tie-break convention; it is threaded through every
-// enumeration predicate so a ray or edge grazing a shared boundary resolves
-// identically for every probe.  Validated in isolation (reg3d-s6 notebook):
-// exact vs long double (200k), total + antisymmetric under all 6
-// transpositions, and matched by an independent __int128 implementation of the
-// full cascade (200k coplanar).  Only invoked on the RARE filter-uncertain (0)
-// fallback, so the certified fast path (and siA/siB, fully certified) is
-// untouched.
-// RELUCTANT ACCEPTANCE (owner contract): everything in this namespace is the
-// exact-kernel surface the design had declined; it is accepted NARROWLY as the
-// stage-6 filter-0 fallback - kept micro, self-contained, and off every
-// certified path.
+// ONE exact integer implementation.  The perturbed 4x4 orient3d determinant is
+// sum_K coeff_K * e^K; the SoS sign is the sign of the LOWEST-K nonzero
+// coefficient.  Perturb matrix entry (row r, coord c) by e^(2^(rank(r)*3 +
+// (2-c))), rank = order of the four points' GLOBAL vertex indices; the twelve
+// keys are DISTINCT powers of two, so K is a bitmask of the perturbed entries
+// and every coefficient coeff_K is a signed sum of products of <= 3 of the
+// twelve coordinate MANTISSAS (a minor of degree <= 3 over the same windowed
+// coords).  So the whole cascade - the e^0 exact orient3d AND the higher-e
+// perturbation terms - evaluates on ONE integer path: decompose each coord to
+// (mantissa*2^exp) via frexp, form each term as a 192-bit |product of <= 3
+// mantissas| at a 2-exponent, align a coefficient's terms to their min
+// exponent, and accumulate the sign in a two's-complement bigint.  The
+// accumulator width is ADAPTIVE (limbs computed from the term-exponent spread)
+// and sized to the worst-case finite-double spread, so there is NO window-fail
+// refusal: the sign is TOTAL for every finite-double input (0 means an exact
+// geometric tie, never "uncertain").  Local-rank reduction: the map (local rank
+// r)->(global rank G(r)) is strictly monotonic on the bit positions r*3+(2-c),
+// so the leading monomial - hence the sign - is invariant to using local ranks
+// 0..3 in place of the true global ranks; a per-predicate local computation
+// decides consistently with ONE global perturbation.  This is the ONLY
+// tie-break convention, threaded through every enumeration predicate so a ray
+// or edge grazing a shared boundary resolves identically for every probe.
+// Validated (reg3d-s6r notebook): BITWISE-identical to the prior
+// Shewchuk-expansion cascade on the mesh domain (same-scale + mixed-magnitude,
+// e^0 and SoS, zero mismatch), and exact-correct vs an arbitrary-precision
+// oracle on wild inputs where the expansion overflowed double; the fixed-window
+// predecessor refused a zero-straddling adversary this path decides.  Only
+// invoked on the RARE filter-uncertain (0) fallback, so the certified fast path
+// (and siA/siB, fully certified) is untouched.
+//
+// RELUCTANT ACCEPTANCE (owner contract): this integer exact kernel is net-new
+// surface the design had declined ("no exact kernel in the tree",
+// docs/Regularize3D.md B mechanism).  It is accepted NARROWLY as the stage-6
+// filter-0 fallback - one implementation, single call site discipline, off
+// every certified path.  QUEUED FOR REVISIT (docs/Regularize3D.md open list):
+// whether the arrangement can be structured to avoid needing an exact orient3d
+// kernel at all remains an open question; this kernel is the current,
+// reluctantly-accepted answer, not a settled one.
 namespace sos {
-using Exp = std::vector<double>;  // nonoverlapping, increasing |.|, zero-elim
-inline void TwoSum(double a, double b, double& x, double& y) {
-  x = a + b;
-  const double bv = x - a, av = x - bv;
-  y = (a - av) + (b - bv);
-}
-inline void TwoProduct(double a, double b, double& x, double& y) {
-  x = a * b;
-  y = std::fma(a, b, -x);
-}
-// e + f (both nonoverlapping, increasing) -> nonoverlapping, increasing.
-inline Exp FastExpansionSum(const Exp& e, const Exp& f) {
-  if (e.empty()) return f;
-  if (f.empty()) return e;
-  Exp h;
-  size_t i = 0, j = 0;
-  auto next = [&]() -> double {
-    if (i < e.size() && (j >= f.size() || std::abs(e[i]) <= std::abs(f[j])))
-      return e[i++];
-    return f[j++];
-  };
-  double q = next(), hh;
-  while (i < e.size() || j < f.size()) {
-    TwoSum(q, next(), q, hh);
-    if (hh != 0.0) h.push_back(hh);
-  }
-  if (q != 0.0 || h.empty()) h.push_back(q);
-  return h;
-}
-// e * b (single double) -> nonoverlapping, increasing.
-inline Exp ScaleExpansion(const Exp& e, double b) {
-  Exp h;
-  if (e.empty() || b == 0.0) return h;
-  double q, hh, prod1, prod0, sum;
-  TwoProduct(e[0], b, q, hh);
-  if (hh != 0.0) h.push_back(hh);
-  for (size_t i = 1; i < e.size(); ++i) {
-    TwoProduct(e[i], b, prod1, prod0);
-    TwoSum(q, prod0, sum, hh);
-    if (hh != 0.0) h.push_back(hh);
-    TwoSum(prod1, sum, q, hh);
-    if (hh != 0.0) h.push_back(hh);
-  }
-  if (q != 0.0 || h.empty()) h.push_back(q);
-  return h;
-}
-inline Exp ExpProduct(const Exp& e, const Exp& f) {
-  Exp h;
-  for (double b : f) h = FastExpansionSum(h, ScaleExpansion(e, b));
-  return h;
-}
-inline int ExpSign(const Exp& e) {
-  for (size_t k = e.size(); k-- > 0;)
-    if (e[k] != 0.0) return e[k] > 0 ? 1 : -1;
-  return 0;
-}
-using Poly = std::map<int, Exp>;  // e-exponent -> exact coefficient expansion
-inline void PolyAdd(Poly& p, int k, const Exp& c) {
-  if (c.empty()) return;
-  auto it = p.find(k);
-  if (it == p.end())
-    p.emplace(k, c);
-  else
-    it->second = FastExpansionSum(it->second, c);
-}
-inline Poly PolyMul(const Poly& a, const Poly& b) {
-  Poly r;
-  for (const auto& [ka, ca] : a)
-    for (const auto& [kb, cb] : b) PolyAdd(r, ka + kb, ExpProduct(ca, cb));
-  return r;
-}
 constexpr int kPerm[24][4] = {
     {0, 1, 2, 3}, {0, 1, 3, 2}, {0, 2, 1, 3}, {0, 2, 3, 1}, {0, 3, 1, 2},
     {0, 3, 2, 1}, {1, 0, 2, 3}, {1, 0, 3, 2}, {1, 2, 0, 3}, {1, 2, 3, 0},
@@ -1570,80 +1513,97 @@ inline int Parity(const int s[4]) {
       if (s[i] > s[j]) p = -p;
   return p;
 }
-// Exact orient3d sign (the e^0 coefficient); 0 iff the four points are exactly
-// coplanar.  No perturbation - this is the exact filter fallback.
-inline int ExactOrient3D(const double pts[4][3]) {
-  Exp acc;
-  for (const auto& s : kPerm) {
-    Exp prod{1.0};
-    bool zero = false;
-    for (int r = 0; r < 4; ++r) {
-      const int c = s[r];
-      if (c == 3) continue;  // the ones column
-      prod = ScaleExpansion(prod, pts[r][c]);
-      if (prod.empty()) {
-        zero = true;
-        break;
-      }
-    }
-    if (zero) continue;
-    if (Parity(s) < 0)
-      for (double& v : prod) v = -v;
-    acc = FastExpansionSum(acc, prod);
-  }
-  return ExpSign(acc);
-}
-// int256 4-limb fast path for the exact orient3d sign (the micro exact
-// tie-test, owner contract).  Every coordinate is m * 2^e with m a signed
-// 53-bit integer (frexp); each of the 24 Leibniz terms is a product of three
-// mantissas (<= 159 bits, exact via 64x64->128 splits) at exponent e1+e2+e3;
-// all terms are aligned to the minimum exponent and accumulated in a signed
-// 256-bit two's-complement integer.  Capacity: 159 (term) + spread (shift) +
-// 5 (24 adds) + 1 (sign) <= 256 requires the term-exponent SPREAD <= 90 bits
-// - always true for same-scale mesh coordinates; a wider spread returns false
-// and the caller falls back to the expansion path (ExactOrient3D), exact for
-// every double input.  Validated against the expansion reference on 800k
-// configs - random, exact-zero coplanar, mixed/wild magnitudes - with zero
-// mismatches (reg3d-s6 notebook).
-struct I256 {
-  uint64_t w[4] = {0, 0, 0, 0};  // little-endian limbs, two's complement
+// A determinant term: sign * |product of <= 3 mantissas| * 2^e.  |product| <
+// 2^159 (three 53-bit mantissas) fits in three 64-bit limbs.
+struct Term {
+  uint64_t mag[3];
+  long e;
+  int sign;
 };
-inline void AddI256(I256& a, const I256& b) {
+// Adaptive two's-complement accumulator width.  Each coord is m*2^E with |m| <
+// 2^53 and E = ex - 53, ex the frexp exponent in [-1073, 1024], so E in
+// [-1126, 971] and a three-factor exponent esum in [-3378, 2913]: the term
+// spread is <= 6291 bits, the accumulator <= 159 + 6291 + carry bits, so 112
+// limbs is a PROVABLE upper bound (never approached on same-scale mesh data,
+// where the spread is a handful of bits).  The active limb count is computed
+// per call from the actual spread; the fixed storage just guarantees totality.
+constexpr int kAccumLimbs = 112;
+// |product of the cnt (nonzero) mantissas| -> mag[3]; returns the product sign.
+inline int MulMag(const int64_t* pm, int cnt, uint64_t mag[3]) {
+  mag[0] = 1;
+  mag[1] = 0;
+  mag[2] = 0;
+  int sg = 1;
+  uint64_t a[3];
+  for (int i = 0; i < cnt; ++i) {
+    a[i] = (uint64_t)(pm[i] < 0 ? -pm[i] : pm[i]);
+    if (pm[i] < 0) sg = -sg;
+  }
+  if (cnt == 1) {
+    mag[0] = a[0];
+  } else if (cnt == 2) {
+    const unsigned __int128 p = (unsigned __int128)a[0] * a[1];
+    mag[0] = (uint64_t)p;
+    mag[1] = (uint64_t)(p >> 64);
+  } else if (cnt == 3) {
+    const unsigned __int128 p12 = (unsigned __int128)a[0] * a[1];
+    const uint64_t lo = (uint64_t)p12, hi = (uint64_t)(p12 >> 64);
+    const unsigned __int128 pLo = (unsigned __int128)lo * a[2];
+    const unsigned __int128 pHi = (unsigned __int128)hi * a[2] + (pLo >> 64);
+    mag[0] = (uint64_t)pLo;
+    mag[1] = (uint64_t)pHi;
+    mag[2] = (uint64_t)(pHi >> 64);
+  }
+  return sg;
+}
+// acc[0..nLimbs) += sign * (mag << shift), two's complement.
+inline void AddShiftedMag(uint64_t* acc, int nLimbs, const uint64_t mag[3],
+                          int shift, int sign) {
+  const int limbShift = shift / 64, bitShift = shift % 64;
+  uint64_t tmp[kAccumLimbs] = {0};
+  for (int i = 0; i < 3; ++i) {
+    const int dst = i + limbShift;
+    if (dst >= 0 && dst < nLimbs) {
+      tmp[dst] |= mag[i] << bitShift;
+      if (bitShift && dst + 1 < nLimbs)
+        tmp[dst + 1] |= mag[i] >> (64 - bitShift);
+    }
+  }
+  if (sign < 0) {
+    unsigned __int128 carry = 1;
+    for (int i = 0; i < nLimbs; ++i) {
+      const unsigned __int128 s = (unsigned __int128)(~tmp[i]) + carry;
+      tmp[i] = (uint64_t)s;
+      carry = s >> 64;
+    }
+  }
   unsigned __int128 carry = 0;
-  for (int i = 0; i < 4; ++i) {
-    const unsigned __int128 s = (unsigned __int128)a.w[i] + b.w[i] + carry;
-    a.w[i] = (uint64_t)s;
+  for (int i = 0; i < nLimbs; ++i) {
+    const unsigned __int128 s = (unsigned __int128)acc[i] + tmp[i] + carry;
+    acc[i] = (uint64_t)s;
     carry = s >> 64;
   }
 }
-inline void NegI256(I256& a) {
-  for (int i = 0; i < 4; ++i) a.w[i] = ~a.w[i];
-  I256 one;
-  one.w[0] = 1;
-  AddI256(a, one);
-}
-inline void ShlI256(I256& a, int k) {
-  if (k <= 0) return;
-  const int limb = k / 64, bit = k % 64;
-  for (int i = 3; i >= 0; --i) {
-    uint64_t v = 0;
-    const int src = i - limb;
-    if (src >= 0) {
-      v = a.w[src] << bit;
-      if (bit && src - 1 >= 0) v |= a.w[src - 1] >> (64 - bit);
-    }
-    a.w[i] = v;
+// Sign of the exact integer sum of the terms.  Adaptive width, total (no
+// refusal): the true sum fits the two's-complement window by construction.
+inline int SumSign(const Term* t, int nT) {
+  if (nT == 0) return 0;
+  long emin = t[0].e, emax = t[0].e;
+  for (int i = 1; i < nT; ++i) {
+    emin = std::min(emin, t[i].e);
+    emax = std::max(emax, t[i].e);
   }
+  int nLimbs = (int)((192 + (emax - emin)) / 64) + 3;
+  if (nLimbs > kAccumLimbs) nLimbs = kAccumLimbs;  // never hit (proven bound)
+  uint64_t acc[kAccumLimbs] = {0};
+  for (int i = 0; i < nT; ++i)
+    AddShiftedMag(acc, nLimbs, t[i].mag, (int)(t[i].e - emin), t[i].sign);
+  if (acc[nLimbs - 1] >> 63) return -1;
+  for (int i = 0; i < nLimbs; ++i)
+    if (acc[i]) return 1;
+  return 0;
 }
-inline int SignI256(const I256& a) {
-  if (a.w[3] >> 63) return -1;
-  return (a.w[0] | a.w[1] | a.w[2] | a.w[3]) ? 1 : 0;
-}
-// Exact orient3d sign into `sign`; false = the exponent spread exceeds int256
-// capacity (caller uses the expansion path).
-inline bool ExactSignI256(const double pts[4][3], int& sign) {
-  int64_t M[4][3];
-  int E[4][3];
+inline void Decompose(const double pts[4][3], int64_t M[4][3], int E[4][3]) {
   for (int r = 0; r < 4; ++r)
     for (int c = 0; c < 3; ++c) {
       const double d = pts[r][c];
@@ -1657,19 +1617,19 @@ inline bool ExactSignI256(const double pts[4][3], int& sign) {
       M[r][c] = (int64_t)std::ldexp(f, 53);
       E[r][c] = ex - 53;
     }
-  struct Term {
-    unsigned __int128 hiAbs;
-    uint64_t lo;
-    int sign;
-    long e;
-  };
-  Term terms[24];
+}
+// Exact orient3d sign (the e^0 coefficient), 0 iff the four points are exactly
+// coplanar.  TOTAL: no window-fail; the 0 is a genuine geometric tie.
+inline int ExactOrient3D(const double pts[4][3]) {
+  int64_t M[4][3];
+  int E[4][3];
+  Decompose(pts, M, E);
+  Term t[24];
   int nT = 0;
-  long emin = 0, emax = 0;
   for (const auto& s : kPerm) {
-    int64_t m3[3];
-    long esum = 0;
-    int k = 0;
+    int64_t pm[3];
+    long pe = 0;
+    int cnt = 0;
     bool zero = false;
     for (int r = 0; r < 4; ++r) {
       const int c = s[r];
@@ -1678,84 +1638,81 @@ inline bool ExactSignI256(const double pts[4][3], int& sign) {
         zero = true;
         break;
       }
-      m3[k++] = M[r][c];
-      esum += E[r][c];
+      pm[cnt++] = M[r][c];
+      pe += E[r][c];
     }
     if (zero) continue;
-    int sg = Parity(s);
-    __int128 p12 = (__int128)m3[0] * m3[1];
-    if (p12 < 0) {
-      sg = -sg;
-      p12 = -p12;
-    }
-    const unsigned __int128 a12 = (unsigned __int128)p12;
-    const uint64_t b = (uint64_t)(m3[2] < 0 ? -m3[2] : m3[2]);
-    if (m3[2] < 0) sg = -sg;
-    const uint64_t aLo = (uint64_t)a12, aHi = (uint64_t)(a12 >> 64);
-    const unsigned __int128 pLo = (unsigned __int128)aLo * b;
-    const unsigned __int128 pHi = (unsigned __int128)aHi * b + (pLo >> 64);
-    terms[nT].lo = (uint64_t)pLo;
-    terms[nT].hiAbs = pHi;
-    terms[nT].sign = sg;
-    terms[nT].e = esum;
-    if (nT == 0) {
-      emin = emax = esum;
-    } else {
-      emin = std::min(emin, esum);
-      emax = std::max(emax, esum);
-    }
+    t[nT].sign = Parity(s) * MulMag(pm, cnt, t[nT].mag);
+    t[nT].e = pe;
     ++nT;
   }
-  if (nT == 0) {
-    sign = 0;
-    return true;
-  }
-  if (emax - emin > 90) return false;
-  I256 acc;
-  for (int t = 0; t < nT; ++t) {
-    I256 v;
-    v.w[0] = terms[t].lo;
-    v.w[1] = (uint64_t)terms[t].hiAbs;
-    v.w[2] = (uint64_t)(terms[t].hiAbs >> 64);
-    ShlI256(v, (int)(terms[t].e - emin));
-    if (terms[t].sign < 0) NegI256(v);
-    AddI256(acc, v);
-  }
-  sign = SignI256(acc);
-  return true;
+  return SumSign(t, nT);
 }
-
-// Symbolically-perturbed orient3d sign (never 0).  idx = the four points'
-// global vertex indices (distinct).  When ExactOrient3D != 0 this returns that
-// exact sign; otherwise the SoS cascade decides.
+// Symbolically-perturbed orient3d sign (never 0 for distinct idx).  Enumerates
+// all 24*8 monomials, groups by the e-exponent K, and returns the sign of the
+// lowest-K nonzero coefficient.  When the e^0 (K==0) coefficient - the exact
+// orient3d - is nonzero this returns that exact sign; otherwise the
+// perturbation decides.  idx = the four points' global vertex indices
+// (distinct).
 inline int SoSOrient3D(const double pts[4][3], const int idx[4]) {
+  int64_t M[4][3];
+  int E[4][3];
+  Decompose(pts, M, E);
   int order[4] = {0, 1, 2, 3};
   std::sort(order, order + 4, [&](int a, int b) { return idx[a] < idx[b]; });
   int rankOf[4];
   for (int r = 0; r < 4; ++r) rankOf[order[r]] = r;
   auto keyOf = [&](int r, int c) { return 1 << (rankOf[r] * 3 + (2 - c)); };
-  Poly det;
+  struct Mono {
+    int K;
+    Term t;
+  };
+  Mono mono[192];
+  int nM = 0;
   for (const auto& s : kPerm) {
-    Poly prod;
-    prod[0] = Exp{1.0};
-    for (int r = 0; r < 4; ++r) {
-      const int c = s[r];
-      Poly factor;
-      if (c == 3) {
-        factor[0] = Exp{1.0};
-      } else {
-        if (pts[r][c] != 0.0) factor[0] = Exp{pts[r][c]};
-        factor[keyOf(r, c)] = Exp{1.0};
+    const int par = Parity(s);
+    int rr[3], cc[3], nf = 0;
+    for (int r = 0; r < 4; ++r)
+      if (s[r] != 3) {  // the three non-ones factors
+        rr[nf] = r;
+        cc[nf] = s[r];
+        ++nf;
       }
-      prod = PolyMul(prod, factor);
+    for (int mask = 0; mask < 8; ++mask) {  // subset perturbed vs real
+      int K = 0;
+      int64_t pm[3];
+      long pe = 0;
+      int cnt = 0;
+      bool zero = false;
+      for (int f = 0; f < nf; ++f) {
+        if (mask & (1 << f)) {
+          K += keyOf(rr[f], cc[f]);  // perturbed factor
+        } else {
+          const int64_t m = M[rr[f]][cc[f]];
+          if (m == 0) {
+            zero = true;
+            break;
+          }
+          pm[cnt++] = m;
+          pe += E[rr[f]][cc[f]];
+        }
+      }
+      if (zero) continue;
+      mono[nM].K = K;
+      mono[nM].t.sign = par * MulMag(pm, cnt, mono[nM].t.mag);
+      mono[nM].t.e = pe;
+      ++nM;
     }
-    if (Parity(s) < 0)
-      for (auto& [k, cc] : prod)
-        for (double& v : cc) v = -v;
-    for (auto& [k, cc] : prod) PolyAdd(det, k, cc);
   }
-  for (auto& [k, cc] : det) {
-    const int sg = ExpSign(cc);
+  std::sort(mono, mono + nM,
+            [](const Mono& a, const Mono& b) { return a.K < b.K; });
+  int i = 0;
+  while (i < nM) {
+    Term grp[192];
+    int ng = 0;
+    const int k0 = mono[i].K;
+    while (i < nM && mono[i].K == k0) grp[ng++] = mono[i++].t;
+    const int sg = SumSign(grp, ng);
     if (sg != 0) return sg;
   }
   return 0;  // unreachable for distinct points; caller treats 0 as fail-closed
@@ -1763,15 +1720,17 @@ inline int SoSOrient3D(const double pts[4][3], const int idx[4]) {
 }  // namespace sos
 
 // orient3d on double INPUT coords through the Shewchuk STATIC error-bound
-// filter (o3derrboundA = (7 + 56u)u, u = 2^-53).  Returns the CERTIFIED sign
-// (+/-1) when |det| exceeds the permanent-scaled error bound; returns 0 when
-// the filtered sign is UNCERTAIN (sub-bound or exact-zero).  The 0 case is no
-// longer a fail-closed boundary: it routes to the micro exact tie-test
-// (Orient3DExactSign, filter-0-only) and - on a genuine exact zero - the
-// single-global SoS (Orient3DSoS), per the stage-6 owner contract.  On the
-// corpus single-shell self-intersectors this filter certifies every
-// enumeration predicate (v5b-r4: siA/siB 100% certified, zero fallback), so
-// the exact kernel below is never touched on the certified fast path.
+// filter (o3derrboundA = (7 + 56u)u, u = 2^-53 - the bound constant is per
+// Shewchuk's error analysis; NO kernel of his is in the build, only the
+// constant).  Returns the CERTIFIED sign (+/-1) when |det| exceeds the
+// permanent-scaled error bound; returns 0 when the filtered sign is UNCERTAIN
+// (sub-bound or exact-zero).  The 0 case is no longer a fail-closed boundary:
+// it routes to the micro exact tie-test (Orient3DExactSign, filter-0-only) and
+// - on a genuine exact zero - the single-global SoS (Orient3DSoS), per the
+// stage-6 owner contract.  On the corpus single-shell self-intersectors this
+// filter certifies every enumeration predicate (v5b-r4: siA/siB 100% certified,
+// zero fallback), so the exact kernel below is never touched on the certified
+// fast path.
 inline int Orient3DFilterSign(const vec3& a, const vec3& b, const vec3& c,
                               const vec3& d) {
   const vec3 ad = a - d, bd = b - d, cd = c - d;
@@ -1788,20 +1747,23 @@ inline int Orient3DFilterSign(const vec3& a, const vec3& b, const vec3& c,
   return 0;  // uncertain -> Orient3DExactSign, then SoS (Orient3DSoS)
 }
 
-// The micro exact tie-test (owner contract): the EXACT orient3d sign, 0 iff
-// the four points are exactly coplanar.  int256 4-limb fast path; expansion
-// fallback for exponent spreads beyond capacity.  RELUCTANT ACCEPTANCE: this
-// exact kernel is net-new surface area the design had declined ("no exact
-// kernel in the tree", docs/Regularize3D.md B mechanism); the owner accepted
-// it NARROWLY for the stage-6 tie residue - its ONLY call sites are behind a
-// filter 0 (Orient3DSoS, the EdgePiercesTriSoS edge-in-plane guard, the test
-// probe), never the certified fast path.
+// The micro exact tie-test (owner contract): the EXACT orient3d sign, 0 iff the
+// four points are exactly coplanar.  ONE integer path (sos::ExactOrient3D),
+// TOTAL for every finite-double input - no window-fail, no expansion fallback.
+// RELUCTANT ACCEPTANCE: this exact kernel is net-new surface the design had
+// declined ("no exact kernel in the tree", docs/Regularize3D.md B mechanism);
+// the owner accepted it NARROWLY for the stage-6 tie residue - its ONLY call
+// sites are behind a filter 0 (Orient3DSoS, the EdgePiercesTriSoS edge-in-plane
+// guard, the test probe), never the certified fast path.
+// QUEUED FOR REVISIT / TRIPWIRE (docs/Regularize3D.md open list): this integer
+// path is legitimate ONLY as ONE predicate at ONE call site (~100 lines,
+// exhaustively testable).  If a SECOND exact predicate or a SECOND call site is
+// ever needed, VENDOR Shewchuk's public-domain predicates.c instead of growing
+// this - do NOT rebuild expansion arithmetic piecemeal.
 inline int Orient3DExactSign(const vec3& a, const vec3& b, const vec3& c,
                              const vec3& d) {
   const double pts[4][3] = {
       {a.x, a.y, a.z}, {b.x, b.y, b.z}, {c.x, c.y, c.z}, {d.x, d.y, d.z}};
-  int s;
-  if (sos::ExactSignI256(pts, s)) return s;
   return sos::ExactOrient3D(pts);
 }
 
