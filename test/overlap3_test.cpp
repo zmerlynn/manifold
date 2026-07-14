@@ -2087,18 +2087,27 @@ TEST(Overlap3, Regularize_NegativeWinding_PushedCapSphere) {
 // ===========================================================================
 
 // PROPERTY PIN for the micro exact tie-test (Orient3DExactSignProbe, the
-// owner-contract int256 4-limb exact orient3d sign with expansion fallback).
-// Graded properties, each on randomized configs:
+// owner-contract exact orient3d sign - ONE integer path, adaptive-width, TOTAL:
+// no window-fail refusal, no expansion fallback).  Graded properties, each on
+// randomized configs:
 //  P1 FILTER AGREEMENT: whenever the replicated static Shewchuk filter
 //     certifies a sign, the exact sign matches it (the filter is sound, so a
 //     disagreement would indict the exact path).
 //  P2 ANTISYMMETRY: swapping any two of the four points flips the sign
 //     (including on exactly-degenerate configs, where 0 stays 0).
 //  P3 CONSTRUCTED EXACT ZEROS: four points on an exact plane -> sign 0.
-//  P4 SCALING INVARIANCE: scaling all coordinates by a power of two (det
-//     scales by a POSITIVE factor) never changes the sign - large exponents
-//     push the int256 path past capacity, so this also exercises the
-//     expansion-fallback boundary bit-consistently.
+//  P4 SCALING INVARIANCE: scaling all coordinates by a power of two multiplies
+//     the determinant by a POSITIVE factor, so the sign is invariant.  NOTE
+//     (reg3d-s6r): uniform pow2 scaling shifts every term's exponent by the
+//     SAME amount, so it PRESERVES the term-exponent spread - it does NOT walk
+//     any accumulator-width boundary (that is P5's job, below).
+//  P5 MIXED-MAGNITUDE / ZERO-STRADDLING: coordinates spanning a huge exponent
+//     range in one predicate (fine scale ~2^-996 next to coarse ~2^-10) - a
+//     term-exponent spread far past the retired fixed 90-bit window.  This is
+//     the wide-spread path that SURVIVES the rework (the adaptive-width
+//     accumulator).  A specific adversary is pinned to its arbitrary-precision
+//     oracle sign, exact coplanarity at wide spread must still decide 0, and
+//     antisymmetry must hold - the path is total, never refusing.
 TEST(Overlap3, Orient3DExactSign_PropertyPin) {
   // Replicated static filter (Orient3DFilterSign's math, kept in lockstep).
   auto filter = [](const vec3& a, const vec3& b, const vec3& c, const vec3& d) {
@@ -2140,8 +2149,7 @@ TEST(Overlap3, Orient3DExactSign_PropertyPin) {
       }
     // P3: constructed exact zero.
     if (coplanar && s != 0) ++p3;
-    // P4: power-of-two scaling invariance (also walks the int256->expansion
-    // capacity boundary at large |k|).
+    // P4: power-of-two scaling invariance (uniform scaling preserves spread).
     const double k = std::ldexp(1.0, Sc(rng));
     if (Orient3DExactSignProbe(q[0] * k, q[1] * k, q[2] * k, q[3] * k) != s)
       ++p4;
@@ -2150,6 +2158,49 @@ TEST(Overlap3, Orient3DExactSign_PropertyPin) {
   EXPECT_EQ(p2, 0) << "exact sign must be antisymmetric";
   EXPECT_EQ(p3, 0) << "exactly-coplanar points must give sign 0";
   EXPECT_EQ(p4, 0) << "sign must be invariant to power-of-two scaling";
+
+  // P5 MIXED-MAGNITUDE / ZERO-STRADDLING: the wide-spread path the rework
+  // keeps. (a) A predicate straddling coordinate zero at fine scale: coords
+  // mixing 2^-996 (~1e-300) with 2^-10 (~1e-3) give a term-exponent spread of
+  // ~2963 bits, far past the retired fixed 90-bit window.  The exact sign is
+  // pinned to its independent arbitrary-precision (Python Fraction) oracle: -1
+  // (reg3d-s6r).  The old int256 fixed window REFUSED this config; the adaptive
+  // path decides it.
+  const vec3 adv[4] = {
+      {std::ldexp(1.0, -996), std::ldexp(3.0, -10), 0.0},
+      {std::ldexp(5.0, -10), std::ldexp(1.0, -996), std::ldexp(2.0, -10)},
+      {std::ldexp(7.0, -10), std::ldexp(2.0, -10), std::ldexp(1.0, -996)},
+      {std::ldexp(9.0, -10), std::ldexp(4.0, -10), std::ldexp(3.0, -10)}};
+  EXPECT_EQ(Orient3DExactSignProbe(adv[0], adv[1], adv[2], adv[3]), -1)
+      << "wide-spread adversary must match its arbitrary-precision oracle";
+  EXPECT_EQ(Orient3DExactSignProbe(adv[1], adv[0], adv[2], adv[3]), 1)
+      << "and be antisymmetric at wide spread";
+  // (b) Exact coplanarity at wide spread must still decide 0 (never a spurious
+  // nonzero, never a refusal).  Four points share an exact z, with x,y spanning
+  // ~2^-500..2^40 - a spread of ~1000 bits - so the determinant is exactly 0.
+  int p5 = 0;
+  std::uniform_int_distribution<int> Wide(-500, 40);
+  for (int t = 0; t < 4000; ++t) {
+    const double z = std::ldexp(1.0, Sc(rng));  // common z -> exactly coplanar
+    vec3 w[4];
+    for (auto& v : w) {
+      v.x = std::ldexp(std::round(U(rng) * 8), Wide(rng));
+      v.y = std::ldexp(std::round(U(rng) * 8), Wide(rng));
+      v.z = z;
+    }
+    if (Orient3DExactSignProbe(w[0], w[1], w[2], w[3]) != 0) ++p5;
+    // antisymmetry at mixed magnitude on a generic (non-coplanar) config
+    vec3 g[4];
+    for (auto& v : g) {
+      v.x = std::ldexp(std::round(U(rng) * 8), Wide(rng));
+      v.y = std::ldexp(std::round(U(rng) * 8), Wide(rng));
+      v.z = std::ldexp(std::round(U(rng) * 8), Wide(rng));
+    }
+    const int sg = Orient3DExactSignProbe(g[0], g[1], g[2], g[3]);
+    if (Orient3DExactSignProbe(g[1], g[0], g[2], g[3]) != -sg) ++p5;
+  }
+  EXPECT_EQ(p5, 0)
+      << "wide-spread exact coplanarity must give 0 and stay antisymmetric";
 }
 
 // Constructed carrier: a SINGLE self-intersecting component with ISOLATED
