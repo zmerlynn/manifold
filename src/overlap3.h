@@ -291,4 +291,12 @@ CandidateBProbe RegularizeB_Probe(const Manifold::Impl& dirty,
 // entanglement).
 RegularizeResult RegularizeDirtyDirect(const Manifold::Impl& soup, double eps);
 
+// Test hook: the micro exact tie-test behind the stage-6 SoS - the EXACT
+// orient3d sign (0 iff the four points are exactly coplanar), int256 4-limb
+// fast path with an expansion-arithmetic fallback for wide exponent spreads.
+// Exposed so the property pin can grade it directly (filter agreement,
+// antisymmetry, constructed exact zeros, scaling invariance).
+int Orient3DExactSignProbe(const vec3& a, const vec3& b, const vec3& c,
+                           const vec3& d);
+
 }  // namespace manifold

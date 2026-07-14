@@ -1481,6 +1481,10 @@ GateVerdict GateComponent(const Manifold::Impl& comp) {
 // full cascade (200k coplanar).  Only invoked on the RARE filter-uncertain (0)
 // fallback, so the certified fast path (and siA/siB, fully certified) is
 // untouched.
+// RELUCTANT ACCEPTANCE (owner contract): everything in this namespace is the
+// exact-kernel surface the design had declined; it is accepted NARROWLY as the
+// stage-6 filter-0 fallback - kept micro, self-contained, and off every
+// certified path.
 namespace sos {
 using Exp = std::vector<double>;  // nonoverlapping, increasing |.|, zero-elim
 inline void TwoSum(double a, double b, double& x, double& y) {
@@ -1589,6 +1593,138 @@ inline int ExactOrient3D(const double pts[4][3]) {
   }
   return ExpSign(acc);
 }
+// int256 4-limb fast path for the exact orient3d sign (the micro exact
+// tie-test, owner contract).  Every coordinate is m * 2^e with m a signed
+// 53-bit integer (frexp); each of the 24 Leibniz terms is a product of three
+// mantissas (<= 159 bits, exact via 64x64->128 splits) at exponent e1+e2+e3;
+// all terms are aligned to the minimum exponent and accumulated in a signed
+// 256-bit two's-complement integer.  Capacity: 159 (term) + spread (shift) +
+// 5 (24 adds) + 1 (sign) <= 256 requires the term-exponent SPREAD <= 90 bits
+// - always true for same-scale mesh coordinates; a wider spread returns false
+// and the caller falls back to the expansion path (ExactOrient3D), exact for
+// every double input.  Validated against the expansion reference on 800k
+// configs - random, exact-zero coplanar, mixed/wild magnitudes - with zero
+// mismatches (reg3d-s6 notebook).
+struct I256 {
+  uint64_t w[4] = {0, 0, 0, 0};  // little-endian limbs, two's complement
+};
+inline void AddI256(I256& a, const I256& b) {
+  unsigned __int128 carry = 0;
+  for (int i = 0; i < 4; ++i) {
+    const unsigned __int128 s = (unsigned __int128)a.w[i] + b.w[i] + carry;
+    a.w[i] = (uint64_t)s;
+    carry = s >> 64;
+  }
+}
+inline void NegI256(I256& a) {
+  for (int i = 0; i < 4; ++i) a.w[i] = ~a.w[i];
+  I256 one;
+  one.w[0] = 1;
+  AddI256(a, one);
+}
+inline void ShlI256(I256& a, int k) {
+  if (k <= 0) return;
+  const int limb = k / 64, bit = k % 64;
+  for (int i = 3; i >= 0; --i) {
+    uint64_t v = 0;
+    const int src = i - limb;
+    if (src >= 0) {
+      v = a.w[src] << bit;
+      if (bit && src - 1 >= 0) v |= a.w[src - 1] >> (64 - bit);
+    }
+    a.w[i] = v;
+  }
+}
+inline int SignI256(const I256& a) {
+  if (a.w[3] >> 63) return -1;
+  return (a.w[0] | a.w[1] | a.w[2] | a.w[3]) ? 1 : 0;
+}
+// Exact orient3d sign into `sign`; false = the exponent spread exceeds int256
+// capacity (caller uses the expansion path).
+inline bool ExactSignI256(const double pts[4][3], int& sign) {
+  int64_t M[4][3];
+  int E[4][3];
+  for (int r = 0; r < 4; ++r)
+    for (int c = 0; c < 3; ++c) {
+      const double d = pts[r][c];
+      if (d == 0.0) {
+        M[r][c] = 0;
+        E[r][c] = 0;
+        continue;
+      }
+      int ex;
+      const double f = std::frexp(d, &ex);
+      M[r][c] = (int64_t)std::ldexp(f, 53);
+      E[r][c] = ex - 53;
+    }
+  struct Term {
+    unsigned __int128 hiAbs;
+    uint64_t lo;
+    int sign;
+    long e;
+  };
+  Term terms[24];
+  int nT = 0;
+  long emin = 0, emax = 0;
+  for (const auto& s : kPerm) {
+    int64_t m3[3];
+    long esum = 0;
+    int k = 0;
+    bool zero = false;
+    for (int r = 0; r < 4; ++r) {
+      const int c = s[r];
+      if (c == 3) continue;  // the ones column
+      if (M[r][c] == 0) {
+        zero = true;
+        break;
+      }
+      m3[k++] = M[r][c];
+      esum += E[r][c];
+    }
+    if (zero) continue;
+    int sg = Parity(s);
+    __int128 p12 = (__int128)m3[0] * m3[1];
+    if (p12 < 0) {
+      sg = -sg;
+      p12 = -p12;
+    }
+    const unsigned __int128 a12 = (unsigned __int128)p12;
+    const uint64_t b = (uint64_t)(m3[2] < 0 ? -m3[2] : m3[2]);
+    if (m3[2] < 0) sg = -sg;
+    const uint64_t aLo = (uint64_t)a12, aHi = (uint64_t)(a12 >> 64);
+    const unsigned __int128 pLo = (unsigned __int128)aLo * b;
+    const unsigned __int128 pHi = (unsigned __int128)aHi * b + (pLo >> 64);
+    terms[nT].lo = (uint64_t)pLo;
+    terms[nT].hiAbs = pHi;
+    terms[nT].sign = sg;
+    terms[nT].e = esum;
+    if (nT == 0) {
+      emin = emax = esum;
+    } else {
+      emin = std::min(emin, esum);
+      emax = std::max(emax, esum);
+    }
+    ++nT;
+  }
+  if (nT == 0) {
+    sign = 0;
+    return true;
+  }
+  if (emax - emin > 90) return false;
+  I256 acc;
+  for (int t = 0; t < nT; ++t) {
+    I256 v;
+    v.w[0] = terms[t].lo;
+    v.w[1] = (uint64_t)terms[t].hiAbs;
+    v.w[2] = (uint64_t)(terms[t].hiAbs >> 64);
+    ShlI256(v, (int)(terms[t].e - emin));
+    if (terms[t].sign < 0) NegI256(v);
+    AddI256(acc, v);
+  }
+  sign = SignI256(acc);
+  return true;
+}
+
 // Symbolically-perturbed orient3d sign (never 0).  idx = the four points'
 // global vertex indices (distinct).  When ExactOrient3D != 0 this returns that
 // exact sign; otherwise the SoS cascade decides.
@@ -1629,12 +1765,13 @@ inline int SoSOrient3D(const double pts[4][3], const int idx[4]) {
 // orient3d on double INPUT coords through the Shewchuk STATIC error-bound
 // filter (o3derrboundA = (7 + 56u)u, u = 2^-53).  Returns the CERTIFIED sign
 // (+/-1) when |det| exceeds the permanent-scaled error bound; returns 0 when
-// the filtered sign is UNCERTAIN (sub-bound or exact-zero).  The exact-Fraction
-// fallback that the fragment used for the 0 case is NOT ported (net-new exact
-// kernel); B treats an uncertain deciding predicate as a fail-closed boundary
-// rather than guess a sign.  On the corpus single-shell self-intersectors this
-// filter certifies every enumeration predicate (v5b-r4: siA/siB 100% certified,
-// zero fallback).
+// the filtered sign is UNCERTAIN (sub-bound or exact-zero).  The 0 case is no
+// longer a fail-closed boundary: it routes to the micro exact tie-test
+// (Orient3DExactSign, filter-0-only) and - on a genuine exact zero - the
+// single-global SoS (Orient3DSoS), per the stage-6 owner contract.  On the
+// corpus single-shell self-intersectors this filter certifies every
+// enumeration predicate (v5b-r4: siA/siB 100% certified, zero fallback), so
+// the exact kernel below is never touched on the certified fast path.
 inline int Orient3DFilterSign(const vec3& a, const vec3& b, const vec3& c,
                               const vec3& d) {
   const vec3 ad = a - d, bd = b - d, cd = c - d;
@@ -1648,18 +1785,37 @@ inline int Orient3DFilterSign(const vec3& a, const vec3& b, const vec3& c,
   constexpr double u = 0x1p-53;
   const double errb = (7.0 + 56.0 * u) * u * perm;
   if (errb > 0.0 && std::abs(det) > errb) return det > 0.0 ? 1 : -1;
-  return 0;  // uncertain -> exact fallback / SoS (Orient3DSoS)
+  return 0;  // uncertain -> Orient3DExactSign, then SoS (Orient3DSoS)
+}
+
+// The micro exact tie-test (owner contract): the EXACT orient3d sign, 0 iff
+// the four points are exactly coplanar.  int256 4-limb fast path; expansion
+// fallback for exponent spreads beyond capacity.  RELUCTANT ACCEPTANCE: this
+// exact kernel is net-new surface area the design had declined ("no exact
+// kernel in the tree", docs/Regularize3D.md B mechanism); the owner accepted
+// it NARROWLY for the stage-6 tie residue - its ONLY call sites are behind a
+// filter 0 (Orient3DSoS, the EdgePiercesTriSoS edge-in-plane guard, the test
+// probe), never the certified fast path.
+inline int Orient3DExactSign(const vec3& a, const vec3& b, const vec3& c,
+                             const vec3& d) {
+  const double pts[4][3] = {
+      {a.x, a.y, a.z}, {b.x, b.y, b.z}, {c.x, c.y, c.z}, {d.x, d.y, d.z}};
+  int s;
+  if (sos::ExactSignI256(pts, s)) return s;
+  return sos::ExactOrient3D(pts);
 }
 
 // The complete orient3d decision (docs/Regularize3D.md stage 6): the certified
-// filter sign on the fast path, else the single-global SoS - exact when the
-// four points are genuinely non-coplanar (the filter was merely uncertain), the
-// symbolic tie-break when they are exactly coplanar.  NEVER 0.  `i*` are the
-// four points' global vertex indices.
+// filter sign on the fast path; else the micro exact tie-test decides the
+// filter-uncertain-but-nonzero band exactly; else (a genuine exact zero) the
+// single-global SoS breaks the tie.  NEVER 0.  `i*` are the four points'
+// global vertex indices.
 inline int Orient3DSoS(const vec3& a, const vec3& b, const vec3& c,
                        const vec3& d, int ia, int ib, int ic, int id) {
   const int s = Orient3DFilterSign(a, b, c, d);
   if (s != 0) return s;
+  const int ex = Orient3DExactSign(a, b, c, d);
+  if (ex != 0) return ex;
   const double pts[4][3] = {
       {a.x, a.y, a.z}, {b.x, b.y, b.z}, {c.x, c.y, c.z}, {d.x, d.y, d.z}};
   const int idx[4] = {ia, ib, ic, id};
@@ -1697,13 +1853,9 @@ int EdgePiercesTriSoS(const vec3& u, const vec3& v, const vec3& a,
                       int ib, int ic) {
   const int fu = Orient3DFilterSign(a, b, c, u);
   const int fv = Orient3DFilterSign(a, b, c, v);
-  if (fu == 0 && fv == 0) {
-    const double au[4][3] = {
-        {a.x, a.y, a.z}, {b.x, b.y, b.z}, {c.x, c.y, c.z}, {u.x, u.y, u.z}};
-    const double av[4][3] = {
-        {a.x, a.y, a.z}, {b.x, b.y, b.z}, {c.x, c.y, c.z}, {v.x, v.y, v.z}};
-    if (sos::ExactOrient3D(au) == 0 && sos::ExactOrient3D(av) == 0) return 0;
-  }
+  if (fu == 0 && fv == 0 && Orient3DExactSign(a, b, c, u) == 0 &&
+      Orient3DExactSign(a, b, c, v) == 0)
+    return 0;  // edge exactly in the tri plane: the fold's, never a seam
   const int su = Orient3DSoS(a, b, c, u, ia, ib, ic, iu);
   const int sv = Orient3DSoS(a, b, c, v, ia, ib, ic, iv);
   if (su == sv) return 0;  // both same (perturbed) side -> no straddle
@@ -2848,6 +3000,13 @@ Manifold::Impl ComposeComponents(std::vector<Manifold::Impl>& parts) {
 }
 
 }  // namespace
+
+// Test hook (overlap3.h): expose the micro exact tie-test so the property pin
+// can grade it directly.
+int Orient3DExactSignProbe(const vec3& a, const vec3& b, const vec3& c,
+                           const vec3& d) {
+  return Orient3DExactSign(a, b, c, d);
+}
 
 RegularizeResult RegularizeImpl(const Manifold::Impl& in, double eps) {
   RegularizeResult result;

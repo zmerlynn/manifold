@@ -87,7 +87,11 @@ What survives of A is decompose + test + early-exit + route-to-B + compose.
 ## B's mechanism (the dirty-core resolver)
 
 B computes the arrangement and winding of ONE self-overlapping component in DOUBLES,
-kernel-free, reusing boolean3's discipline rather than introducing an exact kernel.
+kernel-free on the certified path, reusing boolean3's discipline.  AMENDMENT (stage 6,
+owner contract): a micro exact tie-test (Orient3DExactSign - int256 4-limb, expansion
+fallback) plus the single-global SoS cascade were RELUCTANTLY ACCEPTED as net-new
+exact-kernel surface, confined strictly to the filter-0 fallback - the certified fast
+path never touches them.
 
 - ENUMERATION. The collider's broadphase returns candidate face pairs; keep genuine
   non-adjacent crossings, SKIP self-adjacent (shared-vertex) pairs. Every crossing
@@ -176,16 +180,27 @@ rounded geometry, and never a lossy fallback. The queued completions:
 - Stage 5 - NEAR-COPLANAR widen + guard. The thin band whose coplanarity gap is above the
   filter's error bound but below eps is neither clustered (the fold owns only exact
   coplanarity) nor safely transversal; widen the coplanar decision with a guarded band.
-- Stage 6 - SINGLE-CONVENTION SoS. One global symbolic-perturbation convention lifted to
-  orient2d/orient3d = 0 so every non-coplanar exact-zero tie (vertex-on-face, edge-on-edge)
-  resolves by the same rule. This is the residue GT7863 and openscad fail closed on today -
-  AND the residue every genus-handle junction hits: connecting an internal coplanar overlap
-  into one component (the only way it is one connected 2-manifold - see the within-component
-  note below) puts an axis-normal face coplanar with the wall/cap it joins, an exact-zero
-  RecordSeams refuses. So NO within-component coplanar carrier RESOLVES through B until
-  stage 6 lands (measured: a stacked bridged carrier detects + routes DIRTY on the coplanar
-  gate, then fails closed at the rod junction). The gate scoping is correct; the resolve is
-  stage-6 work.
+- Stage 6 - SINGLE-CONVENTION SoS: LANDED (reg3d-s6). One global symbolic-perturbation
+  convention (the Shadows pattern lifted to orient3d = 0: Edelsbrunner-Mucke perturbation
+  keyed by global vertex index, computed over an exact expansion e-polynomial; local-rank
+  reduction proven sign-invariant, so per-predicate evaluation decides consistently with
+  ONE global perturbation) now DECIDES every genuine non-coplanar transversal exact-zero
+  tie (vertex-on-face, edge-on-edge) instead of refusing.  The coplanar family stays the
+  fold's - coplanar pairs are never SoS-perturbed (perturbing them manufactures the
+  sub-eps sliver cells of the thin-cell axis).  Level-0 discipline holds: the tie is
+  detected exactly (filter, then the micro exact tie-test Orient3DExactSign - int256
+  4-limb with an expansion fallback, RELUCTANTLY-ACCEPTED net-new exact-kernel surface,
+  owner contract, confined to filter-0 call sites), then broken by the convention;
+  once-only constructions unchanged.  MEASURED: the genus-handle bridged carrier
+  (BridgedCaps) resolves oracle-true through the real entry (GWN membership + volume +
+  tol-invariance; mutation-verified: disabling the convention reverts to the old
+  fail-closed, flipping its direction stays oracle-true).  The former SoS-gate refusals
+  NARROW to three precisely-named residues, each still a hard fail-closed with no output:
+  (i) coplanar-DOMINATED soups (GT7863, PokedCube) pass the tie gate and fail at EMISSION
+  (touching-sheet / sub-eps slivers - the stage-7 thin-cell axis); (ii) genuine >2-sheet
+  junctions (entangled bars, openscad) fail at the non-2-endpoint-seam wall (the
+  triple-point open); (iii) axis-aligned integer geometry can graze every winding probe
+  seed (the component-local seed-policy open).
 - Stage 7 - THIN-CELL representability at rounding. A cell thinner than eps has no
   representable double boundary; decide its retention exactly from input data, do not emit a
   sub-eps sliver.
@@ -195,7 +210,8 @@ edges) is one connected 2-manifold ONLY via a genus handle (a solid bridge, or a
 through the coincident caps): sharing the coincidence boundary is a non-manifold pinch or a
 transversal crossing, and a buried plug's three winding levels (0/1/2) cannot be bridged
 consistently (a handle would weld a w0|w1 sheet to a w1|w2 sheet). Only a stacked pair (both
-interiors w=1) is bridgeable, and its junction is on the stage-6 SoS axis.
+interiors w=1) is bridgeable, and its junction is on the stage-6 SoS axis - now landed:
+the bridged carrier is the family's oracle-true resolve pin.
 
 
 ## Parallelism (order-freeness, measured)
@@ -213,9 +229,10 @@ correctness change (the sequential result is the spec the parallel one must matc
 - THE BUILD. The cell complex + halfedge-boundary extraction is the largest unbuilt
   piece; the fragment did point classification of recorded cells, not the boundary
   build. B is fragment-validated, not landed.
-- SINGLE GLOBAL SoS (stage 6 above). The non-coplanar vertex-on-face / edge-on-edge tie
-  family that GT7863, openscad, AND every within-component-coplanar bridge junction fail
-  closed on; specified, not built. This is the dominant open resolve-blocker.
+- SINGLE GLOBAL SoS: LANDED (stage 6 above) - the bridge-junction family resolves
+  oracle-true.  What remains open is the NARROWED residue behind it: the stage-7
+  thin-cell emission (coplanar-dominated soups), the >2-sheet triple-point seam
+  model, and the component-local seed policy (all named, all hard fail-closed).
 - NEGATIVE WINDING / subtraction, untested. openscad's soup winding reaches -1; the
   {w_S>=1} threshold read should absorb it, but no subtraction carrier has exercised
   it.

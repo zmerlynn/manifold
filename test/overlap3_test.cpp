@@ -2086,6 +2086,72 @@ TEST(Overlap3, Regularize_NegativeWinding_PushedCapSphere) {
 // NARROWED, the thin-cell wall remains.
 // ===========================================================================
 
+// PROPERTY PIN for the micro exact tie-test (Orient3DExactSignProbe, the
+// owner-contract int256 4-limb exact orient3d sign with expansion fallback).
+// Graded properties, each on randomized configs:
+//  P1 FILTER AGREEMENT: whenever the replicated static Shewchuk filter
+//     certifies a sign, the exact sign matches it (the filter is sound, so a
+//     disagreement would indict the exact path).
+//  P2 ANTISYMMETRY: swapping any two of the four points flips the sign
+//     (including on exactly-degenerate configs, where 0 stays 0).
+//  P3 CONSTRUCTED EXACT ZEROS: four points on an exact plane -> sign 0.
+//  P4 SCALING INVARIANCE: scaling all coordinates by a power of two (det
+//     scales by a POSITIVE factor) never changes the sign - large exponents
+//     push the int256 path past capacity, so this also exercises the
+//     expansion-fallback boundary bit-consistently.
+TEST(Overlap3, Orient3DExactSign_PropertyPin) {
+  // Replicated static filter (Orient3DFilterSign's math, kept in lockstep).
+  auto filter = [](const vec3& a, const vec3& b, const vec3& c, const vec3& d) {
+    const vec3 ad = a - d, bd = b - d, cd = c - d;
+    const double bc = bd.y * cd.z, cb = cd.y * bd.z;
+    const double ca = cd.y * ad.z, ac = ad.y * cd.z;
+    const double ab = ad.y * bd.z, ba = bd.y * ad.z;
+    const double det = ad.x * (bc - cb) + bd.x * (ca - ac) + cd.x * (ab - ba);
+    const double perm = (std::abs(bc) + std::abs(cb)) * std::abs(ad.x) +
+                        (std::abs(ca) + std::abs(ac)) * std::abs(bd.x) +
+                        (std::abs(ab) + std::abs(ba)) * std::abs(cd.x);
+    constexpr double u = 0x1p-53;
+    const double errb = (7.0 + 56.0 * u) * u * perm;
+    if (errb > 0.0 && std::abs(det) > errb) return det > 0.0 ? 1 : -1;
+    return 0;
+  };
+  std::mt19937_64 rng(20260714u);
+  std::uniform_real_distribution<double> U(-3, 3);
+  std::uniform_int_distribution<int> Sc(-120, 120);
+  int p1 = 0, p2 = 0, p3 = 0, p4 = 0;
+  for (int t = 0; t < 20000; ++t) {
+    vec3 q[4];
+    const bool coplanar = (t % 4 == 0);
+    for (auto& v : q) {
+      v.x = std::round(U(rng) * 4);
+      v.y = std::round(U(rng) * 4);
+      v.z = coplanar ? 1.0 : std::round(U(rng) * 4);
+    }
+    const int s = Orient3DExactSignProbe(q[0], q[1], q[2], q[3]);
+    // P1: filter agreement.
+    const int f = filter(q[0], q[1], q[2], q[3]);
+    if (f != 0 && s != f) ++p1;
+    // P2: antisymmetry across all 6 transpositions.
+    for (int i = 0; i < 4; ++i)
+      for (int j = i + 1; j < 4; ++j) {
+        vec3 w[4] = {q[0], q[1], q[2], q[3]};
+        std::swap(w[i], w[j]);
+        if (Orient3DExactSignProbe(w[0], w[1], w[2], w[3]) != -s) ++p2;
+      }
+    // P3: constructed exact zero.
+    if (coplanar && s != 0) ++p3;
+    // P4: power-of-two scaling invariance (also walks the int256->expansion
+    // capacity boundary at large |k|).
+    const double k = std::ldexp(1.0, Sc(rng));
+    if (Orient3DExactSignProbe(q[0] * k, q[1] * k, q[2] * k, q[3] * k) != s)
+      ++p4;
+  }
+  EXPECT_EQ(p1, 0) << "exact sign must agree with every certified filter sign";
+  EXPECT_EQ(p2, 0) << "exact sign must be antisymmetric";
+  EXPECT_EQ(p3, 0) << "exactly-coplanar points must give sign 0";
+  EXPECT_EQ(p4, 0) << "sign must be invariant to power-of-two scaling";
+}
+
 // Constructed carrier: a SINGLE self-intersecting component with ISOLATED
 // exact-zero ties (vertex-on-plane + pierce-on-edge, NO coplanar overlap - the
 // PokedCube's axis-aligned spike pierces the far faces at exact configs).  The
