@@ -233,9 +233,24 @@ rounded geometry, and never a lossy fallback. The queued completions:
   fail-closed, flipping its direction stays oracle-true).  The former SoS-gate refusals
   NARROW to three precisely-named residues, each still a hard fail-closed with no output:
   (i) coplanar-DOMINATED soups (GT7863, PokedCube) pass the tie gate and fail at EMISSION
-  (touching-sheet / sub-eps slivers - the stage-7 thin-cell axis); (ii) genuine >2-sheet
-  junctions (entangled bars, openscad) fail at the non-2-endpoint-seam wall (the
-  triple-point open); (iii) axis-aligned integer geometry can graze every winding probe
+  (touching-sheet / sub-eps slivers - the stage-7 thin-cell axis); (ii) COPLANAR/TRANSVERSAL
+  ENTANGLEMENT - a transversal wall-wall seam whose endpoint lands ON a coplanar cap cluster
+  plane was truncated (nPts==1) by the cap-cluster suppression and failed closed; this was
+  RE-DIAGNOSED as NOT a >2-sheet triple point (entangled bars has zero book-of-pages lines,
+  every arrangement edge is exactly two walls; the coincident caps are the fold's, not a
+  radial sheet - reg3d-radial) and is now CLOSED for that 2-sheet cap-plane case by the
+  SEAM-ENDPOINT JUNCTION COMPLETION (reg3d-ent): RecordSeams gives the dropped endpoint the
+  fold's in-plane arrangement identity (records the cap-plane crossing, dedups the symmetric
+  double-pierce), so the seamed wall drops its interior span and the folded cap + seamed
+  walls weld shut at the reentrant corner.  MEASURED oracle-true: EntangledBars (axis-aligned,
+  exact union vol) AND a rotated variant (vol == the library boolean union, closure via the
+  weld on irrational junctions) - GWN membership + one solid + tol-invariance; mutation-
+  verified (disabling the recovery OR the dedup reverts to the truncation fail-closed).  No
+  new predicate / no radial rule.  openscad NARROWS strictly (RecordSeams truncations 496 ->
+  344) but stays fail-closed - its residue is the near-coplanar-sliver (GT7863-class) and the
+  cap-INTERIOR endpoint (a seam piercing a cap face interior, which would need the pierce
+  injected as new fold input), both separate axes; (iii) axis-aligned integer geometry can
+  graze every winding probe
   seed - NARROWED (reg3d-arr): the CLEAN-face classify now re-probes other interior
   points of the same uncrossed triangle (a constant winding cell above it), so BarsCrossZ
   resolves oracle-true; only the SEAMED path's per-cell centroid probe can still graze
@@ -270,8 +285,13 @@ correctness change (the sequential result is the spec the parallel one must matc
   build. B is fragment-validated, not landed.
 - SINGLE GLOBAL SoS: LANDED (stage 6 above) - the bridge-junction family resolves
   oracle-true.  What remains open is the NARROWED residue behind it: the stage-7
-  thin-cell emission (coplanar-dominated soups), the >2-sheet triple-point seam
-  model, and the component-local seed policy (all named, all hard fail-closed).
+  thin-cell emission (coplanar-dominated soups) and the component-local seed policy
+  (both named, hard fail-closed).  The former "entangled bars / >2-sheet triple
+  point" residue was RE-DIAGNOSED as a 2-sheet cap-plane seam TRUNCATION (not a
+  triple point) and CLOSED by the seam-endpoint junction completion (reg3d-ent,
+  standing adjudication (ii)); a genuine >2-sheet radial junction is not forced by
+  any corpus carrier (reg3d-radial verified the reduction but found zero
+  book-of-pages lines), so the radial rule stays unbuilt (kernel-tripwire-gated).
 - EXACT-KERNEL SURFACE, QUEUED FOR REVISIT (owner contract, reluctant acceptance).
   Whether the arrangement can be structured to avoid needing an exact orient3d kernel
   at all is still open; the current integer Orient3DExactSign / SoS cascade is the
