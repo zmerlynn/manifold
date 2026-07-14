@@ -130,12 +130,11 @@ double ImplEps(const Manifold::Impl& impl) {
 // ===========================================================================
 
 // ===========================================================================
-// Regularization operator (docs/Regularize3D.md) - Stage-1 GATE + DISPATCH.
-// RegularizeImpl is the parallel entry point: decompose by connectivity ->
-// per-component gate (validity + IsSelfIntersecting) -> early-exit clean ->
-// route dirty to candidate B (a fail-closed stub in Stage 1) -> compose back
-// by concatenation.  These pins are authored RED-FIRST (a no-op stub cannot
-// pass any of them) and each is mutation-verified in the lane notebook.
+// Regularization operator (docs/Regularize3D.md) - GATE + DISPATCH.
+// RemoveOverlaps3D: decompose by connectivity -> per-component gate (validity +
+// IsSelfIntersecting + within-component coplanar overlap) -> early-exit clean
+// -> route dirty to the resolver -> re-gate -> compose back by concatenation.
+// These pins are mutation-verified in the lane notebook.
 // ===========================================================================
 
 // Bit-pattern mesh identity: vert positions (raw doubles) and triangle vertex
@@ -174,7 +173,7 @@ static Manifold::Impl PokedCube() {
 // gate and is copied through BITWISE-unchanged (mesh geometry + topology).
 TEST(Overlap3, Regularize_CleanSingleComponent_BitwisePassThrough) {
   const Manifold::Impl in(Manifold::Impl::Shape::Cube);
-  const RegularizeResult r = RegularizeImpl(in, ImplEps(in));
+  const RegularizeResult r = RemoveOverlaps3D(in, ImplEps(in));
   ASSERT_FALSE(r.fatal.has_value())
       << "clean cube must not fail closed: " << r.detail;
   ASSERT_TRUE(r.impl.has_value());
@@ -193,7 +192,7 @@ TEST(Overlap3, Regularize_MultiComponent_AllClean_DispatchCounts) {
   const Manifold a = Manifold::Cube({1, 1, 1});
   const Manifold b = Manifold::Cube({1, 1, 1}).Translate({3, 0, 0});
   const Manifold::Impl in = ComposeImpl(a, b);
-  const RegularizeResult r = RegularizeImpl(in, ImplEps(in));
+  const RegularizeResult r = RemoveOverlaps3D(in, ImplEps(in));
   ASSERT_FALSE(r.fatal.has_value()) << r.detail;
   ASSERT_TRUE(r.impl.has_value());
   EXPECT_EQ(r.counters.components, 2);
@@ -206,7 +205,7 @@ TEST(Overlap3, Regularize_MultiComponent_AllClean_DispatchCounts) {
 }
 
 // Pin 3: multi-component dispatch, one clean + one dirty.  The clean cube
-// early-exits; the poked cube routes to candidate B and fails closed - the
+// early-exits; the poked cube routes to the resolver and fails closed - the
 // whole result is the honest fail-closed, with complete dispatch counts.  Post
 // stage-6 SoS the poked cube PASSES the exact-zero tie gate and fails NARROWER,
 // at emission (NonManifoldEmission: the collapsed-vertex spike is a degenerate
@@ -216,7 +215,7 @@ TEST(Overlap3, Regularize_MultiComponent_CleanPlusDirty_DispatchCounts) {
   const Manifold clean = Manifold::Cube({1, 1, 1}).Translate({3, 0, 0});
   const Manifold dirtyM(GetMeshGLImpl<double, uint64_t>(PokedCube(), -1));
   const Manifold::Impl in = ComposeImpl(clean, dirtyM);
-  const RegularizeResult r = RegularizeImpl(in, ImplEps(in));
+  const RegularizeResult r = RemoveOverlaps3D(in, ImplEps(in));
   EXPECT_EQ(r.counters.components, 2);
   EXPECT_EQ(r.counters.clean, 1);
   EXPECT_EQ(r.counters.dirty, 1);
@@ -228,16 +227,16 @@ TEST(Overlap3, Regularize_MultiComponent_CleanPlusDirty_DispatchCounts) {
   EXPECT_FALSE(r.impl.has_value()) << "fail-closed yields no partial output";
 }
 
-// Pin 4: a dirty single component routes to candidate B and fails closed.  Post
+// Pin 4: a dirty single component routes to the resolver and fails closed. Post
 // stage-6 SoS the poked cube passes the exact-zero tie gate and fails NARROWER,
 // at emission (NonManifoldEmission), never a silent wrong result.
-TEST(Overlap3, Regularize_DirtySingleComponent_RoutesToFailClosedStub) {
+TEST(Overlap3, Regularize_DirtySingleComponent_RoutesToResolver) {
   const Manifold::Impl dirty = PokedCube();
   ASSERT_TRUE(dirty.IsManifold() && dirty.Is2Manifold())
       << "fixture must be a valid 2-manifold";
   ASSERT_TRUE(dirty.IsSelfIntersecting())
       << "fixture must self-intersect (else it is not a dirty component)";
-  const RegularizeResult r = RegularizeImpl(dirty, ImplEps(dirty));
+  const RegularizeResult r = RemoveOverlaps3D(dirty, ImplEps(dirty));
   EXPECT_EQ(r.counters.components, 1);
   EXPECT_EQ(r.counters.clean, 0);
   EXPECT_EQ(r.counters.dirty, 1);
@@ -249,7 +248,7 @@ TEST(Overlap3, Regularize_DirtySingleComponent_RoutesToFailClosedStub) {
 }
 
 // White-box classification pin (reg3d-s7b + reg3d-arr): the clean-face
-// retention inside candidate B's EmitCleanFaces must be PER-FACE, not
+// retention inside the resolver's EmitCleanFaces must be PER-FACE, not
 // per-patch.  The everted-corner carrier (PokedCube: the +++ corner collapsed
 // onto ---) puts genuine {w_S>=1} boundary clean faces (own +n winding == 0)
 // and exterior clean faces (own winding == -1) in ONE clean-clean-connected
@@ -271,7 +270,7 @@ TEST(Overlap3, Regularize_DirtySingleComponent_RoutesToFailClosedStub) {
 // face in a patch reaches the same decision, so the emitted set is unchanged).
 TEST(Overlap3, Regularize_CleanFacePerFace_RetainsEvertedBoundary) {
   const Manifold::Impl in = PokedCube();
-  const CleanFaceProbe p = RegularizeCleanFaces_Probe(in);
+  const CleanFaceProbe p = ClassifyCleanFaces_Probe(in);
   ASSERT_FALSE(p.faceIdx.empty()) << "PokedCube must reach EmitCleanFaces with "
                                      "clean faces (arrangement prefix must not "
                                      "fail before the clean pass)";
@@ -304,16 +303,16 @@ TEST(Overlap3, Regularize_CleanFacePerFace_RetainsEvertedBoundary) {
                              "the mixed patch the flood dropped wholesale";
 }
 
-// Pin 5 (Stage-2 acceptance, RED now / GREEN when B lands): the corpus single-
+// Acceptance: the corpus single-
 // shell self-intersectors self_intersectA/B - genuine w_S in {0,1,2} dirty
-// components with NO negative winding (the clean, safe-by-margin B target;
-// PokedCube reaches w_S=-1, an openscad-class negative-winding KNOWN-OPEN, so
-// it is deliberately NOT the resolve fixture) - must be REGULARIZED to the
-// boundary of {w_S >= 1}.  The acceptance battery is GEOMETRIC, not just "some
-// clean shape" (the Stage-1 verify lane found the prior pin greened against a
-// stub returning an unrelated clean cube): the emitted boundary must enclose
-// the {w_S>=1} volume within an INDEPENDENT reference band, be one connected
-// solid, and be tol-invariant.
+// components with NO negative winding (the clean, safe-by-margin resolver
+// target; PokedCube reaches w_S=-1, an openscad-class negative-winding
+// KNOWN-OPEN, so it is deliberately NOT the resolve fixture) - must be
+// REGULARIZED to the boundary of {w_S >= 1}.  The acceptance battery is
+// GEOMETRIC, not just "some clean shape" (an earlier verify lane found the
+// prior pin greened against a stub returning an unrelated clean cube): the
+// emitted boundary must enclose the {w_S>=1} volume within an INDEPENDENT
+// reference band, be one connected solid, and be tol-invariant.
 //
 // Reference figures (independent MC winding-integration oracle, N=4e5, three
 // cocycle-checked seeds; and a grid flood-fill component oracle stable over
@@ -337,7 +336,7 @@ static void ExpectSelfIntersectorRegularizes(const char* name, double volLo,
       << name << " fixture must be a dirty single component";
   const double eps = ImplEps(in);
 
-  const RegularizeResult r = RegularizeImpl(in, eps);
+  const RegularizeResult r = RemoveOverlaps3D(in, eps);
   ASSERT_FALSE(r.fatal.has_value())
       << name << " B must resolve, not fail closed: " << r.detail;
   ASSERT_TRUE(r.impl.has_value());
@@ -368,7 +367,7 @@ static void ExpectSelfIntersectorRegularizes(const char* name, double volLo,
   // rounded positions, so the enclosed volume is invariant to the weld radius.
   // A second run at a tightened eps must reproduce it (a tol-dependent resolve
   // would drift).
-  const RegularizeResult r2 = RegularizeImpl(in, eps * 0.5);
+  const RegularizeResult r2 = RemoveOverlaps3D(in, eps * 0.5);
   ASSERT_FALSE(r2.fatal.has_value())
       << name << " tol-variant run fatal: " << r2.detail;
   ASSERT_TRUE(r2.impl.has_value());
@@ -386,13 +385,13 @@ TEST(Overlap3, Regularize_SelfIntersectB_Regularized) {
 }
 
 // ---------------------------------------------------------------------------
-// Candidate B mechanism (docs/Regularize3D.md "B's mechanism") - white-box port
-// verification against the FRAGMENT-VALIDATED numbers (v5b-r3/r4 notebooks).
-// These pins are NOT disabled: they prove the ported ENUMERATION and coupled
-// WINDING (the substrate B runs today, on top of which THE BUILD is unbuilt)
-// are correct, independent of the boundary-emission wall.  Anchor points carry
-// their winding from the independent MC oracle (reg3d-s2 notebook),
-// cocycle-stable across two unrelated seeds.
+// The resolver mechanism (docs/Regularize3D.md "the resolver's mechanism") -
+// white-box port verification against the FRAGMENT-VALIDATED numbers (v5b-r3/r4
+// notebooks). These pins are NOT disabled: they prove the ported ENUMERATION
+// and coupled WINDING (the substrate B runs today, on top of which THE BUILD is
+// unbuilt) are correct, independent of the boundary-emission wall.  Anchor
+// points carry their winding from the independent MC oracle (reg3d-s2
+// notebook), cocycle-stable across two unrelated seeds.
 // ---------------------------------------------------------------------------
 static void ExpectBMechanism(const char* name, int expectSeams, vec3 w1,
                              vec3 w2, vec3 far, vec3 seed, vec3 seed2) {
@@ -407,7 +406,7 @@ static void ExpectBMechanism(const char* name, int expectSeams, vec3 w1,
   // (safe-by-margin, so the single-global-SoS axis is not exercised on the
   // corpus).
   const std::vector<vec3> probes = {far, w1, w2};
-  const CandidateBProbe p = RegularizeB_Probe(in, probes, seed);
+  const ComponentEnumProbe p = EnumerateComponent_Probe(in, probes, seed);
   EXPECT_EQ(p.seamCount, expectSeams) << name << " enumeration seam count";
   EXPECT_EQ(p.boundaryTouchPairs, 0)
       << name << " must be safe-by-margin (no exact-zero tie)";
@@ -420,7 +419,7 @@ static void ExpectBMechanism(const char* name, int expectSeams, vec3 w1,
 
   // PATH-INDEPENDENCE (cocycle): an unrelated second seed reproduces the w=2
   // classification (the coupled winding is single-valued off-surface).
-  const CandidateBProbe p2 = RegularizeB_Probe(in, {w2}, seed2);
+  const ComponentEnumProbe p2 = EnumerateComponent_Probe(in, {w2}, seed2);
   ASSERT_EQ(p2.probeWinding.size(), 1u);
   EXPECT_EQ(p2.probeWinding[0], 2) << name << " winding not path-independent";
 }
@@ -537,7 +536,7 @@ TEST(Overlap3, Regularize_NegativeWinding_PushedCapSphere) {
       << "fixture must reach negative winding (the axis under test)";
 
   const double eps = ImplEps(in);
-  const RegularizeResult r = RegularizeImpl(in, eps);
+  const RegularizeResult r = RemoveOverlaps3D(in, eps);
   ASSERT_FALSE(r.fatal.has_value())
       << "negative winding must be absorbed, not fail-closed: " << r.detail;
   ASSERT_TRUE(r.impl.has_value());
@@ -573,7 +572,7 @@ TEST(Overlap3, Regularize_NegativeWinding_PushedCapSphere) {
 
   // TOL-INVARIANCE: topology decided from input data, so volume is weld-radius
   // invariant.
-  const RegularizeResult r2 = RegularizeImpl(in, eps * 0.5);
+  const RegularizeResult r2 = RemoveOverlaps3D(in, eps * 0.5);
   ASSERT_FALSE(r2.fatal.has_value()) << "tol-variant run fatal: " << r2.detail;
   ASSERT_TRUE(r2.impl.has_value());
   const Manifold out2(GetMeshGLImpl<double, uint64_t>(*r2.impl, -1));
@@ -731,12 +730,12 @@ TEST(Overlap3, Regularize_ExactZeroTie_Constructed_FailClosed) {
   ASSERT_TRUE(in.IsSelfIntersecting()) << "carrier must be a dirty component";
   // The carrier genuinely REACHES an exact-zero pierce tie (else it would not
   // exercise the axis): B's enumeration reports filter-tie pairs.
-  const CandidateBProbe p =
-      RegularizeB_Probe(in, {}, in.bBox_.Center() + vec3(97.1, 33.7, 51.3));
+  const ComponentEnumProbe p = EnumerateComponent_Probe(
+      in, {}, in.bBox_.Center() + vec3(97.1, 33.7, 51.3));
   EXPECT_GT(p.boundaryTouchPairs, 0)
       << "carrier must reach an exact-zero tie (the axis under test)";
 
-  const RegularizeResult r = RegularizeImpl(in, ImplEps(in));
+  const RegularizeResult r = RemoveOverlaps3D(in, ImplEps(in));
   ASSERT_TRUE(r.fatal.has_value())
       << "the residue must fail closed, never a silent resolve";
   // NARROWED: past the SoS gate, now the thin-cell / touching-sheet emission.
@@ -780,7 +779,7 @@ TEST(Overlap3, Regularize_ExactZeroTie_GT7863_FailClosed) {
   comb.runOriginalID.push_back(Manifold::ReserveIDs(1));
   const Manifold::Impl in(comb);
 
-  const RegularizeResult r = RegularizeImpl(in, ImplEps(in));
+  const RegularizeResult r = RemoveOverlaps3D(in, ImplEps(in));
   EXPECT_EQ(r.counters.components, 4) << "four components stay separate";
   EXPECT_EQ(r.counters.clean, 2) << "2 components early-exit clean";
   EXPECT_EQ(r.counters.dirty, 2)
@@ -800,7 +799,7 @@ TEST(Overlap3, Regularize_ExactZeroTie_GT7863_FailClosed) {
 // w_below = w_above + m emits the {w_S>=1} boundary (mult-1 stays the existing
 // w_above==0 rule).  The self-intersection gate does NOT flag a pure coplanar
 // overlap (the doc's R2(i) blind spot), so these carriers are exercised through
-// the RegularizeDirtyDirect hook (candidate B on a soup treated as one dirty
+// the ResolveComponentDirect hook (the resolver on a soup treated as one dirty
 // component).  Each resolve is checked against an INDEPENDENT generalized
 // winding-number oracle (Van Oosterom-Strackee over the input soup) - a wrong
 // fold lands outside the band or disagrees on membership - plus tol-invariance.
@@ -841,7 +840,7 @@ struct MB {
 };
 
 // Generalized winding number of an oriented triangle SOUP (Van Oosterom-
-// Strackee) - independent of candidate B's ray-crossing winding.
+// Strackee) - independent of the resolver's ray-crossing winding.
 double GWNsoup(const Manifold::Impl& in, const vec3& p) {
   double sum = 0.0;
   const int nTri = static_cast<int>(in.NumTri());
@@ -911,10 +910,10 @@ MeshGL64 MultiPlug(const std::vector<std::array<double, 4>>& boxes) {
 
 // Run the fold and grade the resolve against the GWN oracle + tol-invariance.
 // The carriers below are MULTI-BOX soups (a cross-component coplanar overlap);
-// under the non-fusion contract RegularizeImpl decomposes them into separate
+// under the non-fusion contract RemoveOverlaps3D decomposes them into separate
 // clean components, so the fold ARRANGEMENT (Fix 1) is exercised through the
-// RegularizeDirtyDirect hook, which treats the whole soup as one dirty
-// component and runs candidate B on it directly (bypassing decompose + the
+// ResolveComponentDirect hook, which treats the whole soup as one dirty
+// component and runs the resolver on it directly (bypassing decompose + the
 // gate).
 static void ExpectFoldResolves(const char* tag, const MeshGL64& mesh,
                                double volLo, double volHi) {
@@ -922,11 +921,11 @@ static void ExpectFoldResolves(const char* tag, const MeshGL64& mesh,
   ASSERT_TRUE(in.IsManifold() && in.Is2Manifold()) << tag;
   // The pure coplanar overlap is NOT flagged by the self-intersection gate
   // (R2(i)); the carrier reaches the fold via its coplanar cap clusters.
-  const CandidateBProbe p =
-      RegularizeB_Probe(in, {}, in.bBox_.Center() + vec3(97.1, 33.7, 51.3));
+  const ComponentEnumProbe p = EnumerateComponent_Probe(
+      in, {}, in.bBox_.Center() + vec3(97.1, 33.7, 51.3));
   EXPECT_GT(p.coplanarClusterFaces, 0) << tag << " must reach the fold";
   const double eps = EpsilonFromScale(in.bBox_.Scale(), 1000);
-  auto run = [&](double e) { return RegularizeDirtyDirect(in, e); };
+  auto run = [&](double e) { return ResolveComponentDirect(in, e); };
 
   const RegularizeResult r = run(eps);
   ASSERT_FALSE(r.fatal.has_value())
@@ -980,7 +979,7 @@ static void ExpectFoldResolves(const char* tag, const MeshGL64& mesh,
 // Same-oriented mult-2 buried plug (B strictly inside A, caps coincident):
 // {w_S>=1} = A (B is buried), volume = 12 exactly.  SlantPlug is TWO disjoint
 // boxes with a CROSS-component coplanar overlap - under the non-fusion contract
-// RegularizeImpl passes both through (see the SlantPlug pass-through pin
+// RemoveOverlaps3D passes both through (see the SlantPlug pass-through pin
 // below); the FOLD ARRANGEMENT (Fix 1) is exercised on the whole soup via the
 // direct hook.  A no-op / wrong fold fails the 11.9-12.1 band and the GWN
 // oracle.
@@ -1045,7 +1044,7 @@ TEST(Overlap3, Regularize_ExactZeroTie_Openscad_FailClosed) {
           .string());
   if (!fin.is_open()) GTEST_SKIP() << "model not found";
   const Manifold::Impl in(ReadOBJ(fin));
-  const RegularizeResult r = RegularizeImpl(in, ImplEps(in));
+  const RegularizeResult r = RemoveOverlaps3D(in, ImplEps(in));
   EXPECT_GE(r.counters.dirty, 1) << "coplanar overlap must route to B";
   ASSERT_TRUE(r.fatal.has_value())
       << "the narrowed residue must fail closed, never silently resolve";
@@ -1067,7 +1066,7 @@ TEST(Overlap3, Regularize_ExactZeroTie_Openscad_FailClosed) {
 // exterior) - a genus handle joining A-interior and B-interior, both w=1.  This
 // makes the coplanar overlap INTERNAL to one component: IsSelfIntersecting
 // misses it (R2(i)), so the WITHIN-component coplanar gate is what routes it
-// DIRTY (the point of the re-scope).  Candidate B then FAILS CLOSED on the
+// DIRTY (the point of the re-scope).  The resolver then FAILS CLOSED on the
 // bridge-junction SoS residue: the rod's faces are coplanar with the
 // axis-normal wall/frame planes they connect to, an exact-zero orient3d that
 // RecordSeams refuses (the single-global-SoS axis, PokedCube-class).  Building
@@ -1221,7 +1220,7 @@ TEST(Overlap3, Regularize_SlantPlug_CrossComponent_PassThrough) {
   EXPECT_FALSE(in.IsSelfIntersecting())
       << "the coplanar overlap is cross-component and not self-intersecting";
 
-  const RegularizeResult r = RegularizeImpl(in, ImplEps(in));
+  const RegularizeResult r = RemoveOverlaps3D(in, ImplEps(in));
   ASSERT_FALSE(r.fatal.has_value()) << r.detail;
   ASSERT_TRUE(r.impl.has_value());
   EXPECT_EQ(r.counters.components, 2) << "two disjoint boxes stay separate";
@@ -1248,11 +1247,11 @@ TEST(Overlap3, Regularize_SlantPlug_CrossComponent_PassThrough) {
 }
 
 // POINT-4 (owner adjudication): the WITHIN-component coplanar gate reached
-// through the REAL RegularizeImpl entry.  BridgedCaps is ONE connected
+// through the REAL RemoveOverlaps3D entry.  BridgedCaps is ONE connected
 // 2-manifold (a stacked pair joined by a solid rod) whose only defect is an
 // INTERNAL coplanar overlap - IsSelfIntersecting does NOT flag it (R2(i)), so
 // the re-scoped GateComponent coplanar check is the ONLY thing that can route
-// it to candidate B.  Candidate B then fails closed on the bridge-junction
+// it to the resolver.  The resolver then fails closed on the bridge-junction
 // single-global-SoS residue (the connection needed to make an internal coplanar
 // overlap one component is itself on the unbuilt SoS axis; see the BridgedCaps
 // header + the lane notebook).  Mutation guard: disable the
@@ -1266,8 +1265,8 @@ TEST(Overlap3, Regularize_SlantPlug_CrossComponent_PassThrough) {
 // coplanar caps are consumed by the fold, and the rod junction (rod faces
 // coplanar/ perpendicular with the wall & frame planes) is resolved by the SoS
 // instead of failing closed.  RESOLVES oracle-true through the REAL
-// RegularizeImpl entry: {w_S>=1} = A[0,6]x[0,5]x[0,2] (60) + B[2,4]x[2,3]x[2,4]
-// (4) + the L-rod
+// RemoveOverlaps3D entry: {w_S>=1} = A[0,6]x[0,5]x[0,2] (60) +
+// B[2,4]x[2,3]x[2,4] (4) + the L-rod
 // (~0.192) = 64.192, one solid, the doubled cap interior.  Graded by the
 // INDEPENDENT GWN solid-angle oracle (membership + volume band +
 // tol-invariance). MUTATION-VERIFIED in-lane (reg3d-s6 notebook): disabling the
@@ -1318,13 +1317,13 @@ TEST(Overlap3, Regularize_ExactZeroTie_EntangledBars_Resolves) {
       TwoBoxSoup(Manifold::Cube({6, 2, 2}).Translate({0, 2, 2}),
                  Manifold::Cube({2, 6, 2}).Translate({2, 0, 2}));
   ASSERT_TRUE(in.IsManifold() && in.Is2Manifold());
-  const CandidateBProbe p =
-      RegularizeB_Probe(in, {}, in.bBox_.Center() + vec3(97.1, 33.7, 51.3));
+  const ComponentEnumProbe p = EnumerateComponent_Probe(
+      in, {}, in.bBox_.Center() + vec3(97.1, 33.7, 51.3));
   EXPECT_GT(p.seamCount, 0) << "must reach a transversal crossing";
   EXPECT_GT(p.coplanarClusterFaces, 0) << "must reach the coplanar caps (fold)";
 
   const double eps = EpsilonFromScale(in.bBox_.Scale(), 1000);
-  const RegularizeResult r = RegularizeDirtyDirect(in, eps);
+  const RegularizeResult r = ResolveComponentDirect(in, eps);
   ASSERT_FALSE(r.fatal.has_value())
       << "the cap-plane seam endpoint must resolve, not truncate: " << r.detail;
   ASSERT_TRUE(r.impl.has_value());
@@ -1364,7 +1363,7 @@ TEST(Overlap3, Regularize_ExactZeroTie_EntangledBars_Resolves) {
   EXPECT_GT(checked, 3000) << "oracle undersampled";
 
   // TOL-INVARIANCE: the retained topology is decided from input data.
-  const RegularizeResult r2 = RegularizeDirtyDirect(in, eps * 0.5);
+  const RegularizeResult r2 = ResolveComponentDirect(in, eps * 0.5);
   ASSERT_TRUE(r2.impl.has_value()) << "tol-variant fatal: " << r2.detail;
   const Manifold out2(GetMeshGLImpl<double, uint64_t>(*r2.impl, -1));
   EXPECT_NEAR(vol, out2.Volume(), 1e-6 * vol) << "not tol-invariant";
@@ -1388,13 +1387,13 @@ TEST(Overlap3, Regularize_ExactZeroTie_EntangledBarsRotated_Resolves) {
                          .Translate({0, 0, 2});
   const Manifold::Impl in = TwoBoxSoup(A, B);
   ASSERT_TRUE(in.IsManifold() && in.Is2Manifold());
-  const CandidateBProbe p =
-      RegularizeB_Probe(in, {}, in.bBox_.Center() + vec3(97.1, 33.7, 51.3));
+  const ComponentEnumProbe p = EnumerateComponent_Probe(
+      in, {}, in.bBox_.Center() + vec3(97.1, 33.7, 51.3));
   EXPECT_GT(p.seamCount, 0);
   EXPECT_GT(p.coplanarClusterFaces, 0);
 
   const double eps = EpsilonFromScale(in.bBox_.Scale(), 1000);
-  const RegularizeResult r = RegularizeDirtyDirect(in, eps);
+  const RegularizeResult r = ResolveComponentDirect(in, eps);
   ASSERT_FALSE(r.fatal.has_value())
       << "rotated cap-plane junction must resolve: " << r.detail;
   ASSERT_TRUE(r.impl.has_value());
@@ -1433,7 +1432,7 @@ TEST(Overlap3, Regularize_ExactZeroTie_EntangledBarsRotated_Resolves) {
   EXPECT_GT(checked, 3000) << "oracle undersampled";
 
   // TOL-INVARIANCE.
-  const RegularizeResult r2 = RegularizeDirtyDirect(in, eps * 0.5);
+  const RegularizeResult r2 = ResolveComponentDirect(in, eps * 0.5);
   ASSERT_TRUE(r2.impl.has_value()) << "tol-variant fatal: " << r2.detail;
   const Manifold out2(GetMeshGLImpl<double, uint64_t>(*r2.impl, -1));
   EXPECT_NEAR(vol, out2.Volume(), 1e-6 * vol) << "not tol-invariant";
@@ -1457,13 +1456,13 @@ TEST(Overlap3, Regularize_ExactZeroTie_BarsCrossZ_Resolves) {
       TwoBoxSoup(Manifold::Cube({6, 2, 4}).Translate({0, 2, 0}),
                  Manifold::Cube({2, 6, 2}).Translate({2, 0, 1}));
   ASSERT_TRUE(in.IsManifold() && in.Is2Manifold());
-  const CandidateBProbe p =
-      RegularizeB_Probe(in, {}, in.bBox_.Center() + vec3(97.1, 33.7, 51.3));
+  const ComponentEnumProbe p = EnumerateComponent_Probe(
+      in, {}, in.bBox_.Center() + vec3(97.1, 33.7, 51.3));
   EXPECT_GT(p.seamCount, 0) << "must reach transversal crossings";
   EXPECT_EQ(p.coplanarClusterFaces, 0) << "no coplanar caps (fold not reached)";
 
   const double eps = EpsilonFromScale(in.bBox_.Scale(), 1000);
-  const RegularizeResult r = RegularizeDirtyDirect(in, eps);
+  const RegularizeResult r = ResolveComponentDirect(in, eps);
   ASSERT_FALSE(r.fatal.has_value()) << "the per-face clean rule must resolve "
                                        "the seed-graze, not fail closed: "
                                     << r.detail;
@@ -1504,7 +1503,7 @@ TEST(Overlap3, Regularize_ExactZeroTie_BarsCrossZ_Resolves) {
   EXPECT_GT(checked, 3000) << "oracle undersampled";
 
   // TOL-INVARIANCE: the retained topology is decided from input data.
-  const RegularizeResult r2 = RegularizeDirtyDirect(in, eps * 0.5);
+  const RegularizeResult r2 = ResolveComponentDirect(in, eps * 0.5);
   ASSERT_TRUE(r2.impl.has_value()) << "tol-variant fatal: " << r2.detail;
   const Manifold out2(GetMeshGLImpl<double, uint64_t>(*r2.impl, -1));
   EXPECT_NEAR(vol, out2.Volume(), 1e-6 * vol) << "not tol-invariant";
@@ -1519,13 +1518,13 @@ TEST(Overlap3, Regularize_WithinComponentCoplanar_BridgedCaps_Resolves) {
       << "ONE connected component (the rod joins A and B)";
   EXPECT_FALSE(in.IsSelfIntersecting())
       << "the internal coplanar overlap is NOT self-intersecting (R2(i))";
-  const CandidateBProbe p =
-      RegularizeB_Probe(in, {}, in.bBox_.Center() + vec3(97.1, 33.7, 51.3));
+  const ComponentEnumProbe p = EnumerateComponent_Probe(
+      in, {}, in.bBox_.Center() + vec3(97.1, 33.7, 51.3));
   EXPECT_GT(p.coplanarClusterFaces, 0)
       << "the doubled cap is a genuine within-component coplanar overlap";
 
   const double eps = ImplEps(in);
-  const RegularizeResult r = RegularizeImpl(in, eps);
+  const RegularizeResult r = RemoveOverlaps3D(in, eps);
   ASSERT_FALSE(r.fatal.has_value())
       << "the SoS must resolve the bridge junction, not fail closed: "
       << r.detail;
@@ -1570,7 +1569,7 @@ TEST(Overlap3, Regularize_WithinComponentCoplanar_BridgedCaps_Resolves) {
   EXPECT_GT(checked, 2000) << "oracle undersampled";
 
   // TOL-INVARIANCE: the retained topology is decided from input data.
-  const RegularizeResult r2 = RegularizeImpl(in, eps * 0.5);
+  const RegularizeResult r2 = RemoveOverlaps3D(in, eps * 0.5);
   ASSERT_TRUE(r2.impl.has_value()) << "tol-variant fatal: " << r2.detail;
   const Manifold out2(GetMeshGLImpl<double, uint64_t>(*r2.impl, -1));
   EXPECT_NEAR(vol, out2.Volume(), 1e-6 * vol) << "not tol-invariant";
@@ -1580,12 +1579,12 @@ TEST(Overlap3, Regularize_WithinComponentCoplanar_BridgedCaps_Resolves) {
 // (body + mask) carries the corpus's real near-coplanar overlap geometry - two
 // large flat facets within eps of coplanar (research memo: 14 decidable-thin
 // near-coplanar pairs).  But that overlap is CROSS-component (between the body
-// and mask solids), so RegularizeImpl decomposes into separate clean components
-// and passes them through UNCHANGED under the uniform non-fusion contract - the
-// per-component near-coplanar widen never sees a cross-component cluster (and
-// no component is dirty).  A regression guard: a gate that wrongly fused or
-// routed the cross-component overlap dirty would change the component count /
-// output.
+// and mask solids), so RemoveOverlaps3D decomposes into separate clean
+// components and passes them through UNCHANGED under the uniform non-fusion
+// contract - the per-component near-coplanar widen never sees a cross-component
+// cluster (and no component is dirty).  A regression guard: a gate that wrongly
+// fused or routed the cross-component overlap dirty would change the component
+// count / output.
 #ifndef MANIFOLD_NO_FILESYSTEM
 TEST(Overlap3, Regularize_Hull_CrossComponent_PassThrough) {
   std::filesystem::path file(__FILE__);
@@ -1595,7 +1594,7 @@ TEST(Overlap3, Regularize_Hull_CrossComponent_PassThrough) {
   if (!fBody.is_open() || !fMask.is_open()) GTEST_SKIP() << "hull model absent";
   const Manifold::Impl impl =
       ComposeImpl(Manifold::ReadOBJ(fBody), Manifold::ReadOBJ(fMask));
-  const RegularizeResult r = RegularizeImpl(impl, ImplEps(impl));
+  const RegularizeResult r = RemoveOverlaps3D(impl, ImplEps(impl));
   ASSERT_FALSE(r.fatal.has_value()) << r.detail;
   EXPECT_GT(r.counters.components, 1) << "body + mask are distinct components";
   EXPECT_EQ(r.counters.clean, r.counters.components)
@@ -1625,8 +1624,8 @@ TEST(Overlap3, Regularize_Hull_CrossComponent_PassThrough) {
 // NOTE on reachability: a PURE near-coplanar overlap (deviation < 2eps) is
 // invisible to IsSelfIntersecting (its 2*eps normal-nudge always separates two
 // near-coplanar faces), so - exactly like the exact CoplanarFold_* carriers -
-// the fold is exercised through the RegularizeDirtyDirect hook (candidate B on
-// the soup as one dirty component), not the gate.
+// the fold is exercised through the ResolveComponentDirect hook (the resolver
+// on the soup as one dirty component), not the gate.
 // ===========================================================================
 
 // SlantPlug with B's TOP cap tilted a sub-eps `delta` off A's slant plane along
@@ -1688,8 +1687,8 @@ TEST(Overlap3, Regularize_NearCoplanarFold_Mult2_Resolves) {
       0.3 * SlantPlugEps();  // near band; tol-invariant to eps/2
   const MeshGL64 mesh = NearSlantPlug(delta, /*cross=*/false, /*flipB=*/false);
   const Manifold::Impl in(mesh);
-  const CandidateBProbe p =
-      RegularizeB_Probe(in, {}, in.bBox_.Center() + vec3(9.71, 3.37, 5.13));
+  const ComponentEnumProbe p = EnumerateComponent_Probe(
+      in, {}, in.bBox_.Center() + vec3(9.71, 3.37, 5.13));
   EXPECT_EQ(p.coplanarClusterFaces, 4)
       << "only the exact z=0 bottom caps cluster; the tilted top caps are the "
          "near band (would be 8 if the tops were exactly coplanar)";
@@ -1719,7 +1718,7 @@ TEST(Overlap3, Regularize_NearCoplanarChain_GuardFailClosed) {
   const double eps = EpsilonFromScale(probe.bBox_.Scale(), 1000);
   const Manifold::Impl in(CurvedChainSoup(0.8 * eps / s0, K));
   ASSERT_TRUE(in.IsManifold() && in.Is2Manifold());
-  const RegularizeResult r = RegularizeDirtyDirect(in, eps);
+  const RegularizeResult r = ResolveComponentDirect(in, eps);
   ASSERT_TRUE(r.fatal.has_value())
       << "a curved near-coplanar chain must fail closed, never fold to a wrong "
          "plane";
@@ -1730,13 +1729,13 @@ TEST(Overlap3, Regularize_NearCoplanarChain_GuardFailClosed) {
 }
 
 // ===========================================================================
-// Corpus re-pin: the sole-impl (RemoveOverlaps3D / RegularizeImpl) contract on
-// the file fixtures.  The v3 sweep Corpus_* pins retired with the sweep; these
-// MEASURE and pin what the regularization operator does today.  Under the
+// Corpus re-pin: the sole-impl (RemoveOverlaps3D / RemoveOverlaps3D) contract
+// on the file fixtures.  The v3 sweep Corpus_* pins retired with the sweep;
+// these MEASURE and pin what the regularization operator does today.  Under the
 // non-fusion contract an overlapping pair / multi-shell input decomposes into
 // per-shell components, each gated independently: a clean shell early-exits
 // (bitwise pass-through), a self-intersecting or within-component-coplanar
-// shell routes to candidate B.  Figures are the measured dispatch (reg3d-sole
+// shell routes to the resolver.  Figures are the measured dispatch (reg3d-sole
 // notebook); a mutation that fused components or misrouted a clean shell reds
 // the count / vertex-set check.
 // ===========================================================================
@@ -1749,7 +1748,7 @@ static void ExpectCorpusCleanPassThrough(const char* tag,
                                          const Manifold::Impl& in, int nComp) {
   ASSERT_TRUE(in.IsManifold() && in.Is2Manifold())
       << tag << " fixture must be a valid 2-manifold";
-  const RegularizeResult r = RegularizeImpl(in, ImplEps(in));
+  const RegularizeResult r = RemoveOverlaps3D(in, ImplEps(in));
   ASSERT_FALSE(r.fatal.has_value())
       << tag << " must not fail closed: " << r.detail;
   ASSERT_TRUE(r.impl.has_value());
@@ -1825,18 +1824,18 @@ TEST(Overlap3, Corpus_Offsets_CleanPassThrough) {
 }
 
 // GenericTwin7081: the pair decomposes into 13 components; 11 gate clean but 2
-// carry a within-component defect candidate B declines to resolve exactly (a
+// carry a within-component defect the resolver declines to resolve exactly (a
 // "seam sub-face arrangement not exactly resolvable" residue - triple-point /
 // degenerate / filter-uncertain, the unbuilt B axes).  Any component
 // fail-closed suppresses output, so the whole compose fails closed - the honest
-// recorded refusal, never a silent wrong resolve.  HEAVY (~20s: candidate B
+// recorded refusal, never a silent wrong resolve.  HEAVY (~20s: the resolver
 // runs its O(ntri) winding on the dirty shells); run under the corpus resource
 // cap (ulimit -v 4000000; timeout 900).
 TEST(Overlap3, Corpus_GenericTwin7081_FailClosed) {
   const auto in = LoadCorpusPair("Generic_Twin_7081.1.t0_left.obj",
                                  "Generic_Twin_7081.1.t0_right.obj");
   if (!in) GTEST_SKIP() << "model not found";
-  const RegularizeResult r = RegularizeImpl(*in, ImplEps(*in));
+  const RegularizeResult r = RemoveOverlaps3D(*in, ImplEps(*in));
   ASSERT_TRUE(r.fatal.has_value()) << "GT7081 must fail closed, not resolve";
   EXPECT_EQ(*r.fatal, FatalReason::DirtyComponentUnresolved) << r.detail;
   EXPECT_FALSE(r.impl.has_value()) << "fail-closed yields no partial output";

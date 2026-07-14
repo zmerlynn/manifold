@@ -39,7 +39,7 @@ namespace manifold {
 enum class FatalReason {
   SubEpsInput,          // eps <= 0 or degenerate input geometry
   NonManifoldEmission,  // emitted triangulation is not 2-manifold
-  // Regularization operator (docs/Regularize3D.md): candidate B RAN on a dirty
+  // Regularization operator (docs/Regularize3D.md): the resolver RAN on a dirty
   // (self-intersecting or coplanar-overlapping) component but DECLINED to
   // resolve it exactly - a non-coplanar exact-zero SoS residue, a >2-sheet
   // triple point, a coplanar/transversal entanglement, a near-coplanar
@@ -73,7 +73,7 @@ struct StageResult {
 // ---------------------------------------------------------------------------
 // Regularization operator (docs/Regularize3D.md) - public entry point.
 //
-// RegularizeImpl maps a valid oriented face soup to the boundary of the solid
+// RemoveOverlaps3D maps a valid oriented face soup to the boundary of the solid
 // {p : w_S(p) >= 1}, PER CONNECTED COMPONENT (it never fuses separate
 // components - fusion is the Boolean's job, already done upstream).
 // Cross-component overlap of any kind - touching, coplanar, or transversal - is
@@ -81,21 +81,23 @@ struct StageResult {
 // regularized on its own and concatenated back unchanged (docs/Regularize3D.md
 // non-fusion contract).  A coplanar self-overlap is resolved only when it is
 // INTERNAL to one connected component, where the per-component gate detects it
-// and routes it to candidate B.  The pipeline: DECOMPOSE by connectivity ->
+// and routes it to the resolver.  The pipeline: DECOMPOSE by connectivity ->
 // per-component GATE (validity + IsSelfIntersecting + within-component coplanar
 // overlap) -> EARLY-EXIT clean components -> route DIRTY components to
-// candidate B -> RE-GATE B's output -> COMPOSE BACK by concatenation.
+// the resolver -> RE-GATE the resolver's output -> COMPOSE BACK by
+// concatenation.
 // ---------------------------------------------------------------------------
 
-// White-box dispatch counters (the Stage-1 pins read these directly).
+// White-box dispatch counters (the dispatch pins read these directly).
 struct RegularizeCounters {
   int components = 0;   // components after decompose by connectivity
   int clean = 0;        // passed the gate; early-exit copied through
   int dirty = 0;        // failed the gate (self-intersecting OR coplanar
-                        // overlap); routed to candidate B
-  int regularized = 0;  // B produced a clean re-gated output
-  int failClosed = 0;   // components that fail-closed (B decline, re-gate, or
-                        // an unexpected non-manifold input component)
+                        // overlap); routed to the resolver
+  int regularized = 0;  // the resolver produced a clean re-gated output
+  int failClosed =
+      0;  // components that fail-closed (resolver decline, re-gate, or
+          // an unexpected non-manifold input component)
 };
 
 struct RegularizeResult {
@@ -106,35 +108,35 @@ struct RegularizeResult {
 };
 
 // eps = 0 -> compute from bounding-box scale.
-RegularizeResult RegularizeImpl(const Manifold::Impl& in, double eps = 0.0);
+RegularizeResult RemoveOverlaps3D(const Manifold::Impl& in, double eps = 0.0);
 
 // ---------------------------------------------------------------------------
 // Test hooks (overlap3_test.cpp only).
 // ---------------------------------------------------------------------------
 
-// Candidate B mechanism probe (docs/Regularize3D.md "B's mechanism"), exposed
-// so the port of the validated fragment (enumeration + coupled winding) is
-// tested directly against the fragment's recorded numbers.  seamCount = genuine
-// non-adjacent self-crossings; boundaryTouchPairs = pairs whose deciding
-// predicate hit an exact-zero / static-filter-uncertain boundary (the
-// single-global-SoS axis); probeWinding[i] = coupled soup winding w_S at
+// The resolver mechanism probe (docs/Regularize3D.md "the resolver's
+// mechanism"), exposed so the port of the validated fragment (enumeration +
+// coupled winding) is tested directly against the fragment's recorded numbers.
+// seamCount = genuine non-adjacent self-crossings; boundaryTouchPairs = pairs
+// whose deciding predicate hit an exact-zero / static-filter-uncertain boundary
+// (the single-global-SoS axis); probeWinding[i] = coupled soup winding w_S at
 // probes[i] cast to `seed` (kWindingUncertain if a deciding predicate was
 // filter-uncertain).
-struct CandidateBProbe {
+struct ComponentEnumProbe {
   int seamCount = 0;
   int boundaryTouchPairs = 0;
   int coplanarClusterFaces = 0;  // faces in an exact-coplanar overlap cluster
   std::vector<int> probeWinding;
 };
 constexpr int kWindingUncertain = INT_MIN;
-CandidateBProbe RegularizeB_Probe(const Manifold::Impl& dirty,
-                                  const std::vector<vec3>& probes,
-                                  const vec3& seed);
+ComponentEnumProbe EnumerateComponent_Probe(const Manifold::Impl& dirty,
+                                            const std::vector<vec3>& probes,
+                                            const vec3& seed);
 
-// Test hook: per-clean-face classification inside candidate B's EmitCleanFaces,
-// exposed so the clean-patch PER-FACE hardening can be pinned at the
-// CLASSIFICATION level even when the carrier still fails downstream on the
-// arrangement build.  For each face that reaches EmitCleanFaces as "clean"
+// Test hook: per-clean-face classification inside the resolver's
+// EmitCleanFaces, exposed so the clean-patch PER-FACE hardening can be pinned
+// at the CLASSIFICATION level even when the carrier still fails downstream on
+// the arrangement build.  For each face that reaches EmitCleanFaces as "clean"
 // (neither seamed nor in a coplanar cluster) it reports: the face's OWN +n
 // winding probe (kWindingUncertain if every seed grazed) and whether
 // EmitCleanFaces retained that face in the emitted set.  The per-face rule
@@ -146,15 +148,15 @@ struct CleanFaceProbe {
   std::vector<int> ownWinding;  // each face's own +n winding probe
   std::vector<char> kept;       // whether EmitCleanFaces retained it (1/0)
 };
-CleanFaceProbe RegularizeCleanFaces_Probe(const Manifold::Impl& soup);
+CleanFaceProbe ClassifyCleanFaces_Probe(const Manifold::Impl& soup);
 
-// Test hook: run candidate B (fold + build + re-gate) directly on a soup
+// Test hook: run the resolver (fold + build + re-gate) directly on a soup
 // treated as ONE dirty component, bypassing decompose and the
 // IsSelfIntersecting gate. The self-intersection gate does not flag a pure
 // coplanar overlap, so this hook is the way to exercise the exact-coplanar
 // fold's RESOLVE path on an isolated coplanar cluster (no transversal
 // entanglement).
-RegularizeResult RegularizeDirtyDirect(const Manifold::Impl& soup, double eps);
+RegularizeResult ResolveComponentDirect(const Manifold::Impl& soup, double eps);
 
 // Test hook: the micro exact tie-test behind the stage-6 SoS - the EXACT
 // orient3d sign (0 iff the four points are exactly coplanar).  ONE integer path

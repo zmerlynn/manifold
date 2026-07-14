@@ -1,5 +1,11 @@
 # 3D overlap removal by sweep plane (prototype design)
 
+> SUPERSEDED (history). RemoveOverlaps3D is now the per-component regularization
+> operator specified in docs/Regularize3D.md; the v3/v4 sweep pipeline this doc
+> describes was deleted from the branch (it lives on in git history and the
+> explore/sweep-plane-3d-v3/-v4 branches).  Kept as the design record only.
+
+
 STATUS: DESIGN COMPLETE - crucible closed at round 3 (round 1: 5
 lanes, 4 convergent BREAKs resolved [R1-fold]; round 2: re-attack +
 fresh-eyes + empirical id-plumbing build, round-1 fixes held,

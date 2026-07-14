@@ -1,5 +1,11 @@
 # Maintained-order emission for 3D overlap removal (v4 design exploration)
 
+> SUPERSEDED (history). RemoveOverlaps3D is now the per-component regularization
+> operator specified in docs/Regularize3D.md; the v3/v4 sweep pipeline this doc
+> describes was deleted from the branch (it lives on in git history and the
+> explore/sweep-plane-3d-v3/-v4 branches).  Kept as the design record only.
+
+
 STATUS: DESIGN EXPLORATION, crucible round 3 (two adversarial rounds folded), branch
 explore/sweep-plane-3d-v4. This is an ARCHITECTURE study, not a pipeline. The v3
 sweep-native emission (docs/SweepEmit3D.md) stays intact as the reference and the

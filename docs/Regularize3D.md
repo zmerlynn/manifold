@@ -1,13 +1,15 @@
 # RemoveOverlaps3D as a regularization operator (current design)
 
-STATUS: DESIGN, post-owner-decision. This is the small, current statement of what
-RemoveOverlaps3D should be, distilled from the campaign in docs/ExactArrangement3D.md
-(kept as the historical record - read this doc for the design, that doc for how it was
-reached). Candidate B below is validated at FRAGMENT scale (exact-rational probes with
-a double mirror), not landed production C++: `RemoveOverlaps3D`
-(src/overlap3.cpp:1293) today still runs the v3 sweep pipeline (SweepEmit / BuildSlabs
-/ EmitCaps / EmitStrips). This doc specifies the operator that replaces the sweep as
-the resolver; the sweep stays as reference and fixture harness until B lands.
+STATUS: SPEC (landed). This is the statement of what RemoveOverlaps3D IS, distilled
+from the campaign in docs/ExactArrangement3D.md (kept as the historical record - read
+this doc for the design, that doc for how it was reached). `RemoveOverlaps3D`
+(src/overlap3.cpp) IS this operator: the v3 sweep pipeline it replaced (SweepEmit /
+BuildSlabs / EmitCaps / EmitStrips) has been DELETED from the branch - its history
+lives in git and on the explore/sweep-plane-3d-v3/-v4 branches. The dirty-component
+resolver (enumeration + coupled winding + the {w_S>=1} halfedge-boundary emission) is
+built and runs on the corpus; the honest open axes (a >2-sheet radial junction, the
+thin-cell emission, negative-winding subtraction, the component-local seed policy)
+fail closed with a named reason and are listed in the open list below.
 
 Conventions: magnitudes only (exact figures cite the lab notebooks), ASCII, `eps`
 means the machine-scale weld radius (kPrecision * bBox.Scale(), utils.h), `tol` means
@@ -54,8 +56,8 @@ rounding can create eps-scale self-crossings.
    scope - PERIOD; there is no cross-component merge (non-fusion, above).
 
 2. PER-COMPONENT GATE. Each component is tested: valid (`IsManifold` &&
-   `Is2Manifold`, overlap3.cpp:1189), non-self-intersecting
-   (`Manifold::Impl::IsSelfIntersecting`, properties.cpp:138 - a Morton/AABB broadphase
+   `Is2Manifold`, overlap3.cpp), non-self-intersecting
+   (`Manifold::Impl::IsSelfIntersecting`, properties.cpp - a Morton/AABB broadphase
    over the collider plus a triangle-triangle distance test, shares-vertex skip,
    2*eps relaxation), AND free of WITHIN-component coplanar overlap
    (`DetectCoplanarClusters`, run on this component only, which `IsSelfIntersecting` does
@@ -66,27 +68,46 @@ rounding can create eps-scale self-crossings.
 3. EARLY-EXIT clean components. A component that passes the gate is already the
    boundary of a simple solid; it is copied through untouched.
 
-4. RUN CANDIDATE B per DIRTY component. A component that fails the self-intersection
-   test is regularized by B (next section): compute its local arrangement + per-cell
+4. RUN THE RESOLVER per DIRTY component. A component that fails the self-intersection
+   test is regularized by the resolver (next section): compute its local arrangement + per-cell
    w_S, emit the oriented {w_S>=1} boundary.
 
-5. RE-GATE B's output once. B's emitted geometry is double-rounded, so it gets the
+5. RE-GATE the resolver's output once. The resolver's emitted geometry is double-rounded, so it gets the
    SAME gate as the input (validity + IsSelfIntersecting). A clean pass composes in; a
-   failure is the honest fail-closed outcome (a recorded FatalReason, overlap3.h:49),
+   failure is the honest fail-closed outcome (a recorded FatalReason, overlap3.h),
    never a silent wrong result.
 
 6. COMPOSE BACK. Concatenate the early-exit components and the regularized components.
    No cross-component weld, no fusion.
 
-This is candidate A reduced to its GATE. The owner dropped candidate A's Boolean fold
-(the pair corpus decomposes into separate valid solids only because the fixtures were
-built by composition; a production chain has already done any wanted union upstream).
-What survives of A is decompose + test + early-exit + route-to-B + compose.
+This is candidate A reduced to its GATE (candidate A was an earlier design with a
+Boolean fold; the owner dropped the fold - the pair corpus decomposes into separate
+valid solids only because the fixtures were built by composition, and a production
+chain has already done any wanted union upstream). What survives is decompose + test +
+early-exit + route-to-the-resolver + compose.
 
 
-## B's mechanism (the dirty-core resolver)
+## Phase map (code)
 
-B computes the arrangement and winding of ONE self-overlapping component in DOUBLES,
+The operator's phases and where they live in src/overlap3.cpp (the sole impl):
+
+- DECOMPOSE  -> DecomposeComponents (connectivity split; the unit of scope).
+- GATE       -> GateComponent (validity + IsSelfIntersecting + DetectCoplanarClusters).
+- DISPATCH   -> RemoveOverlaps3D (public entry: gate every component, early-exit clean,
+                route dirty, re-gate, compose).
+- RESOLVE    -> ResolveComponent (the dirty-core resolver, next section), which runs:
+    - PLANARIZE -> SnapNearCoplanarClusters (near-coplanar widen + global-planarity guard).
+    - ENUMERATE -> RecordSeams (+ EnumerateSelfCrossings / EdgePiercesTri, sos::* kernel).
+    - WIND      -> WindingAt / RobustWinding (coupled integer-delta w_S).
+    - EMIT      -> EmitComponentBoundary: FoldCoplanarClusters, EmitSeamedFace,
+                   EmitCleanFaces, then the assembly (BuildImpl + SplitTouchingSheets).
+- RE-GATE    -> a second GateComponent on the resolver's double-rounded output.
+- COMPOSE    -> ComposeComponents (concatenation, no fusion).
+
+
+## The resolver's mechanism (the dirty-core resolver)
+
+The resolver computes the arrangement and winding of ONE self-overlapping component in DOUBLES,
 kernel-free on the certified path, reusing boolean3's discipline.  AMENDMENT (stage 6,
 owner contract): a micro exact tie-test (Orient3DExactSign) plus the single-global SoS
 cascade were RELUCTANTLY ACCEPTED as net-new exact-kernel surface, confined strictly to
@@ -107,7 +128,7 @@ kernel of his in the build.
 - WINDING. Per-cell w_S by signed INTEGER face-crossing deltas: crossing an oriented
   face f along a path changes w by sign(dot(t, n_f)) on the input normal, coupled
   across the arrangement (unite non-crossing edges, one seed ray per connected
-  cell-component, flood - the Winding03 discipline, boolean3.cpp:388). The deltas are
+  cell-component, flood - the Winding03 discipline, boolean3.cpp). The deltas are
   +-1 integers, never near-zero, so the winding half is FP-safe by construction.
   The cost the localizer's dissolution ("the component is the unit of scope") hid:
   each seed cast is an O(ntri) winding query scoped to the component, so ONE large
@@ -123,9 +144,9 @@ kernel of his in the build.
   PairUp shape), so the radial sort is a trivial 2-element sort; the >2-sheet branch
   carries the specified determinant rule but is never forced.
 
-Why B replaces PairUp rather than inheriting it: PairUp pairs an edge's crossings by
+Why the resolver replaces PairUp rather than inheriting it: PairUp pairs an edge's crossings by
 1D start-end alternation, which is genuinely violated on the doubly-covered (w_S=2)
-stratum. B does not pair - it thresholds the coupled integer w_S, which is indifferent
+stratum. The resolver does not pair - it thresholds the coupled integer w_S, which is indifferent
 to crossing order, so the double-cover and the negative-winding regime fall out of the
 same read.
 
@@ -136,14 +157,16 @@ edge grazing a shared boundary resolves identically for every probe. Each inters
 everywhere; two derivations of one point diverge without bound in the near-parallel
 tail, so once-only is a required design element, not advice.
 
-What B reuses from v3, honestly: Canonicalize (overlap3.cpp:218 - input quantization +
-the signed-multiplicity fold; the winding delta sign is exactly CanonicalFace.mult
-times the crossed face orientation), the collider broadphase (also the gate's), the
-gate itself, the Shadows tie-break pattern, and the Winding03 coupling. B does NO plane
-sweep: it does not touch BuildSlabs / SlabResolver / track-extension / EmitCaps /
-EmitStrips / FindSeams. The sweep's dense-critical ArrangementBudget refusal is a
-sweep artifact (the O(seam^2) x-crossing density is a sweep-PROJECTION effect, not
-radial structure) and does not transfer to B.
+What the resolver reuses, honestly: the collider broadphase (also the gate's), the
+gate itself (IsSelfIntersecting + the coplanar-cluster detector), the Shadows
+tie-break pattern, the Winding03 coupling, and the assembly (BuildImpl +
+SplitTouchingSheets) that welds emitted triangles into a 2-manifold and re-separates
+touching sheets.  It does its own input read (a TriSoup over the component's
+halfedges), NOT the deleted sweep's Canonicalize quantization.  It does NO plane
+sweep - there is no BuildSlabs / SlabResolver / EmitCaps / EmitStrips / FindSeams
+(all deleted).  The v3 sweep's dense-critical ArrangementBudget refusal was a
+sweep-PROJECTION artifact (an O(seam^2) x-crossing density, not radial structure) and
+has no analog here.
 
 
 ## What is proven (evidence by pointer - one line each, not re-narrated)
@@ -154,7 +177,7 @@ radial structure) and does not transfer to B.
   barrier is PRECISION, not information: V4ImplPlan.md stage A0 + a0-verify-prefold.
 - The lost material is real: exact w_S = 2 at the Havoc lump, reproduced bit-for-bit by
   two independent algorithms: .claude/lane-reports/v5-verify-probe-1783913337.md.
-- B's deciding predicates are FP-safe exhaustively (static filter proven sound over
+- the resolver's deciding predicates are FP-safe exhaustively (static filter proven sound over
   ~1.6B predicates, zero certified flips): .claude/lane-reports/v5b-s12-1783918690.md.
 - Every combinatorial decision restructures to a level-0 input predicate (constructed-
   point precision dissolved for decisions): same lane (S2).
@@ -185,14 +208,14 @@ rounded geometry, and never a lossy fallback. The queued completions:
   coplanarity gap is above the filter's error bound but below eps is neither clustered by
   the exact fold nor safely transversal; enumerated transversally its sub-eps-thin cell
   double-rounds to a sliver (the "unresolvable sheet contact" emission).  It is now closed
-  by INPUT-SIDE PLANARIZATION in front of candidate B (research memo candidate (a)): a
+  by INPUT-SIDE PLANARIZATION in front of the resolver (research memo candidate (a)): a
   pre-pass clusters bbox-overlapping, non-adjacent, 2D-overlapping faces whose LOCAL
   coplanarity gap (the smaller of the two directional vertex-plane maxes - the larger is
   diameter-amplified, a red herring) is below eps; a GLOBAL-PLANARITY GUARD fits one plane
   per cluster (centroid + area-weighted normal) and FAILS CLOSED, distinctly named, when any
   member vertex deviates beyond eps (the anti-chain-reaction net that catches a curved
   near-tangent tessellation); admitted clusters SNAP onto the fitted plane (a <= eps input
-  perturbation inside the standing epsilon-valid contract).  B then RE-DERIVES the whole
+  perturbation inside the standing epsilon-valid contract).  the resolver then RE-DERIVES the whole
   arrangement / coupled winding / cell-classify / emit from the snapped, now
   exactly-coplanar input, so the landed exact fold handles it verbatim and the m ==
   winding-jump self-check holds by the exact argument.  This is coordinated-by-construction,
@@ -205,7 +228,7 @@ rounded geometry, and never a lossy fallback. The queued completions:
   fail-closed, disabling the guard makes a curved chain WRONGLY fold to one plane).  A pure
   near-coplanar overlap (deviation < 2eps) is invisible to IsSelfIntersecting (its 2*eps
   normal-nudge separates two near-coplanar faces), so - like the exact fold - the widen is
-  reached when B already runs on a dirty component; the corpus's real near-coplanar geometry
+  reached when the resolver already runs on a dirty component; the corpus's real near-coplanar geometry
   (the hull's body/mask facets) is CROSS-component and stays pass-through under non-fusion.
 - Stage 6 - SINGLE-CONVENTION SoS: LANDED (reg3d-s6, reworked reg3d-s6r). One global
   symbolic-perturbation convention (the Shadows pattern lifted to orient3d = 0:
@@ -280,9 +303,12 @@ correctness change (the sequential result is the spec the parallel one must matc
 
 ## Open list (honest)
 
-- THE BUILD. The cell complex + halfedge-boundary extraction is the largest unbuilt
-  piece; the fragment did point classification of recorded cells, not the boundary
-  build. B is fragment-validated, not landed.
+- THE BUILD. LANDED. The per-face 2D-arrangement + halfedge {w_S>=1} boundary
+  emission (EmitComponentBoundary: FoldCoplanarClusters, EmitSeamedFace,
+  EmitCleanFaces, then BuildImpl) is built and runs the corpus (siA/siB resolve
+  oracle-true through the real entry). What is NOT built is the >2-sheet radial
+  junction branch (no corpus carrier forces it - kernel-tripwire-gated) and the
+  thin-cell emission; both fail closed, named, below.
 - SINGLE GLOBAL SoS: LANDED (stage 6 above) - the bridge-junction family resolves
   oracle-true.  What remains open is the NARROWED residue behind it: the stage-7
   thin-cell emission (coplanar-dominated soups) and the component-local seed policy
@@ -322,20 +348,21 @@ correctness change (the sequential result is the spec the parallel one must matc
 
 ## Risks (attack surface for the adversarial round)
 
-R1. THE SELECTIVE WELD MAY HAVE BEEN DISSOLVED WRONGLY. B replaces a whole component
-    and composes back, so the patch-to-exterior stitch is gone - but B's own
-    constructed intersection coordinates, rounded to double, can land sub-eps-distinct.
-    If the ordinary assembly weld (the global eps grid) merges two exact-distinct B
-    verts it re-manufactures the twin the arrangement just resolved; if it merges a
-    B-interior vert onto a boundary vert it corrupts B's topology. The re-gate does NOT
-    backstop this failure: when the weld merges two exact-distinct B verts, the
+R1. THE SELECTIVE WELD MAY HAVE BEEN DISSOLVED WRONGLY. The resolver replaces a whole
+    component and composes back, so the patch-to-exterior stitch is gone - but the
+    resolver's own constructed intersection coordinates, rounded to double, can land
+    sub-eps-distinct.  If the ordinary assembly weld (the global eps grid) merges two
+    exact-distinct resolver verts it re-manufactures the twin the arrangement just
+    resolved; if it merges a resolver-interior vert onto a boundary vert it corrupts
+    the resolver's topology. The re-gate does NOT
+    backstop this failure: when the weld merges two exact-distinct resolver verts, the
     triangles straddling the merge now share that vertex position, so
     IsSelfIntersecting's shares-vertex skip drops the pair - a self-FOLD manufactured by
     the merge is invisible to it. Only the validity half (IsManifold/Is2Manifold)
     catches a weld outcome, and only the non-manifold one (a pinch/tear), never a fold.
     Nor is a constant-radius bounded weld the escape: the wall-A weld-bump probe killed
     it at every multiplier (too small re-manufactures the twin, too big collapses
-    slivers to holes). R1's honest rebuttal is B's own STRUCTURAL defense, not the gate:
+    slivers to holes). R1's honest rebuttal is the resolver's own STRUCTURAL defense, not the gate:
     the once-only construction rule (each intersection built once, referenced
     everywhere) never makes two rounded images of one point, and radial assembly (not
     projection, not self-location) has no O(seam^2) projected twins. The residual that
@@ -349,16 +376,16 @@ R2. THE GATE'S SELF-COLLISION TEST MAY BE MORE EXPENSIVE / DIFFERENT THAN CLAIME
     thousands of tris) "cheap" needs measuring. Worse, the gate is systematically
     CLEAN-biased: the 2*eps shares-vertex relaxation SUPPRESSES near-miss detection (it
     returns non-intersecting when an eps normal nudge separates the pair) - it does not
-    flag near-misses - and that bias does not agree with B's arrangement notion. The
-    silent-miss direction is GATE-CLEAN but B-DIRTY: a genuine crossing whose two verts
+    flag near-misses - and that bias does not agree with the resolver's arrangement notion. The
+    silent-miss direction is GATE-CLEAN but RESOLVER-DIRTY: a genuine crossing whose two verts
     sit in a near-degenerate band just outside the eps weld (distinct enough not to
     merge, close enough to trip the 2*eps skip) passes the gate, EARLY-EXITS as clean,
     and carries an unregularized self-overlap through silently - worse than fail-closed,
     though narrow (it needs a near-degenerate config in that thin band). The reverse
-    (gate-dirty, B finds nothing) is near-empty: B's shared-vertex skip set is a subset
-    of the gate's distance skip set, so nothing the gate robustly flags is skipped by B;
-    the only case is a legitimate touching contact the gate flags and B re-emits clean -
-    wasteful, not wrong. R2(i) (gate-clean/B-dirty) and R1 are the SAME blind spot: the
+    (gate-dirty, the resolver finds nothing) is near-empty: the resolver's shared-vertex skip set is a subset
+    of the gate's distance skip set, so nothing the gate robustly flags is skipped by the resolver;
+    the only case is a legitimate touching contact the gate flags and the resolver re-emits clean -
+    wasteful, not wrong. R2(i) (gate-clean/resolver-dirty) and R1 are the SAME blind spot: the
     weld-merge fold in R1 manufactures exactly the shared-vertex config the gate skips,
     so the re-gate that would "catch" R1 IS the clean-biased gate R2 flags.
 
@@ -378,10 +405,12 @@ R4. REPO-TERM MISUSE. This doc leans on Canonicalize / IsSelfIntersecting / the
     calling the signed-multiplicity fold an operand label it is not) the reuse story is
     thinner than stated. eps-vs-tol and halfedge-not-DCEL are the standing traps.
 
-R5. THE DESIGN READS AS MORE SETTLED THAN THE CODE. Everything past the gate is
-    validated at fragment scale with exact-rational probes, not built. The unbuilt
-    axes (SoS, subtraction, the halfedge boundary build, the seed policy) are named
-    opens, and a reader should not mistake "fragment-validated" for "landed".
+R5. WHAT IS LANDED VS OPEN. The gate, dispatch, coplanar fold, seam recording,
+    coupled winding, the {w_S>=1} boundary emission, and the assembly are built and
+    run the corpus. The named-open axes (a >2-sheet radial junction, the thin-cell
+    emission, negative-winding subtraction, the component-local seed policy) each
+    FAIL CLOSED with a distinct reason - never a silent wrong resolve - so a reader
+    should read the open list as "fails closed here", not "unimplemented and unsafe".
 
 KNOWN OUTPUT ARTIFACT (ent-verify, disclosure): on rotated/irrational junctions
 the emission weld can materialize a single inert zero-area triangle (paired

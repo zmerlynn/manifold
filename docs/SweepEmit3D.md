@@ -1,5 +1,11 @@
 # Sweep-native emission for 3D overlap removal (design, v3)
 
+> SUPERSEDED (history). RemoveOverlaps3D is now the per-component regularization
+> operator specified in docs/Regularize3D.md; the v3/v4 sweep pipeline this doc
+> describes was deleted from the branch (it lives on in git history and the
+> explore/sweep-plane-3d-v3/-v4 branches).  Kept as the design record only.
+
+
 STATUS: DESIGN DRAFT under crucible review. Supersedes the stage-D/E
 architecture of docs/SweepPlane3D.md; stages A-C's proofed mechanics
 carry over (softened where stated). Motivation is empirical, from

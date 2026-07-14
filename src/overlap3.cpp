@@ -285,7 +285,8 @@ StageResult<Manifold::Impl> BuildImpl(const std::vector<OutTri3D>& tris,
 
 // Forward decl (defined below): per-face exactly-coplanar overlap cluster id
 // (or -1).  Used by GateComponent to route a WITHIN-component coplanar-overlap
-// component to B (the R2(i) blind spot the self-intersection test misses).
+// component to the resolver (the R2(i) blind spot the self-intersection test
+// misses).
 std::vector<int> DetectCoplanarClusters(const Manifold::Impl& in);
 
 // Split `in` into connected components by halfedge connectivity - the Decompose
@@ -388,26 +389,28 @@ GateVerdict GateComponent(const Manifold::Impl& comp) {
   // (docs/Regularize3D.md R2(i)), so such a component would early-exit "clean"
   // yet is NOT the {w_S>=1} boundary.  DetectCoplanarClusters (bbox-overlap
   // prefilter, then exact orient3d coplanarity + a 2D-area overlap witness),
-  // run on THIS component only, routes it to B where the exact-coplanar fold
-  // consumes the overlap.  This is WITHIN-component by construction: `comp` is
-  // one connectivity component, so a CROSS-component coplanar overlap (two
-  // distinct components that happen to coincide) is invisible here BY DESIGN -
-  // the non-fusion posture (fusion is the Boolean's job).  A clean solid with
-  // no internal coplanar overlap detects nothing and stays Clean (bitwise
-  // pass-through); the cost is the prefiltered scan, proportional to the input.
+  // run on THIS component only, routes it to the resolver where the
+  // exact-coplanar fold consumes the overlap.  This is WITHIN-component by
+  // construction: `comp` is one connectivity component, so a CROSS-component
+  // coplanar overlap (two distinct components that happen to coincide) is
+  // invisible here BY DESIGN - the non-fusion posture (fusion is the Boolean's
+  // job).  A clean solid with no internal coplanar overlap detects nothing and
+  // stays Clean (bitwise pass-through); the cost is the prefiltered scan,
+  // proportional to the input.
   for (int c : DetectCoplanarClusters(comp))
     if (c >= 0) return GateVerdict::Dirty;
   return GateVerdict::Clean;
 }
 
 // ---------------------------------------------------------------------------
-// Candidate B mechanism (docs/Regularize3D.md "B's mechanism"), ported from the
-// FRAGMENT-VALIDATED reference (v5b fragment drivers + v5b-r3/r4 notebooks):
-// operand-agnostic ENUMERATION (level-0 pierce predicates through a static
-// Shewchuk filter) + coupled integer-delta WINDING.  Every crossing DECISION is
-// a level-0 orient3d on INPUT coordinates.  These are the substrate of B; the
-// cell-complex + halfedge {w_S>=1} boundary EMISSION (THE BUILD) sits on top
-// and is the doc's named largest-unbuilt-piece.
+// The resolver mechanism (docs/Regularize3D.md "the resolver's mechanism"),
+// ported from the FRAGMENT-VALIDATED reference (v5b fragment drivers +
+// v5b-r3/r4 notebooks): operand-agnostic ENUMERATION (level-0 pierce predicates
+// through a static Shewchuk filter) + coupled integer-delta WINDING.  Every
+// crossing DECISION is a level-0 orient3d on INPUT coordinates.  These are the
+// substrate of the resolver; the cell-complex + halfedge {w_S>=1} boundary
+// EMISSION (THE BUILD) sits on top and is the doc's named
+// largest-unbuilt-piece.
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
@@ -444,11 +447,11 @@ GateVerdict GateComponent(const Manifold::Impl& comp) {
 //
 // RELUCTANT ACCEPTANCE (owner contract): this integer exact kernel is net-new
 // surface the design had declined ("no exact kernel in the tree",
-// docs/Regularize3D.md B mechanism).  It is accepted NARROWLY as the stage-6
-// filter-0 fallback - one implementation, single call site discipline, off
-// every certified path.  QUEUED FOR REVISIT (docs/Regularize3D.md open list):
-// whether the arrangement can be structured to avoid needing an exact orient3d
-// kernel at all remains an open question; this kernel is the current,
+// docs/Regularize3D.md resolver mechanism).  It is accepted NARROWLY as the
+// stage-6 filter-0 fallback - one implementation, single call site discipline,
+// off every certified path.  QUEUED FOR REVISIT (docs/Regularize3D.md open
+// list): whether the arrangement can be structured to avoid needing an exact
+// orient3d kernel at all remains an open question; this kernel is the current,
 // reluctantly-accepted answer, not a settled one.
 namespace sos {
 constexpr int kPerm[24][4] = {
@@ -702,15 +705,15 @@ inline int Orient3DFilterSign(const vec3& a, const vec3& b, const vec3& c,
 // four points are exactly coplanar.  ONE integer path (sos::ExactOrient3D),
 // TOTAL for every finite-double input - no window-fail, no expansion fallback.
 // RELUCTANT ACCEPTANCE: this exact kernel is net-new surface the design had
-// declined ("no exact kernel in the tree", docs/Regularize3D.md B mechanism);
-// the owner accepted it NARROWLY for the stage-6 tie residue - its ONLY call
-// sites are behind a filter 0 (Orient3DSoS, the EdgePiercesTriSoS edge-in-plane
-// guard, the test probe), never the certified fast path.
-// QUEUED FOR REVISIT / TRIPWIRE (docs/Regularize3D.md open list): this integer
-// path is legitimate ONLY as ONE predicate at ONE call site (~100 lines,
-// exhaustively testable).  If a SECOND exact predicate or a SECOND call site is
-// ever needed, VENDOR Shewchuk's public-domain predicates.c instead of growing
-// this - do NOT rebuild expansion arithmetic piecemeal.
+// declined ("no exact kernel in the tree", docs/Regularize3D.md resolver
+// mechanism); the owner accepted it NARROWLY for the stage-6 tie residue - its
+// ONLY call sites are behind a filter 0 (Orient3DSoS, the EdgePiercesTriSoS
+// edge-in-plane guard, the test probe), never the certified fast path. QUEUED
+// FOR REVISIT / TRIPWIRE (docs/Regularize3D.md open list): this integer path is
+// legitimate ONLY as ONE predicate at ONE call site (~100 lines, exhaustively
+// testable).  If a SECOND exact predicate or a SECOND call site is ever needed,
+// VENDOR Shewchuk's public-domain predicates.c instead of growing this - do NOT
+// rebuild expansion arithmetic piecemeal.
 inline int Orient3DExactSign(const vec3& a, const vec3& b, const vec3& c,
                              const vec3& d) {
   const double pts[4][3] = {
@@ -1242,7 +1245,7 @@ BuildArrangement RecordSeams(const Manifold::Impl& in,
           // Genuine non-coplanar transversal exact-zero residue: the single-
           // global SoS (stage 6) DECIDES it (pierce / no-pierce).  A NON-
           // decision is only reachable with the convention disabled, and is the
-          // documented fail-closed slot (A.boundaryTouch, RunCandidateB).
+          // documented fail-closed slot (A.boundaryTouch, ResolveComponent).
           const int sp =
               EdgePiercesTriSoS(u, w, T[0], T[1], T[2], A.vid[owner][e],
                                 A.vid[owner][(e + 1) % 3], A.vid[tgt][0],
@@ -1557,16 +1560,16 @@ bool PointInTri2D(const vec2& p, const vec2& a, const vec2& b, const vec2& c) {
 // in-plane reconstructions, unlike a transversal triple point), ExtractCells
 // yields the non-overlapping sub-faces, and each sub-face carries an integer
 // MULT m = the net signed in-plane cover (anti-oriented content cancels, same-
-// oriented sums).  Retention generalizes B's mult-1 rule: with w_below =
-// w_above + m (the 3D winding jump across the plane equals the coincident
-// cover, so it is SELF-CHECKED against the real coupled winding on both sides),
-// a sub-face is on d{w_S>=1} iff EXACTLY ONE side is inside {w>=1}; the solid
-// side fixes the emitted orientation.  m==0 (pure cancellation) drops.  A
-// cluster face that is ALSO transversally seamed is the coplanar/transversal
-// ENTANGLEMENT (a seam line would straddle a cell); that stays fail-closed with
-// its own named reason, distinct from the near-coplanar residue.  Any
-// degenerate projection, malformed cell walk, filter-uncertain winding, or
-// self-check mismatch fails closed (never a silent wrong resolve).
+// oriented sums).  Retention generalizes the resolver's mult-1 rule: with
+// w_below = w_above + m (the 3D winding jump across the plane equals the
+// coincident cover, so it is SELF-CHECKED against the real coupled winding on
+// both sides), a sub-face is on d{w_S>=1} iff EXACTLY ONE side is inside
+// {w>=1}; the solid side fixes the emitted orientation.  m==0 (pure
+// cancellation) drops.  A cluster face that is ALSO transversally seamed is the
+// coplanar/transversal ENTANGLEMENT (a seam line would straddle a cell); that
+// stays fail-closed with its own named reason, distinct from the near-coplanar
+// residue.  Any degenerate projection, malformed cell walk, filter-uncertain
+// winding, or self-check mismatch fails closed (never a silent wrong resolve).
 void FoldCoplanarClusters(std::vector<OutTri3D>& out, const Manifold::Impl& in,
                           const BuildArrangement& A,
                           const std::vector<int>& face2cluster,
@@ -1875,7 +1878,7 @@ bool EmitCleanFaces(std::vector<OutTri3D>& out, const Manifold::Impl& in,
 // THE BUILD driver: fold exactly-coplanar clusters in-plane, emit seamed
 // sub-faces + clean faces, assemble + weld.  Returns the regularized Impl, or a
 // fatal.
-StageResult<Manifold::Impl> RunCandidateBBuild(
+StageResult<Manifold::Impl> EmitComponentBoundary(
     const Manifold::Impl& in, const BuildArrangement& A,
     const std::vector<int>& face2cluster, double eps) {
   // Winding seeds: a few far points in unrelated directions off the bbox.
@@ -1894,26 +1897,27 @@ StageResult<Manifold::Impl> RunCandidateBBuild(
   if (!ok)
     return StageResult<Manifold::Impl>::Fatal(
         FatalReason::DirtyComponentUnresolved,
-        "candidate B: exact-coplanar fold declined (coplanar/transversal "
+        "resolver: exact-coplanar fold declined (coplanar/transversal "
         "entanglement, degenerate projection, or filter-uncertain classify) - "
         "fail-closed");
   const int nTri = static_cast<int>(in.NumTri());
   for (int f = 0; f < nTri && ok; ++f)
     if (A.seamed[f]) EmitSeamedFace(emitted, A, f, in, seeds, eps, ok);
   if (!ok)
-    // B declined to build this face's arrangement exactly: a >2-sheet triple
-    // point, a coplanar/degenerate projection, a malformed cell walk, or a
-    // filter-uncertain classify probe (the SoS axis).  Negative winding is NOT
-    // a decline - the witness rule absorbs it (w_above==0 retain).  Fail closed
-    // - never emit geometry B could not verify.
+    // The resolver declined to build this face's arrangement exactly: a
+    // >2-sheet triple point, a coplanar/degenerate projection, a malformed cell
+    // walk, or a filter-uncertain classify probe (the SoS axis).  Negative
+    // winding is NOT a decline - the witness rule absorbs it (w_above==0
+    // retain).  Fail closed
+    // - never emit geometry the resolver could not verify.
     return StageResult<Manifold::Impl>::Fatal(
         FatalReason::DirtyComponentUnresolved,
-        "candidate B: seam sub-face arrangement not exactly resolvable "
+        "resolver: seam sub-face arrangement not exactly resolvable "
         "(triple point / degenerate / filter-uncertain) - fail-closed");
   if (!EmitCleanFaces(emitted, in, A, face2cluster, seeds, eps))
     return StageResult<Manifold::Impl>::Fatal(
         FatalReason::DirtyComponentUnresolved,
-        "candidate B: clean-face winding probe was filter-uncertain (SoS) - "
+        "resolver: clean-face winding probe was filter-uncertain (SoS) - "
         "fail-closed");
   return BuildImpl(emitted, eps);
 }
@@ -1926,12 +1930,12 @@ StageResult<Manifold::Impl> RunCandidateBBuild(
 // enumerated transversally they double-round to slivers (unresolvable sheet
 // contact) - the thin band this pass closes.
 //
-// This is an INPUT-SIDE PLANARIZATION, run BEFORE B's enumeration/winding/emit,
-// so B RE-DERIVES the whole arrangement from the snapped input (the thin cell
-// ceases to exist).  It is NOT an emission-time snap (those fight decisions the
-// arrangement already made, ExactArrangement3D variant-E kill); it perturbs the
-// INPUT by <= eps inside the standing epsilon-valid contract, coordinated by
-// construction.
+// This is an INPUT-SIDE PLANARIZATION, run BEFORE the resolver's
+// enumeration/winding/emit, so the resolver RE-DERIVES the whole arrangement
+// from the snapped input (the thin cell ceases to exist).  It is NOT an
+// emission-time snap (those fight decisions the arrangement already made,
+// ExactArrangement3D variant-E kill); it perturbs the INPUT by <= eps inside
+// the standing epsilon-valid contract, coordinated by construction.
 //
 //  1. WIDEN: union bbox-overlapping, non-self-adjacent faces that OVERLAP in 2D
 //     and whose max cross vertex-plane distance is < eps (the near band).  A
@@ -1944,8 +1948,8 @@ StageResult<Manifold::Impl> RunCandidateBBuild(
 //     blanket.
 //  3. SNAP each near cluster's verts onto its fitted plane (<= eps move). After
 //     the snap the cluster is EXACTLY coplanar (to ~1 ULP), so the landed exact
-//     fold in RunCandidateBBuild handles it verbatim and the m == winding-jump
-//     self-check holds by the exact argument.
+//     fold in EmitComponentBoundary handles it verbatim and the m ==
+//     winding-jump self-check holds by the exact argument.
 //
 // Returns: {value} = the snapped copy when a near cluster was snapped;
 //          {} (no value, no fatal) when there is no near-band cluster (the
@@ -2031,7 +2035,7 @@ StageResult<Manifold::Impl> SnapNearCoplanarClusters(const Manifold::Impl& in,
     if (!unitN(faces[0], ref)) {
       return StageResult<Manifold::Impl>::Fatal(
           FatalReason::DirtyComponentUnresolved,
-          "candidate B: near-coplanar cluster has a degenerate face - "
+          "resolver: near-coplanar cluster has a degenerate face - "
           "fail-closed");
     }
     vec3 nSum(0.0, 0.0, 0.0);
@@ -2043,7 +2047,7 @@ StageResult<Manifold::Impl> SnapNearCoplanarClusters(const Manifold::Impl& in,
     if (!(nl > 0.0)) {
       return StageResult<Manifold::Impl>::Fatal(
           FatalReason::DirtyComponentUnresolved,
-          "candidate B: near-coplanar cluster normal is degenerate - "
+          "resolver: near-coplanar cluster normal is degenerate - "
           "fail-closed");
     }
     const vec3 N = nSum / nl;
@@ -2058,7 +2062,7 @@ StageResult<Manifold::Impl> SnapNearCoplanarClusters(const Manifold::Impl& in,
       if (std::abs(la::dot(N, in.vertPos_[v] - cen)) > eps) {
         return StageResult<Manifold::Impl>::Fatal(
             FatalReason::DirtyComponentUnresolved,
-            "candidate B: near-coplanar cluster fails the global-planarity "
+            "resolver: near-coplanar cluster fails the global-planarity "
             "guard (curved chain, max deviation > eps) - fail-closed");
       }
     // SNAP onto the fitted plane; flag an inconsistent multi-cluster vertex.
@@ -2066,7 +2070,7 @@ StageResult<Manifold::Impl> SnapNearCoplanarClusters(const Manifold::Impl& in,
       if (vertCluster[v] >= 0 && vertCluster[v] != clusterId) {
         return StageResult<Manifold::Impl>::Fatal(
             FatalReason::DirtyComponentUnresolved,
-            "candidate B: a vertex lies in two near-coplanar clusters "
+            "resolver: a vertex lies in two near-coplanar clusters "
             "(inconsistent snap) - fail-closed");
       }
       vertCluster[v] = clusterId;
@@ -2080,20 +2084,21 @@ StageResult<Manifold::Impl> SnapNearCoplanarClusters(const Manifold::Impl& in,
   return StageResult<Manifold::Impl>::Ok(std::move(work));
 }
 
-// Candidate B (docs/Regularize3D.md "B's mechanism") - the dirty-core resolver.
-// The validated MECHANISM (enumeration + coupled winding) is ported; THE BUILD
-// (the {w_S>=1} halfedge boundary emission) reuses RemoveOverlaps2D per crossed
-// face (RunCandidateBBuild above).  B enumerates + records the seam geometry,
-// runs the build, and re-gates; anything it cannot resolve exactly (an
-// exact-zero pierce tie = single-global SoS, a >2-sheet triple point, a
-// coplanar seam, a negative-winding patch) FAILS CLOSED with a named reason -
-// never a silent wrong result.  The caller re-gates the output once more
-// (IsSelfIntersecting).
-StageResult<Manifold::Impl> RunCandidateB(const Manifold::Impl& dirty,
-                                          double eps) {
+// The resolver (docs/Regularize3D.md "the resolver's mechanism") - the
+// dirty-core resolver. The validated MECHANISM (enumeration + coupled winding)
+// is ported; THE BUILD (the {w_S>=1} halfedge boundary emission) reuses
+// RemoveOverlaps2D per crossed face (EmitComponentBoundary above).  the
+// resolver enumerates + records the seam geometry, runs the build, and
+// re-gates; anything it cannot resolve exactly (an exact-zero pierce tie =
+// single-global SoS, a >2-sheet triple point, a coplanar seam, a
+// negative-winding patch) FAILS CLOSED with a named reason - never a silent
+// wrong result.  The caller re-gates the output once more (IsSelfIntersecting).
+StageResult<Manifold::Impl> ResolveComponent(const Manifold::Impl& dirty,
+                                             double eps) {
   // NEAR-COPLANAR PRE-PASS (docs/Regularize3D.md stage-5): planarize any
-  // within-eps near-coplanar overlap cluster onto its fitted plane so B
-  // re-derives the arrangement from an exactly-coplanar input.  No near cluster
+  // within-eps near-coplanar overlap cluster onto its fitted plane so the
+  // resolver re-derives the arrangement from an exactly-coplanar input.  No
+  // near cluster
   // -> `dirty` is used bitwise (the exact path is unperturbed); a curved chain
   // (global-planarity guard failure) fails closed here, distinctly named.
   StageResult<Manifold::Impl> snapped = SnapNearCoplanarClusters(dirty, eps);
@@ -2114,16 +2119,16 @@ StageResult<Manifold::Impl> RunCandidateB(const Manifold::Impl& dirty,
     // would risk an oracle-wrong resolve.  Fail closed.
     return StageResult<Manifold::Impl>::Fatal(
         FatalReason::DirtyComponentUnresolved,
-        "candidate B: non-coplanar exact-zero tie; single-global SoS "
+        "resolver: non-coplanar exact-zero tie; single-global SoS "
         "(PokedCube-class) unbuilt - fail-closed");
   }
   if (!A.ok) {
     return StageResult<Manifold::Impl>::Fatal(
         FatalReason::DirtyComponentUnresolved,
-        "candidate B: a self-crossing pair had a non-2-endpoint seam "
+        "resolver: a self-crossing pair had a non-2-endpoint seam "
         "(degenerate incidence) - fail-closed");
   }
-  return RunCandidateBBuild(in, A, face2cluster, eps);
+  return EmitComponentBoundary(in, A, face2cluster, eps);
 }
 
 // Compose the surviving components back into one Impl by CONCATENATION - no
@@ -2159,7 +2164,7 @@ int Orient3DExactSignProbe(const vec3& a, const vec3& b, const vec3& c,
   return Orient3DExactSign(a, b, c, d);
 }
 
-RegularizeResult RegularizeImpl(const Manifold::Impl& in, double eps) {
+RegularizeResult RemoveOverlaps3D(const Manifold::Impl& in, double eps) {
   RegularizeResult result;
 
   // Empty input -> empty output (matches RemoveOverlaps3D's trivially-empty
@@ -2193,7 +2198,7 @@ RegularizeResult RegularizeImpl(const Manifold::Impl& in, double eps) {
     const GateVerdict verdict = GateComponent(comp);
     if (verdict == GateVerdict::Invalid) {
       // Defensive: a component of a valid input is valid; a non-manifold one is
-      // neither early-exitable nor a case B resolves.  Fail closed.
+      // neither early-exitable nor a case the resolver resolves.  Fail closed.
       ++result.counters.failClosed;
       if (!firstFatal) {
         firstFatal = FatalReason::NonManifoldEmission;
@@ -2208,9 +2213,9 @@ RegularizeResult RegularizeImpl(const Manifold::Impl& in, double eps) {
       continue;
     }
 
-    // 4. DIRTY -> candidate B.
+    // 4. DIRTY -> the resolver.
     ++result.counters.dirty;
-    StageResult<Manifold::Impl> bRes = RunCandidateB(comp, eps);
+    StageResult<Manifold::Impl> bRes = ResolveComponent(comp, eps);
     if (!bRes.ok()) {
       ++result.counters.failClosed;
       if (!firstFatal) {
@@ -2219,25 +2224,25 @@ RegularizeResult RegularizeImpl(const Manifold::Impl& in, double eps) {
       }
       continue;
     }
-    // 5. RE-GATE B's output once (same gate as the input; B's coords are
-    // double-rounded).  A clean pass composes in; a failure is the honest
-    // fail-closed, never a silent wrong result.  This is a PRODUCTION
-    // fail-closed backstop for the R1/R2 weld-fold blind spot (BuildImpl
-    // already gates non-manifold emission; the re-gate's non-redundant job is
-    // catching a MANIFOLD-but-self-intersecting output = a weld-manufactured
-    // fold).  It is verified UNREACHED on constructible general-position
-    // fixtures (reg3d-s3: 0/180 sphere variants produce re-gate-catchable
-    // output - every bad case is caught earlier by BuildImpl's manifold gate),
-    // i.e. it fires only in the unbuilt weld-fold regime.  It is deliberately
-    // NOT demoted to a DEBUG_ASSERT: it must fail closed in RELEASE, not
-    // compile out and admit wrong geometry.
+    // 5. RE-GATE the resolver's output once (same gate as the input; the
+    // resolver's coords are double-rounded).  A clean pass composes in; a
+    // failure is the honest fail-closed, never a silent wrong result.  This is
+    // a PRODUCTION fail-closed backstop for the R1/R2 weld-fold blind spot
+    // (BuildImpl already gates non-manifold emission; the re-gate's
+    // non-redundant job is catching a MANIFOLD-but-self-intersecting output = a
+    // weld-manufactured fold).  It is verified UNREACHED on constructible
+    // general-position fixtures (reg3d-s3: 0/180 sphere variants produce
+    // re-gate-catchable output - every bad case is caught earlier by
+    // BuildImpl's manifold gate), i.e. it fires only in the unbuilt weld-fold
+    // regime.  It is deliberately NOT demoted to a DEBUG_ASSERT: it must fail
+    // closed in RELEASE, not compile out and admit wrong geometry.
     Manifold::Impl bImpl = std::move(*bRes.value);
     bImpl.epsilon_ = eps;
     if (GateComponent(bImpl) != GateVerdict::Clean) {
       ++result.counters.failClosed;
       if (!firstFatal) {
         firstFatal = FatalReason::NonManifoldEmission;
-        firstDetail = "candidate B output failed the re-gate";
+        firstDetail = "resolver output failed the re-gate";
       }
       continue;
     }
@@ -2257,12 +2262,12 @@ RegularizeResult RegularizeImpl(const Manifold::Impl& in, double eps) {
   return result;
 }
 
-// Test hook: exercise B's ported mechanism directly (enumeration + coupled
-// winding) so it can be graded against the fragment's recorded numbers.
-CandidateBProbe RegularizeB_Probe(const Manifold::Impl& dirty,
-                                  const std::vector<vec3>& probes,
-                                  const vec3& seed) {
-  CandidateBProbe out;
+// Test hook: exercise the resolver's ported mechanism directly (enumeration +
+// coupled winding) so it can be graded against the fragment's recorded numbers.
+ComponentEnumProbe EnumerateComponent_Probe(const Manifold::Impl& dirty,
+                                            const std::vector<vec3>& probes,
+                                            const vec3& seed) {
+  ComponentEnumProbe out;
   const BEnumeration enu = EnumerateSelfCrossings(dirty);
   out.seamCount = enu.seamCount;
   out.boundaryTouchPairs = enu.boundaryTouchPairs;
@@ -2276,18 +2281,18 @@ CandidateBProbe RegularizeB_Probe(const Manifold::Impl& dirty,
   return out;
 }
 
-CleanFaceProbe RegularizeCleanFaces_Probe(const Manifold::Impl& soup) {
+CleanFaceProbe ClassifyCleanFaces_Probe(const Manifold::Impl& soup) {
   CleanFaceProbe out;
   double eps = EpsilonFromScale(soup.bBox_.Scale(), 1000);
   if (!(eps > 0.0) || !std::isfinite(eps)) return out;
-  // Mirror RunCandidateB's prefix so the classify inputs match production
+  // Mirror ResolveComponent's prefix so the classify inputs match production
   // exactly (snap near-coplanar, detect exact-coplanar clusters, record seams).
   StageResult<Manifold::Impl> snapped = SnapNearCoplanarClusters(soup, eps);
   if (snapped.fatal) return out;
   const Manifold::Impl& in = snapped.value ? *snapped.value : soup;
   const std::vector<int> face2cluster = DetectCoplanarClusters(in);
   const BuildArrangement A = RecordSeams(in, face2cluster, eps);
-  // Same winding seeds as RunCandidateBBuild.
+  // Same winding seeds as EmitComponentBoundary.
   const vec3 c = in.bBox_.Center();
   const double L = in.bBox_.Scale() + 1.0;
   const std::vector<vec3> seeds = {
@@ -2324,12 +2329,13 @@ CleanFaceProbe RegularizeCleanFaces_Probe(const Manifold::Impl& soup) {
   return out;
 }
 
-RegularizeResult RegularizeDirtyDirect(const Manifold::Impl& soup, double eps) {
+RegularizeResult ResolveComponentDirect(const Manifold::Impl& soup,
+                                        double eps) {
   RegularizeResult result;
   if (eps <= 0.0) eps = EpsilonFromScale(soup.bBox_.Scale(), 1000);
   result.counters.components = 1;
   result.counters.dirty = 1;
-  StageResult<Manifold::Impl> bRes = RunCandidateB(soup, eps);
+  StageResult<Manifold::Impl> bRes = ResolveComponent(soup, eps);
   if (!bRes.ok()) {
     ++result.counters.failClosed;
     result.fatal = bRes.fatal;
@@ -2341,7 +2347,7 @@ RegularizeResult RegularizeDirtyDirect(const Manifold::Impl& soup, double eps) {
   if (GateComponent(bImpl) != GateVerdict::Clean) {
     ++result.counters.failClosed;
     result.fatal = FatalReason::NonManifoldEmission;
-    result.detail = "candidate B output failed the re-gate";
+    result.detail = "resolver output failed the re-gate";
     return result;
   }
   ++result.counters.regularized;
