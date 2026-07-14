@@ -2120,7 +2120,7 @@ struct BuildArrangement {
 // raise A.boundaryTouch.  A cross-cluster / non-coplanar exact-zero tie still
 // sets boundaryTouch (the SoS residue).
 BuildArrangement RecordSeams(const Manifold::Impl& in,
-                             const std::vector<int>& face2cluster) {
+                             const std::vector<int>& face2cluster, double eps) {
   BuildArrangement A;
   const int nTri = static_cast<int>(in.NumTri());
   A.tri.resize(nTri);
@@ -2303,6 +2303,37 @@ BuildArrangement RecordSeams(const Manifold::Impl& in,
           else if (sp != 0)
             A.boundaryTouch = true;
         }
+        // CAP-PLANE SEAM ENDPOINT (coplanar/transversal junction completion):
+        // when BOTH faces of a wall-wall pair are non-cluster (neither is a
+        // folded cap) but `owner`'s edge LIES in a coplanar cap cluster plane
+        // and PROPERLY CROSSES `tgt`'s plane (both endpoints strictly off it,
+        // on opposite sides) at a point on/inside `tgt`'s triangle, that
+        // crossing is a genuine transversal seam endpoint sitting ON the cap
+        // fold's in-plane arrangement (an overlap-corner vertex the fold also
+        // emits). edgeInClusterPlane's blanket suppression would drop it,
+        // truncating the seam (nPts==1) at the junction; recording it gives the
+        // endpoint the fold arrangement's identity so the seamed wall and the
+        // folded cap weld shut at the reentrant corner.  The symmetric
+        // double-pierce (both walls' cap edges meet here) is deduped below; any
+        // mis-/over-recovery only ever makes nPts!=2 -> fail closed, never a
+        // wrong resolve.
+        if (!hit && r == -1 && !pairCoplanar && face2cluster[i] < 0 &&
+            face2cluster[j] < 0 && edgeInClusterPlane(owner, e)) {
+          const int su = Orient3DFilterSign(T[0], T[1], T[2], u);
+          const int sv = Orient3DFilterSign(T[0], T[1], T[2], w);
+          if (su != 0 && sv != 0 && su != sv) {
+            const vec3 P = SegPlanePoint(u, w, T[0], T[1], T[2]);
+            const vec3 n = la::cross(T[1] - T[0], T[2] - T[0]);
+            const double area2 = la::length2(n);
+            if (area2 > 0.0) {
+              const double margin = area2 * 1e-9;
+              const double s0 = la::dot(n, la::cross(T[1] - T[0], P - T[0]));
+              const double s1 = la::dot(n, la::cross(T[2] - T[1], P - T[1]));
+              const double s2 = la::dot(n, la::cross(T[0] - T[2], P - T[2]));
+              if (s0 >= -margin && s1 >= -margin && s2 >= -margin) hit = true;
+            }
+          }
+        }
         if (hit && nPts < 4) {
           ptTri[nPts] = tgt;  // pierces tri tgt -> interior to tgt
           pts[nPts++] = pierce(A.vid[owner][e], A.vid[owner][(e + 1) % 3], tgt);
@@ -2310,6 +2341,18 @@ BuildArrangement RecordSeams(const Manifold::Impl& in,
       };
       for (int e = 0; e < 3; ++e) recordEdge(i, e, j);
       for (int e = 0; e < 3; ++e) recordEdge(j, e, i);
+      // Dedup endpoints within the weld radius: a cap-plane reentrant junction
+      // is pierced by BOTH walls' cap edges (the symmetric corner incidence)
+      // and so is recorded twice; the emission weld would merge them anyway.
+      // Genuine distinct seam endpoints are far more than eps apart, so an
+      // ordinary seam is untouched (bitwise).
+      for (int a = 0; a + 1 < nPts; ++a)
+        for (int b = nPts - 1; b > a; --b)
+          if (la::length(pts[a] - pts[b]) <= eps) {
+            pts[b] = pts[nPts - 1];
+            ptTri[b] = ptTri[nPts - 1];
+            --nPts;
+          }
       if (nPts == 0) continue;  // no genuine crossing
       if (nPts != 2) {
         // A genuine seam has exactly two endpoints; anything else is a
@@ -3139,7 +3182,7 @@ StageResult<Manifold::Impl> RunCandidateB(const Manifold::Impl& dirty,
   // transversal seam enumeration skips their pairs so their exact-zero coplanar
   // ties do not raise boundaryTouch.
   const std::vector<int> face2cluster = DetectCoplanarClusters(in);
-  const BuildArrangement A = RecordSeams(in, face2cluster);
+  const BuildArrangement A = RecordSeams(in, face2cluster, eps);
   if (A.boundaryTouch) {
     // A deciding pierce predicate hit an exact-zero / filter-uncertain boundary
     // that the coplanar fold does NOT consume: a NON-coplanar vertex-on-face /
@@ -3321,7 +3364,7 @@ CleanFaceProbe RegularizeCleanFaces_Probe(const Manifold::Impl& soup) {
   if (snapped.fatal) return out;
   const Manifold::Impl& in = snapped.value ? *snapped.value : soup;
   const std::vector<int> face2cluster = DetectCoplanarClusters(in);
-  const BuildArrangement A = RecordSeams(in, face2cluster);
+  const BuildArrangement A = RecordSeams(in, face2cluster, eps);
   // Same winding seeds as RunCandidateBBuild.
   const vec3 c = in.bBox_.Center();
   const double L = in.bBox_.Scale() + 1.0;

@@ -2830,36 +2830,77 @@ static Manifold::Impl TwoBoxSoup(const Manifold& a, const Manifold& b) {
 // TARGET (e), docs/Regularize3D.md: ENTANGLED PRISMS.  Two axis-aligned bars
 // crossing at right angles and sharing z[2,4] - a 3D plus.  The coincident
 // z-caps over the crossing are a COPLANAR overlap (the FOLD's), and the
-// transversal x/y walls cross EDGE-ON-EDGE at exact points like (2,2,2) - the
-// stage-6 SoS tie the convention now DECIDES.  This carrier REACHES both
-// (probe: coplanar clusters > 0 AND transversal seams > 0), so the SoS is
-// exercised; but its junction is a genuine >2-SHEET triple point (FOUR walls
-// meet at (2,2,2)), which the two-endpoint seam model cannot represent (a
-// "non-2-endpoint seam / degenerate incidence").  So it fails closed NARROWER,
-// at the >2-sheet / once-only-triple-point axis (a distinct named open, docs
-// open list) - NOT the SoS-orient3d axis, and NOT a silent wrong resolve.  The
-// vertex-on-face / edge-on-edge SoS family itself resolves oracle-true on
-// BridgedCaps (above).
-TEST(Overlap3, Regularize_ExactZeroTie_EntangledBars_FailClosed) {
+// transversal x/y walls cross at the vertical reentrant edges (x,y) in
+// {(2,2),(2,4),(4,2),(4,4)}, z[2,4].  Each such wall-wall seam has ONE ordinary
+// interior endpoint (on the wall diagonal) and ONE endpoint sitting on a cap
+// cluster plane at an overlap-corner vertex OF THE FOLD'S IN-PLANE ARRANGEMENT
+// (e.g. (2,2,2)).  The cap-plane endpoint was formerly DROPPED by
+// edgeInClusterPlane's blanket suppression, truncating the seam to nPts==1 and
+// failing closed ("degenerate incidence") - the COPLANAR/TRANSVERSAL
+// ENTANGLEMENT wall.  The junction completion (reg3d-ent) gives that endpoint
+// the fold arrangement's identity: RecordSeams records the cap-plane crossing
+// (a genuine transversal endpoint on the cap fold) and dedups the symmetric
+// double-pierce, so nPts==2, the seamed wall drops its interior span, and the
+// folded cap + seamed walls weld shut at the reentrant corner.  RESOLVES
+// oracle-true: {w_S>=1} is the exact union of the two bars (24 + 24 - 8 = 40).
+// The junction is NOT a >2-sheet triple point (measured: every arrangement edge
+// is exactly two walls; the coincident caps are the fold's, not a radial sheet)
+// so NO radial rule / new predicate is needed (reg3d-radial STEP 1).
+TEST(Overlap3, Regularize_ExactZeroTie_EntangledBars_Resolves) {
   const Manifold::Impl in =
       TwoBoxSoup(Manifold::Cube({6, 2, 2}).Translate({0, 2, 2}),
                  Manifold::Cube({2, 6, 2}).Translate({2, 0, 2}));
   ASSERT_TRUE(in.IsManifold() && in.Is2Manifold());
   const CandidateBProbe p =
       RegularizeB_Probe(in, {}, in.bBox_.Center() + vec3(97.1, 33.7, 51.3));
-  EXPECT_GT(p.seamCount, 0) << "must reach a transversal crossing (SoS axis)";
+  EXPECT_GT(p.seamCount, 0) << "must reach a transversal crossing";
   EXPECT_GT(p.coplanarClusterFaces, 0) << "must reach the coplanar caps (fold)";
 
-  const RegularizeResult r =
-      RegularizeDirtyDirect(in, EpsilonFromScale(in.bBox_.Scale(), 1000));
-  ASSERT_TRUE(r.fatal.has_value())
-      << "the >2-sheet junction must fail closed, never a silent wrong resolve";
-  EXPECT_EQ(*r.fatal, FatalReason::DirtyComponentUnresolved) << r.detail;
-  // NARROWED past the SoS gate: the >2-sheet triple-point / degenerate-seam
-  // axis.
-  EXPECT_NE(r.detail.find("degenerate incidence"), std::string::npos)
-      << "residue must name the >2-sheet / degenerate-seam wall: " << r.detail;
-  EXPECT_FALSE(r.impl.has_value());
+  const double eps = EpsilonFromScale(in.bBox_.Scale(), 1000);
+  const RegularizeResult r = RegularizeDirtyDirect(in, eps);
+  ASSERT_FALSE(r.fatal.has_value())
+      << "the cap-plane seam endpoint must resolve, not truncate: " << r.detail;
+  ASSERT_TRUE(r.impl.has_value());
+  EXPECT_EQ(r.counters.regularized, 1);
+  const Manifold out(GetMeshGLImpl<double, uint64_t>(*r.impl, -1));
+  EXPECT_EQ(out.Status(), Manifold::Error::NoError);
+  EXPECT_FALSE(r.impl->IsSelfIntersecting()) << "output self-intersects";
+  EXPECT_EQ(out.Decompose().size(), 1u) << "must be one solid";
+  // Exact union of the two bars: 24 + 24 - 8 (the 2x2x2 overlap) = 40.
+  const double vol = out.Volume();
+  EXPECT_GT(vol, 39.999) << "volume below the exact-union band";
+  EXPECT_LT(vol, 40.001) << "volume above the exact-union band";
+
+  // INDEPENDENT GWN oracle: (w_soup>=1) == (w_out>0) at every unambiguous
+  // point.
+  const auto inTris = SoupTris(in);
+  std::mt19937 rng(0xE47A0);
+  const Box bb = out.BoundingBox();
+  const vec3 mn = bb.min - (bb.max - bb.min) * 0.05;
+  const vec3 mx = bb.max + (bb.max - bb.min) * 0.05;
+  std::uniform_real_distribution<double> U(0, 1);
+  std::vector<vec3> qs;
+  for (int k = 0; k < 20000; ++k)
+    qs.push_back(mn + (mx - mn) * vec3(U(rng), U(rng), U(rng)));
+  const auto wOut = out.WindingNumber(qs);
+  int disagree = 0, checked = 0;
+  for (int k = 0; k < static_cast<int>(qs.size()) && disagree < 5; ++k) {
+    const double g = GWN(inTris, qs[k]);
+    if (std::abs(g - std::round(g)) > 0.15) continue;  // near-surface skip
+    ++checked;
+    if ((std::lround(g) >= 1) != (wOut[k] > 0.5)) {
+      ++disagree;
+      ADD_FAILURE() << "GWN membership disagreement at (" << qs[k].x << ","
+                    << qs[k].y << "," << qs[k].z << ")";
+    }
+  }
+  EXPECT_GT(checked, 3000) << "oracle undersampled";
+
+  // TOL-INVARIANCE: the retained topology is decided from input data.
+  const RegularizeResult r2 = RegularizeDirtyDirect(in, eps * 0.5);
+  ASSERT_TRUE(r2.impl.has_value()) << "tol-variant fatal: " << r2.detail;
+  const Manifold out2(GetMeshGLImpl<double, uint64_t>(*r2.impl, -1));
+  EXPECT_NEAR(vol, out2.Volume(), 1e-6 * vol) << "not tol-invariant";
 }
 
 // TARGET (e) variant: the same two bars OFFSET in z (no coincident caps - the
