@@ -57,12 +57,12 @@ enum class FatalReason {
   // tens of thousands of thin slabs would swap-thrash into bad_alloc; the slabs
   // stage fails closed here instead (spec [WALL-B]).
   ArrangementBudget,
-  // Regularization operator (docs/Regularize3D.md): a dirty (self-intersecting)
-  // component reached candidate B, but B's production dirty-core resolver is
-  // not yet built.  Stage-1 fail-closed STUB SENTINEL - the honest outcome
-  // while the dirty core is a stub, never a silent wrong result.  When B lands
-  // it is replaced by either a clean re-gated resolve or a real re-gate fatal
-  // (NonManifoldEmission / a self-intersection re-gate failure).
+  // Regularization operator (docs/Regularize3D.md): candidate B RAN on a dirty
+  // (self-intersecting or coplanar-overlapping) component but DECLINED to
+  // resolve it exactly - a non-coplanar exact-zero SoS residue, a >2-sheet
+  // triple point, a coplanar/transversal entanglement, a near-coplanar
+  // planarity-guard failure, or a filter-uncertain winding probe.  The honest
+  // fail-closed (recorded reason, no output), never a silent wrong result.
   DirtyComponentUnresolved,
 };
 
@@ -212,29 +212,30 @@ Overlap3Result RemoveOverlaps3D(const Manifold::Impl& in, double eps = 0.0);
 // Regularization operator (docs/Regularize3D.md) - parallel entry point.
 //
 // RegularizeImpl maps a valid oriented face soup to the boundary of the solid
-// {p : w_S(p) >= 1}, PER CONNECTED COMPONENT (it never fuses separate DISJOINT
-// components - fusion is the Boolean's job, already done upstream).  The one
-// exception is a genuine COPLANAR self-overlap that connectivity would split (a
-// buried plug with a coincident cap): those components are UNITED at decompose
-// time so the fold sees the overlap as internal (touching/disjoint objects with
-// no 2D-area overlap never merge).  The pipeline: DECOMPOSE by connectivity (+
-// coplanar-overlap merge) -> per-component GATE (validity + IsSelfIntersecting
-// + coplanar overlap) -> EARLY-EXIT clean components -> route DIRTY components
-// to candidate B -> RE-GATE B's output -> COMPOSE BACK by concatenation.  The
-// v3 sweep entry point RemoveOverlaps3D is untouched; this is an additive
-// second entry point, not a rewrite.
+// {p : w_S(p) >= 1}, PER CONNECTED COMPONENT (it never fuses separate
+// components - fusion is the Boolean's job, already done upstream).
+// Cross-component overlap of any kind - touching, coplanar, or transversal - is
+// out of scope: a buried plug with a coincident cap is two components, each
+// regularized on its own and concatenated back unchanged (docs/Regularize3D.md
+// non-fusion contract).  A coplanar self-overlap is resolved only when it is
+// INTERNAL to one connected component, where the per-component gate detects it
+// and routes it to candidate B.  The pipeline: DECOMPOSE by connectivity ->
+// per-component GATE (validity + IsSelfIntersecting + within-component coplanar
+// overlap) -> EARLY-EXIT clean components -> route DIRTY components to
+// candidate B -> RE-GATE B's output -> COMPOSE BACK by concatenation.  The v3
+// sweep entry point RemoveOverlaps3D is untouched; this is an additive second
+// entry point, not a rewrite.
 // ---------------------------------------------------------------------------
 
 // White-box dispatch counters (the Stage-1 pins read these directly).
 struct RegularizeCounters {
-  int components = 0;  // components after decompose + coplanar-overlap merge
-  int clean = 0;       // passed the gate; early-exit copied through
-  int dirty = 0;       // failed the gate (self-intersecting OR coplanar
-                       // overlap); routed to candidate B
-  int regularized =
-      0;               // B produced a clean re-gated output (0 while B is stub)
-  int failClosed = 0;  // components that fail-closed (dirty stub, re-gate, or
-                       // an unexpected non-manifold input component)
+  int components = 0;   // components after decompose by connectivity
+  int clean = 0;        // passed the gate; early-exit copied through
+  int dirty = 0;        // failed the gate (self-intersecting OR coplanar
+                        // overlap); routed to candidate B
+  int regularized = 0;  // B produced a clean re-gated output
+  int failClosed = 0;   // components that fail-closed (B decline, re-gate, or
+                        // an unexpected non-manifold input component)
 };
 
 struct RegularizeResult {
@@ -309,10 +310,11 @@ CleanFaceProbe RegularizeCleanFaces_Probe(const Manifold::Impl& soup);
 RegularizeResult RegularizeDirtyDirect(const Manifold::Impl& soup, double eps);
 
 // Test hook: the micro exact tie-test behind the stage-6 SoS - the EXACT
-// orient3d sign (0 iff the four points are exactly coplanar), int256 4-limb
-// fast path with an expansion-arithmetic fallback for wide exponent spreads.
-// Exposed so the property pin can grade it directly (filter agreement,
-// antisymmetry, constructed exact zeros, scaling invariance).
+// orient3d sign (0 iff the four points are exactly coplanar).  ONE integer path
+// (sos::ExactOrient3D), adaptive-width two's-complement accumulator, TOTAL for
+// every finite-double input (no window-fail, no expansion fallback).  Exposed
+// so the property pin can grade it directly (filter agreement, antisymmetry,
+// constructed exact zeros, scaling invariance).
 int Orient3DExactSignProbe(const vec3& a, const vec3& b, const vec3& c,
                            const vec3& d);
 
