@@ -1888,6 +1888,22 @@ BEnumeration EnumerateSelfCrossings(const Manifold::Impl& in) {
   return out;
 }
 
+// Are two triangles EXACTLY coplanar at level-0?  Each of the six cross checks
+// (every vertex of one against the other's plane) is a certified orient3d
+// filter sign; a 0 means the vertex is within ~1 ULP of the plane, i.e. the
+// coplanarity gap is far below eps.  Returns a SIGN-derived bool (no
+// constructed geometry), so it is the single implementation of the
+// "filter-coplanar pair" test the exact-fold detector, the seam recorder, and
+// the near-coplanar snap all share.
+bool FacesFilterCoplanar(const std::array<vec3, 3>& Ti,
+                         const std::array<vec3, 3>& Tj) {
+  for (int k = 0; k < 3; ++k)
+    if (Orient3DFilterSign(Ti[0], Ti[1], Ti[2], Tj[k]) != 0) return false;
+  for (int k = 0; k < 3; ++k)
+    if (Orient3DFilterSign(Tj[0], Tj[1], Tj[2], Ti[k]) != 0) return false;
+  return true;
+}
+
 // Do two coplanar (or near-coplanar) triangles share positive 2D area,
 // projected into Ti's plane?  Only genuinely OVERLAPPING faces need folding;
 // the coplanar tiles of one flat face (an annulus, a subdivided facet) merely
@@ -1967,24 +1983,13 @@ std::vector<int> DetectCoplanarClusters(const Manifold::Impl& in) {
         if (vid[i][a] == vid[j][b]) return true;
     return false;
   };
-  auto coplanar = [&](int i, int j) {
-    for (int k = 0; k < 3; ++k)
-      if (Orient3DFilterSign(tri[i][0], tri[i][1], tri[i][2], tri[j][k]) != 0)
-        return false;
-    for (int k = 0; k < 3; ++k)
-      if (Orient3DFilterSign(tri[j][0], tri[j][1], tri[j][2], tri[i][k]) != 0)
-        return false;
-    return true;
-  };
-  auto overlap2D = [&](int i, int j) {
-    return TrianglesOverlap2D(tri[i], tri[j]);
-  };
   DisjointSets uf(nTri);
   bool any = false;
   for (int i = 0; i < nTri; ++i)
     for (int j = i + 1; j < nTri; ++j) {
       if (!bboxOverlap(i, j) || sharesVert(i, j)) continue;
-      if (coplanar(i, j) && overlap2D(i, j)) {
+      if (FacesFilterCoplanar(tri[i], tri[j]) &&
+          TrianglesOverlap2D(tri[i], tri[j])) {
         uf.unite(i, j);
         any = true;
       }
@@ -2268,13 +2273,7 @@ BuildArrangement RecordSeams(const Manifold::Impl& in,
       // Pair coplanarity (filter): a coplanar pair's exact-zero ties belong to
       // the in-plane FOLD, never the SoS transversal path (the s3/s4adj sliver
       // rail).  Only a NON-coplanar transversal residue is SoS-decided.
-      bool pairCoplanar = true;
-      for (int k = 0; k < 3 && pairCoplanar; ++k)
-        if (Orient3DFilterSign(T0[0], T0[1], T0[2], T1[k]) != 0)
-          pairCoplanar = false;
-      for (int k = 0; k < 3 && pairCoplanar; ++k)
-        if (Orient3DFilterSign(T1[0], T1[1], T1[2], T0[k]) != 0)
-          pairCoplanar = false;
+      const bool pairCoplanar = FacesFilterCoplanar(T0, T1);
       // Record the crossing points of `owner`'s edges through `tgt`.  A FILTER-
       // certified pierce (r==1) records directly.  A filter-refused (-1)
       // GENUINE transversal exact-zero tie - not a cluster riser, not a benign
@@ -3054,16 +3053,6 @@ StageResult<Manifold::Impl> SnapNearCoplanarClusters(const Manifold::Impl& in,
     }
     return std::min(di, dj);
   };
-  auto filterCoplanar = [&](int i, int j) {
-    for (int k = 0; k < 3; ++k)
-      if (Orient3DFilterSign(tri[i][0], tri[i][1], tri[i][2], tri[j][k]) != 0)
-        return false;
-    for (int k = 0; k < 3; ++k)
-      if (Orient3DFilterSign(tri[j][0], tri[j][1], tri[j][2], tri[i][k]) != 0)
-        return false;
-    return true;
-  };
-
   DisjointSets uf(nTri);
   std::vector<char> nearFace(nTri, 0);  // touched a genuine near-band pair
   bool anyNear = false;
@@ -3073,7 +3062,8 @@ StageResult<Manifold::Impl> SnapNearCoplanarClusters(const Manifold::Impl& in,
       if (pairGap(i, j) >= eps) continue;
       if (!TrianglesOverlap2D(tri[i], tri[j])) continue;
       uf.unite(i, j);
-      if (!filterCoplanar(i, j)) {  // near band, not exact-coplanar
+      if (!FacesFilterCoplanar(tri[i],
+                               tri[j])) {  // near band, not exact-coplanar
         nearFace[i] = nearFace[j] = 1;
         anyNear = true;
       }
