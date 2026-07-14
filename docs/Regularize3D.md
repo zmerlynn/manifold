@@ -494,7 +494,12 @@ Cluster map (root mechanism, not which string fires):
 
 - CLUSTER 1 - EMISSION REPRESENTABILITY (stage-7 thin-cell / touching sheet).
   The resolved {w_S>=1} boundary reduces to sub-eps / touching sheets with no
-  representable double-manifold; BuildImpl declines.  Two sub-shapes:
+  representable double-manifold; BuildImpl declines.  UNIFIED ANATOMY (reg3d-c1a):
+  every carrier fails SplitTouchingSheets at an UNBALANCED fan = an OPEN BOUNDARY
+  (dropped faces), NOT a touching/doubled sheet - measured zero surviving weld
+  twins and zero non-manifold edges on all of them; the wall needs MORE emitted
+  faces, so C-5's twin-identity unification is a measured no-op here (see closure
+  plan 5).  Two sub-shapes:
   1a near-coplanar sliver (GT7863 AND GT7081 post-reg3d-c2bx: two near-parallel
   seamed faces, gap above the fold threshold but the sub-face is thin - GT7081's
   0.002deg shallow-dihedral geometry is the same wall reached once its
@@ -549,7 +554,12 @@ Cluster map (root mechanism, not which string fires):
   uniform emission weld can merge two genuinely-distinct arrangement points within
   eps (a fold the shares-vertex-skip gate is blind to) or leave a 1-ULP-distinct
   vertex unmerged (the disclosed zero-area triangle).  No corpus carrier
-  demonstrated; live on the synthetic rotated pin.
+  demonstrated; live on the synthetic rotated pin.  reg3d-c1a REFUTED the
+  hypothesis that the once-only fold-vertex identity (C-5) could double as the
+  emission-wall fix (measured no-op; the emission fans carry no surviving twins)
+  AND showed C-5 "proper" is not a bounded DC but the plane-based-rep escalation
+  (the reentrant-corner point has three distinct cross-phase constructions;
+  unifying them by construction needs one canonical symbolic vertex).
 - CLUSTER 6 - DEGENERATE-INPUT / DEFENSIVE GUARDS ("epsilon not computable",
   "input not 2-manifold").  Terminal-correct contract edges, not gaps.
 
@@ -596,18 +606,57 @@ RESEARCH = memo with a required proof sketch, TRIPWIRE = kernel-vendor decision)
    is UNAFFECTED, so it does NOT unlock openscad alone - an emission-side follow-up.
    (openscad is UNCHANGED by the escalation: it fails UPSTREAM at RecordSeams
    "degenerate incidence"; the winding probe fires zero times, reg3d-c2bx.)
-3. CRUCIBLE C-1a (RESEARCH).  GT7863 near-coplanar sliver: widen the stage-5 fold
-   above eps under a per-sub-face thinness bound.  Proof sketch = the
-   global-planarity guard argument extended to the thin sub-face; shared with
-   openscad's sliver share.
-4. CRUCIBLE C-1b (RESEARCH).  PokedCube negative-winding double sheet: coordinated
-   cap+strip re-emission.  Proof sketch = the winding-jump-of-2 emission rule (the
-   mult-1 per-face rule is provably insufficient at a w=-1|w=1 junction).
-5. CRUCIBLE C-5 (DC + PROOF).  Once-only fold-vertex identity hardening: expose the
-   fold's overlay vertex by construction so both recovered seam endpoints REFERENCE
-   it, retiring the positional dedup and the weld-reliance (closes the zero-area
-   artifact).  The residual - two genuinely-distinct points rounding within eps -
-   stays open (neither cheaply weldable nor reliably re-gated), the honest R1 open.
+3. CRUCIBLE C-1a (PROOF; reg3d-c1a UNIFIED EMISSION ANATOMY).  The consolidated
+   emission wall ("unresolvable sheet contact", SplitTouchingSheets ->
+   NonManifoldEmission) was instrumented on ALL its carriers (PokedCube, GT7863,
+   GT7081 both shells; cap-seaming fixture).  MEASURED (ZZZ_C1A, reverted
+   byte-clean): every emission carrier fails at the SAME branch - an UNBALANCED
+   fan (fwd/bwd count mismatch) = an OPEN BOUNDARY / hole, with ZERO surviving
+   near-duplicate vertices in any band (eps..16*eps) near the failing edge or
+   anywhere in the emitted vert set, and zero non-manifold edges (no doubled
+   sheets).  PokedCube's 8-triangle emission reconstructs into three closed
+   boundary loops (a 7-gon through the everted spike + two ISOLATED islands whose
+   connecting neighbors were dropped).  GT7863 = an 8-edge hole in a near-coplanar
+   x-sliver (x span ~0.76 at x~-31165); GT7081 = the SAME wall at a 0.002deg
+   shallower dihedral (112 + 6 open edges across two shells, winding classify now
+   exact per reg3d-c2bx, so only the near-tangent sliver emission remains).
+   PROOF (genuinely unpairable from the information present): each fan is an open
+   boundary because faces on d{w>=1} were DROPPED by the per-face emission at a
+   degenerate corner (PokedCube's w=-1|w=1 double-sheet everted spike) or a
+   near-coplanar / near-tangent site (GT7863/GT7081 slivers) - the dropped faces
+   are unrecoverable from the rounded-vec3 per-face arrangement + winding.  The
+   coordinated fixes converge: PokedCube needs the winding-jump-of-2 double-sheet
+   re-emission + an EXACT arrangement at the degenerate corner (triple points);
+   GT7863/GT7081 need a stage-5 near-coplanar fold WIDENING above eps under a
+   per-sub-face thinness bound (which risks the global-planarity-guard /
+   curved-chain oracle-wrongness).  Both fix shapes are the PLANE-BASED
+   REPRESENTATION escalation (exact symbolic vertices -> exact triple points +
+   at-rounding thin-cell/sliver decisions), which crosses the exact-kernel tripwire
+   (vendor Shewchuk).  RECORDED (build nothing on it).  The cap-seaming fixture is
+   NOT on this wall - its failing component dies UPSTREAM at RecordSeams F11/F3
+   (its non-piercing control emits clean); the C-2a research adjudication stands.
+4. CRUCIBLE C-1b (PROOF; folded into C-1a).  PokedCube negative-winding double
+   sheet - measured above: the everted corner is a w=-1|w=1 double-sheet junction
+   AND a degenerate near-triple-point; the mult-1 per-face emission drops the
+   inner-sheet connecting faces (s7b: clean-patch flood + shares-vertex-skip
+   crossings).  Same escalation as C-1a.
+5. CRUCIBLE C-5 (REFUTED as the emission-wall key; residual = the plane-based-rep
+   escalation).  reg3d-c1a MEASURED C-5's predicted effect on every emission fan
+   and found it NULL: C-5 unifies within-eps twin identities, but it only changes
+   the SplitTouchingSheets input where a twin SURVIVES the BuildImpl eps-weld
+   (>eps apart) - and there are ZERO such twins on any carrier (the fans need MORE
+   faces, not merged twins).  So the census hypothesis that construction-keyed
+   identity could make the fans pairable is refuted.  A SOURCE read (RecordSeams
+   recovery + dedup, overlap3.cpp:1416-1486) further shows C-5 "proper"
+   (bit-identical BY CONSTRUCTION rather than the current positional dedup) is NOT
+   the bounded DC the census assumed: the symmetric double-pierce is two different
+   SegPlanePoint constructions of one reentrant corner, and the fold overlay builds
+   it a third way - unifying them requires ONE canonical construction shared across
+   phases (RecordSeams runs BEFORE FoldCoplanarClusters), i.e. the plane-based
+   representation.  The A4 zero-area artifact (synthetic rotated pin, inert, no
+   corpus carrier) is the only thing C-5 would cure, and it too routes to the same
+   escalation.  The honest R1 residual (two genuinely-distinct points rounding
+   within eps) stays open.
 6. ADJUDICATION - Cluster 3 (TRIPWIRE).  The >2-sheet radial rule is proven sound
    and fires zero times on the corpus; building it adds a second exact call site,
    so it stays unbuilt behind the vendor-Shewchuk decision (owner's).  Fail-closed
