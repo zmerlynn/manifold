@@ -22,25 +22,23 @@ a `Manifold::Impl` that may be self-overlapping (a valid oriented 2-manifold who
 interior is multiply covered) and returns the boundary of the region covered at least
 once - the boundary-of-a-simple-solid reading downstream consumers assume.
 
-What it is NOT. It is not the Boolean. It never FUSES separate objects: two disjoint
-components that happen to touch are each regularized on their own and composed back
-by concatenation, never unioned. Fusion is the Boolean's job, already done upstream in
-any operation chain; what arrives at RemoveOverlaps3D is one or a few epsilon-valid
-manifolds whose only unresolved defect is INTERNAL self-overlap. (Whole-soup {w_S>=1}
-would fuse; per-component {w_S>=1} does not - the deliberate choice, matching the
-touching-contacts posture.)
+What it is NOT. It is not the Boolean. It never FUSES separate objects, and the contract
+is UNIFORM: cross-component interaction - overlapping, touching, coplanar OR transversal -
+is NEVER this operator's job. Two connectivity components are each regularized on their
+own and composed back by concatenation, never unioned, whatever their spatial relation.
+Fusion is the Boolean's job, already done upstream in any operation chain; what arrives at
+RemoveOverlaps3D is one or a few epsilon-valid manifolds whose only unresolved defect is
+INTERNAL (within-component) self-overlap.
 
-The one scoped exception is a genuine COPLANAR self-overlap that connectivity would
-split. A buried plug (a box whose coincident cap doubles the cover) is two connectivity
-components with a CROSS-component coplanar overlap, and connecting them into one
-manifold instead forces a transversal entanglement (measured) - so a per-component gate
-can never see the defect. The decompose step therefore UNITES the components that share
-an exactly-coplanar 2D-area overlap cluster (DetectCoplanarClusters' overlap2D witness),
-routing the united super-component to the coplanar fold. This is scoped to a real
-coplanar self-overlap: touching contacts (edge/vertex, zero area) and disjoint objects
-never cluster, so the non-fusion posture holds for everything else. (Owner-review note:
-this widens the per-component boundary for the coplanar-overlap class only; it is the
-change that makes the fold reachable in production instead of test-hook-only.)
+Cross-component adjudication (owner decision). A global {w_S >= 1} read over the whole
+soup WOULD fuse two components that face-touch or coplanar-overlap into their union - that
+is a real semantic choice, and it is deliberately NOT taken here: the per-component read
+does not fuse. A caller that wants fusion runs the Boolean. Concretely, a buried plug (a
+box whose coincident cap doubles the cover of a second box) is TWO connectivity components
+with a cross-component coplanar overlap; this operator passes both through unchanged. The
+coplanar fold reaches a coplanar self-overlap only when it is INTERNAL to one connected
+component (a doubled internal wall / folded-flat flap stitched into the shell), which the
+per-component gate below detects.
 
 Precision contract. Output COORDINATES may be eps-noisy (constructed intersection
 points round to double); the output TOPOLOGY is exact - decided from input data, not
@@ -51,20 +49,19 @@ rounding can create eps-scale self-crossings.
 
 ## The pipeline
 
-1. DECOMPOSE by connectivity, then MERGE coplanar-overlapping components. Split the
-   input into connected components (the existing Decompose primitive), and when there
-   is more than one, unite the components that share an exactly-coplanar 2D-area
-   overlap cluster (see "What it is NOT"). The (possibly merged) component is the unit
-   of work and the unit of scope.
+1. DECOMPOSE by connectivity. Split the input into connected components (the existing
+   Decompose primitive). The connectivity component is the unit of work and the unit of
+   scope - PERIOD; there is no cross-component merge (non-fusion, above).
 
 2. PER-COMPONENT GATE. Each component is tested: valid (`IsManifold` &&
    `Is2Manifold`, overlap3.cpp:1189), non-self-intersecting
    (`Manifold::Impl::IsSelfIntersecting`, properties.cpp:138 - a Morton/AABB broadphase
    over the collider plus a triangle-triangle distance test, shares-vertex skip,
-   2*eps relaxation), AND free of coplanar overlap (`DetectCoplanarClusters`, which
-   `IsSelfIntersecting` does not flag - R2(i)). A component with a coplanar overlap
-   routes DIRTY even when self-intersection-free, so the exact-coplanar fold reaches
-   it.
+   2*eps relaxation), AND free of WITHIN-component coplanar overlap
+   (`DetectCoplanarClusters`, run on this component only, which `IsSelfIntersecting` does
+   not flag - R2(i)). A component whose OWN faces coplanar-overlap routes DIRTY even when
+   self-intersection-free, so the exact-coplanar fold reaches it; a CROSS-component
+   coplanar overlap is invisible to this gate by design (non-fusion).
 
 3. EARLY-EXIT clean components. A component that passes the gate is already the
    boundary of a simple solid; it is copied through untouched.
@@ -169,14 +166,56 @@ radial structure) and does not transfer to B.
   mode observed): ExactArrangement3D.md "Zero silent wrong-resolves".
 
 
+## Standing adjudication (how refusals are treated)
+
+A fail-closed on an unbuilt axis is NOT a defect to paper over - it is a COMPLETENESS
+COUNTEREXAMPLE queued as correctness work. The rule: every solution must be a DECISION-
+COMPLETION (extend the exact decision procedure to cover the case), never a repair pass on
+rounded geometry, and never a lossy fallback. The queued completions:
+
+- Stage 5 - NEAR-COPLANAR widen + guard. The thin band whose coplanarity gap is above the
+  filter's error bound but below eps is neither clustered (the fold owns only exact
+  coplanarity) nor safely transversal; widen the coplanar decision with a guarded band.
+- Stage 6 - SINGLE-CONVENTION SoS. One global symbolic-perturbation convention lifted to
+  orient2d/orient3d = 0 so every non-coplanar exact-zero tie (vertex-on-face, edge-on-edge)
+  resolves by the same rule. This is the residue GT7863 and openscad fail closed on today -
+  AND the residue every genus-handle junction hits: connecting an internal coplanar overlap
+  into one component (the only way it is one connected 2-manifold - see the within-component
+  note below) puts an axis-normal face coplanar with the wall/cap it joins, an exact-zero
+  RecordSeams refuses. So NO within-component coplanar carrier RESOLVES through B until
+  stage 6 lands (measured: a stacked bridged carrier detects + routes DIRTY on the coplanar
+  gate, then fails closed at the rod junction). The gate scoping is correct; the resolve is
+  stage-6 work.
+- Stage 7 - THIN-CELL representability at rounding. A cell thinner than eps has no
+  representable double boundary; decide its retention exactly from input data, do not emit a
+  sub-eps sliver.
+
+Within-component note. An internal coplanar overlap (two coincident sheets, no shared
+edges) is one connected 2-manifold ONLY via a genus handle (a solid bridge, or a hole
+through the coincident caps): sharing the coincidence boundary is a non-manifold pinch or a
+transversal crossing, and a buried plug's three winding levels (0/1/2) cannot be bridged
+consistently (a handle would weld a w0|w1 sheet to a w1|w2 sheet). Only a stacked pair (both
+interiors w=1) is bridgeable, and its junction is on the stage-6 SoS axis.
+
+
+## Parallelism (order-freeness, measured)
+
+The operator is order-free: the output is bit-identical regardless of component / face /
+query order (the compose is concatenation, the winding is a coupled integer read, the
+predicates are level-0 on input coords). So it is embarrassingly parallel - per-component,
+per-face-pair enumeration, and per-query winding are all independent. A BVH-accelerated
+winding query plus threading over components/queries is a named LATER perf pass, not a
+correctness change (the sequential result is the spec the parallel one must match bitwise).
+
+
 ## Open list (honest)
 
 - THE BUILD. The cell complex + halfedge-boundary extraction is the largest unbuilt
   piece; the fragment did point classification of recorded cells, not the boundary
   build. B is fragment-validated, not landed.
-- SINGLE GLOBAL SoS, unexercised. The cross-operand vertex-on-face tie family that
-  GT7863 (coplanar exact-zeros) and openscad (coincident verts) need is specified but
-  UNEXERCISED at fragment scale; the fragment hit only same-operand incidences.
+- SINGLE GLOBAL SoS (stage 6 above). The non-coplanar vertex-on-face / edge-on-edge tie
+  family that GT7863, openscad, AND every within-component-coplanar bridge junction fail
+  closed on; specified, not built. This is the dominant open resolve-blocker.
 - NEGATIVE WINDING / subtraction, untested. openscad's soup winding reaches -1; the
   {w_S>=1} threshold read should absorb it, but no subtraction carrier has exercised
   it.
@@ -230,12 +269,14 @@ R2. THE GATE'S SELF-COLLISION TEST MAY BE MORE EXPENSIVE / DIFFERENT THAN CLAIME
     so the re-gate that would "catch" R1 IS the clean-biased gate R2 flags.
 
 R3. PER-COMPONENT SEMANTICS VS THE CONNECTIVITY BOUNDARY. Decompose splits by halfedge
-    connectivity. Two solids touching at a shared edge or vertex are ONE connected
-    component, so B would fuse their overlap where whole-soup semantics is what the
-    caller wanted - or vice versa, a caller wanting no fusion is served only if the
-    Boolean already separated them upstream. Connectivity may be the wrong
-    decomposition boundary at exactly the touching-contact cases the operator claims to
-    respect.
+    connectivity, and that split IS the scope - uniformly (the owner adjudicated against a
+    coplanar-fusion exception). The residual tension is only that connectivity, not
+    geometry, draws the line: two solids sharing an edge/vertex are ONE component (so their
+    overlap is within-scope) while two coincident-but-disjoint solids are TWO (out of
+    scope, pass-through). The operator does not second-guess this - a caller wanting a
+    different grouping (fusion) runs the Boolean first. What connectivity cannot deliver is
+    a within-component coplanar RESOLVE: the connection that makes such a defect one
+    component is on the stage-6 SoS axis, so it fails closed (never wrong) until stage 6.
 
 R4. REPO-TERM MISUSE. This doc leans on Canonicalize / IsSelfIntersecting / the
     collider / Shadows / Winding03 as reusable primitives; if any is described with the
