@@ -1333,8 +1333,8 @@ Overlap3Internals RemoveOverlaps3D_TestHooks(const Manifold::Impl& in,
 namespace {
 
 // Forward decl (defined below): per-face exactly-coplanar overlap cluster id
-// (or -1).  Used by DecomposeComponents to merge coplanar-overlapping
-// components and by GateComponent to route a coplanar-overlap component to B.
+// (or -1).  Used by GateComponent to route a WITHIN-component coplanar-overlap
+// component to B (the R2(i) blind spot the self-intersection test misses).
 std::vector<int> DetectCoplanarClusters(const Manifold::Impl& in);
 
 // Split `in` into connected components by halfedge connectivity - the Decompose
@@ -1346,18 +1346,16 @@ std::vector<int> DetectCoplanarClusters(const Manifold::Impl& in);
 // input returns exactly one component that IS a copy of `in`, so a clean
 // input of one component passes through unchanged.
 //
-// COPLANAR-OVERLAP MERGE (docs/Regularize3D.md coplanar axis): two connectivity
-// components that overlap in a shared plane (a buried plug with a coincident
-// cap, coplanar stacked boxes) are a genuine SELF-OVERLAP defect the coplanar
-// fold resolves - but decompose-by-connectivity would split them so the
-// per-component gate never sees the overlap (it is CROSS-component).  When
-// there is more than one component, the exactly-coplanar overlap clusters are
-// detected on the whole input and the components sharing a cluster are UNITED,
-// so the overlap becomes internal to one super-component (the fold's resolve
-// target). Scoped to genuine 2D-AREA coplanar overlap (DetectCoplanarClusters'
-// overlap2D witness): touching contacts (edge/vertex, zero area) and disjoint
-// objects never cluster, so the non-fusion posture holds for everything but a
-// real coplanar self-overlap.
+// NON-FUSION POSTURE (docs/Regularize3D.md contract): the connectivity split is
+// the unit of scope, PERIOD.  Cross-component interaction - overlapping,
+// touching, coplanar OR transversal - is NEVER regularized here; two distinct
+// components that happen to coplanar-overlap (a buried plug, coplanar stacked
+// boxes) are each regularized on their own and composed back by concatenation,
+// never united.  A global {w_S>=1} read WOULD fuse them, but that is the
+// Boolean's job (already done upstream in any operation chain); the per-
+// component read is the deliberate choice, matching the touching-contact
+// posture.  The coplanar fold reaches a defect only when it is INTERNAL to one
+// connected component (a doubled wall / folded flap stitched into the shell).
 std::vector<Manifold::Impl> DecomposeComponents(const Manifold::Impl& in,
                                                 double eps) {
   std::vector<Manifold::Impl> out;
@@ -1370,30 +1368,7 @@ std::vector<Manifold::Impl> DecomposeComponents(const Manifold::Impl& in,
       uf.unite(in.halfedge_.Start(static_cast<int>(e)),
                in.halfedge_.End(static_cast<int>(e)));
   std::vector<int> vertLabel;
-  int numComponents = uf.connectedComponents(vertLabel);
-
-  // Coplanar-overlap merge (see the header comment): only when the connectivity
-  // split produced more than one component - a single component is already the
-  // finest unit and running the O(nTri^2) cluster scan on it would be pure
-  // cost. Uniting one vertex of each cluster member folds the components that
-  // share a coplanar cluster together; a cluster entirely within one component
-  // is a no-op (its verts are already connected).
-  if (numComponents > 1) {
-    const std::vector<int> face2cluster = DetectCoplanarClusters(in);
-    std::vector<int> clusterRep;  // first vert seen per cluster id
-    for (int f = 0; f < static_cast<int>(face2cluster.size()); ++f) {
-      const int c = face2cluster[f];
-      if (c < 0) continue;
-      const int v = in.halfedge_.Start(3 * f);
-      if (c >= static_cast<int>(clusterRep.size()))
-        clusterRep.resize(c + 1, -1);
-      if (clusterRep[c] < 0)
-        clusterRep[c] = v;
-      else
-        uf.unite(clusterRep[c], v);
-    }
-    numComponents = uf.connectedComponents(vertLabel);
-  }
+  const int numComponents = uf.connectedComponents(vertLabel);
 
   if (numComponents == 1) {
     // The whole input is one component; copy it through unchanged so a clean
@@ -1455,16 +1430,20 @@ enum class GateVerdict { Clean, Dirty, Invalid };
 GateVerdict GateComponent(const Manifold::Impl& comp) {
   if (!comp.IsManifold() || !comp.Is2Manifold()) return GateVerdict::Invalid;
   if (comp.IsSelfIntersecting()) return GateVerdict::Dirty;
-  // A component that PASSES the self-intersection test can still carry a pure
-  // COPLANAR overlap (coincident / overlapping coplanar faces):
-  // IsSelfIntersecting does NOT flag coplanar coincidence (docs/Regularize3D.md
-  // R2(i)), so such a component would early-exit "clean" yet is NOT the
-  // {w_S>=1} boundary (a buried plug's coincident cap doubles the cover).
-  // DetectCoplanarClusters (bbox-overlap prefilter, then exact orient3d
-  // coplanarity + a 2D-area overlap witness) routes it to B, where the
-  // exact-coplanar fold consumes the overlap.  A clean solid with no coplanar
-  // overlap detects nothing and stays Clean (bitwise pass-through); the cost is
-  // the prefiltered scan, proportional to the input.
+  // WITHIN-COMPONENT coplanar overlap.  A single connected component that
+  // passes the self-intersection test can still carry a pure COPLANAR overlap
+  // between its OWN faces (a doubled internal wall / folded-flat flap whose two
+  // sheets coincide): IsSelfIntersecting does NOT flag coplanar coincidence
+  // (docs/Regularize3D.md R2(i)), so such a component would early-exit "clean"
+  // yet is NOT the {w_S>=1} boundary.  DetectCoplanarClusters (bbox-overlap
+  // prefilter, then exact orient3d coplanarity + a 2D-area overlap witness),
+  // run on THIS component only, routes it to B where the exact-coplanar fold
+  // consumes the overlap.  This is WITHIN-component by construction: `comp` is
+  // one connectivity component, so a CROSS-component coplanar overlap (two
+  // distinct components that happen to coincide) is invisible here BY DESIGN -
+  // the non-fusion posture (fusion is the Boolean's job).  A clean solid with
+  // no internal coplanar overlap detects nothing and stays Clean (bitwise
+  // pass-through); the cost is the prefiltered scan, proportional to the input.
   for (int c : DetectCoplanarClusters(comp))
     if (c >= 0) return GateVerdict::Dirty;
   return GateVerdict::Clean;
