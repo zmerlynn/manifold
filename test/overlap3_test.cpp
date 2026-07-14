@@ -1728,3 +1728,123 @@ TEST(Overlap3, Regularize_NearCoplanarChain_GuardFailClosed) {
       << "residue must name the guard: " << r.detail;
   EXPECT_FALSE(r.impl.has_value());
 }
+
+// ===========================================================================
+// Corpus re-pin: the sole-impl (RemoveOverlaps3D / RegularizeImpl) contract on
+// the file fixtures.  The v3 sweep Corpus_* pins retired with the sweep; these
+// MEASURE and pin what the regularization operator does today.  Under the
+// non-fusion contract an overlapping pair / multi-shell input decomposes into
+// per-shell components, each gated independently: a clean shell early-exits
+// (bitwise pass-through), a self-intersecting or within-component-coplanar
+// shell routes to candidate B.  Figures are the measured dispatch (reg3d-sole
+// notebook); a mutation that fused components or misrouted a clean shell reds
+// the count / vertex-set check.
+// ===========================================================================
+#ifndef MANIFOLD_NO_FILESYSTEM
+
+// Clean pass-through: every component gates clean, so the output is the input's
+// components concatenated unchanged - bitwise-identical vertex positions, no
+// fold, no weld shift.  `nComp` is the measured Decompose count.
+static void ExpectCorpusCleanPassThrough(const char* tag,
+                                         const Manifold::Impl& in, int nComp) {
+  ASSERT_TRUE(in.IsManifold() && in.Is2Manifold())
+      << tag << " fixture must be a valid 2-manifold";
+  const RegularizeResult r = RegularizeImpl(in, ImplEps(in));
+  ASSERT_FALSE(r.fatal.has_value())
+      << tag << " must not fail closed: " << r.detail;
+  ASSERT_TRUE(r.impl.has_value());
+  EXPECT_EQ(r.counters.components, nComp) << tag << " decompose count";
+  EXPECT_EQ(r.counters.clean, nComp) << tag << " every component gates clean";
+  EXPECT_EQ(r.counters.dirty, 0) << tag << " no within-component defect";
+  EXPECT_EQ(r.counters.regularized, 0);
+  EXPECT_EQ(r.counters.failClosed, 0);
+
+  const Manifold out(GetMeshGLImpl<double, uint64_t>(*r.impl, -1));
+  EXPECT_EQ(out.Status(), Manifold::Error::NoError) << tag << " output invalid";
+  EXPECT_EQ(out.Decompose().size(), static_cast<size_t>(nComp))
+      << tag << " components stay separate (no fusion)";
+
+  // BITWISE pass-through: the output vertex positions are exactly the input's
+  // (concatenation of the unchanged components; no fold, no weld shift).  A
+  // gate that misrouted a clean shell to B, or fused components, would perturb
+  // them.
+  std::multiset<std::tuple<double, double, double>> inV, outV;
+  for (const vec3& p : in.vertPos_) inV.emplace(p.x, p.y, p.z);
+  const MeshGL64 og = GetMeshGLImpl<double, uint64_t>(*r.impl, -1);
+  for (size_t i = 0; i + 2 < og.vertProperties.size(); i += 3)
+    outV.emplace(og.vertProperties[i], og.vertProperties[i + 1],
+                 og.vertProperties[i + 2]);
+  EXPECT_EQ(inV, outV) << tag << " pass-through must be bit-identical verts";
+}
+
+static std::optional<Manifold::Impl> LoadCorpusPair(const char* l,
+                                                    const char* rr) {
+  std::filesystem::path f(__FILE__);
+  std::ifstream fl((f.parent_path() / "models" / l).string());
+  std::ifstream fr((f.parent_path() / "models" / rr).string());
+  if (!fl.is_open() || !fr.is_open()) return std::nullopt;
+  return ComposeImpl(Manifold::ReadOBJ(fl), Manifold::ReadOBJ(fr));
+}
+static std::optional<Manifold::Impl> LoadCorpusSingle(const char* n) {
+  std::filesystem::path f(__FILE__);
+  std::ifstream fin((f.parent_path() / "models" / n).string());
+  if (!fin.is_open()) return std::nullopt;
+  return Manifold::Impl(ReadOBJ(fin));
+}
+
+// Cray pair: joins into ONE connected component that gates clean.
+TEST(Overlap3, Corpus_Cray_CleanPassThrough) {
+  const auto in = LoadCorpusPair("Cray_left.obj", "Cray_right.obj");
+  if (!in) GTEST_SKIP() << "model not found";
+  ExpectCorpusCleanPassThrough("Cray", *in, 1);
+}
+
+// Havocglass8 pair: two overlapping shells.  Cross-component overlap is out of
+// scope (non-fusion), each shell gates clean -> pass-through.
+TEST(Overlap3, Corpus_Havocglass8_CleanPassThrough) {
+  const auto in =
+      LoadCorpusPair("Havocglass8_left.obj", "Havocglass8_right.obj");
+  if (!in) GTEST_SKIP() << "model not found";
+  ExpectCorpusCleanPassThrough("Havocglass8", *in, 2);
+}
+
+// Offset meshes: multi-shell solids whose shells are each a clean solid.
+TEST(Overlap3, Corpus_Offsets_CleanPassThrough) {
+  const struct {
+    const char* name;
+    int nComp;
+  } cases[] = {{"Offset1.obj", 39},
+               {"Offset2.obj", 45},
+               {"Offset3.obj", 1},
+               {"Offset4.obj", 1}};
+  for (const auto& c : cases) {
+    const auto in = LoadCorpusSingle(c.name);
+    if (!in) GTEST_SKIP() << c.name << " not found";
+    ExpectCorpusCleanPassThrough(c.name, *in, c.nComp);
+  }
+}
+
+// GenericTwin7081: the pair decomposes into 13 components; 11 gate clean but 2
+// carry a within-component defect candidate B declines to resolve exactly (a
+// "seam sub-face arrangement not exactly resolvable" residue - triple-point /
+// degenerate / filter-uncertain, the unbuilt B axes).  Any component
+// fail-closed suppresses output, so the whole compose fails closed - the honest
+// recorded refusal, never a silent wrong resolve.  HEAVY (~20s: candidate B
+// runs its O(ntri) winding on the dirty shells); run under the corpus resource
+// cap (ulimit -v 4000000; timeout 900).
+TEST(Overlap3, Corpus_GenericTwin7081_FailClosed) {
+  const auto in = LoadCorpusPair("Generic_Twin_7081.1.t0_left.obj",
+                                 "Generic_Twin_7081.1.t0_right.obj");
+  if (!in) GTEST_SKIP() << "model not found";
+  const RegularizeResult r = RegularizeImpl(*in, ImplEps(*in));
+  ASSERT_TRUE(r.fatal.has_value()) << "GT7081 must fail closed, not resolve";
+  EXPECT_EQ(*r.fatal, FatalReason::DirtyComponentUnresolved) << r.detail;
+  EXPECT_FALSE(r.impl.has_value()) << "fail-closed yields no partial output";
+  EXPECT_EQ(r.counters.components, 13) << "decompose count";
+  EXPECT_EQ(r.counters.clean, 11);
+  EXPECT_EQ(r.counters.dirty, 2)
+      << "two shells carry a within-component defect";
+  EXPECT_EQ(r.counters.regularized, 0);
+  EXPECT_EQ(r.counters.failClosed, 2);
+}
+#endif
