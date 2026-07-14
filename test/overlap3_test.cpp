@@ -2399,3 +2399,29 @@ TEST(Overlap3, Regularize_CoplanarFold_DirectHook_Resolves) {
   coplanarfold::ExpectFoldResolves("directhook", coplanarfold::SlantPlug(false),
                                    11.9, 12.1, /*useDirectHook=*/true);
 }
+
+// Real carrier through the REAL entry: the openscad soup imports as a valid
+// manifold with a pure COPLANAR overlap (IsSelfIntersecting=0), so decompose's
+// coplanar-overlap merge unites its two overlapping pieces into one dirty
+// super-component the fold reaches (the same defect class the fold consumes on
+// GT7863).  Its residue is the NON-coplanar point/edge SoS tie the
+// single-global symbolic-perturbation path (unbuilt) would need, so it fails
+// closed with the STRICTLY NARROWER named reason - never a silent wrong
+// resolve, no OOM (the merge's cluster scan is bbox-prefiltered and fast on
+// this 1442-face model).
+TEST(Overlap3, Regularize_ExactZeroTie_Openscad_FailClosed) {
+  std::filesystem::path file(__FILE__);
+  std::ifstream fin(
+      (file.parent_path() / "models" / "openscad-nonmanifold-crash.obj")
+          .string());
+  if (!fin.is_open()) GTEST_SKIP() << "model not found";
+  const Manifold::Impl in(ReadOBJ(fin));
+  const RegularizeResult r = RegularizeImpl(in, ImplEps(in));
+  EXPECT_GE(r.counters.dirty, 1) << "coplanar overlap must route to B";
+  ASSERT_TRUE(r.fatal.has_value()) << "the non-coplanar SoS residue must fail "
+                                      "closed, never silently resolve";
+  EXPECT_EQ(*r.fatal, FatalReason::DirtyComponentUnresolved);
+  EXPECT_NE(r.detail.find("SoS"), std::string::npos)
+      << "fail-closed reason must name the SoS axis: " << r.detail;
+  EXPECT_FALSE(r.impl.has_value()) << "fail-closed yields no partial output";
+}
