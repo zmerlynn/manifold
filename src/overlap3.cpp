@@ -1827,6 +1827,44 @@ int EdgePiercesTriSoS(const vec3& u, const vec3& v, const vec3& a,
   return (o1 == o2 && o2 == o3) ? 1 : 0;
 }
 
+// Per-triangle geometry cache + broadphase prefilters shared by the O(F^2)
+// self-crossing scans (enumeration, exact-coplanar detection, near-coplanar
+// snap): each triangle's three vertex positions and global ids plus its AABB,
+// with the bbox-overlap and shared-vertex (self-adjacency) skips every scan
+// applies before any predicate.  Selection/compare only (la::min/max, integer
+// equality), so it is bit-for-bit the inline builds it replaces.  RecordSeams
+// keeps its own copy because it stores tri/vid/faceN into the BuildArrangement.
+struct TriSoup {
+  std::vector<std::array<vec3, 3>> tri;
+  std::vector<std::array<int, 3>> vid;
+  std::vector<vec3> lo, hi;
+  explicit TriSoup(const Manifold::Impl& in) {
+    const int nTri = static_cast<int>(in.NumTri());
+    tri.resize(nTri);
+    vid.resize(nTri);
+    lo.resize(nTri);
+    hi.resize(nTri);
+    for (int t = 0; t < nTri; ++t) {
+      for (int k = 0; k < 3; ++k) {
+        vid[t][k] = in.halfedge_.Start(3 * t + k);
+        tri[t][k] = in.vertPos_[vid[t][k]];
+      }
+      lo[t] = la::min(la::min(tri[t][0], tri[t][1]), tri[t][2]);
+      hi[t] = la::max(la::max(tri[t][0], tri[t][1]), tri[t][2]);
+    }
+  }
+  bool BBoxOverlap(int i, int j) const {
+    return !(hi[i].x < lo[j].x || hi[j].x < lo[i].x || hi[i].y < lo[j].y ||
+             hi[j].y < lo[i].y || hi[i].z < lo[j].z || hi[j].z < lo[i].z);
+  }
+  bool SharesVert(int i, int j) const {
+    for (int a = 0; a < 3; ++a)
+      for (int b = 0; b < 3; ++b)
+        if (vid[i][a] == vid[j][b]) return true;
+    return false;
+  }
+};
+
 struct BEnumeration {
   int seamCount = 0;  // genuine non-adjacent self-crossings
   int boundaryTouchPairs =
@@ -1841,31 +1879,12 @@ struct BEnumeration {
 BEnumeration EnumerateSelfCrossings(const Manifold::Impl& in) {
   BEnumeration out;
   const int nTri = static_cast<int>(in.NumTri());
-  std::vector<std::array<vec3, 3>> tri(nTri);
-  std::vector<std::array<int, 3>> vid(nTri);
-  std::vector<vec3> lo(nTri), hi(nTri);
-  for (int t = 0; t < nTri; ++t) {
-    for (int k = 0; k < 3; ++k) {
-      vid[t][k] = in.halfedge_.Start(3 * t + k);
-      tri[t][k] = in.vertPos_[vid[t][k]];
-    }
-    lo[t] = la::min(la::min(tri[t][0], tri[t][1]), tri[t][2]);
-    hi[t] = la::max(la::max(tri[t][0], tri[t][1]), tri[t][2]);
-  }
-  auto bboxOverlap = [&](int i, int j) {
-    return !(hi[i].x < lo[j].x || hi[j].x < lo[i].x || hi[i].y < lo[j].y ||
-             hi[j].y < lo[i].y || hi[i].z < lo[j].z || hi[j].z < lo[i].z);
-  };
-  auto sharesVert = [&](int i, int j) {
-    for (int a = 0; a < 3; ++a)
-      for (int b = 0; b < 3; ++b)
-        if (vid[i][a] == vid[j][b]) return true;
-    return false;
-  };
+  const TriSoup soup(in);
+  const auto& tri = soup.tri;
   for (int i = 0; i < nTri; ++i) {
     for (int j = i + 1; j < nTri; ++j) {
-      if (!bboxOverlap(i, j)) continue;
-      if (sharesVert(i, j)) continue;  // self-adjacency skip (S4a)
+      if (!soup.BBoxOverlap(i, j)) continue;
+      if (soup.SharesVert(i, j)) continue;  // self-adjacency skip (S4a)
       const auto& A = tri[i];
       const auto& B = tri[j];
       bool genuine = false, boundary = false;
@@ -1962,32 +1981,13 @@ bool TrianglesOverlap2D(const std::array<vec3, 3>& Ti,
 // multi-face coplanar cluster (the ordinary transversal path).
 std::vector<int> DetectCoplanarClusters(const Manifold::Impl& in) {
   const int nTri = static_cast<int>(in.NumTri());
-  std::vector<std::array<vec3, 3>> tri(nTri);
-  std::vector<std::array<int, 3>> vid(nTri);
-  std::vector<vec3> lo(nTri), hi(nTri);
-  for (int t = 0; t < nTri; ++t) {
-    for (int k = 0; k < 3; ++k) {
-      vid[t][k] = in.halfedge_.Start(3 * t + k);
-      tri[t][k] = in.vertPos_[vid[t][k]];
-    }
-    lo[t] = la::min(la::min(tri[t][0], tri[t][1]), tri[t][2]);
-    hi[t] = la::max(la::max(tri[t][0], tri[t][1]), tri[t][2]);
-  }
-  auto bboxOverlap = [&](int i, int j) {
-    return !(hi[i].x < lo[j].x || hi[j].x < lo[i].x || hi[i].y < lo[j].y ||
-             hi[j].y < lo[i].y || hi[i].z < lo[j].z || hi[j].z < lo[i].z);
-  };
-  auto sharesVert = [&](int i, int j) {
-    for (int a = 0; a < 3; ++a)
-      for (int b = 0; b < 3; ++b)
-        if (vid[i][a] == vid[j][b]) return true;
-    return false;
-  };
+  const TriSoup soup(in);
+  const auto& tri = soup.tri;
   DisjointSets uf(nTri);
   bool any = false;
   for (int i = 0; i < nTri; ++i)
     for (int j = i + 1; j < nTri; ++j) {
-      if (!bboxOverlap(i, j) || sharesVert(i, j)) continue;
+      if (!soup.BBoxOverlap(i, j) || soup.SharesVert(i, j)) continue;
       if (FacesFilterCoplanar(tri[i], tri[j]) &&
           TrianglesOverlap2D(tri[i], tri[j])) {
         uf.unite(i, j);
@@ -3005,27 +3005,9 @@ StageResult<Manifold::Impl> RunCandidateBBuild(
 StageResult<Manifold::Impl> SnapNearCoplanarClusters(const Manifold::Impl& in,
                                                      double eps) {
   const int nTri = static_cast<int>(in.NumTri());
-  std::vector<std::array<vec3, 3>> tri(nTri);
-  std::vector<std::array<int, 3>> vid(nTri);
-  std::vector<vec3> lo(nTri), hi(nTri);
-  for (int t = 0; t < nTri; ++t) {
-    for (int k = 0; k < 3; ++k) {
-      vid[t][k] = in.halfedge_.Start(3 * t + k);
-      tri[t][k] = in.vertPos_[vid[t][k]];
-    }
-    lo[t] = la::min(la::min(tri[t][0], tri[t][1]), tri[t][2]);
-    hi[t] = la::max(la::max(tri[t][0], tri[t][1]), tri[t][2]);
-  }
-  auto bboxOverlap = [&](int i, int j) {
-    return !(hi[i].x < lo[j].x || hi[j].x < lo[i].x || hi[i].y < lo[j].y ||
-             hi[j].y < lo[i].y || hi[i].z < lo[j].z || hi[j].z < lo[i].z);
-  };
-  auto sharesVert = [&](int i, int j) {
-    for (int a = 0; a < 3; ++a)
-      for (int b = 0; b < 3; ++b)
-        if (vid[i][a] == vid[j][b]) return true;
-    return false;
-  };
+  const TriSoup soup(in);
+  const auto& tri = soup.tri;
+  const auto& vid = soup.vid;
   // Unit normal of face f (or false if degenerate).
   auto unitN = [&](int f, vec3& n) {
     const vec3 raw = la::cross(tri[f][1] - tri[f][0], tri[f][2] - tri[f][0]);
@@ -3058,7 +3040,7 @@ StageResult<Manifold::Impl> SnapNearCoplanarClusters(const Manifold::Impl& in,
   bool anyNear = false;
   for (int i = 0; i < nTri; ++i)
     for (int j = i + 1; j < nTri; ++j) {
-      if (!bboxOverlap(i, j) || sharesVert(i, j)) continue;
+      if (!soup.BBoxOverlap(i, j) || soup.SharesVert(i, j)) continue;
       if (pairGap(i, j) >= eps) continue;
       if (!TrianglesOverlap2D(tri[i], tri[j])) continue;
       uf.unite(i, j);
