@@ -382,3 +382,9 @@ R5. THE DESIGN READS AS MORE SETTLED THAN THE CODE. Everything past the gate is
     validated at fragment scale with exact-rational probes, not built. The unbuilt
     axes (SoS, subtraction, the halfedge boundary build, the seed policy) are named
     opens, and a reader should not mistake "fragment-validated" for "landed".
+
+KNOWN OUTPUT ARTIFACT (ent-verify, disclosure): on rotated/irrational junctions
+the emission weld can materialize a single inert zero-area triangle (paired
+edges, topology sound, oracle-exact volume; IsSelfIntersecting-blind).  The
+clean fix is the once-only fold-vertex identity hardening (queued, simplicity
+pass); the R1 weld blind spot remains the underlying open.
