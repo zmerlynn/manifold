@@ -469,11 +469,17 @@ Cluster map (root mechanism, not which string fires):
   simple orientation flip).  Production-reachable.
 - CLUSTER 2 - SEAM SUB-FACE EXACT RESOLVABILITY.  RecordSeams / EmitSeamedFace
   cannot build a face's 2D arrangement exactly at a degenerate incidence.  2a
-  openscad's residue = the near-coplanar sliver (folds into 1a) PLUS a cap-INTERIOR
-  pierce (a seam endpoint inside a cap FACE, which the entanglement recovery does
-  not record because it only owns cap-overlay vertices); 2b GT7081's shells, whose
-  sub-mechanism is not yet characterized at this granularity (probe queued).
-  Production-reachable.
+  openscad's residue (per-pair measured, reg3d-c2a): a wall-wall endpoint on a
+  cap-cluster plane is always a cap-boundary-edge crossing the fold owns (capvert),
+  so a cap-INTERIOR seam endpoint arises ONLY when a wall PIERCES a cap FACE - and
+  that pierce SEAMS the cap (the coplanar/transversal ENTANGLEMENT the fold declines
+  by design), so it is the Cluster-1 coordinated-emission wall, NOT a bounded
+  endpoint injection (see closure plan 1).  The measured openscad residue splits
+  into: a capvert share the entanglement recovery's proper-cross gate excludes
+  (a bounded recovery WIDENING - fold-owned vertex-on-plane touches), the
+  near-coplanar sliver (folds into 1a), and the cap-seaming entanglement.  2b
+  GT7081's shells, whose sub-mechanism is not yet characterized at this
+  granularity (probe queued).  Production-reachable.
 - CLUSTER 3 - SoS / EXACT-TIE RESIDUE + the unbuilt >2-sheet radial branch.  No
   corpus carrier forces it (reg3d-radial: zero book-of-pages lines; every corpus
   nPts!=2 is a 2-sheet truncation, not a triple point).  The radial reduction is
@@ -496,9 +502,23 @@ Closure plan (ordered by production-reachability x carriers-unlocked x closure
 shape; DC = decision-completion, PROOF = proof-shaped terminal adjudication,
 RESEARCH = memo with a required proof sketch, TRIPWIRE = kernel-vendor decision):
 
-1. CRUCIBLE C-2a (DC).  openscad cap-INTERIOR pierce injection: record the
-   cap-interior seam endpoint as new fold input (the entanglement lane named the
-   shape).  Cheapest genuine completion; narrows openscad's residue.
+1. CRUCIBLE C-2a (RESEARCH - reclassified from DC; reg3d-c2a).  The census scoped
+   this as a bounded cap-INTERIOR pierce injection; the per-pair measurement + a
+   constructed minimal fixture REFUTE that.  A cap-interior seam endpoint arises
+   ONLY from a wall piercing a cap face, which SEAMS the cap = the coplanar/
+   transversal entanglement the fold declines by design; the F11 seam truncation is
+   only a symptom, with the F3 fold-decline underneath (proven: the same fixture
+   with the plug RESTING on the cap - no pierce - resolves; piercing it fails
+   closed; openscad's failing component is likewise cap-seam-entangled).  Closing it
+   needs the fold to arrange around the transversal seam and classify each split
+   sub-cell by the real 3D coupled winding = the Cluster-1 coordinated-emission
+   wall, not a bounded completion.  openscad is UNCHANGED (no RecordSeams-only fix
+   resolves a cap-seam-entangled component).  Fail-closed, pinned
+   (Regularize_CapSeamingEntanglement_CapInteriorPierce_FailClosed).  SEPARATE
+   bounded-ish lever surfaced but out of scope: the capvert recovery WIDENING (the
+   entanglement recovery's proper-cross gate excludes fold-owned vertex-on-plane
+   touches) - it does NOT unlock openscad alone (F3 underneath), so it is an
+   emission-side follow-up, not this completion.
 2. CRUCIBLE C-2b (probe-first).  Characterize GT7081's two dirty shells: cap-plane
    truncation the recovery misses / cap-interior injection / a genuine >2-sheet.
    Anatomy decides whether it collapses into C-2a or escalates to Cluster 3.

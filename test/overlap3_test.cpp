@@ -1509,6 +1509,97 @@ TEST(Overlap3, Regularize_ExactZeroTie_BarsCrossZ_Resolves) {
   EXPECT_NEAR(vol, out2.Volume(), 1e-6 * vol) << "not tol-invariant";
 }
 
+static Manifold::Impl NBoxSoup(const std::vector<Manifold>& ms) {
+  MeshGL64 out;
+  out.numProp = 3;
+  for (const Manifold& m : ms) {
+    const MeshGL64 g = m.GetMeshGL64();
+    const uint64_t base = out.NumVert();
+    const size_t np = g.numProp;
+    for (uint64_t v = 0; v < g.NumVert(); ++v)
+      for (int k = 0; k < 3; ++k)
+        out.vertProperties.push_back(g.vertProperties[v * np + k]);
+    for (uint64_t t : g.triVerts) out.triVerts.push_back(t + base);
+  }
+  out.runOriginalID.push_back(Manifold::ReserveIDs(1));
+  return Manifold::Impl(out);
+}
+
+// COPLANAR/TRANSVERSAL CAP-SEAMING ENTANGLEMENT (census Cluster 2a, ledger
+// C-2a). A base coplanar cap CLUSTER at z=2 - box A [0,6]x[0,6]x[0,2] top cap
+// coincident with box B [1,5]x[1,5]x[0,2] top cap (a mult-2 overlap the fold
+// owns) - is PIERCED by a small box C [2,4]x[2,4] straddling z[1,3].  C's four
+// walls cross the z=2 plane strictly INSIDE the cap faces, so the coplanar cap
+// faces are TRANSVERSALLY SEAMED (A.seamed set on a cluster face) and the
+// wall-cap seam endpoints land in the cap INTERIOR (C's footprint corners /
+// cap-triangulation diagonals - NOT an overlay vertex the fold owns).
+//
+// This is the C-2a target the census named "cap-INTERIOR pierce injection" and
+// classified a bounded decision-completion.  This lane's per-pair measurement
+// (reg3d-c2a) REFUTES the bounded classification: a wall-wall seam endpoint on
+// a cap-cluster plane is where two walls' bottom edges (both in the plane)
+// meet, and a wall bottom edge in the cluster plane is a cap BOUNDARY edge - so
+// their meeting is a fold overlay vertex (capvert), never strictly
+// cap-interior.  A cap-INTERIOR endpoint therefore only arises when a wall
+// PIERCES a cap FACE, and that pierce SEAMS the cap = the coplanar/transversal
+// entanglement the fold declines BY DESIGN (a transversal seam splits a fold
+// cell with a 3D winding jump the coplanar mult does not carry).  So the F11
+// seam truncation here is only a SYMPTOM; the fold-decline (F3) sits underneath
+// (verified in-lane: measured seamedCluster>0 with the seams recorded).
+// Injecting the pierce and arranging the cap around the transversal seam =
+// unifying the coplanar fold with the transversal seam machinery + classifying
+// each split sub-cell by the real 3D coupled winding = RESEARCH-GRADE (the
+// Cluster-1 coordinated-emission wall), not a bounded endpoint injection.  So
+// this FAILS CLOSED (narrower than a silent wrong resolve), documenting the
+// wall.  The oracle exists (the union is a valid solid, volume A + C-above-cap
+// = 72 + 4 = 76) - the geometry is resolvable in principle, just not by a
+// bounded completion.
+//
+// CONTRAST (the delta is the PIERCE): the same A+B cluster with C sitting ON
+// the cap (bottom at z=2, no transversal pierce - a buried plug of the
+// coplanar-fold family) RESOLVES oracle-true (volume 72 + 8 = 80).  Piercing vs
+// resting on the cap is the entire boundary between the fold family (resolves)
+// and the cap-seaming entanglement (research-grade fail-closed).
+TEST(Overlap3, Regularize_CapSeamingEntanglement_CapInteriorPierce_FailClosed) {
+  const Manifold A = Manifold::Cube({6, 6, 2});                       // [0,6]^2
+  const Manifold B = Manifold::Cube({4, 4, 2}).Translate({1, 1, 0});  // [1,5]^2
+  const Manifold Cpierce =
+      Manifold::Cube({2, 2, 2}).Translate({2, 2, 1});  // [2,4]^2 z[1,3] PIERCES
+  const Manifold::Impl in = NBoxSoup({A, B, Cpierce});
+  ASSERT_TRUE(in.IsManifold() && in.Is2Manifold());
+  const ComponentEnumProbe p = EnumerateComponent_Probe(
+      in, {}, in.bBox_.Center() + vec3(97.1, 33.7, 51.3));
+  EXPECT_GT(p.coplanarClusterFaces, 0) << "must reach the coplanar cap cluster";
+  EXPECT_GT(p.seamCount, 0) << "the pierce must transversally seam the cap";
+
+  const double eps = EpsilonFromScale(in.bBox_.Scale(), 1000);
+  const RegularizeResult r = ResolveComponentDirect(in, eps);
+  // FAIL CLOSED: the cap-seaming entanglement is research-grade, never a silent
+  // wrong resolve.  Today the RecordSeams truncation (F11 "degenerate
+  // incidence") is the first gate; the fold-decline (F3) sits underneath it.
+  ASSERT_TRUE(r.fatal.has_value())
+      << "the cap-seaming entanglement must fail closed, not resolve: "
+      << r.detail;
+  EXPECT_EQ(*r.fatal, FatalReason::DirtyComponentUnresolved) << r.detail;
+  EXPECT_FALSE(r.impl.has_value()) << "fail-closed yields no partial output";
+
+  // CONTRAST: C sitting ON the cap (no pierce) is the resolving buried-plug
+  // case.
+  const Manifold Crest =
+      Manifold::Cube({2, 2, 2}).Translate({2, 2, 2});  // [2,4]^2 z[2,4] RESTS
+  const Manifold::Impl inRest = NBoxSoup({A, B, Crest});
+  const RegularizeResult rRest = ResolveComponentDirect(inRest, eps);
+  ASSERT_FALSE(rRest.fatal.has_value())
+      << "the non-piercing plug (fold family) must resolve: " << rRest.detail;
+  ASSERT_TRUE(rRest.impl.has_value());
+  const Manifold outRest(GetMeshGLImpl<double, uint64_t>(*rRest.impl, -1));
+  EXPECT_EQ(outRest.Decompose().size(), 1u) << "rest: must be one solid";
+  EXPECT_FALSE(rRest.impl->IsSelfIntersecting()) << "rest: self-intersects";
+  const double volRest = outRest.Volume();
+  EXPECT_GT(volRest, 79.99) << "rest: volume below the union band";
+  EXPECT_LT(volRest, 80.01) << "rest: volume above the union band";
+}
+
 TEST(Overlap3, Regularize_WithinComponentCoplanar_BridgedCaps_Resolves) {
   const Manifold::Impl in(BridgedCaps());
   ASSERT_TRUE(in.IsManifold() && in.Is2Manifold())
