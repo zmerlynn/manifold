@@ -1888,6 +1888,50 @@ BEnumeration EnumerateSelfCrossings(const Manifold::Impl& in) {
   return out;
 }
 
+// Do two coplanar (or near-coplanar) triangles share positive 2D area,
+// projected into Ti's plane?  Only genuinely OVERLAPPING faces need folding;
+// the coplanar tiles of one flat face (an annulus, a subdivided facet) merely
+// abut and must NOT cluster - a vertex strictly inside the other, or a
+// properly-crossing edge pair, is the area-overlap witness (triangles are
+// convex, so this is exhaustive).  Shared by the exact and near-coplanar
+// cluster detectors.
+bool TrianglesOverlap2D(const std::array<vec3, 3>& Ti,
+                        const std::array<vec3, 3>& Tj) {
+  const vec3 e1 = la::normalize(Ti[1] - Ti[0]);
+  const vec3 nrm = la::cross(Ti[1] - Ti[0], Ti[2] - Ti[0]);
+  const double nl = la::length(nrm);
+  if (!(nl > 0.0)) return false;
+  const vec3 e2 = la::cross(nrm / nl, e1);
+  const vec3 o = Ti[0];
+  auto pr = [&](const vec3& P) {
+    return vec2(la::dot(P - o, e1), la::dot(P - o, e2));
+  };
+  vec2 A[3] = {pr(Ti[0]), pr(Ti[1]), pr(Ti[2])};
+  vec2 B[3] = {pr(Tj[0]), pr(Tj[1]), pr(Tj[2])};
+  auto cr = [](const vec2& u, const vec2& v) { return u.x * v.y - u.y * v.x; };
+  auto strictIn = [&](const vec2& p, const vec2* T) {
+    const double d0 = cr(T[1] - T[0], p - T[0]);
+    const double d1 = cr(T[2] - T[1], p - T[1]);
+    const double d2 = cr(T[0] - T[2], p - T[2]);
+    const bool neg = d0 < 0 || d1 < 0 || d2 < 0;
+    const bool pos = d0 > 0 || d1 > 0 || d2 > 0;
+    return !(neg && pos) && d0 != 0 && d1 != 0 && d2 != 0;
+  };
+  for (int k = 0; k < 3; ++k)
+    if (strictIn(A[k], B) || strictIn(B[k], A)) return true;
+  auto proper = [&](const vec2& p1, const vec2& p2, const vec2& p3,
+                    const vec2& p4) {
+    const double d1 = cr(p2 - p1, p3 - p1), d2 = cr(p2 - p1, p4 - p1);
+    const double d3 = cr(p4 - p3, p1 - p3), d4 = cr(p4 - p3, p2 - p3);
+    return ((d1 > 0) != (d2 > 0)) && ((d3 > 0) != (d4 > 0)) && d1 != 0 &&
+           d2 != 0 && d3 != 0 && d4 != 0;
+  };
+  for (int a = 0; a < 3; ++a)
+    for (int b = 0; b < 3; ++b)
+      if (proper(A[a], A[(a + 1) % 3], B[b], B[(b + 1) % 3])) return true;
+  return false;
+}
+
 // EXACT-COPLANAR FOLD, cluster detection (docs/Regularize3D.md coplanar axis).
 // Union non-self-adjacent, bbox-overlapping faces that are EXACTLY coplanar -
 // every vertex of each lies on the other's plane, decided by the level-0
@@ -1931,47 +1975,8 @@ std::vector<int> DetectCoplanarClusters(const Manifold::Impl& in) {
         return false;
     return true;
   };
-  // Do the two coplanar triangles share positive 2D area?  Only genuinely
-  // OVERLAPPING coplanar faces need folding; the coplanar tiles of one flat
-  // face (an annulus, a subdivided facet) merely abut and must NOT cluster - a
-  // vertex strictly inside the other, or a properly-crossing edge pair, is the
-  // area-overlap witness (triangles are convex, so this is exhaustive).
   auto overlap2D = [&](int i, int j) {
-    const vec3 e1 = la::normalize(tri[i][1] - tri[i][0]);
-    const vec3 nrm = la::cross(tri[i][1] - tri[i][0], tri[i][2] - tri[i][0]);
-    const double nl = la::length(nrm);
-    if (!(nl > 0.0)) return false;
-    const vec3 e2 = la::cross(nrm / nl, e1);
-    const vec3 o = tri[i][0];
-    auto pr = [&](const vec3& P) {
-      return vec2(la::dot(P - o, e1), la::dot(P - o, e2));
-    };
-    vec2 A[3] = {pr(tri[i][0]), pr(tri[i][1]), pr(tri[i][2])};
-    vec2 B[3] = {pr(tri[j][0]), pr(tri[j][1]), pr(tri[j][2])};
-    auto cr = [](const vec2& u, const vec2& v) {
-      return u.x * v.y - u.y * v.x;
-    };
-    auto strictIn = [&](const vec2& p, const vec2* T) {
-      const double d0 = cr(T[1] - T[0], p - T[0]);
-      const double d1 = cr(T[2] - T[1], p - T[1]);
-      const double d2 = cr(T[0] - T[2], p - T[2]);
-      const bool neg = d0 < 0 || d1 < 0 || d2 < 0;
-      const bool pos = d0 > 0 || d1 > 0 || d2 > 0;
-      return !(neg && pos) && d0 != 0 && d1 != 0 && d2 != 0;
-    };
-    for (int k = 0; k < 3; ++k)
-      if (strictIn(A[k], B) || strictIn(B[k], A)) return true;
-    auto proper = [&](const vec2& p1, const vec2& p2, const vec2& p3,
-                      const vec2& p4) {
-      const double d1 = cr(p2 - p1, p3 - p1), d2 = cr(p2 - p1, p4 - p1);
-      const double d3 = cr(p4 - p3, p1 - p3), d4 = cr(p4 - p3, p2 - p3);
-      return ((d1 > 0) != (d2 > 0)) && ((d3 > 0) != (d4 > 0)) && d1 != 0 &&
-             d2 != 0 && d3 != 0 && d4 != 0;
-    };
-    for (int a = 0; a < 3; ++a)
-      for (int b = 0; b < 3; ++b)
-        if (proper(A[a], A[(a + 1) % 3], B[b], B[(b + 1) % 3])) return true;
-    return false;
+    return TrianglesOverlap2D(tri[i], tri[j]);
   };
   DisjointSets uf(nTri);
   bool any = false;
@@ -2901,6 +2906,195 @@ StageResult<Manifold::Impl> RunCandidateBBuild(
   return BuildImpl(emitted, eps);
 }
 
+// NEAR-COPLANAR WIDEN + GLOBAL-PLANARITY GUARD (docs/Regularize3D.md stage-5;
+// reg3d-nearcoplanar-research candidate (a)).  The exact-coplanar fold only
+// admits pairs whose six cross orient3d filter signs are all 0 (coplanarity gap
+// below ~1 ULP).  Faces within eps of coplanar but ABOVE that bound are
+// DECIDABLE non-coplanar yet their arrangement cells are sub-eps thin:
+// enumerated transversally they double-round to slivers (unresolvable sheet
+// contact) - the thin band this pass closes.
+//
+// This is an INPUT-SIDE PLANARIZATION, run BEFORE B's enumeration/winding/emit,
+// so B RE-DERIVES the whole arrangement from the snapped input (the thin cell
+// ceases to exist).  It is NOT an emission-time snap (those fight decisions the
+// arrangement already made, ExactArrangement3D variant-E kill); it perturbs the
+// INPUT by <= eps inside the standing epsilon-valid contract, coordinated by
+// construction.
+//
+//  1. WIDEN: union bbox-overlapping, non-self-adjacent faces that OVERLAP in 2D
+//     and whose max cross vertex-plane distance is < eps (the near band).  A
+//     cluster is EXACT (skip - the existing fold owns it, bitwise) unless some
+//     admitted pair is filter-non-coplanar (a genuine near-band pair).
+//  2. GLOBAL-PLANARITY GUARD (the curvature safety net + snap target): fit ONE
+//     plane to a near cluster (centroid + area-weighted normal); if any member
+//     vertex deviates > eps, FAIL CLOSED (a curved near-coplanar chain,
+//     distinct from the SoS residue) - a strictly-narrower refusal than today's
+//     blanket.
+//  3. SNAP each near cluster's verts onto its fitted plane (<= eps move). After
+//     the snap the cluster is EXACTLY coplanar (to ~1 ULP), so the landed exact
+//     fold in RunCandidateBBuild handles it verbatim and the m == winding-jump
+//     self-check holds by the exact argument.
+//
+// Returns: {value} = the snapped copy when a near cluster was snapped;
+//          {} (no value, no fatal) when there is no near-band cluster (the
+//          caller runs on the ORIGINAL input, bitwise); Fatal on a guard
+//          failure or a vertex shared by two near clusters (an inconsistent
+//          snap).
+StageResult<Manifold::Impl> SnapNearCoplanarClusters(const Manifold::Impl& in,
+                                                     double eps) {
+  const int nTri = static_cast<int>(in.NumTri());
+  std::vector<std::array<vec3, 3>> tri(nTri);
+  std::vector<std::array<int, 3>> vid(nTri);
+  std::vector<vec3> lo(nTri), hi(nTri);
+  for (int t = 0; t < nTri; ++t) {
+    for (int k = 0; k < 3; ++k) {
+      vid[t][k] = in.halfedge_.Start(3 * t + k);
+      tri[t][k] = in.vertPos_[vid[t][k]];
+    }
+    lo[t] = la::min(la::min(tri[t][0], tri[t][1]), tri[t][2]);
+    hi[t] = la::max(la::max(tri[t][0], tri[t][1]), tri[t][2]);
+  }
+  auto bboxOverlap = [&](int i, int j) {
+    return !(hi[i].x < lo[j].x || hi[j].x < lo[i].x || hi[i].y < lo[j].y ||
+             hi[j].y < lo[i].y || hi[i].z < lo[j].z || hi[j].z < lo[i].z);
+  };
+  auto sharesVert = [&](int i, int j) {
+    for (int a = 0; a < 3; ++a)
+      for (int b = 0; b < 3; ++b)
+        if (vid[i][a] == vid[j][b]) return true;
+    return false;
+  };
+  // Unit normal of face f (or false if degenerate).
+  auto unitN = [&](int f, vec3& n) {
+    const vec3 raw = la::cross(tri[f][1] - tri[f][0], tri[f][2] - tri[f][0]);
+    const double l = la::length(raw);
+    if (!(l > 0.0)) return false;
+    n = raw / l;
+    return true;
+  };
+  // Local coplanarity gap of the pair: the smaller of the two directional maxes
+  // (each triangle's verts to the OTHER's plane).  The min direction is the
+  // smaller face's verts against the larger plane = the true gap over the
+  // shared footprint; the max direction extrapolates one plane across the
+  // other's full extent (diameter-amplified, a red herring per the research
+  // memo).  A macro transversal crossing has BOTH directions large, so min
+  // still rejects it. Returns +inf if either plane is degenerate.
+  auto pairGap = [&](int i, int j) {
+    vec3 ni, nj;
+    if (!unitN(i, ni) || !unitN(j, nj)) {
+      return std::numeric_limits<double>::infinity();
+    }
+    double di = 0.0, dj = 0.0;
+    for (int k = 0; k < 3; ++k) {
+      di = std::max(di, std::abs(la::dot(ni, tri[j][k] - tri[i][0])));
+      dj = std::max(dj, std::abs(la::dot(nj, tri[i][k] - tri[j][0])));
+    }
+    return std::min(di, dj);
+  };
+  auto filterCoplanar = [&](int i, int j) {
+    for (int k = 0; k < 3; ++k)
+      if (Orient3DFilterSign(tri[i][0], tri[i][1], tri[i][2], tri[j][k]) != 0)
+        return false;
+    for (int k = 0; k < 3; ++k)
+      if (Orient3DFilterSign(tri[j][0], tri[j][1], tri[j][2], tri[i][k]) != 0)
+        return false;
+    return true;
+  };
+
+  DisjointSets uf(nTri);
+  std::vector<char> nearFace(nTri, 0);  // touched a genuine near-band pair
+  bool anyNear = false;
+  for (int i = 0; i < nTri; ++i)
+    for (int j = i + 1; j < nTri; ++j) {
+      if (!bboxOverlap(i, j) || sharesVert(i, j)) continue;
+      if (pairGap(i, j) >= eps) continue;
+      if (!TrianglesOverlap2D(tri[i], tri[j])) continue;
+      uf.unite(i, j);
+      if (!filterCoplanar(i, j)) {  // near band, not exact-coplanar
+        nearFace[i] = nearFace[j] = 1;
+        anyNear = true;
+      }
+    }
+  // No near-band cluster: the caller runs on the ORIGINAL input, bitwise.  The
+  // exact path is thus wholly unperturbed by this pass.
+  if (!anyNear) return StageResult<Manifold::Impl>{};
+
+  // Group faces by root; a cluster is NEAR (to be snapped) iff it holds a
+  // near-band face, EXACT (left bitwise for the existing fold) otherwise.
+  std::map<int, std::vector<int>> members;
+  for (int f = 0; f < nTri; ++f)
+    members[static_cast<int>(uf.find(f))].push_back(f);
+
+  // Snap into a copy; reads stay against the pristine `in`.  A vertex in two
+  // NEAR clusters is an inconsistent snap (fail closed, never silently pick
+  // one).
+  Manifold::Impl work = in;
+  std::vector<int> vertCluster(in.NumVert(), -1);
+  int clusterId = 0;
+  for (auto& [root, faces] : members) {
+    if (faces.size() < 2) continue;
+    bool clusterNear = false;
+    for (int f : faces) clusterNear = clusterNear || nearFace[f];
+    if (!clusterNear) continue;  // exact cluster: leave bitwise
+
+    // Fitted plane: area-weighted normal (aligned to face 0 so anti-oriented
+    // members do not cancel) through the member-vertex centroid.
+    std::set<int> verts;
+    for (int f : faces)
+      for (int k = 0; k < 3; ++k) verts.insert(vid[f][k]);
+    vec3 ref;
+    if (!unitN(faces[0], ref)) {
+      return StageResult<Manifold::Impl>::Fatal(
+          FatalReason::DirtyComponentUnresolved,
+          "candidate B: near-coplanar cluster has a degenerate face - "
+          "fail-closed");
+    }
+    vec3 nSum(0.0, 0.0, 0.0);
+    for (int f : faces) {
+      const vec3 raw = la::cross(tri[f][1] - tri[f][0], tri[f][2] - tri[f][0]);
+      nSum += (la::dot(raw, ref) < 0.0) ? -raw : raw;
+    }
+    const double nl = la::length(nSum);
+    if (!(nl > 0.0)) {
+      return StageResult<Manifold::Impl>::Fatal(
+          FatalReason::DirtyComponentUnresolved,
+          "candidate B: near-coplanar cluster normal is degenerate - "
+          "fail-closed");
+    }
+    const vec3 N = nSum / nl;
+    vec3 cen(0.0, 0.0, 0.0);
+    for (int v : verts) cen += in.vertPos_[v];
+    cen /= static_cast<double>(verts.size());
+
+    // GLOBAL-PLANARITY GUARD: max member deviation from the fitted plane must
+    // be within eps, else this is a curved near-coplanar chain the fold cannot
+    // carry (the anti-chain-reaction net).  Fail closed, distinctly named.
+    for (int v : verts)
+      if (std::abs(la::dot(N, in.vertPos_[v] - cen)) > eps) {
+        return StageResult<Manifold::Impl>::Fatal(
+            FatalReason::DirtyComponentUnresolved,
+            "candidate B: near-coplanar cluster fails the global-planarity "
+            "guard (curved chain, max deviation > eps) - fail-closed");
+      }
+    // SNAP onto the fitted plane; flag an inconsistent multi-cluster vertex.
+    for (int v : verts) {
+      if (vertCluster[v] >= 0 && vertCluster[v] != clusterId) {
+        return StageResult<Manifold::Impl>::Fatal(
+            FatalReason::DirtyComponentUnresolved,
+            "candidate B: a vertex lies in two near-coplanar clusters "
+            "(inconsistent snap) - fail-closed");
+      }
+      vertCluster[v] = clusterId;
+      work.vertPos_[v] = in.vertPos_[v] - la::dot(N, in.vertPos_[v] - cen) * N;
+    }
+    ++clusterId;
+  }
+
+  work.CalculateBBox();
+  work.epsilon_ = in.epsilon_;
+  return StageResult<Manifold::Impl>::Ok(std::move(work));
+}
+
 // Candidate B (docs/Regularize3D.md "B's mechanism") - the dirty-core resolver.
 // The validated MECHANISM (enumeration + coupled winding) is ported; THE BUILD
 // (the {w_S>=1} halfedge boundary emission) reuses RemoveOverlaps2D per crossed
@@ -2912,11 +3106,20 @@ StageResult<Manifold::Impl> RunCandidateBBuild(
 // (IsSelfIntersecting).
 StageResult<Manifold::Impl> RunCandidateB(const Manifold::Impl& dirty,
                                           double eps) {
+  // NEAR-COPLANAR PRE-PASS (docs/Regularize3D.md stage-5): planarize any
+  // within-eps near-coplanar overlap cluster onto its fitted plane so B
+  // re-derives the arrangement from an exactly-coplanar input.  No near cluster
+  // -> `dirty` is used bitwise (the exact path is unperturbed); a curved chain
+  // (global-planarity guard failure) fails closed here, distinctly named.
+  StageResult<Manifold::Impl> snapped = SnapNearCoplanarClusters(dirty, eps);
+  if (snapped.fatal) return snapped;
+  const Manifold::Impl& in = snapped.value ? *snapped.value : dirty;
+
   // Exactly-coplanar face clusters are resolved by the in-plane fold; the
   // transversal seam enumeration skips their pairs so their exact-zero coplanar
   // ties do not raise boundaryTouch.
-  const std::vector<int> face2cluster = DetectCoplanarClusters(dirty);
-  const BuildArrangement A = RecordSeams(dirty, face2cluster);
+  const std::vector<int> face2cluster = DetectCoplanarClusters(in);
+  const BuildArrangement A = RecordSeams(in, face2cluster);
   if (A.boundaryTouch) {
     // A deciding pierce predicate hit an exact-zero / filter-uncertain boundary
     // that the coplanar fold does NOT consume: a NON-coplanar vertex-on-face /
@@ -2934,7 +3137,7 @@ StageResult<Manifold::Impl> RunCandidateB(const Manifold::Impl& dirty,
         "candidate B: a self-crossing pair had a non-2-endpoint seam "
         "(degenerate incidence) - fail-closed");
   }
-  return RunCandidateBBuild(dirty, A, face2cluster, eps);
+  return RunCandidateBBuild(in, A, face2cluster, eps);
 }
 
 // Compose the surviving components back into one Impl by CONCATENATION - no
