@@ -142,3 +142,109 @@ near-coplanar sliver.
   incidences get bit-identical canonical triple identity (no per-face-pair
   double-construction disagreement -> no dropped faces), i.e. the R1/once-only /
   triple-point payoff, NOT the sliver.
+
+## Step 4: PREDICATE FORMS + bit-growth (measured on real GT7863 planes) - DONE
+predicates.py + radial measurement:
+- CURRENT kernel = ONE form: orient3d (4 input POINTS), degree-3, max 136-bit
+  integer on real GT7863 verts; accumulator 218 lines / 112 limbs (proven bound).
+- PLANE-REP needs NEW predicate FORMS over PLANE COEFFICIENTS (normal=deg-2,
+  offset=deg-3 in input coords):
+  P1 triple-point-vs-plane (side/orient) = 4-plane homogeneous determinant,
+     DEGREE-9, measured max 387-bit / median 367-bit (~2.8x current). Replaces
+     every constructed-point orient3d (WindingAt probes, in-face tests).
+  P2 radial order around a >2-sheet edge = dot(cross(uC,uD),axis) with
+     uX=cross(nX, cross(nA,nB)), DEGREE-16, measured max 706-bit / median 653-bit
+     (~5x current). Currently UNBUILT + UNFORCED (reg3d-radial: 0 book-of-pages
+     lines) - but plane-rep FORCES it: the degenerate concurrences it stops
+     rounding-away (PokedCube spike, GT7863's 515 exact incidences) ARE genuine
+     >=3-plane radial junctions.
+  P3 triple-point coordinate materialization (Cramer) = degree-7/degree-6 ratio,
+     measured numerator ~308-bit / denominator ~298-bit. Per arrangement vertex.
+  P4 at-rounding merge decision = degree-7 coordinate vs rational eps.
+- TRIPWIRE: current doc allows ONE predicate FORM (this integer orient3d) + extra
+  CALLERS. Plane-rep needs 2-3 NEW FORMS (P1 deg-9, P2 deg-16, P3 construction) =>
+  crosses the tripwire's "SECOND predicate form -> VENDOR Shewchuk predicates.c".
+  The 218-line accumulator SUBSTRATE survives (generic exact-integer sign, 112
+  limbs has headroom for 706 bits) but each new form needs its own monomial
+  enumeration (ExactOrient3D's 24-perm / SoSOrient3D's 192-monomial multiply).
+
+## Step 5: WHAT SURVIVES vs REWRITTEN (stage map, from src read) - DONE
+- DECOMPOSE / GATE / DISPATCH / COMPOSE: SURVIVE unchanged (component scope,
+  IsSelfIntersecting+DetectCoplanarClusters routing in double, compose=concat).
+- PLANARIZE (stage-5 SnapNearCoplanarClusters): the input-side snap is SUBSUMED;
+  its DECISION (which near-coplanar clusters merge) survives as a symbolic at-
+  output snap-consistency rule (probe step 3: the sliver merge is stage-5
+  relocated). Net: reconceived, decision preserved.
+- ENUMERATE (RecordSeams/EnumerateSelfCrossings/EdgePiercesTri): crossing-
+  EXISTENCE tests SURVIVE (EdgePiercesTri = orient3d on input points, degree-3);
+  seam ENDPOINT POSITIONS become plane-triples (symbolic) not SegPlanePoint
+  (double). ~half rewritten.
+- WIND (WindingAt/RobustWinding): coupled-integer crossing logic + seed ray
+  SURVIVE; the probe POINT becomes a symbolic cell rep so its per-crossing test
+  upgrades degree-3 -> degree-9 (P1). Logic survives, predicate form upgrades.
+- EMIT (EmitSeamedFace 2D overlay via RemoveOverlaps2D + BuildImpl +
+  SplitTouchingSheets weld): MOSTLY REWRITTEN. The per-face 2D overlay -> symbolic
+  cell extraction; the eps-weld + touching-sheet split -> symbolic plane-triple
+  identity + P4 at-output snap. This is the bulk of the rewrite.
+- EXACT KERNEL accumulator (218 lines): SUBSTRATE survives; predicate front-ends
+  multiply (P1/P2/P3 enumerations, or vendored Shewchuk).
+
+## Step 6: COST TABLE + VERDICT - DONE
+(a) PREDICATE FORMS: current 1 form deg-3/136-bit -> plane-rep 3-4 forms:
+    P1 deg-9/387-bit, P2 deg-16/706-bit, P3 deg-7 ratio/~308-bit construct,
+    P4 deg-7 compare. Crosses the tripwire => vendor Shewchuk.
+(b) SURVIVES: decompose/gate/dispatch/compose (all), winding LOGIC, crossing-
+    existence tests, the accumulator substrate. REWRITTEN: EMIT (2D overlay +
+    weld/STS -> symbolic cells + at-output snap), seam POSITIONS, stage-5 (->
+    at-output), WIND predicate form.
+(c) LOC (vs record: B core ~1.9k over stages 1-3, accumulator 218): symbolic
+    substrate ~300-500; new predicate forms ~600-1200 hand-rolled OR ~4000
+    vendored (Shewchuk); >2-sheet radial rule ~300-500; symbolic cell complex +
+    boundary (replacing EmitSeamedFace+BuildImpl+STS) ~800-1500; at-output snap
+    ~200-400; ENUMERATE/WIND rewire ~300-500. TOTAL new/rewritten ~2500-4500 LOC
+    (+ up to ~4000 vendored) = a re-architecture of the resolver's BACK HALF,
+    equalling or exceeding the entire landed B core.
+(d) OUTPUT-EXTRACTION difficulty class: PokedCube = TRIVIAL ROUNDING (macroscopic
+    pierce pts) but its wall is emission not extraction; GT7863 sliver = NEEDS
+    SNAP-CONSISTENCY RULE (weld-collapse: rounds distinct at ~900-2260 ULPs but
+    within eps; the uniform weld merges -> collapse; rule = symbolic union-find
+    replacing the eps-weld = stage-5 at output). NOT research; but the sub-eps
+    strip is below representability so the "fix" DROPS it = merges the sheets =
+    what stage-5 already does.
+(e) CARRIER COVERAGE (measured, not hope): plane-rep makes the arrangement EXACT
+    (removes the precision failure mode) but CLOSES NEITHER lead carrier alone:
+    - PokedCube (1b): NOT closed by plane-rep - needs the negative-winding /
+      double-sheet emission rule (classification completion, ORTHOGONAL to vertex
+      precision, confirmed by the consistent winding field + s7). Necessary-for-
+      exactness at the spike but not sufficient.
+    - GT7863/GT7081 (1a): arrangement closes exactly, but output re-collapses the
+      sub-eps sliver via the weld unless the snap rule (=stage-5) is added; the
+      SAME closure is reachable by widening stage-5 (census C-1a option) at far
+      lower cost. Plane-rep's UNIQUE payoff = consistent identity for the
+      515-exact-incidence class (R1 weld-twin retire + exact triple points).
+    - cap-seaming (openscad 2a): dies UPSTREAM (F11/F3 fold-decline), not the
+      emission wall; plane-rep gives the junction canonical identity but F3 is a
+      design decline (transversal-through-cap = coordinated-emission wall).
+    So expected RED closed by plane-rep ALONE = ZERO; it is the correct long-term
+    SUBSTRATE for R1 + triple points, fixing no measured RED a cheaper targeted
+    fix (stage-5 widen for 1a; winding-jump emission for 1b) does not also close.
+(f) PERF order-of-magnitude (measured): same asymptotics (O(F^2) enumerate +
+    O(ntri) winding); constant factor: exact predicate ~2.8x wider (136->387 bit)
+    for P1, ~5x (706 bit) for P2, PLUS a per-arrangement-vertex 3x3 exact Cramer
+    solve (~308-bit rationals). Filter-first keeps the clean fast path comparable;
+    the exact-heavy dirty path is ~3-10x slower + fires more often (exact
+    everywhere the double pipeline was uncertain). GT7081's winding is already
+    seconds/query; 3-10x that is the risk. Within ONE order of magnitude.
+
+VERDICT (probe): exact plane-rep DOES make the arrangement close (winding-
+consistency theorem, confirmed field) and the output-extraction wall RELOCATES
+from mid-pipeline to the assembly WELD (measured: sub-eps sliver rounds to
+distinct doubles ~900-2260 ULPs apart, then the eps-weld merges = R1). It closes
+NEITHER lead carrier by itself (PokedCube needs the winding-jump emission;
+GT7863's sliver needs the snap rule = stage-5 relocated). It crosses the exact-
+kernel tripwire (deg-9 + deg-16 forms => vendor Shewchuk) and is a back-half
+re-architecture (~2.5-4.5k LOC + up to ~4k vendored). RECOMMENDATION unchanged
+from s7 and now MEASURED: do NOT build plane-rep to close 1a/1b; it is the correct
+R1+triple-point SUBSTRATE to bank IF a weld-twin or genuine triple-point carrier
+goes RED. The cheaper targeted fixes (stage-5 widen for the sliver; winding-jump
+double-sheet emission for negative winding) remain the actual next axes.
