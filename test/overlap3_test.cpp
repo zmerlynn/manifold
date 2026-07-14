@@ -2113,15 +2113,14 @@ TEST(Overlap3, Regularize_ExactZeroTie_Constructed_FailClosed) {
 }
 
 // Real carrier: the GT7863 twin pair composed as ONE soup.  Connectivity splits
-// it into 4 pieces, but two of them OVERLAP coplanar-ly (the twins' coincident
-// cross-operand faces), so the coplanar-overlap merge UNITES them into one
-// self-intersecting super-component; the remaining two early-exit clean (3
-// components, 2 clean, 1 dirty).  The exact-coplanar FOLD consumes that
-// coplanar family (the caps cluster and fold), so the dirty super-component
-// fails closed on the STRICTLY NARROWER residue: the NON-coplanar
-// vertex-on-face / edge-on-edge point-SoS ties (the single-global-SoS axis,
-// PokedCube-class), not the coplanar axis.  The whole compose still fail-closes
-// (any component fail-closed suppresses the output).
+// it into 4 pieces (non-fusion contract: they stay separate).  TWO route dirty:
+// one is self-intersecting, and one carries a WITHIN-component coplanar overlap
+// that the re-scoped coplanar gate catches (IsSelfIntersecting misses it,
+// R2(i)). The other two early-exit clean.  The exact-coplanar FOLD consumes the
+// coplanar family, so each dirty piece fails closed on the STRICTLY NARROWER
+// residue: the NON-coplanar vertex-on-face / edge-on-edge point-SoS ties (the
+// single-global-SoS axis, PokedCube-class), not the coplanar axis.  The whole
+// compose still fail-closes (any component fail-closed suppresses the output).
 TEST(Overlap3, Regularize_ExactZeroTie_GT7863_FailClosed) {
   std::filesystem::path file(__FILE__);
   auto load = [&](const char* n) -> std::optional<MeshGL64> {
@@ -2145,10 +2144,10 @@ TEST(Overlap3, Regularize_ExactZeroTie_GT7863_FailClosed) {
   const Manifold::Impl in(comb);
 
   const RegularizeResult r = RegularizeImpl(in, ImplEps(in));
-  EXPECT_EQ(r.counters.components, 3)
-      << "the two coplanar-overlapping twin pieces merge into one";
+  EXPECT_EQ(r.counters.components, 4) << "four components stay separate";
   EXPECT_EQ(r.counters.clean, 2) << "2 components early-exit clean";
-  EXPECT_EQ(r.counters.dirty, 1) << "1 self-intersecting (coplanar) component";
+  EXPECT_EQ(r.counters.dirty, 2)
+      << "1 self-intersecting + 1 within-component coplanar overlap";
   ASSERT_TRUE(r.fatal.has_value()) << "the point-SoS residue must fail closed";
   EXPECT_EQ(*r.fatal, FatalReason::DirtyComponentUnresolved);
   EXPECT_NE(r.detail.find("SoS"), std::string::npos)
@@ -2277,14 +2276,14 @@ MeshGL64 MultiPlug(const std::vector<std::array<double, 4>>& boxes) {
 }
 
 // Run the fold and grade the resolve against the GWN oracle + tol-invariance.
-// Through the REAL RegularizeImpl entry by default: decompose UNITES the
-// coplanar-overlapping components (a buried plug is a cross-component coplanar
-// self-overlap) and the coplanar gate routes the merged super-component to B.
-// `useDirectHook` instead bypasses decompose+gate (the RegularizeDirtyDirect
-// test-convenience path), for exercising the fold on an isolated soup.
+// The carriers below are MULTI-BOX soups (a cross-component coplanar overlap);
+// under the non-fusion contract RegularizeImpl decomposes them into separate
+// clean components, so the fold ARRANGEMENT (Fix 1) is exercised through the
+// RegularizeDirtyDirect hook, which treats the whole soup as one dirty
+// component and runs candidate B on it directly (bypassing decompose + the
+// gate).
 static void ExpectFoldResolves(const char* tag, const MeshGL64& mesh,
-                               double volLo, double volHi,
-                               bool useDirectHook = false) {
+                               double volLo, double volHi) {
   const Manifold::Impl in(mesh);
   ASSERT_TRUE(in.IsManifold() && in.Is2Manifold()) << tag;
   // The pure coplanar overlap is NOT flagged by the self-intersection gate
@@ -2293,18 +2292,13 @@ static void ExpectFoldResolves(const char* tag, const MeshGL64& mesh,
       RegularizeB_Probe(in, {}, in.bBox_.Center() + vec3(97.1, 33.7, 51.3));
   EXPECT_GT(p.coplanarClusterFaces, 0) << tag << " must reach the fold";
   const double eps = EpsilonFromScale(in.bBox_.Scale(), 1000);
-  auto run = [&](double e) {
-    return useDirectHook ? RegularizeDirtyDirect(in, e) : RegularizeImpl(in, e);
-  };
+  auto run = [&](double e) { return RegularizeDirtyDirect(in, e); };
 
   const RegularizeResult r = run(eps);
   ASSERT_FALSE(r.fatal.has_value())
       << tag << " fold must resolve, not fail closed: " << r.detail;
   ASSERT_TRUE(r.impl.has_value());
   EXPECT_EQ(r.counters.regularized, 1) << tag;
-  if (!useDirectHook)
-    EXPECT_EQ(r.counters.clean, 0)
-        << tag << " coplanar overlap must route dirty (not clean pass-through)";
 
   const Manifold out(GetMeshGLImpl<double, uint64_t>(*r.impl, -1));
   EXPECT_EQ(out.Status(), Manifold::Error::NoError) << tag;
@@ -2350,12 +2344,12 @@ static void ExpectFoldResolves(const char* tag, const MeshGL64& mesh,
 }  // namespace coplanarfold
 
 // Same-oriented mult-2 buried plug (B strictly inside A, caps coincident):
-// {w_S>=1} = A (B is buried), volume = 12 exactly.  RED-FIRST through the REAL
-// RegularizeImpl entry: pre-fix the two disjoint boxes each early-exit CLEAN
-// and the soup passes through un-regularized at 13.75; the coplanar-overlap
-// merge + coplanar gate route the united super-component to B, which folds the
-// doubled caps to 12.0.  A no-op / wrong fold (or a mult-1-only gate that never
-// merges) fails the 11.9-12.1 band and the GWN oracle.
+// {w_S>=1} = A (B is buried), volume = 12 exactly.  SlantPlug is TWO disjoint
+// boxes with a CROSS-component coplanar overlap - under the non-fusion contract
+// RegularizeImpl passes both through (see the SlantPlug pass-through pin
+// below); the FOLD ARRANGEMENT (Fix 1) is exercised on the whole soup via the
+// direct hook.  A no-op / wrong fold fails the 11.9-12.1 band and the GWN
+// oracle.
 TEST(Overlap3, Regularize_CoplanarFold_Mult2_Resolves) {
   coplanarfold::ExpectFoldResolves("mult2", coplanarfold::SlantPlug(false),
                                    11.9, 12.1);
@@ -2393,22 +2387,15 @@ TEST(Overlap3, Regularize_CoplanarFold_Mult3Nested_Resolves) {
       39.9, 40.1);
 }
 
-// The RegularizeDirtyDirect test-convenience hook still exercises the fold on a
-// soup treated as one dirty component (bypassing decompose + gate), same 12.0.
-TEST(Overlap3, Regularize_CoplanarFold_DirectHook_Resolves) {
-  coplanarfold::ExpectFoldResolves("directhook", coplanarfold::SlantPlug(false),
-                                   11.9, 12.1, /*useDirectHook=*/true);
-}
-
 // Real carrier through the REAL entry: the openscad soup imports as a valid
-// manifold with a pure COPLANAR overlap (IsSelfIntersecting=0), so decompose's
-// coplanar-overlap merge unites its two overlapping pieces into one dirty
-// super-component the fold reaches (the same defect class the fold consumes on
-// GT7863).  Its residue is the NON-coplanar point/edge SoS tie the
+// manifold with a WITHIN-component pure COPLANAR overlap
+// (IsSelfIntersecting=0), so a single connectivity component routes DIRTY on
+// the re-scoped coplanar gate (no cross-component merge - the non-fusion
+// contract).  Its residue is the NON-coplanar point/edge SoS tie the
 // single-global symbolic-perturbation path (unbuilt) would need, so it fails
 // closed with the STRICTLY NARROWER named reason - never a silent wrong
-// resolve, no OOM (the merge's cluster scan is bbox-prefiltered and fast on
-// this 1442-face model).
+// resolve, no OOM (the coplanar scan is bbox-prefiltered and fast on this
+// 1442-face model).
 TEST(Overlap3, Regularize_ExactZeroTie_Openscad_FailClosed) {
   std::filesystem::path file(__FILE__);
   std::ifstream fin(
@@ -2424,4 +2411,234 @@ TEST(Overlap3, Regularize_ExactZeroTie_Openscad_FailClosed) {
   EXPECT_NE(r.detail.find("SoS"), std::string::npos)
       << "fail-closed reason must name the SoS axis: " << r.detail;
   EXPECT_FALSE(r.impl.has_value()) << "fail-closed yields no partial output";
+}
+
+// WITHIN-component coplanar carrier (the re-scoped GateComponent axis).
+// BridgedCaps: box A [0,6]x[0,5]x[0,2] and box B [2,4]x[2,3]x[2,4] STACKED, B's
+// bottom cap coincident with A's top over B's footprint (a DOUBLED internal
+// wall = pure coplanar overlap).  A single containing quad over B keeps the
+// caps detectable (they share NO verts) while B's walls stay interior to it.  A
+// and B are joined into ONE connected component by a small solid L-ROD far from
+// the caps (a hole in A's top annulus + a hole in B's +x wall, stitched through
+// exterior) - a genus handle joining A-interior and B-interior, both w=1.  This
+// makes the coplanar overlap INTERNAL to one component: IsSelfIntersecting
+// misses it (R2(i)), so the WITHIN-component coplanar gate is what routes it
+// DIRTY (the point of the re-scope).  Candidate B then FAILS CLOSED on the
+// bridge-junction SoS residue: the rod's faces are coplanar with the
+// axis-normal wall/frame planes they connect to, an exact-zero orient3d that
+// RecordSeams refuses (the single-global-SoS axis, PokedCube-class).  Building
+// a genus handle is the ONLY way to make an internal coplanar overlap one
+// connected 2-manifold (sharing the coincidence boundary is a non-manifold
+// pinch or a transversal crossing; a buried plug's 3 winding levels can't be
+// bridged consistently), and every such junction is on that SoS axis - so no
+// within-component coplanar carrier RESOLVES through B today (a completeness
+// counterexample, docs open list).  The FOLD ARRANGEMENT itself resolves the
+// same defect on the direct hook (the CoplanarFold_* pins above).
+static MeshGL64 BridgedCaps() {
+  coplanarfold::MB b;
+  auto V = [&](double x, double y, double z) { return b.V(x, y, z); };
+  auto qz = [&](double x0, double x1, double y0, double y1, double z, bool up) {
+    if (up)
+      b.Quad(V(x0, y0, z), V(x1, y0, z), V(x1, y1, z), V(x0, y1, z));  // +z
+    else
+      b.Quad(V(x0, y0, z), V(x0, y1, z), V(x1, y1, z), V(x1, y0, z));  // -z
+  };
+  auto qx = [&](double y0, double y1, double z0, double z1, double x, bool pl) {
+    if (pl)
+      b.Quad(V(x, y0, z0), V(x, y1, z0), V(x, y1, z1), V(x, y0, z1));  // +x
+    else
+      b.Quad(V(x, y0, z0), V(x, y0, z1), V(x, y1, z1), V(x, y1, z0));  // -x
+  };
+  auto qy = [&](double x0, double x1, double z0, double z1, double y, bool pl) {
+    if (pl)
+      b.Quad(V(x0, y, z0), V(x0, y, z1), V(x1, y, z1), V(x1, y, z0));  // +y
+    else
+      b.Quad(V(x0, y, z0), V(x1, y, z0), V(x1, y, z1), V(x0, y, z1));  // -y
+  };
+  // frameZ / frameX: a rectangle in the z=const / x=const plane MINUS a
+  // rectangular hole, tiled by 4 MITER trapezoids (outer edges are the full box
+  // edges, so they match the plain-quad neighbours; the hole is interior).
+  auto frameZ = [&](double X0, double X1, double Y0, double Y1, double hx0,
+                    double hx1, double hy0, double hy1, double z, bool up) {
+    auto q = [&](double ax, double ay, double bx, double by, double cx,
+                 double cy, double dx, double dy) {
+      if (up)
+        b.Quad(V(ax, ay, z), V(bx, by, z), V(cx, cy, z), V(dx, dy, z));
+      else
+        b.Quad(V(ax, ay, z), V(dx, dy, z), V(cx, cy, z), V(bx, by, z));
+    };
+    q(X0, Y0, X1, Y0, hx1, hy0, hx0, hy0);
+    q(X1, Y0, X1, Y1, hx1, hy1, hx1, hy0);
+    q(X1, Y1, X0, Y1, hx0, hy1, hx1, hy1);
+    q(X0, Y1, X0, Y0, hx0, hy0, hx0, hy1);
+  };
+  auto frameX = [&](double Y0, double Y1, double Z0, double Z1, double hy0,
+                    double hy1, double hz0, double hz1, double x, bool pl) {
+    auto q = [&](double ay, double az, double by, double bz, double cy,
+                 double cz, double dy, double dz) {
+      if (pl)
+        b.Quad(V(x, ay, az), V(x, by, bz), V(x, cy, cz), V(x, dy, dz));
+      else
+        b.Quad(V(x, ay, az), V(x, dy, dz), V(x, cy, cz), V(x, by, bz));
+    };
+    q(Y0, Z0, Y1, Z0, hy1, hz0, hy0, hz0);
+    q(Y1, Z0, Y1, Z1, hy1, hz1, hy1, hz0);
+    q(Y1, Z1, Y0, Z1, hy0, hz1, hy1, hz1);
+    q(Y0, Z1, Y0, Z0, hy0, hz0, hy0, hz1);
+  };
+  // A = [0,6]x[0,5]x[0,2].  A's top (z=2) is split at the grid lines
+  // x{0,1,5,6}, y{0,1,4,5} so that:
+  //  - a single CENTRAL quad [1,5]x[1,4] fully CONTAINS B [2,4]x[2,3], so B's
+  //    walls are interior to it (no edge crosses a wall plane) and the coplanar
+  //    overlap is DETECTED (the central quad shares no verts with B);
+  //  - the surrounding FRAME cells are all bbox-disjoint (in x or y) from B's
+  //    walls, so they are never compared with them - killing the spurious
+  //    coplanar wall/annulus exact-zero ties that fail the fold closed.
+  // The rod-hole sits in the +x frame cell [5,6]x[1,4] (miter frameZ so its
+  // outer edges stay full and match the central quad + wall).
+  {  // A bottom: 3x3 grid (lines x{0,1,5,6}, y{0,1,4,5}) to match the split
+     // walls
+    const double gx[] = {0, 1, 5, 6}, gy[] = {0, 1, 4, 5};
+    for (int i = 0; i < 3; ++i)
+      for (int j = 0; j < 3; ++j)
+        qz(gx[i], gx[i + 1], gy[j], gy[j + 1], 0, /*up=*/false);
+  }
+  qz(1, 5, 1, 4, 2, /*up=*/true);  // A top CENTRAL quad (contains B)
+  qz(0, 1, 0, 1, 2, /*up=*/true);  // A top frame cells (bbox-far from B)
+  qz(1, 5, 0, 1, 2, /*up=*/true);
+  qz(5, 6, 0, 1, 2, /*up=*/true);
+  qz(0, 1, 1, 4, 2, /*up=*/true);
+  qz(0, 1, 4, 5, 2, /*up=*/true);
+  qz(1, 5, 4, 5, 2, /*up=*/true);
+  qz(5, 6, 4, 5, 2, /*up=*/true);
+  frameZ(5, 6, 1, 4, 5.2, 5.6, 2.35, 2.65, 2,
+         /*up=*/true);  // +x frame+rod-hole
+  // A walls, split at the frame grid lines so the top edges match.
+  const double xs[][2] = {{0, 1}, {1, 5}, {5, 6}};
+  for (auto& s : xs) {
+    qy(s[0], s[1], 0, 2, 0, /*pl=*/false);  // -y wall segment
+    qy(s[0], s[1], 0, 2, 5, /*pl=*/true);   // +y wall segment
+  }
+  const double ys[][2] = {{0, 1}, {1, 4}, {4, 5}};
+  for (auto& s : ys) {
+    qx(s[0], s[1], 0, 2, 0, /*pl=*/false);  // -x wall segment
+    qx(s[0], s[1], 0, 2, 6, /*pl=*/true);   // +x wall segment
+  }
+  // B = [2,4]x[2,3]x[2,4].  Clean caps (2 tris each -> detectable coplanar
+  // overlap with A's central quad).  +x wall (x=4) minus the rod-hole.
+  qz(2, 4, 2, 3, 4, /*up=*/true);   // B top
+  qz(2, 4, 2, 3, 2, /*up=*/false);  // B bottom (coincident cap)
+  qy(2, 4, 2, 4, 2, /*pl=*/false);  // B -y
+  qy(2, 4, 2, 4, 3, /*pl=*/true);   // B +y
+  qx(2, 3, 2, 4, 2, /*pl=*/false);  // B -x
+  frameX(2, 3, 2, 4, 2.35, 2.65, 2.8, 3, 4, /*pl=*/true);  // B +x (rod-hole)
+  // Solid L-rod through EXTERIOR (above the cap, bbox-clear of the cap plane):
+  // horizontal seg x[4,5.6] z[2.8,3] into B's +x wall, vertical seg x[5.2,5.6]
+  // z[2,3] down into A's frame hole.  thickness y[2.35,2.65].
+  const double ry0 = 2.35, ry1 = 2.65;
+  qz(4, 5.2, ry0, ry1, 2.8, /*up=*/false);  // bottom of horizontal seg (-z)
+  qx(ry0, ry1, 2, 2.8, 5.2, /*pl=*/false);  // inner step (-x)
+  qx(ry0, ry1, 2, 3, 5.6, /*pl=*/true);     // right of vertical seg (+x)
+  qz(4, 5.6, ry0, ry1, 3, /*up=*/true);     // top (+z)
+  auto tri = [&](double ax, double az, double bx, double bz, double cx,
+                 double cz, double y, bool plusY) {
+    if (plusY) {
+      b.tv.push_back(V(ax, y, az));
+      b.tv.push_back(V(cx, y, cz));
+      b.tv.push_back(V(bx, y, bz));
+    } else {
+      b.tv.push_back(V(ax, y, az));
+      b.tv.push_back(V(bx, y, bz));
+      b.tv.push_back(V(cx, y, cz));
+    }
+  };
+  // y-faces = the L-hexagon, fanned from the reentrant corner (5.2,2.8).
+  for (double y : {ry0, ry1}) {
+    const bool pl = (y == ry1);
+    tri(5.2, 2.8, 5.2, 2, 5.6, 2, y, pl);
+    tri(5.2, 2.8, 5.6, 2, 5.6, 3, y, pl);
+    tri(5.2, 2.8, 5.6, 3, 4, 3, y, pl);
+    tri(5.2, 2.8, 4, 3, 4, 2.8, y, pl);
+  }
+  return b.Mesh();
+}
+
+// POINT-3 (owner adjudication): SlantPlug is TWO disjoint boxes with a
+// CROSS-component coplanar overlap.  The non-fusion contract is UNIFORM -
+// cross-component interaction (overlapping / touching / coplanar or
+// transversal) is NEVER our job; fusion is the Boolean's.  So both boxes
+// early-exit CLEAN and the operator emits them UNCHANGED (bitwise), Decompose
+// == 2, volume 13.75. Mutation guard: a gate that wrongly merged the
+// coplanar-overlapping components or routed either dirty would resolve the
+// buried plug to 12.0 and fail the bitwise / count / volume checks below.
+TEST(Overlap3, Regularize_SlantPlug_CrossComponent_PassThrough) {
+  const Manifold::Impl in(coplanarfold::SlantPlug(false));
+  ASSERT_TRUE(in.IsManifold() && in.Is2Manifold());
+  EXPECT_FALSE(in.IsSelfIntersecting())
+      << "the coplanar overlap is cross-component and not self-intersecting";
+
+  const RegularizeResult r = RegularizeImpl(in, ImplEps(in));
+  ASSERT_FALSE(r.fatal.has_value()) << r.detail;
+  ASSERT_TRUE(r.impl.has_value());
+  EXPECT_EQ(r.counters.components, 2) << "two disjoint boxes stay separate";
+  EXPECT_EQ(r.counters.clean, 2) << "both early-exit clean (no merge)";
+  EXPECT_EQ(r.counters.dirty, 0)
+      << "cross-component coplanar overlap is invisible"
+         " to the per-component gate by design";
+  EXPECT_EQ(r.counters.regularized, 0);
+
+  const Manifold out(GetMeshGLImpl<double, uint64_t>(*r.impl, -1));
+  EXPECT_EQ(out.Status(), Manifold::Error::NoError);
+  EXPECT_NEAR(out.Volume(), 13.75, 1e-9) << "un-regularized (A + protruding B)";
+  EXPECT_EQ(out.Decompose().size(), 2u) << "still two solids";
+
+  // BITWISE pass-through: the output vertex positions are exactly the input's
+  // (concatenation of the two unchanged components, no fold, no weld shift).
+  std::multiset<std::tuple<double, double, double>> inV, outV;
+  for (const vec3& p : in.vertPos_) inV.emplace(p.x, p.y, p.z);
+  const MeshGL64 og = GetMeshGLImpl<double, uint64_t>(*r.impl, -1);
+  for (size_t i = 0; i + 2 < og.vertProperties.size(); i += 3)
+    outV.emplace(og.vertProperties[i], og.vertProperties[i + 1],
+                 og.vertProperties[i + 2]);
+  EXPECT_EQ(inV, outV) << "pass-through must be bit-identical vertex positions";
+}
+
+// POINT-4 (owner adjudication): the WITHIN-component coplanar gate reached
+// through the REAL RegularizeImpl entry.  BridgedCaps is ONE connected
+// 2-manifold (a stacked pair joined by a solid rod) whose only defect is an
+// INTERNAL coplanar overlap - IsSelfIntersecting does NOT flag it (R2(i)), so
+// the re-scoped GateComponent coplanar check is the ONLY thing that can route
+// it to candidate B.  Candidate B then fails closed on the bridge-junction
+// single-global-SoS residue (the connection needed to make an internal coplanar
+// overlap one component is itself on the unbuilt SoS axis; see the BridgedCaps
+// header + the lane notebook).  Mutation guard: disable the
+// DetectCoplanarClusters check in GateComponent and this component early-exits
+// CLEAN (a silent wrong pass-through of an un-regularized doubled wall) - so
+// the check is load-bearing.
+TEST(Overlap3, Regularize_WithinComponentCoplanar_RoutesDirty) {
+  const Manifold::Impl in(BridgedCaps());
+  ASSERT_TRUE(in.IsManifold() && in.Is2Manifold())
+      << "a valid single connected 2-manifold";
+  EXPECT_EQ(
+      Manifold(GetMeshGLImpl<double, uint64_t>(in, -1)).Decompose().size(), 1u)
+      << "ONE connected component (the rod joins A and B)";
+  EXPECT_FALSE(in.IsSelfIntersecting())
+      << "the internal coplanar overlap is NOT self-intersecting (R2(i))";
+  const CandidateBProbe p =
+      RegularizeB_Probe(in, {}, in.bBox_.Center() + vec3(97.1, 33.7, 51.3));
+  EXPECT_GT(p.coplanarClusterFaces, 0)
+      << "the doubled cap is a genuine within-component coplanar overlap";
+
+  const RegularizeResult r = RegularizeImpl(in, ImplEps(in));
+  EXPECT_EQ(r.counters.components, 1);
+  EXPECT_EQ(r.counters.clean, 0)
+      << "the within-component coplanar gate must route it DIRTY, not clean";
+  EXPECT_EQ(r.counters.dirty, 1);
+  // Fails closed on the bridge-junction SoS residue (never a silent resolve).
+  ASSERT_TRUE(r.fatal.has_value())
+      << "the connection SoS residue must fail closed, never resolve wrong";
+  EXPECT_EQ(*r.fatal, FatalReason::DirtyComponentUnresolved);
+  EXPECT_NE(r.detail.find("SoS"), std::string::npos)
+      << "fail-closed reason names the single-global SoS axis: " << r.detail;
+  EXPECT_FALSE(r.impl.has_value());
 }
