@@ -88,10 +88,14 @@ What survives of A is decompose + test + early-exit + route-to-B + compose.
 
 B computes the arrangement and winding of ONE self-overlapping component in DOUBLES,
 kernel-free on the certified path, reusing boolean3's discipline.  AMENDMENT (stage 6,
-owner contract): a micro exact tie-test (Orient3DExactSign - int256 4-limb, expansion
-fallback) plus the single-global SoS cascade were RELUCTANTLY ACCEPTED as net-new
-exact-kernel surface, confined strictly to the filter-0 fallback - the certified fast
-path never touches them.
+owner contract): a micro exact tie-test (Orient3DExactSign) plus the single-global SoS
+cascade were RELUCTANTLY ACCEPTED as net-new exact-kernel surface, confined strictly to
+the filter-0 fallback - the certified fast path never touches them.  Both are ONE
+integer implementation (the whole cascade evaluates as signed sums of products of the
+coordinate mantissas over an adaptive-width two's-complement accumulator); the earlier
+Shewchuk-expansion substrate and the fixed int256 window were removed in favour of it.
+The filter itself uses only Shewchuk's error-bound CONSTANT (per his analysis), no
+kernel of his in the build.
 
 - ENUMERATION. The collider's broadphase returns candidate face pairs; keep genuine
   non-adjacent crossings, SKIP self-adjacent (shared-vertex) pairs. Every crossing
@@ -180,18 +184,27 @@ rounded geometry, and never a lossy fallback. The queued completions:
 - Stage 5 - NEAR-COPLANAR widen + guard. The thin band whose coplanarity gap is above the
   filter's error bound but below eps is neither clustered (the fold owns only exact
   coplanarity) nor safely transversal; widen the coplanar decision with a guarded band.
-- Stage 6 - SINGLE-CONVENTION SoS: LANDED (reg3d-s6). One global symbolic-perturbation
-  convention (the Shadows pattern lifted to orient3d = 0: Edelsbrunner-Mucke perturbation
-  keyed by global vertex index, computed over an exact expansion e-polynomial; local-rank
-  reduction proven sign-invariant, so per-predicate evaluation decides consistently with
-  ONE global perturbation) now DECIDES every genuine non-coplanar transversal exact-zero
-  tie (vertex-on-face, edge-on-edge) instead of refusing.  The coplanar family stays the
-  fold's - coplanar pairs are never SoS-perturbed (perturbing them manufactures the
-  sub-eps sliver cells of the thin-cell axis).  Level-0 discipline holds: the tie is
-  detected exactly (filter, then the micro exact tie-test Orient3DExactSign - int256
-  4-limb with an expansion fallback, RELUCTANTLY-ACCEPTED net-new exact-kernel surface,
-  owner contract, confined to filter-0 call sites), then broken by the convention;
-  once-only constructions unchanged.  MEASURED: the genus-handle bridged carrier
+- Stage 6 - SINGLE-CONVENTION SoS: LANDED (reg3d-s6, reworked reg3d-s6r). One global
+  symbolic-perturbation convention (the Shadows pattern lifted to orient3d = 0:
+  Edelsbrunner-Mucke perturbation keyed by global vertex index; local-rank reduction
+  proven sign-invariant, so per-predicate evaluation decides consistently with ONE global
+  perturbation) now DECIDES every genuine non-coplanar transversal exact-zero tie
+  (vertex-on-face, edge-on-edge) instead of refusing.  The whole cascade evaluates on ONE
+  integer path: each e-coefficient is a signed sum of products of the coordinate
+  mantissas (a minor of degree <= 3 over the same windowed coords), accumulated in an
+  ADAPTIVE-WIDTH two's-complement integer sized to the worst-case finite-double exponent
+  spread.  So the exact orient3d sign is TOTAL: there is no window-fail refusal branch,
+  and an exact-zero result means a genuine geometric TIE everywhere, never "uncertain" -
+  the ambiguity gate is gone BY CONSTRUCTION (an assertability goal met structurally, not
+  by a runtime assert).  The earlier Shewchuk-expansion substrate and the fixed int256
+  window were deleted for this one implementation (bitwise-stable on the mesh domain,
+  and strictly more total on wide-magnitude inputs where the expansion overflowed
+  double).  The coplanar family stays the fold's - coplanar pairs are never SoS-perturbed
+  (perturbing them manufactures the sub-eps sliver cells of the thin-cell axis).  Level-0
+  discipline holds: the tie is detected exactly (filter, then the exact tie-test
+  Orient3DExactSign, RELUCTANTLY-ACCEPTED net-new exact-kernel surface, owner contract,
+  confined to filter-0 call sites), then broken by the convention; once-only
+  constructions unchanged.  MEASURED: the genus-handle bridged carrier
   (BridgedCaps) resolves oracle-true through the real entry (GWN membership + volume +
   tol-invariance; mutation-verified: disabling the convention reverts to the old
   fail-closed, flipping its direction stays oracle-true).  The former SoS-gate refusals
@@ -233,6 +246,14 @@ correctness change (the sequential result is the spec the parallel one must matc
   oracle-true.  What remains open is the NARROWED residue behind it: the stage-7
   thin-cell emission (coplanar-dominated soups), the >2-sheet triple-point seam
   model, and the component-local seed policy (all named, all hard fail-closed).
+- EXACT-KERNEL SURFACE, QUEUED FOR REVISIT (owner contract, reluctant acceptance).
+  Whether the arrangement can be structured to avoid needing an exact orient3d kernel
+  at all is still open; the current integer Orient3DExactSign / SoS cascade is the
+  reluctantly-accepted answer, not a settled one.  TRIPWIRE: this integer path is
+  legitimate ONLY as ONE predicate at ONE call site (~100 lines, exhaustively testable).
+  If a SECOND exact predicate or a SECOND call site is ever needed, VENDOR Shewchuk's
+  public-domain predicates.c instead of growing this - do NOT rebuild expansion
+  arithmetic piecemeal.
 - NEGATIVE WINDING / subtraction, untested. openscad's soup winding reaches -1; the
   {w_S>=1} threshold read should absorb it, but no subtraction carrier has exercised
   it.
