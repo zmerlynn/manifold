@@ -60,3 +60,49 @@ right 126v/244f) at x~-31165; dirty region = near-coplanar overlap of the two.
 - GT7863 probe: extract near-coplanar sliver face pair from OBJ, local
   arrangement, test closure + output collapse.
 - Measure predicate forms/degrees actually evaluated; write cost table.
+
+## Step 1: exact kernel + PokedCube winding field - DONE
+probe_core.py: exact rational plane kernel (plane-from-3-pts, vertex=plane-triple
+via Cramer, exact w_S = signed segment-crossing oracle matching WindingAt, exact
+mesh volume). Sanity: unit cube vol/center-winding correct; plane-triple exact.
+
+PokedCube exact reconstruction (poked.py): 12 tris, 9 distinct planes (the two
+everted cone faces 10,11 have irrational-free integer planes (1,1,-2) and
+(-2,1,1); apex (-1,-1,-1)).
+- signed mesh volume = 0 (everted cone exactly cancels the body's +1 in the
+  SIGNED integral; NOT the {w>=1} volume).
+- exact winding histogram (15^3 generic-rational grid): w=1: 182, w=-1: 142,
+  w=0: 3051, none: 0. So {w_S>=1} is NONEMPTY (a w=1 pocket, centroid
+  ~(0.03,-0.28,0.06)); w=-1 spike pocket centroid ~(-0.51,-0.23,-0.47). Body
+  CENTER (0,0,0) is w=0 (the everted cone passes through it, subtracting the
+  body's +1). Reconciles with prior lanes' comparable w=1/w=-1 regions.
+- KEY: winding is a consistent integer field (jumps +1 across each oriented face,
+  -n side; verified no contradictions on 3375 exact samples). So d{w_S>=1} is a
+  closed 2-manifold BY THEOREM (a0-verify-witness: topology is a pure function of
+  the soup). "Does exact close the fans" = YES by winding-consistency, provided
+  the arrangement is BUILT exactly at the concurrences.
+
+## Step 2: PokedCube radial closure - PARTIAL (degenerate spike not fully built)
+radial.py: exact radial-assembly closure check (incident half-faces around an
+edge, exact angular sort, wedge windings, retained-face pairing) + arrangement
+vertex enumeration as plane triples. poked_close.py driver.
+- Pierce points at the spike = EXACT rationals -1/14, 1/14 (macroscopic, ~1/7
+  apart, NOT sub-eps) - matches c1a's verts 6,8,10. So PokedCube's pierce points
+  do NOT round-collapse; its wall is NOT sliver precision.
+- Pairwise seam extraction found only 3 clean seams: the everted cone (10,11)
+  piercing the y=-.5 / z=-.5 body faces. The cone-tri x body-tri pairs at the
+  APEX region return no-seg (my clip drops the degenerate incidences where the
+  intersection line runs through a shared apex vertex). These degenerate
+  concurrences ARE the crux and need SoS to build - reimplementing that in Python
+  = rebuilding the exact resolver, out of probe budget. Closure OK=26/OPEN=0 on
+  the NON-degenerate edges (consistent with the theorem) but the spike edges were
+  not fully exercised. HONEST: PokedCube's exact closure rests on the
+  winding-consistency theorem + confirmed field, not a full Python arrangement.
+- REFRAME (measured): PokedCube's failure is NOT pierce-point rounding (pierce pts
+  are macroscopic rationals). It is the NEGATIVE-WINDING / double-sheet emission
+  (s7 step1: mult-1 rule "keep iff w_above==0" correctly drops w_above=-1 cells;
+  the {w>=1} boundary near the w=-1|w=1 region needs the coordinated double-sheet
+  the per-face walk opens). This is a CLASSIFICATION/EMISSION completion,
+  ORTHOGONAL to vertex precision - CONFIRMS s7's "plane-rep does NOT buy negative
+  winding." Pivoting the constructive closure probe to GT7863 (2-face sliver, the
+  mission's LEAD carrier, buildable exactly).
