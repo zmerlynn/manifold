@@ -12,9 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// 3D overlap removal via sweep-native emission (strips + caps).
-// Design: docs/SweepEmit3D.md (three crucible rounds + empirical validation).
-// Internal seam only; public wiring is post-prototype.
+// 3D overlap removal as a per-component regularization operator.
+// Design: docs/Regularize3D.md.  Maps a valid oriented (possibly
+// self-overlapping) face soup to the boundary of {p : w_S(p) >= 1}, per
+// connected component, never fusing separate components (fusion is the
+// Boolean's job).  Internal seam only; public wiring is post-prototype.
 
 #pragma once
 
@@ -24,39 +26,19 @@
 #include <string>
 #include <vector>
 
-#include "boolean2.h"
+#include "boolean2.h"  // EpsilonFromScale, EdgeM, RemoveOverlaps2D
 #include "impl.h"
 #include "manifold/common.h"
 
 namespace manifold {
 
 // ---------------------------------------------------------------------------
-// Canonicalize-stage output.
-// ---------------------------------------------------------------------------
-
-// One canonical face after vert-merge and multiplicity accumulation.
-// mult == 0 records are dropped before reaching the pipeline.
-struct CanonicalFace {
-  int id;        // representative face index in the original Impl
-  ivec3 verts;   // canonical merged-vert ids
-  vec3 normal;   // from stored vert order
-  int64_t mult;  // signed multiplicity (>= 1 or <= -1)
-};
-
-// ---------------------------------------------------------------------------
-// Fatal-reason taxonomy (spec "FAILURE CONTRACT" - shrunken contract).
+// Fatal-reason taxonomy.
 // ---------------------------------------------------------------------------
 
 enum class FatalReason {
   SubEpsInput,          // eps <= 0 or degenerate input geometry
-  SubEpsFeature,        // macro-scale face in merged sub-eps critical run
   NonManifoldEmission,  // emitted triangulation is not 2-manifold
-  // Arrangement too dense/degenerate to section within a sane resource budget -
-  // a refusal, not an error.  The whole slab decomposition is held in memory at
-  // once, so a near-degenerate input packing thousands of faces into each of
-  // tens of thousands of thin slabs would swap-thrash into bad_alloc; the slabs
-  // stage fails closed here instead (spec [WALL-B]).
-  ArrangementBudget,
   // Regularization operator (docs/Regularize3D.md): candidate B RAN on a dirty
   // (self-intersecting or coplanar-overlapping) component but DECLINED to
   // resolve it exactly - a non-coplanar exact-zero SoS residue, a >2-sheet
@@ -64,17 +46,6 @@ enum class FatalReason {
   // planarity-guard failure, or a filter-uncertain winding probe.  The honest
   // fail-closed (recorded reason, no output), never a silent wrong result.
   DirtyComponentUnresolved,
-};
-
-// Non-fatal counter accumulator.
-struct Overlap3Counters {
-  int subEpsContactsDropped = 0;  // point-like skipped contacts
-  int engineIdConflicts = 0;      // total engine id-conflict events; benign
-                                  // diagnostic (srcId is unconsumed in 3D) -
-                                  // see spec [WALL-B]
-  int capArrangements = 0;        // 2D arrangements run by the caps stage
-                                  // (one per critical with cap input - the
-                                  // M4 pin)
 };
 
 // Per-stage result: either a product or a fatal reason.
@@ -100,116 +71,7 @@ struct StageResult {
 };
 
 // ---------------------------------------------------------------------------
-// Slabs-stage types.
-// ---------------------------------------------------------------------------
-
-// Directed section segment for one straddling face in a slab.
-// p1 - p0 has positive dot with yz(cross(+x, face.normal)).
-struct SectionFaceSegment {
-  int faceId;
-  vec2 p0, p1;   // section (y,z) directed as above
-  int64_t mult;  // signed multiplicity from CanonicalFace
-};
-
-// Per-face track for strip generation (strips stage).
-// Records the 3D edge pairs whose interpolations define the face's section
-// segment at any x in the slab:
-//   at x: p0(x) = Interpolate(va0, vb0, x),  p1(x) = Interpolate(va1, vb1, x)
-// xMid evaluation matches (p0, p1) stored in SectionFaceSegment.
-struct FaceTrack {
-  int faceId;
-  vec2 p0, p1;  // section (y,z) at xMid, directed per spec
-  vec3 va0,
-      vb0;  // 3D edge pair for p0: Interpolate(va0, vb0, x) at any x in slab
-  vec3 va1, vb1;  // 3D edge pair for p1
-};
-
-// Linearly interpolate (y,z) of segment va-vb at x=xTarget.  This is the
-// named EXTRAPOLATION path (unlike shared.h:Interpolate): extending a piece
-// backward/forward across an unbuilt run evaluates a track outside
-// [va.x, vb.x] by design.  x-degenerate tracks cannot reach here: face tracks
-// exclude section-parallel edges (ComputeSectionSegment) and seam tracks use
-// exact span membership with xMid strictly between criticals (BuildSlabs);
-// the guard is release-safety only.
-inline vec2 InterpolateSafe(vec3 va, vec3 vb, double xTarget) {
-  const double dx = vb.x - va.x;
-  DEBUG_ASSERT(dx != 0.0, logicErr, "x-degenerate track in InterpolateSafe");
-  if (dx == 0.0) return {va.y, va.z};
-  const double t = (xTarget - va.x) / dx;
-  return va.yz() + t * (vb.yz() - va.yz());
-}
-
-// Per-seam track for cap/strip extension of class-ii endpoints (spec
-// STRIPS/CAPS).
-// A seam crossing at yzMid lies on the 3D seam segment [vA, vB]; the correct
-// extension to any xTarget is InterpolateSafe(vA, vB, xTarget).yz.
-struct SeamTrackEntry {
-  vec2 yzMid;   // seam's (y,z) at this slab's xMid (for endpoint lookup)
-  vec3 vA, vB;  // 3D seam segment endpoints
-};
-
-// Per-slab output.
-struct SlabResult {
-  double xLo, xHi, xMid;
-  bool built;                        // false = sub-eps width, skipped
-  std::vector<SweepCapture> pieces;  // retained boundary pieces from engine
-  std::vector<SectionFaceSegment> segments;  // directed section segments
-  std::vector<FaceTrack> faceTracks;  // per-face tracks for strip extension
-  std::vector<SeamTrackEntry> seamTracks;  // per-seam tracks for class-ii ext
-  // Test-hook: raw section edges and verts before arrangement.
-  std::vector<EdgeM> sectionEdges;
-  std::vector<vec2> sectionVerts;
-};
-
-// ---------------------------------------------------------------------------
-// Seams-stage types.
-// ---------------------------------------------------------------------------
-
-// A face-pair seam: 3D segment [vertId0, vertId1] at the intersection of
-// two canonical faces.
-struct Seam {
-  int faceId0, faceId1;
-  int vertId0, vertId1;  // canonical merged-vert ids
-};
-
-// ---------------------------------------------------------------------------
-// Arrangement geometry (canonicalize + seams output; slabs, caps, and
-// strips input).
-// ---------------------------------------------------------------------------
-
-struct ArrangementGeometry {
-  std::vector<vec3> verts;           // all canonical 3D verts
-  std::vector<CanonicalFace> faces;  // canonical faces
-  std::vector<Seam> seams;           // face-pair seam segments
-  // Coplanar groups (spec COPLANAR mechanism 1): face2Group[fi] is the
-  // group index of face fi, or -1 when ungrouped.  Grouped faces seed their
-  // section edges with id = faces.size() + group (mechanism 2), so
-  // coincident in-plane content merges under one source id.
-  std::vector<int> face2Group;
-  int numGroups = 0;
-  // Extra x-criticals with no vert identity: degenerate-contact endpoints and
-  // seam-seam crossing x's (spec SEAMS: only the x is consumed;
-  // over-inclusion is harmless).  Kept separate from verts - a critical is
-  // not a vertex.
-  std::vector<double> criticalXs;
-};
-
-// ---------------------------------------------------------------------------
-// Public entry point.
-// ---------------------------------------------------------------------------
-
-struct Overlap3Result {
-  std::optional<Manifold::Impl> impl;
-  Overlap3Counters counters;
-  std::optional<FatalReason> fatal;
-  std::string detail;
-};
-
-// eps = 0 -> compute from bounding-box scale.
-Overlap3Result RemoveOverlaps3D(const Manifold::Impl& in, double eps = 0.0);
-
-// ---------------------------------------------------------------------------
-// Regularization operator (docs/Regularize3D.md) - parallel entry point.
+// Regularization operator (docs/Regularize3D.md) - public entry point.
 //
 // RegularizeImpl maps a valid oriented face soup to the boundary of the solid
 // {p : w_S(p) >= 1}, PER CONNECTED COMPONENT (it never fuses separate
@@ -222,9 +84,7 @@ Overlap3Result RemoveOverlaps3D(const Manifold::Impl& in, double eps = 0.0);
 // and routes it to candidate B.  The pipeline: DECOMPOSE by connectivity ->
 // per-component GATE (validity + IsSelfIntersecting + within-component coplanar
 // overlap) -> EARLY-EXIT clean components -> route DIRTY components to
-// candidate B -> RE-GATE B's output -> COMPOSE BACK by concatenation.  The v3
-// sweep entry point RemoveOverlaps3D is untouched; this is an additive second
-// entry point, not a rewrite.
+// candidate B -> RE-GATE B's output -> COMPOSE BACK by concatenation.
 // ---------------------------------------------------------------------------
 
 // White-box dispatch counters (the Stage-1 pins read these directly).
@@ -251,19 +111,6 @@ RegularizeResult RegularizeImpl(const Manifold::Impl& in, double eps = 0.0);
 // ---------------------------------------------------------------------------
 // Test hooks (overlap3_test.cpp only).
 // ---------------------------------------------------------------------------
-
-struct Overlap3Internals {
-  ArrangementGeometry arr;
-  std::vector<SlabResult> slabs;
-  std::optional<FatalReason> fatal;
-  std::string detail;
-  Overlap3Counters counters;
-};
-
-// Run canonicalize + seams + slabs; slabs include sectionEdges/sectionVerts
-// for gate-2.
-Overlap3Internals RemoveOverlaps3D_TestHooks(const Manifold::Impl& in,
-                                             double eps = 0.0);
 
 // Candidate B mechanism probe (docs/Regularize3D.md "B's mechanism"), exposed
 // so the port of the validated fragment (enumeration + coupled winding) is

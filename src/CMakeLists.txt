@@ -31,7 +31,6 @@ set(
   manifold.cpp
   minkowski.cpp
   overlap3.cpp
-  overlap3_sweep.cpp
   polygon.cpp
   properties.cpp
   quickhull.cpp
