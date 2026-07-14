@@ -2566,12 +2566,18 @@ TEST(Overlap3, Regularize_CoplanarFold_Mult3Nested_Resolves) {
 // (IsSelfIntersecting=0), so a single connectivity component routes DIRTY on
 // the re-scoped coplanar gate (no cross-component merge - the non-fusion
 // contract).  Post stage-6 SoS its non-coplanar ties DECIDE (it passes the
-// exact-zero tie gate); it then fails NARROWER, at a DEGENERATE SEAM - the
-// SoS-decided crossings on this axis-aligned soup do not pair into clean
-// two-endpoint seams (a >2-sheet / odd-endpoint incidence the arrangement build
-// refuses), a hard fail-closed = no output.  Still DirtyComponentUnresolved, a
-// strictly narrower named reason than the SoS gate, never a silent wrong
-// resolve, no OOM (bbox-prefiltered scan on this 1442-face model).
+// exact-zero tie gate); then MANY of its truncated seams are cap-plane
+// entanglement (a wall-wall seam endpoint on a coplanar cap cluster vertex)
+// that the reg3d-ent junction completion now RECORDS - measured strictly
+// narrower: the RecordSeams truncation count drops from 496 to 344 with the
+// recovery active (152 seams completed).  The residue that REMAINS (~344) is a
+// DIFFERENT wall: near-coplanar slivers (the GT7863-class thin seam sub-face)
+// and cap- INTERIOR seam endpoints (the seam pierces a cap face interior, not
+// an overlay vertex - would need the pierce injected as new fold input), both
+// separate research axes.  So the component still fails NARROWER, a hard
+// fail-closed = no output.  Still DirtyComponentUnresolved, a strictly narrower
+// named reason than before, never a silent wrong resolve, no OOM
+// (bbox-prefiltered on this 1442-face model).
 TEST(Overlap3, Regularize_ExactZeroTie_Openscad_FailClosed) {
   std::filesystem::path file(__FILE__);
   std::ifstream fin(
@@ -2584,7 +2590,8 @@ TEST(Overlap3, Regularize_ExactZeroTie_Openscad_FailClosed) {
   ASSERT_TRUE(r.fatal.has_value())
       << "the narrowed residue must fail closed, never silently resolve";
   EXPECT_EQ(*r.fatal, FatalReason::DirtyComponentUnresolved) << r.detail;
-  // NARROWED: past the SoS gate, now the degenerate-seam / >2-sheet residue.
+  // NARROWED: past the SoS gate AND past the cap-plane entanglement (152 seams
+  // completed); the residue is the near-coplanar-sliver / cap-interior wall.
   EXPECT_NE(r.detail.find("degenerate incidence"), std::string::npos)
       << "residue must name the degenerate-seam wall: " << r.detail;
   EXPECT_FALSE(r.impl.has_value()) << "fail-closed yields no partial output";
@@ -2897,6 +2904,75 @@ TEST(Overlap3, Regularize_ExactZeroTie_EntangledBars_Resolves) {
   EXPECT_GT(checked, 3000) << "oracle undersampled";
 
   // TOL-INVARIANCE: the retained topology is decided from input data.
+  const RegularizeResult r2 = RegularizeDirtyDirect(in, eps * 0.5);
+  ASSERT_TRUE(r2.impl.has_value()) << "tol-variant fatal: " << r2.detail;
+  const Manifold out2(GetMeshGLImpl<double, uint64_t>(*r2.impl, -1));
+  EXPECT_NEAR(vol, out2.Volume(), 1e-6 * vol) << "not tol-invariant";
+}
+
+// ADVERSARIAL variant of the entanglement completion: the same two crossing
+// bars but B ROTATED 50 degrees about z, so the coincident z-caps still cluster
+// (rotation about z preserves the z=2/z=4 planes) yet the wall-wall seams cross
+// at IRRATIONAL points and the recovered cap-plane endpoints are NOT bit-
+// identical to the fold's overlay vertices (they differ sub-eps).  This
+// stresses the closure: the seamed wall and the folded cap agree at the
+// reentrant corner only through the emission WELD, not by exact construction.
+// It RESOLVES oracle-true - volume matches the library's INDEPENDENT boolean
+// union (a different algorithm), GWN membership agrees, one solid, not
+// self-intersecting.
+TEST(Overlap3, Regularize_ExactZeroTie_EntangledBarsRotated_Resolves) {
+  const Manifold A = Manifold::Cube({6, 2, 2}).Translate({-3, -1, 2});
+  const Manifold B = Manifold::Cube({6, 2, 2})
+                         .Translate({-3, -1, 0})
+                         .Rotate(0, 0, 50)
+                         .Translate({0, 0, 2});
+  const Manifold::Impl in = TwoBoxSoup(A, B);
+  ASSERT_TRUE(in.IsManifold() && in.Is2Manifold());
+  const CandidateBProbe p =
+      RegularizeB_Probe(in, {}, in.bBox_.Center() + vec3(97.1, 33.7, 51.3));
+  EXPECT_GT(p.seamCount, 0);
+  EXPECT_GT(p.coplanarClusterFaces, 0);
+
+  const double eps = EpsilonFromScale(in.bBox_.Scale(), 1000);
+  const RegularizeResult r = RegularizeDirtyDirect(in, eps);
+  ASSERT_FALSE(r.fatal.has_value())
+      << "rotated cap-plane junction must resolve: " << r.detail;
+  ASSERT_TRUE(r.impl.has_value());
+  const Manifold out(GetMeshGLImpl<double, uint64_t>(*r.impl, -1));
+  EXPECT_EQ(out.Status(), Manifold::Error::NoError);
+  EXPECT_FALSE(r.impl->IsSelfIntersecting()) << "output self-intersects";
+  EXPECT_EQ(out.Decompose().size(), 1u) << "must be one solid";
+  // INDEPENDENT oracle #1: the library's boolean union (a different algorithm)
+  // gives the exact union volume; the regularized output must match it.
+  const double volUnion = (A + B).Volume();
+  const double vol = out.Volume();
+  EXPECT_NEAR(vol, volUnion, 1e-6 * volUnion) << "volume off the union";
+
+  // INDEPENDENT oracle #2: GWN membership (solid-angle) at unambiguous points.
+  const auto inTris = SoupTris(in);
+  std::mt19937 rng(0xE47A1);
+  const Box bb = out.BoundingBox();
+  const vec3 mn = bb.min - (bb.max - bb.min) * 0.05;
+  const vec3 mx = bb.max + (bb.max - bb.min) * 0.05;
+  std::uniform_real_distribution<double> U(0, 1);
+  std::vector<vec3> qs;
+  for (int k = 0; k < 20000; ++k)
+    qs.push_back(mn + (mx - mn) * vec3(U(rng), U(rng), U(rng)));
+  const auto wOut = out.WindingNumber(qs);
+  int disagree = 0, checked = 0;
+  for (int k = 0; k < static_cast<int>(qs.size()) && disagree < 5; ++k) {
+    const double g = GWN(inTris, qs[k]);
+    if (std::abs(g - std::round(g)) > 0.15) continue;  // near-surface skip
+    ++checked;
+    if ((std::lround(g) >= 1) != (wOut[k] > 0.5)) {
+      ++disagree;
+      ADD_FAILURE() << "GWN membership disagreement at (" << qs[k].x << ","
+                    << qs[k].y << "," << qs[k].z << ")";
+    }
+  }
+  EXPECT_GT(checked, 3000) << "oracle undersampled";
+
+  // TOL-INVARIANCE.
   const RegularizeResult r2 = RegularizeDirtyDirect(in, eps * 0.5);
   ASSERT_TRUE(r2.impl.has_value()) << "tol-variant fatal: " << r2.detail;
   const Manifold out2(GetMeshGLImpl<double, uint64_t>(*r2.impl, -1));
