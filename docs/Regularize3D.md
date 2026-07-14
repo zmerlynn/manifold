@@ -417,3 +417,108 @@ the emission weld can materialize a single inert zero-area triangle (paired
 edges, topology sound, oracle-exact volume; IsSelfIntersecting-blind).  The
 clean fix is the once-only fold-vertex identity hardening (queued, simplicity
 pass); the R1 weld blind spot remains the underlying open.
+
+
+## Gap ledger (the authoritative census)
+
+The complete enumeration of what still fails closed, folded to root mechanism.
+Magnitudes only here; the exact per-carrier fatal strings, counters, and the
+instrumented measurement live in .claude/lane-reports/reg3d-census-*.md (the
+notebook owns the numbers).  Every entry below is either queued behind a closure
+crucible or carries a proof-shaped adjudication; "research-grade" is never a bare
+terminal state.
+
+Census (each fatal-string SITE in overlap3.cpp -> its axis; F-ids are the
+notebook's).  The 14 sites are: two EMISSION strings (BuildImpl: "unresolvable
+sheet contact" from SplitTouchingSheets, "emitted triangulation not 2-manifold");
+one COPLANAR-FOLD decline; the SEAM-SUBFACE "not exactly resolvable"; the
+non-2-endpoint-seam "degenerate incidence"; the clean-face "filter-uncertain"
+graze; four NEAR-COPLANAR planarize refusals (degenerate face / degenerate normal
+/ global-planarity guard / inconsistent snap); the non-coplanar exact-zero SoS
+tie; the "epsilon not computable" input guard; the "input not 2-manifold"
+defensive gate; and the "resolver output failed the re-gate" R1/R2 backstop.
+
+Live fail-closed carriers (measured at HEAD, ZZZ_CENSUS instrumented then
+reverted):
+
+  carrier          | cluster            | fatal (measured)              | reach
+  -----------------|--------------------|-------------------------------|--------
+  PokedCube        | 1 EMISSION (1b)    | unresolvable sheet contact    | constructed
+  GT7863 pair      | 1 EMISSION (1a)    | unresolvable sheet contact    | corpus
+  openscad soup    | 2 SEAM-SUBFACE(2a) | non-2-endpoint / degenerate   | corpus
+  GT7081 pair      | 2 SEAM-SUBFACE(2b) | seam sub-face not resolvable  | corpus
+  NearCoplanarChain| 4 PLANARIZE-GUARD  | global-planarity guard        | constructed
+  BridgedCaps      | (RESOLVES)         | -                             | resolves
+
+MEASURED CORRECTIONS to earlier anatomy (were logged at a pre-entanglement,
+pre-stage-6 HEAD): (1) PokedCube AND GT7863 fail at the SplitTouchingSheets
+"unresolvable sheet contact" EMISSION string, which fires BEFORE the 2-manifold
+gate - not at "not 2-manifold" as reg3d-arr's open-halfedge dump implied.  (2)
+BridgedCaps RESOLVES (stage-6 SoS closed it); its in-test comment predates that
+landing and is stale.
+
+Cluster map (root mechanism, not which string fires):
+
+- CLUSTER 1 - EMISSION REPRESENTABILITY (stage-7 thin-cell / touching sheet).
+  The resolved {w_S>=1} boundary reduces to sub-eps / touching sheets with no
+  representable double-manifold; BuildImpl declines.  Two sub-shapes:
+  1a near-coplanar sliver (GT7863: two near-parallel seamed faces, gap above the
+  fold threshold but the sub-face is thin); 1b negative-winding double sheet
+  (PokedCube: an everted corner makes a genuine w_S=-1 region, so the w=-1|w=1
+  junction is a double sheet the mult-1 per-face emission opens - s7b refuted the
+  simple orientation flip).  Production-reachable.
+- CLUSTER 2 - SEAM SUB-FACE EXACT RESOLVABILITY.  RecordSeams / EmitSeamedFace
+  cannot build a face's 2D arrangement exactly at a degenerate incidence.  2a
+  openscad's residue = the near-coplanar sliver (folds into 1a) PLUS a cap-INTERIOR
+  pierce (a seam endpoint inside a cap FACE, which the entanglement recovery does
+  not record because it only owns cap-overlay vertices); 2b GT7081's shells, whose
+  sub-mechanism is not yet characterized at this granularity (probe queued).
+  Production-reachable.
+- CLUSTER 3 - SoS / EXACT-TIE RESIDUE + the unbuilt >2-sheet radial branch.  No
+  corpus carrier forces it (reg3d-radial: zero book-of-pages lines; every corpus
+  nPts!=2 is a 2-sheet truncation, not a triple point).  The radial reduction is
+  proven sound but fires zero times.  Kernel-tripwire-gated (a second exact call
+  site -> vendor Shewchuk).
+- CLUSTER 4 - NEAR-COPLANAR PLANARIZE GUARD / SNAP refusals.  A curved near-band
+  is genuinely not one plane; the guard fails closed rather than fold to a wrong
+  plane.  These are CORRECT, decision-complete refusals (the exact procedure DOES
+  cover them), not unbuilt axes.  Not corpus-forced (the corpus's real
+  near-coplanar geometry is cross-component pass-through).
+- CLUSTER 5 - WELD / GATE BLIND SPOTS (R1 / R2 / the zero-area artifact).  The
+  uniform emission weld can merge two genuinely-distinct arrangement points within
+  eps (a fold the shares-vertex-skip gate is blind to) or leave a 1-ULP-distinct
+  vertex unmerged (the disclosed zero-area triangle).  No corpus carrier
+  demonstrated; live on the synthetic rotated pin.
+- CLUSTER 6 - DEGENERATE-INPUT / DEFENSIVE GUARDS ("epsilon not computable",
+  "input not 2-manifold").  Terminal-correct contract edges, not gaps.
+
+Closure plan (ordered by production-reachability x carriers-unlocked x closure
+shape; DC = decision-completion, PROOF = proof-shaped terminal adjudication,
+RESEARCH = memo with a required proof sketch, TRIPWIRE = kernel-vendor decision):
+
+1. CRUCIBLE C-2a (DC).  openscad cap-INTERIOR pierce injection: record the
+   cap-interior seam endpoint as new fold input (the entanglement lane named the
+   shape).  Cheapest genuine completion; narrows openscad's residue.
+2. CRUCIBLE C-2b (probe-first).  Characterize GT7081's two dirty shells: cap-plane
+   truncation the recovery misses / cap-interior injection / a genuine >2-sheet.
+   Anatomy decides whether it collapses into C-2a or escalates to Cluster 3.
+3. CRUCIBLE C-1a (RESEARCH).  GT7863 near-coplanar sliver: widen the stage-5 fold
+   above eps under a per-sub-face thinness bound.  Proof sketch = the
+   global-planarity guard argument extended to the thin sub-face; shared with
+   openscad's sliver share.
+4. CRUCIBLE C-1b (RESEARCH).  PokedCube negative-winding double sheet: coordinated
+   cap+strip re-emission.  Proof sketch = the winding-jump-of-2 emission rule (the
+   mult-1 per-face rule is provably insufficient at a w=-1|w=1 junction).
+5. CRUCIBLE C-5 (DC + PROOF).  Once-only fold-vertex identity hardening: expose the
+   fold's overlay vertex by construction so both recovered seam endpoints REFERENCE
+   it, retiring the positional dedup and the weld-reliance (closes the zero-area
+   artifact).  The residual - two genuinely-distinct points rounding within eps -
+   stays open (neither cheaply weldable nor reliably re-gated), the honest R1 open.
+6. ADJUDICATION - Cluster 3 (TRIPWIRE).  The >2-sheet radial rule is proven sound
+   and fires zero times on the corpus; building it adds a second exact call site,
+   so it stays unbuilt behind the vendor-Shewchuk decision (owner's).  Fail-closed
+   posture stands.
+
+Terminal-correct, no crucible (PROOF): Cluster 4 (a curved chain is not a single
+planar fold - snapping it is the oracle-wrong outcome the guard prevents), Cluster
+6 (degenerate-input guards), and Cluster 3's fail-closed posture until vendored.
