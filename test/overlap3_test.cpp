@@ -2899,3 +2899,121 @@ TEST(Overlap3, Regularize_WithinComponentCoplanar_BridgedCaps_Resolves) {
   const Manifold out2(GetMeshGLImpl<double, uint64_t>(*r2.impl, -1));
   EXPECT_NEAR(vol, out2.Volume(), 1e-6 * vol) << "not tol-invariant";
 }
+
+// ===========================================================================
+// STAGE-5: NEAR-COPLANAR widen + global-planarity guard (reg3d-s5,
+// docs/Regularize3D.md; reg3d-nearcoplanar-research candidate (a)).  A face
+// pair within eps of coplanar but ABOVE the filter's ~1-ULP bound is DECIDABLE
+// non-coplanar, so the exact fold does not cluster it; enumerated transversally
+// its sub-eps-thin cell double-rounds to a sliver ("unresolvable sheet
+// contact").  The input-side planarization (SnapNearCoplanarClusters) snaps
+// such a cluster onto its fitted plane so B re-derives the arrangement from an
+// exactly-coplanar input (the landed exact fold verbatim).  A curved chain (fit
+// deviation > eps) FAILS the global-planarity guard, named.
+//
+// NOTE on reachability: a PURE near-coplanar overlap (deviation < 2eps) is
+// invisible to IsSelfIntersecting (its 2*eps normal-nudge always separates two
+// near-coplanar faces), so - exactly like the exact CoplanarFold_* carriers -
+// the fold is exercised through the RegularizeDirtyDirect hook (candidate B on
+// the soup as one dirty component), not the gate.
+// ===========================================================================
+
+// SlantPlug with B's TOP cap tilted a sub-eps `delta` off A's slant plane along
+// +x (one-sided, `cross`=false) or straddling it (`cross`=true) -
+// NEAR-coplanar, filter-decidable non-coplanar.  The z=0 bottom caps stay
+// EXACTLY coplanar.
+static MeshGL64 NearSlantPlug(double delta, bool cross, bool flipB) {
+  MeshGL64 m = coplanarfold::SlantPlug(flipB);
+  auto zt = [](double x, double y) { return 1.0 + 0.5 * x + 0.25 * y; };
+  for (uint64_t v = 0; v < m.NumVert(); ++v) {
+    const double x = m.vertProperties[v * 3], y = m.vertProperties[v * 3 + 1],
+                 z = m.vertProperties[v * 3 + 2];
+    const bool bTop = (x == 0.5 || x == 1.5) && (y == 0.5 || y == 1.5) &&
+                      std::abs(z - zt(x, y)) < 1e-9;
+    if (bTop)
+      m.vertProperties[v * 3 + 2] = z + delta * (cross ? x - 1.0 : x - 0.5);
+  }
+  return m;
+}
+
+// K nested unit-thick boxes (each footprint strictly inside the larger) whose
+// TOP caps fan through z=0 with tilt k*dm about the y-axis (top corner
+// z=k*dm*x). Consecutive tops overlap in footprint and share a z-band
+// (bbox-detected) with gap ~ dm*s < eps so they chain in the widened
+// union-find; the fan's tilt spread makes the cluster deviate > eps from any
+// plane, so it fails the guard.
+static MeshGL64 CurvedChainSoup(double dm, int K) {
+  coplanarfold::MB b;
+  const double H = 1.0;
+  for (int k = 0; k < K; ++k) {
+    const double s = 3.0 - 0.3 * k;
+    auto V = [&](double x, double y, double z) { return b.V(x, y, z); };
+    auto T = [&](double x, double y) { return V(x, y, k * dm * x); };
+    auto Bo = [&](double x, double y) { return V(x, y, -H); };
+    b.Quad(T(-s, -s), T(s, -s), T(s, s), T(-s, s));      // top (tilted)
+    b.Quad(Bo(-s, -s), Bo(-s, s), Bo(s, s), Bo(s, -s));  // bottom -z
+    b.Quad(Bo(-s, -s), Bo(s, -s), T(s, -s), T(-s, -s));  // -y wall
+    b.Quad(Bo(s, -s), Bo(s, s), T(s, s), T(s, -s));      // +x wall
+    b.Quad(Bo(s, s), Bo(-s, s), T(-s, s), T(s, s));      // +y wall
+    b.Quad(Bo(-s, s), Bo(-s, -s), T(-s, -s), T(-s, s));  // -x wall
+  }
+  return b.Mesh();
+}
+
+// Base eps for the SlantPlug family (bbox scale ~3).
+static double SlantPlugEps() {
+  return EpsilonFromScale(
+      Manifold::Impl(coplanarfold::SlantPlug(false)).bBox_.Scale(), 1000);
+}
+
+// TARGET (a): same-oriented mult-2 buried plug whose TOP caps are NEAR-coplanar
+// (tilted 0.3 eps).  Without the widen this fails closed at the sliver
+// emission; the snap folds it to {w_S>=1} = A, volume 12 (identical to the
+// exact carrier). coplanarClusterFaces == 4 pins that only the z=0 bottoms
+// cluster EXACTLY, so the resolve to 12 requires the NEAR top caps to be folded
+// by stage-5.
+TEST(Overlap3, Regularize_NearCoplanarFold_Mult2_Resolves) {
+  const double delta =
+      0.3 * SlantPlugEps();  // near band; tol-invariant to eps/2
+  const MeshGL64 mesh = NearSlantPlug(delta, /*cross=*/false, /*flipB=*/false);
+  const Manifold::Impl in(mesh);
+  const CandidateBProbe p =
+      RegularizeB_Probe(in, {}, in.bBox_.Center() + vec3(9.71, 3.37, 5.13));
+  EXPECT_EQ(p.coplanarClusterFaces, 4)
+      << "only the exact z=0 bottom caps cluster; the tilted top caps are the "
+         "near band (would be 8 if the tops were exactly coplanar)";
+  coplanarfold::ExpectFoldResolves("nearmult2", mesh, 11.9, 12.1);
+}
+
+// TARGET (a) variant: anti-oriented cancellation with NEAR-coplanar caps (B
+// inverted, top tilted).  The snapped coincident caps cancel (mult 0), {w_S>=1}
+// = A minus B, volume 10.25 - the mult algebra stays the stage-4 form.
+TEST(Overlap3, Regularize_NearCoplanarFold_AntiCancellation_Resolves) {
+  const double delta = 0.3 * SlantPlugEps();
+  coplanarfold::ExpectFoldResolves(
+      "nearanti", NearSlantPlug(delta, /*cross=*/false, /*flipB=*/true), 10.15,
+      10.35);
+}
+
+// TARGET (b): a CURVED near-coplanar chain (tilted-fan nested boxes) whose
+// consecutive tops are within eps (they chain) but whose global fit deviation
+// exceeds eps.  The global-planarity guard REFUSES it with a distinct named
+// reason - a strictly-narrower fail-closed than today's blanket refusal, never
+// a silent wrong resolve.  (dm chosen so the consecutive gap ~0.8 eps < eps but
+// the fan deviation ~1.6 eps > eps.)
+TEST(Overlap3, Regularize_NearCoplanarChain_GuardFailClosed) {
+  const int K = 5;
+  const double s0 = 3.0;
+  const Manifold::Impl probe(CurvedChainSoup(1e-13, K));
+  const double eps = EpsilonFromScale(probe.bBox_.Scale(), 1000);
+  const Manifold::Impl in(CurvedChainSoup(0.8 * eps / s0, K));
+  ASSERT_TRUE(in.IsManifold() && in.Is2Manifold());
+  const RegularizeResult r = RegularizeDirtyDirect(in, eps);
+  ASSERT_TRUE(r.fatal.has_value())
+      << "a curved near-coplanar chain must fail closed, never fold to a wrong "
+         "plane";
+  EXPECT_EQ(*r.fatal, FatalReason::DirtyComponentUnresolved) << r.detail;
+  EXPECT_NE(r.detail.find("global-planarity guard"), std::string::npos)
+      << "residue must name the guard: " << r.detail;
+  EXPECT_FALSE(r.impl.has_value());
+}
