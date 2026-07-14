@@ -1746,9 +1746,12 @@ TEST(Overlap3, Regularize_MultiComponent_AllClean_DispatchCounts) {
 }
 
 // Pin 3: multi-component dispatch, one clean + one dirty.  The clean cube
-// early-exits; the poked (self-intersecting) cube routes to candidate B, which
-// fails closed - so the whole result is the honest fail-closed, with complete
-// dispatch counts (both components gated regardless of decompose order).
+// early-exits; the poked cube routes to candidate B and fails closed - the
+// whole result is the honest fail-closed, with complete dispatch counts.  Post
+// stage-6 SoS the poked cube PASSES the exact-zero tie gate and fails NARROWER,
+// at emission (NonManifoldEmission: the collapsed-vertex spike is a degenerate
+// touching-sheet contact, no representable manifold boundary - stage-7
+// territory), never a silent wrong result.
 TEST(Overlap3, Regularize_MultiComponent_CleanPlusDirty_DispatchCounts) {
   const Manifold clean = Manifold::Cube({1, 1, 1}).Translate({3, 0, 0});
   const Manifold dirtyM(GetMeshGLImpl<double, uint64_t>(PokedCube(), -1));
@@ -1760,14 +1763,14 @@ TEST(Overlap3, Regularize_MultiComponent_CleanPlusDirty_DispatchCounts) {
   EXPECT_EQ(r.counters.regularized, 0);
   EXPECT_EQ(r.counters.failClosed, 1);
   ASSERT_TRUE(r.fatal.has_value())
-      << "a dirty component must fail closed while B is a stub";
-  EXPECT_EQ(*r.fatal, FatalReason::DirtyComponentUnresolved);
+      << "a dirty component must fail closed, never a silent wrong result";
+  EXPECT_EQ(*r.fatal, FatalReason::NonManifoldEmission) << r.detail;
   EXPECT_FALSE(r.impl.has_value()) << "fail-closed yields no partial output";
 }
 
-// Pin 4: a dirty single component routes to candidate B's fail-closed stub with
-// the named reason.  Fixture sanity is asserted first: the poked cube is a
-// VALID 2-manifold that self-intersects (a genuine dirty component).
+// Pin 4: a dirty single component routes to candidate B and fails closed.  Post
+// stage-6 SoS the poked cube passes the exact-zero tie gate and fails NARROWER,
+// at emission (NonManifoldEmission), never a silent wrong result.
 TEST(Overlap3, Regularize_DirtySingleComponent_RoutesToFailClosedStub) {
   const Manifold::Impl dirty = PokedCube();
   ASSERT_TRUE(dirty.IsManifold() && dirty.Is2Manifold())
@@ -1781,7 +1784,7 @@ TEST(Overlap3, Regularize_DirtySingleComponent_RoutesToFailClosedStub) {
   EXPECT_EQ(r.counters.regularized, 0);
   EXPECT_EQ(r.counters.failClosed, 1);
   ASSERT_TRUE(r.fatal.has_value());
-  EXPECT_EQ(*r.fatal, FatalReason::DirtyComponentUnresolved) << r.detail;
+  EXPECT_EQ(*r.fatal, FatalReason::NonManifoldEmission) << r.detail;
   EXPECT_FALSE(r.impl.has_value());
 }
 
@@ -2063,38 +2066,38 @@ TEST(Overlap3, Regularize_NegativeWinding_PushedCapSphere) {
 }
 
 // ===========================================================================
-// Regularization axis: CROSS-OPERAND EXACT-ZERO TIES (single-global SoS).
-// docs/Regularize3D.md open items "single global SoS, unexercised" + R
-// (GT7863).
-//
-// When a level-0 pierce predicate is an EXACT ZERO (a vertex exactly on a face,
-// or a pierce exactly on a triangle edge) the static filter returns 0
-// (uncertain) and B has no exact-Fraction fallback, so it FAILS CLOSED with a
-// named reason rather than guess a sign (zero-oracle-wrong absolute).  The
-// single-global symbolic-perturbation convention that would resolve these ties
-// consistently is the doc's specified-but-UNBUILT path.  reg3d-s3 adjudicated
-// it a research-grade wall under zero-oracle-wrong: GT7863's dirty component is
-// COPLANAR-DOMINATED (54 coplanar face pairs across 23 of 216 tris), so even a
-// correct point-SoS turns coplanar faces into sub-eps slivers whose eps-nudged
-// winding classify is unreliable (the doc's separate coplanar axis), and any
-// SoS ordering bug emits oracle-wrong-but-manifold geometry the re-gate cannot
-// catch.  These pins assert the fail-closed CONTRACT is precise and
-// load-bearing: B never silently resolves an exact-tie carrier to (possibly
-// wrong) geometry.
+// Regularization axis: EXACT-ZERO TIES (single-global SoS),
+// docs/Regularize3D.md stage 6, LANDED.  A level-0 pierce predicate that is an
+// EXACT ZERO (a vertex exactly on a face, or an edge grazing a triangle edge -
+// a NON-coplanar transversal tie) is now DECIDED by the single-global
+// symbolic-perturbation convention (Orient3DSoS: filter fast-path, else the
+// exact e^0 sign, else the Edelsbrunner-Mucke cascade) instead of failing
+// closed.  The coplanar family stays the FOLD's (coplanar pairs are never
+// SoS-perturbed - the s3/s4adj sliver rail).  BridgedCaps (above) is the
+// oracle-true RESOLVE of this tie family through the genus-handle junction. The
+// carriers below are the RESIDUE: they PASS the SoS gate (no longer
+// boundaryTouch) and now fail NARROWER, at emission
+// - the coplanar-DOMINATED soups (GT7863) and the collapsed-vertex spike
+// (PokedCube) reduce to sub-eps / touching-sheet slivers with no representable
+// double-precision manifold boundary (NonManifoldEmission, a hard fail-closed =
+// no output; the doc's stage-7 thin-cell territory, honestly named).  These
+// pins assert the residue is precise and load-bearing: B never silently
+// resolves an exact-tie carrier to (possibly wrong) geometry - the SoS gate
+// NARROWED, the thin-cell wall remains.
 // ===========================================================================
 
 // Constructed carrier: a SINGLE self-intersecting component with ISOLATED
 // exact-zero ties (vertex-on-plane + pierce-on-edge, NO coplanar overlap - the
-// PokedCube's axis-aligned spike pierces the far faces at exact configs).  A
-// pair of separate overlapping cubes would decompose into two CLEAN components
-// and early-exit, never reaching B, so the carrier is one self-intersecting
-// component (reg3d-s3 adjudication).
+// PokedCube's axis-aligned spike pierces the far faces at exact configs).  The
+// SoS now DECIDES those ties (the carrier passes the exact-zero tie gate); it
+// then fails NARROWER, at emission - the collapsed-vertex spike is a degenerate
+// touching-sheet contact (stage-7 thin-cell), not the SoS axis.
 TEST(Overlap3, Regularize_ExactZeroTie_Constructed_FailClosed) {
   const Manifold::Impl in = PokedCube();
   ASSERT_TRUE(in.IsManifold() && in.Is2Manifold());
   ASSERT_TRUE(in.IsSelfIntersecting()) << "carrier must be a dirty component";
   // The carrier genuinely REACHES an exact-zero pierce tie (else it would not
-  // exercise the axis): B's enumeration reports boundary-touch pairs.
+  // exercise the axis): B's enumeration reports filter-tie pairs.
   const CandidateBProbe p =
       RegularizeB_Probe(in, {}, in.bBox_.Center() + vec3(97.1, 33.7, 51.3));
   EXPECT_GT(p.boundaryTouchPairs, 0)
@@ -2102,11 +2105,9 @@ TEST(Overlap3, Regularize_ExactZeroTie_Constructed_FailClosed) {
 
   const RegularizeResult r = RegularizeImpl(in, ImplEps(in));
   ASSERT_TRUE(r.fatal.has_value())
-      << "an exact-zero tie must fail closed, never a silent resolve";
-  EXPECT_EQ(*r.fatal, FatalReason::DirtyComponentUnresolved);
-  EXPECT_NE(r.detail.find("SoS"), std::string::npos)
-      << "fail-closed reason must name the single-global SoS axis: "
-      << r.detail;
+      << "the residue must fail closed, never a silent resolve";
+  // NARROWED: past the SoS gate, now the thin-cell / touching-sheet emission.
+  EXPECT_EQ(*r.fatal, FatalReason::NonManifoldEmission) << r.detail;
   EXPECT_FALSE(r.impl.has_value()) << "fail-closed yields no partial output";
   EXPECT_EQ(r.counters.regularized, 0);
   EXPECT_EQ(r.counters.failClosed, 1);
@@ -2116,11 +2117,14 @@ TEST(Overlap3, Regularize_ExactZeroTie_Constructed_FailClosed) {
 // it into 4 pieces (non-fusion contract: they stay separate).  TWO route dirty:
 // one is self-intersecting, and one carries a WITHIN-component coplanar overlap
 // that the re-scoped coplanar gate catches (IsSelfIntersecting misses it,
-// R2(i)). The other two early-exit clean.  The exact-coplanar FOLD consumes the
-// coplanar family, so each dirty piece fails closed on the STRICTLY NARROWER
-// residue: the NON-coplanar vertex-on-face / edge-on-edge point-SoS ties (the
-// single-global-SoS axis, PokedCube-class), not the coplanar axis.  The whole
-// compose still fail-closes (any component fail-closed suppresses the output).
+// R2(i)). The other two early-exit clean.  Post stage-6 SoS the dirty pieces
+// PASS the exact-zero tie gate (the NON-coplanar vertex-on-face / edge-on-edge
+// ties now DECIDE), then fail NARROWER, at EMISSION: GT7863's dirty component
+// is COPLANAR-DOMINATED (reg3d-s3: 54 coplanar pairs across 23 of 216 tris),
+// whose resolved boundary reduces to sub-eps / touching-sheet slivers with no
+// representable double manifold boundary (NonManifoldEmission, a hard
+// fail-closed = no output; the doc's stage-7 thin-cell axis, not the SoS axis).
+// The whole compose fail-closes (any component fail-closed suppresses output).
 TEST(Overlap3, Regularize_ExactZeroTie_GT7863_FailClosed) {
   std::filesystem::path file(__FILE__);
   auto load = [&](const char* n) -> std::optional<MeshGL64> {
@@ -2148,13 +2152,10 @@ TEST(Overlap3, Regularize_ExactZeroTie_GT7863_FailClosed) {
   EXPECT_EQ(r.counters.clean, 2) << "2 components early-exit clean";
   EXPECT_EQ(r.counters.dirty, 2)
       << "1 self-intersecting + 1 within-component coplanar overlap";
-  ASSERT_TRUE(r.fatal.has_value()) << "the point-SoS residue must fail closed";
-  EXPECT_EQ(*r.fatal, FatalReason::DirtyComponentUnresolved);
-  EXPECT_NE(r.detail.find("SoS"), std::string::npos)
-      << "fail-closed reason must name the SoS axis: " << r.detail;
-  EXPECT_NE(r.detail.find("non-coplanar"), std::string::npos)
-      << "the fold consumes the coplanar family; the residue is NON-coplanar: "
-      << r.detail;
+  ASSERT_TRUE(r.fatal.has_value()) << "the thin-cell residue must fail closed";
+  // NARROWED: past the SoS gate, now the coplanar-sliver / touching-sheet
+  // emission wall (stage-7 thin-cell), never a silent wrong resolve.
+  EXPECT_EQ(*r.fatal, FatalReason::NonManifoldEmission) << r.detail;
   EXPECT_FALSE(r.impl.has_value())
       << "any component fail-closed suppresses the whole compose (no partial)";
 }
@@ -2391,11 +2392,13 @@ TEST(Overlap3, Regularize_CoplanarFold_Mult3Nested_Resolves) {
 // manifold with a WITHIN-component pure COPLANAR overlap
 // (IsSelfIntersecting=0), so a single connectivity component routes DIRTY on
 // the re-scoped coplanar gate (no cross-component merge - the non-fusion
-// contract).  Its residue is the NON-coplanar point/edge SoS tie the
-// single-global symbolic-perturbation path (unbuilt) would need, so it fails
-// closed with the STRICTLY NARROWER named reason - never a silent wrong
-// resolve, no OOM (the coplanar scan is bbox-prefiltered and fast on this
-// 1442-face model).
+// contract).  Post stage-6 SoS its non-coplanar ties DECIDE (it passes the
+// exact-zero tie gate); it then fails NARROWER, at a DEGENERATE SEAM - the
+// SoS-decided crossings on this axis-aligned soup do not pair into clean
+// two-endpoint seams (a >2-sheet / odd-endpoint incidence the arrangement build
+// refuses), a hard fail-closed = no output.  Still DirtyComponentUnresolved, a
+// strictly narrower named reason than the SoS gate, never a silent wrong
+// resolve, no OOM (bbox-prefiltered scan on this 1442-face model).
 TEST(Overlap3, Regularize_ExactZeroTie_Openscad_FailClosed) {
   std::filesystem::path file(__FILE__);
   std::ifstream fin(
@@ -2405,11 +2408,12 @@ TEST(Overlap3, Regularize_ExactZeroTie_Openscad_FailClosed) {
   const Manifold::Impl in(ReadOBJ(fin));
   const RegularizeResult r = RegularizeImpl(in, ImplEps(in));
   EXPECT_GE(r.counters.dirty, 1) << "coplanar overlap must route to B";
-  ASSERT_TRUE(r.fatal.has_value()) << "the non-coplanar SoS residue must fail "
-                                      "closed, never silently resolve";
-  EXPECT_EQ(*r.fatal, FatalReason::DirtyComponentUnresolved);
-  EXPECT_NE(r.detail.find("SoS"), std::string::npos)
-      << "fail-closed reason must name the SoS axis: " << r.detail;
+  ASSERT_TRUE(r.fatal.has_value())
+      << "the narrowed residue must fail closed, never silently resolve";
+  EXPECT_EQ(*r.fatal, FatalReason::DirtyComponentUnresolved) << r.detail;
+  // NARROWED: past the SoS gate, now the degenerate-seam / >2-sheet residue.
+  EXPECT_NE(r.detail.find("degenerate incidence"), std::string::npos)
+      << "residue must name the degenerate-seam wall: " << r.detail;
   EXPECT_FALSE(r.impl.has_value()) << "fail-closed yields no partial output";
 }
 
@@ -2615,7 +2619,23 @@ TEST(Overlap3, Regularize_SlantPlug_CrossComponent_PassThrough) {
 // DetectCoplanarClusters check in GateComponent and this component early-exits
 // CLEAN (a silent wrong pass-through of an un-regularized doubled wall) - so
 // the check is load-bearing.
-TEST(Overlap3, Regularize_WithinComponentCoplanar_RoutesDirty) {
+// TARGET (a), docs/Regularize3D.md stage-6 SoS: BridgedCaps - a
+// within-component coplanar overlap joined into ONE connected 2-manifold by a
+// solid L-rod (a genus handle).  Its bridge-junction is the vertex-on-face /
+// edge-on-edge exact-zero orient3d tie the SINGLE-GLOBAL SoS now DECIDES: the
+// coplanar caps are consumed by the fold, and the rod junction (rod faces
+// coplanar/ perpendicular with the wall & frame planes) is resolved by the SoS
+// instead of failing closed.  RESOLVES oracle-true through the REAL
+// RegularizeImpl entry: {w_S>=1} = A[0,6]x[0,5]x[0,2] (60) + B[2,4]x[2,3]x[2,4]
+// (4) + the L-rod
+// (~0.192) = 64.192, one solid, the doubled cap interior.  Graded by the
+// INDEPENDENT GWN solid-angle oracle (membership + volume band +
+// tol-invariance). MUTATION-VERIFIED in-lane (reg3d-s6 notebook): disabling the
+// SoS reverts this to the old fail-closed at the boundaryTouch gate (SoS is
+// load-bearing); flipping the global perturbation direction still resolves
+// oracle-true (the exact e^0 sign is unaffected, only sub-eps ties flip, not
+// the {w>=1} topology).
+TEST(Overlap3, Regularize_WithinComponentCoplanar_BridgedCaps_Resolves) {
   const Manifold::Impl in(BridgedCaps());
   ASSERT_TRUE(in.IsManifold() && in.Is2Manifold())
       << "a valid single connected 2-manifold";
@@ -2629,16 +2649,54 @@ TEST(Overlap3, Regularize_WithinComponentCoplanar_RoutesDirty) {
   EXPECT_GT(p.coplanarClusterFaces, 0)
       << "the doubled cap is a genuine within-component coplanar overlap";
 
-  const RegularizeResult r = RegularizeImpl(in, ImplEps(in));
+  const double eps = ImplEps(in);
+  const RegularizeResult r = RegularizeImpl(in, eps);
+  ASSERT_FALSE(r.fatal.has_value())
+      << "the SoS must resolve the bridge junction, not fail closed: "
+      << r.detail;
+  ASSERT_TRUE(r.impl.has_value());
   EXPECT_EQ(r.counters.components, 1);
   EXPECT_EQ(r.counters.clean, 0)
-      << "the within-component coplanar gate must route it DIRTY, not clean";
+      << "the within-component coplanar gate routes it DIRTY";
   EXPECT_EQ(r.counters.dirty, 1);
-  // Fails closed on the bridge-junction SoS residue (never a silent resolve).
-  ASSERT_TRUE(r.fatal.has_value())
-      << "the connection SoS residue must fail closed, never resolve wrong";
-  EXPECT_EQ(*r.fatal, FatalReason::DirtyComponentUnresolved);
-  EXPECT_NE(r.detail.find("SoS"), std::string::npos)
-      << "fail-closed reason names the single-global SoS axis: " << r.detail;
-  EXPECT_FALSE(r.impl.has_value());
+  EXPECT_EQ(r.counters.regularized, 1);
+
+  const Manifold out(GetMeshGLImpl<double, uint64_t>(*r.impl, -1));
+  EXPECT_EQ(out.Status(), Manifold::Error::NoError);
+  EXPECT_FALSE(r.impl->IsSelfIntersecting()) << "output self-intersects";
+  EXPECT_EQ(out.Decompose().size(), 1u) << "must be one solid";
+  const double vol = out.Volume();
+  EXPECT_GT(vol, 64.0) << "volume below band";
+  EXPECT_LT(vol, 64.4) << "volume above band";
+
+  // INDEPENDENT GWN oracle: (w_soup>=1) == (w_out>0) at every unambiguous
+  // point.
+  const auto inTris = SoupTris(in);
+  std::mt19937 rng(0xB1D9E);
+  const Box bb = out.BoundingBox();
+  const vec3 mn = bb.min - (bb.max - bb.min) * 0.05;
+  const vec3 mx = bb.max + (bb.max - bb.min) * 0.05;
+  std::uniform_real_distribution<double> U(0, 1);
+  std::vector<vec3> qs;
+  for (int k = 0; k < 12000; ++k)
+    qs.push_back(mn + (mx - mn) * vec3(U(rng), U(rng), U(rng)));
+  const auto wOut = out.WindingNumber(qs);
+  int disagree = 0, checked = 0;
+  for (int k = 0; k < static_cast<int>(qs.size()) && disagree < 5; ++k) {
+    const double g = GWN(inTris, qs[k]);
+    if (std::abs(g - std::round(g)) > 0.15) continue;  // near-surface skip
+    ++checked;
+    if ((std::lround(g) >= 1) != (wOut[k] > 0.5)) {
+      ++disagree;
+      ADD_FAILURE() << "GWN membership disagreement at (" << qs[k].x << ","
+                    << qs[k].y << "," << qs[k].z << ")";
+    }
+  }
+  EXPECT_GT(checked, 2000) << "oracle undersampled";
+
+  // TOL-INVARIANCE: the retained topology is decided from input data.
+  const RegularizeResult r2 = RegularizeImpl(in, eps * 0.5);
+  ASSERT_TRUE(r2.impl.has_value()) << "tol-variant fatal: " << r2.detail;
+  const Manifold out2(GetMeshGLImpl<double, uint64_t>(*r2.impl, -1));
+  EXPECT_NEAR(vol, out2.Volume(), 1e-6 * vol) << "not tol-invariant";
 }

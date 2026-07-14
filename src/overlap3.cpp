@@ -1459,6 +1459,173 @@ GateVerdict GateComponent(const Manifold::Impl& comp) {
 // and is the doc's named largest-unbuilt-piece.
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// SINGLE GLOBAL TIE-BREAK CONVENTION (SoS), docs/Regularize3D.md stage 6.
+// One function whose e^0 coefficient is the EXACT orient3d (the "filter
+// fallback") and whose higher-e terms are the Edelsbrunner-Mucke symbolic
+// perturbation, computed by Shewchuk expansion arithmetic over an e-polynomial.
+// Perturb matrix entry (row r, coord c) by e^(2^(rank(r)*3 + (2-c))), rank =
+// order of the four points' GLOBAL vertex indices; the sign is the sign of the
+// lowest-exponent nonzero coefficient.  Monomial exponents are sums of DISTINCT
+// powers of two, and the map (local rank r) -> (global rank G(r)) is strictly
+// monotonic on the bit positions r*3+(2-c), so the leading monomial - hence the
+// sign - is INVARIANT to using local ranks 0..3 in place of the true global
+// ranks.  That is why a per-predicate local computation still decides
+// consistently with ONE global perturbation: any two predicates about the same
+// configuration return the sign they would under that single perturbation.
+// This is the ONLY tie-break convention; it is threaded through every
+// enumeration predicate so a ray or edge grazing a shared boundary resolves
+// identically for every probe.  Validated in isolation (reg3d-s6 notebook):
+// exact vs long double (200k), total + antisymmetric under all 6
+// transpositions, and matched by an independent __int128 implementation of the
+// full cascade (200k coplanar).  Only invoked on the RARE filter-uncertain (0)
+// fallback, so the certified fast path (and siA/siB, fully certified) is
+// untouched.
+namespace sos {
+using Exp = std::vector<double>;  // nonoverlapping, increasing |.|, zero-elim
+inline void TwoSum(double a, double b, double& x, double& y) {
+  x = a + b;
+  const double bv = x - a, av = x - bv;
+  y = (a - av) + (b - bv);
+}
+inline void TwoProduct(double a, double b, double& x, double& y) {
+  x = a * b;
+  y = std::fma(a, b, -x);
+}
+// e + f (both nonoverlapping, increasing) -> nonoverlapping, increasing.
+inline Exp FastExpansionSum(const Exp& e, const Exp& f) {
+  if (e.empty()) return f;
+  if (f.empty()) return e;
+  Exp h;
+  size_t i = 0, j = 0;
+  auto next = [&]() -> double {
+    if (i < e.size() && (j >= f.size() || std::abs(e[i]) <= std::abs(f[j])))
+      return e[i++];
+    return f[j++];
+  };
+  double q = next(), hh;
+  while (i < e.size() || j < f.size()) {
+    TwoSum(q, next(), q, hh);
+    if (hh != 0.0) h.push_back(hh);
+  }
+  if (q != 0.0 || h.empty()) h.push_back(q);
+  return h;
+}
+// e * b (single double) -> nonoverlapping, increasing.
+inline Exp ScaleExpansion(const Exp& e, double b) {
+  Exp h;
+  if (e.empty() || b == 0.0) return h;
+  double q, hh, prod1, prod0, sum;
+  TwoProduct(e[0], b, q, hh);
+  if (hh != 0.0) h.push_back(hh);
+  for (size_t i = 1; i < e.size(); ++i) {
+    TwoProduct(e[i], b, prod1, prod0);
+    TwoSum(q, prod0, sum, hh);
+    if (hh != 0.0) h.push_back(hh);
+    TwoSum(prod1, sum, q, hh);
+    if (hh != 0.0) h.push_back(hh);
+  }
+  if (q != 0.0 || h.empty()) h.push_back(q);
+  return h;
+}
+inline Exp ExpProduct(const Exp& e, const Exp& f) {
+  Exp h;
+  for (double b : f) h = FastExpansionSum(h, ScaleExpansion(e, b));
+  return h;
+}
+inline int ExpSign(const Exp& e) {
+  for (size_t k = e.size(); k-- > 0;)
+    if (e[k] != 0.0) return e[k] > 0 ? 1 : -1;
+  return 0;
+}
+using Poly = std::map<int, Exp>;  // e-exponent -> exact coefficient expansion
+inline void PolyAdd(Poly& p, int k, const Exp& c) {
+  if (c.empty()) return;
+  auto it = p.find(k);
+  if (it == p.end())
+    p.emplace(k, c);
+  else
+    it->second = FastExpansionSum(it->second, c);
+}
+inline Poly PolyMul(const Poly& a, const Poly& b) {
+  Poly r;
+  for (const auto& [ka, ca] : a)
+    for (const auto& [kb, cb] : b) PolyAdd(r, ka + kb, ExpProduct(ca, cb));
+  return r;
+}
+constexpr int kPerm[24][4] = {
+    {0, 1, 2, 3}, {0, 1, 3, 2}, {0, 2, 1, 3}, {0, 2, 3, 1}, {0, 3, 1, 2},
+    {0, 3, 2, 1}, {1, 0, 2, 3}, {1, 0, 3, 2}, {1, 2, 0, 3}, {1, 2, 3, 0},
+    {1, 3, 0, 2}, {1, 3, 2, 0}, {2, 0, 1, 3}, {2, 0, 3, 1}, {2, 1, 0, 3},
+    {2, 1, 3, 0}, {2, 3, 0, 1}, {2, 3, 1, 0}, {3, 0, 1, 2}, {3, 0, 2, 1},
+    {3, 1, 0, 2}, {3, 1, 2, 0}, {3, 2, 0, 1}, {3, 2, 1, 0}};
+inline int Parity(const int s[4]) {
+  int p = 1;
+  for (int i = 0; i < 4; ++i)
+    for (int j = i + 1; j < 4; ++j)
+      if (s[i] > s[j]) p = -p;
+  return p;
+}
+// Exact orient3d sign (the e^0 coefficient); 0 iff the four points are exactly
+// coplanar.  No perturbation - this is the exact filter fallback.
+inline int ExactOrient3D(const double pts[4][3]) {
+  Exp acc;
+  for (const auto& s : kPerm) {
+    Exp prod{1.0};
+    bool zero = false;
+    for (int r = 0; r < 4; ++r) {
+      const int c = s[r];
+      if (c == 3) continue;  // the ones column
+      prod = ScaleExpansion(prod, pts[r][c]);
+      if (prod.empty()) {
+        zero = true;
+        break;
+      }
+    }
+    if (zero) continue;
+    if (Parity(s) < 0)
+      for (double& v : prod) v = -v;
+    acc = FastExpansionSum(acc, prod);
+  }
+  return ExpSign(acc);
+}
+// Symbolically-perturbed orient3d sign (never 0).  idx = the four points'
+// global vertex indices (distinct).  When ExactOrient3D != 0 this returns that
+// exact sign; otherwise the SoS cascade decides.
+inline int SoSOrient3D(const double pts[4][3], const int idx[4]) {
+  int order[4] = {0, 1, 2, 3};
+  std::sort(order, order + 4, [&](int a, int b) { return idx[a] < idx[b]; });
+  int rankOf[4];
+  for (int r = 0; r < 4; ++r) rankOf[order[r]] = r;
+  auto keyOf = [&](int r, int c) { return 1 << (rankOf[r] * 3 + (2 - c)); };
+  Poly det;
+  for (const auto& s : kPerm) {
+    Poly prod;
+    prod[0] = Exp{1.0};
+    for (int r = 0; r < 4; ++r) {
+      const int c = s[r];
+      Poly factor;
+      if (c == 3) {
+        factor[0] = Exp{1.0};
+      } else {
+        if (pts[r][c] != 0.0) factor[0] = Exp{pts[r][c]};
+        factor[keyOf(r, c)] = Exp{1.0};
+      }
+      prod = PolyMul(prod, factor);
+    }
+    if (Parity(s) < 0)
+      for (auto& [k, cc] : prod)
+        for (double& v : cc) v = -v;
+    for (auto& [k, cc] : prod) PolyAdd(det, k, cc);
+  }
+  for (auto& [k, cc] : det) {
+    const int sg = ExpSign(cc);
+    if (sg != 0) return sg;
+  }
+  return 0;  // unreachable for distinct points; caller treats 0 as fail-closed
+}
+}  // namespace sos
+
 // orient3d on double INPUT coords through the Shewchuk STATIC error-bound
 // filter (o3derrboundA = (7 + 56u)u, u = 2^-53).  Returns the CERTIFIED sign
 // (+/-1) when |det| exceeds the permanent-scaled error bound; returns 0 when
@@ -1481,7 +1648,22 @@ inline int Orient3DFilterSign(const vec3& a, const vec3& b, const vec3& c,
   constexpr double u = 0x1p-53;
   const double errb = (7.0 + 56.0 * u) * u * perm;
   if (errb > 0.0 && std::abs(det) > errb) return det > 0.0 ? 1 : -1;
-  return 0;  // uncertain -> exact fallback (unbuilt); caller fails closed
+  return 0;  // uncertain -> exact fallback / SoS (Orient3DSoS)
+}
+
+// The complete orient3d decision (docs/Regularize3D.md stage 6): the certified
+// filter sign on the fast path, else the single-global SoS - exact when the
+// four points are genuinely non-coplanar (the filter was merely uncertain), the
+// symbolic tie-break when they are exactly coplanar.  NEVER 0.  `i*` are the
+// four points' global vertex indices.
+inline int Orient3DSoS(const vec3& a, const vec3& b, const vec3& c,
+                       const vec3& d, int ia, int ib, int ic, int id) {
+  const int s = Orient3DFilterSign(a, b, c, d);
+  if (s != 0) return s;
+  const double pts[4][3] = {
+      {a.x, a.y, a.z}, {b.x, b.y, b.z}, {c.x, c.y, c.z}, {d.x, d.y, d.z}};
+  const int idx[4] = {ia, ib, ic, id};
+  return sos::SoSOrient3D(pts, idx);
 }
 
 // Does edge (u,v) pierce the INTERIOR of triangle (a,b,c)?  Level-0, decomposed
@@ -1499,6 +1681,35 @@ int EdgePiercesTri(const vec3& u, const vec3& v, const vec3& a, const vec3& b,
   const int o2 = Orient3DFilterSign(u, v, b, c);
   const int o3 = Orient3DFilterSign(u, v, c, a);
   if (o1 == 0 || o2 == 0 || o3 == 0) return -1;
+  return (o1 == o2 && o2 == o3) ? 1 : 0;
+}
+
+// The SoS completion of EdgePiercesTri for the residue the FILTER refuses (-1):
+// a GENUINE NON-COPLANAR transversal exact-zero tie (vertex-on-face /
+// edge-on-edge), which the single-global SoS now DECIDES to a definite pierce
+// (1) or non-pierce (0) - never refuses.  `i*` are the vertices' global
+// indices.  The caller restricts this to the transversal residue (the coplanar
+// / cluster-riser / benign ties are the fold's, handled before this is
+// reached); the edge-in-plane guard below is a defensive second gate so a
+// coplanar incidence can never manufacture a phantom seam.
+int EdgePiercesTriSoS(const vec3& u, const vec3& v, const vec3& a,
+                      const vec3& b, const vec3& c, int iu, int iv, int ia,
+                      int ib, int ic) {
+  const int fu = Orient3DFilterSign(a, b, c, u);
+  const int fv = Orient3DFilterSign(a, b, c, v);
+  if (fu == 0 && fv == 0) {
+    const double au[4][3] = {
+        {a.x, a.y, a.z}, {b.x, b.y, b.z}, {c.x, c.y, c.z}, {u.x, u.y, u.z}};
+    const double av[4][3] = {
+        {a.x, a.y, a.z}, {b.x, b.y, b.z}, {c.x, c.y, c.z}, {v.x, v.y, v.z}};
+    if (sos::ExactOrient3D(au) == 0 && sos::ExactOrient3D(av) == 0) return 0;
+  }
+  const int su = Orient3DSoS(a, b, c, u, ia, ib, ic, iu);
+  const int sv = Orient3DSoS(a, b, c, v, ia, ib, ic, iv);
+  if (su == sv) return 0;  // both same (perturbed) side -> no straddle
+  const int o1 = Orient3DSoS(u, v, a, b, iu, iv, ia, ib);
+  const int o2 = Orient3DSoS(u, v, b, c, iu, iv, ib, ic);
+  const int o3 = Orient3DSoS(u, v, c, a, iu, iv, ic, ia);
   return (o1 == o2 && o2 == o3) ? 1 : 0;
 }
 
@@ -1866,7 +2077,6 @@ BuildArrangement RecordSeams(const Manifold::Impl& in,
       std::array<vec3, 4> pts;
       std::array<int, 4> ptTri;  // piercedTri per endpoint (interiority source)
       int nPts = 0;
-      bool boundary = false;
       // An edge of `owner` that only TOUCHES `tgt`'s plane (does not cross it)
       // is a boundary contact, not a transversal crossing, so it adds no
       // winding jump.  Two flavors are benign:
@@ -1935,43 +2145,51 @@ BuildArrangement RecordSeams(const Manifold::Impl& in,
           if (clusterVerts[c].count(a) && clusterVerts[c].count(b)) return true;
         return false;
       };
-      for (int e = 0; e < 3; ++e) {
-        const int r =
-            EdgePiercesTri(T0[e], T0[(e + 1) % 3], T1[0], T1[1], T1[2]);
-        if (r == 1 && nPts < 4) {
-          ptTri[nPts] = j;  // pierces tri j -> on i's edge, interior to j
-          pts[nPts++] = pierce(A.vid[i][e], A.vid[i][(e + 1) % 3], j);
-        } else if (r == -1 && !edgeInClusterPlane(i, e) &&
-                   !benignInPlane(i, e, j))
-          boundary = true;
-      }
-      for (int e = 0; e < 3; ++e) {
-        const int r =
-            EdgePiercesTri(T1[e], T1[(e + 1) % 3], T0[0], T0[1], T0[2]);
-        if (r == 1 && nPts < 4) {
-          ptTri[nPts] = i;  // pierces tri i -> on j's edge, interior to i
-          pts[nPts++] = pierce(A.vid[j][e], A.vid[j][(e + 1) % 3], i);
-        } else if (r == -1 && !edgeInClusterPlane(j, e) &&
-                   !benignInPlane(j, e, i))
-          boundary = true;
-      }
-      if (boundary) {
-        // A COPLANAR exact-zero tie is never a transversal crossing: the two
-        // faces share a plane, so this is either a folded cluster pair (skipped
-        // above) or a benign non-overlapping coplanar contact.  Only a
-        // NON-coplanar exact-zero tie (a vertex-on-face / edge-on-edge
-        // incidence between transversal faces) is the single-global-SoS
-        // residue.
-        bool coplanar = true;
-        for (int k = 0; k < 3 && coplanar; ++k)
-          if (Orient3DFilterSign(T0[0], T0[1], T0[2], T1[k]) != 0)
-            coplanar = false;
-        for (int k = 0; k < 3 && coplanar; ++k)
-          if (Orient3DFilterSign(T1[0], T1[1], T1[2], T0[k]) != 0)
-            coplanar = false;
-        if (!coplanar) A.boundaryTouch = true;
-        continue;
-      }
+      // Pair coplanarity (filter): a coplanar pair's exact-zero ties belong to
+      // the in-plane FOLD, never the SoS transversal path (the s3/s4adj sliver
+      // rail).  Only a NON-coplanar transversal residue is SoS-decided.
+      bool pairCoplanar = true;
+      for (int k = 0; k < 3 && pairCoplanar; ++k)
+        if (Orient3DFilterSign(T0[0], T0[1], T0[2], T1[k]) != 0)
+          pairCoplanar = false;
+      for (int k = 0; k < 3 && pairCoplanar; ++k)
+        if (Orient3DFilterSign(T1[0], T1[1], T1[2], T0[k]) != 0)
+          pairCoplanar = false;
+      // Record the crossing points of `owner`'s edges through `tgt`.  A FILTER-
+      // certified pierce (r==1) records directly.  A filter-refused (-1)
+      // GENUINE transversal exact-zero tie - not a cluster riser, not a benign
+      // graze, and the pair is non-coplanar - is DECIDED by the single-global
+      // SoS (EdgePiercesTriSoS): the stage-6 completion of the vertex-on-face /
+      // edge-on-edge tie family.  Coplanar / cluster-riser / benign ties record
+      // nothing (the fold or the valid-manifold structure owns them).
+      auto recordEdge = [&](int owner, int e, int tgt) {
+        const vec3& u = A.tri[owner][e];
+        const vec3& w = A.tri[owner][(e + 1) % 3];
+        const auto& T = A.tri[tgt];
+        const int r = EdgePiercesTri(u, w, T[0], T[1], T[2]);
+        bool hit = (r == 1);
+        if (r == -1 && !pairCoplanar && !edgeInClusterPlane(owner, e) &&
+            !benignInPlane(owner, e, tgt)) {
+          // Genuine non-coplanar transversal exact-zero residue: the single-
+          // global SoS (stage 6) DECIDES it (pierce / no-pierce).  A NON-
+          // decision is only reachable with the convention disabled, and is the
+          // documented fail-closed slot (A.boundaryTouch, RunCandidateB).
+          const int sp =
+              EdgePiercesTriSoS(u, w, T[0], T[1], T[2], A.vid[owner][e],
+                                A.vid[owner][(e + 1) % 3], A.vid[tgt][0],
+                                A.vid[tgt][1], A.vid[tgt][2]);
+          if (sp == 1)
+            hit = true;
+          else if (sp != 0)
+            A.boundaryTouch = true;
+        }
+        if (hit && nPts < 4) {
+          ptTri[nPts] = tgt;  // pierces tri tgt -> interior to tgt
+          pts[nPts++] = pierce(A.vid[owner][e], A.vid[owner][(e + 1) % 3], tgt);
+        }
+      };
+      for (int e = 0; e < 3; ++e) recordEdge(i, e, j);
+      for (int e = 0; e < 3; ++e) recordEdge(j, e, i);
       if (nPts == 0) continue;  // no genuine crossing
       if (nPts != 2) {
         // A genuine seam has exactly two endpoints; anything else is a
