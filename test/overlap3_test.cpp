@@ -1915,13 +1915,21 @@ TEST(Overlap3, Corpus_Offsets_CleanPassThrough) {
 }
 
 // GenericTwin7081: the pair decomposes into 13 components; 11 gate clean but 2
-// carry a within-component defect the resolver declines to resolve exactly (a
-// "seam sub-face arrangement not exactly resolvable" residue - triple-point /
-// degenerate / filter-uncertain, the unbuilt B axes).  Any component
-// fail-closed suppresses output, so the whole compose fails closed - the honest
-// recorded refusal, never a silent wrong resolve.  HEAVY (~20s: the resolver
-// runs its O(ntri) winding on the dirty shells); run under the corpus resource
-// cap (ulimit -v 4000000; timeout 900).
+// carry a within-component defect the resolver declines to resolve exactly. The
+// fatal STRING is "seam sub-face arrangement not exactly resolvable", but the
+// measured anatomy (reg3d-c2b) narrows it: the 2D seam sub-face arrangement
+// RESOLVES EXACTLY (preimage-strict reconstruct, zero triple points) - both
+// dirty shells fail at the WINDING CLASSIFY probe (one on the seamed per-cell
+// centroid = this F4, one on a clean face = F5) grazing a near-coplanar face on
+// the FILTER: the near-tangent 0.002deg geometry puts the probe within the
+// filter's uncertainty band of a face the exact kernel decides NONZERO (filter
+// precision, not a degeneracy or a >2-sheet junction).  This is the
+// WINDING-PROBE residue (Cluster 3 / O4), kernel-tripwire-or-research to close,
+// NOT a Cluster-2 seam-arrangement failure.  Any component fail-closed
+// suppresses output, so the whole compose fails closed - the honest recorded
+// refusal, never a silent wrong resolve.  HEAVY (~20s: the resolver runs its
+// O(ntri) winding on the dirty shells); run under the corpus resource cap
+// (ulimit -v 4000000; timeout 900).
 TEST(Overlap3, Corpus_GenericTwin7081_FailClosed) {
   const auto in = LoadCorpusPair("Generic_Twin_7081.1.t0_left.obj",
                                  "Generic_Twin_7081.1.t0_right.obj");

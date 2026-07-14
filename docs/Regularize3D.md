@@ -446,9 +446,22 @@ reverted):
   PokedCube        | 1 EMISSION (1b)    | unresolvable sheet contact    | constructed
   GT7863 pair      | 1 EMISSION (1a)    | unresolvable sheet contact    | corpus
   openscad soup    | 2 SEAM-SUBFACE(2a) | non-2-endpoint / degenerate   | corpus
-  GT7081 pair      | 2 SEAM-SUBFACE(2b) | seam sub-face not resolvable  | corpus
+  GT7081 pair      | 3 WINDING-PROBE(2b)| winding classify filter-graze | corpus
   NearCoplanarChain| 4 PLANARIZE-GUARD  | global-planarity guard        | constructed
   BridgedCaps      | (RESOLVES)         | -                             | resolves
+
+  RECLASSIFICATION (reg3d-c2b, measured): GT7081's F4 string reads "seam sub-face
+  arrangement not exactly resolvable" but the anatomy REFUTES the Cluster-2
+  reading.  Its 2D seam sub-face arrangement RESOLVES EXACTLY (every seamed face
+  passes the preimage-strict reconstruct - zero triple points, zero degenerate
+  projections, zero malformed cells).  BOTH dirty shells fail at the WINDING
+  CLASSIFY probe (one on the seamed per-cell centroid = F4, one on a clean face =
+  F5) grazing a near-coplanar face on the FILTER: the exact kernel decides that
+  same tie NONZERO (the probe is decidably off-plane, gap a few eps), so it is
+  filter PRECISION, not a genuine degeneracy or a >2-sheet junction.  This is the
+  C-2a pattern again (the census over-scoped the cluster).  GT7081 therefore
+  belongs to the WINDING-PROBE axis (Cluster 3 exact-tie residue + the O4
+  component-local seed policy), NOT Cluster 2.
 
 MEASURED CORRECTIONS to earlier anatomy (were logged at a pre-entanglement,
 pre-stage-6 HEAD): (1) PokedCube AND GT7863 fail at the SplitTouchingSheets
@@ -478,13 +491,30 @@ Cluster map (root mechanism, not which string fires):
   into: a capvert share the entanglement recovery's proper-cross gate excludes
   (a bounded recovery WIDENING - fold-owned vertex-on-plane touches), the
   near-coplanar sliver (folds into 1a), and the cap-seaming entanglement.  2b
-  GT7081's shells, whose sub-mechanism is not yet characterized at this
-  granularity (probe queued).  Production-reachable.
-- CLUSTER 3 - SoS / EXACT-TIE RESIDUE + the unbuilt >2-sheet radial branch.  No
-  corpus carrier forces it (reg3d-radial: zero book-of-pages lines; every corpus
-  nPts!=2 is a 2-sheet truncation, not a triple point).  The radial reduction is
-  proven sound but fires zero times.  Kernel-tripwire-gated (a second exact call
-  site -> vendor Shewchuk).
+  GT7081's shells were RECLASSIFIED OUT of this cluster (reg3d-c2b): the anatomy
+  shows their 2D seam sub-face arrangement resolves EXACTLY (preimage-strict
+  reconstruct, zero triple points); the fatal is the WINDING CLASSIFY probe
+  grazing a near-coplanar face on the filter, so they move to the WINDING-PROBE
+  axis (Cluster 3 / O4 seed policy) below.  Production-reachable.
+- CLUSTER 3 - SoS / EXACT-TIE RESIDUE + the unbuilt >2-sheet radial branch +
+  the WINDING-PROBE FILTER-PRECISION residue.  The >2-sheet radial branch is not
+  corpus-forced (reg3d-radial: zero book-of-pages lines; every corpus nPts!=2 is
+  a 2-sheet truncation, not a triple point); its reduction is proven sound but
+  fires zero times.  The WINDING-PROBE residue (reg3d-c2b, GT7081) IS corpus-
+  forced: the winding CLASSIFY probe (WindingAt, used by both the seamed per-cell
+  and clean-face paths) decides ray crossings on the FILTER only (Orient3DFilterSign)
+  and fails closed on a filter-0, never escalating to the exact kernel.  GT7081's
+  near-tangent 0.002deg geometry puts the constructed probe point (cell centroid +
+  eps*n) within the filter's uncertainty band of a near-coplanar face whose exact
+  sign is NONZERO (decidably off-plane) - so the winding is well-defined but the
+  filter refuses.  The O4 component-local seed reprobe is MEASURED insufficient
+  (reg3d-c2b: it clears the multi-triangle seamed cells but not a single-triangle
+  clean face near-coplanar over its whole extent).  Both closures are
+  kernel-tripwire-gated: escalating WindingAt to the exact kernel is a NEW exact
+  call-site FAMILY in the winding half (the "FP-safe by construction" claim covers
+  the +-1 deltas, NOT the ray crossing-detection) -> vendor-Shewchuk owner
+  decision; the alternative is the coupled-integer-flood re-architecture of the
+  WIND phase (research, not bounded).
 - CLUSTER 4 - NEAR-COPLANAR PLANARIZE GUARD / SNAP refusals.  A curved near-band
   is genuinely not one plane; the guard fails closed rather than fold to a wrong
   plane.  These are CORRECT, decision-complete refusals (the exact procedure DOES
@@ -519,9 +549,23 @@ RESEARCH = memo with a required proof sketch, TRIPWIRE = kernel-vendor decision)
    entanglement recovery's proper-cross gate excludes fold-owned vertex-on-plane
    touches) - it does NOT unlock openscad alone (F3 underneath), so it is an
    emission-side follow-up, not this completion.
-2. CRUCIBLE C-2b (probe-first).  Characterize GT7081's two dirty shells: cap-plane
-   truncation the recovery misses / cap-interior injection / a genuine >2-sheet.
-   Anatomy decides whether it collapses into C-2a or escalates to Cluster 3.
+2. CRUCIBLE C-2b (RESEARCH/TRIPWIRE - reclassified from probe-first; reg3d-c2b).
+   The anatomy REFUTES the Cluster-2 reading: GT7081's two dirty shells resolve
+   their 2D seam sub-face arrangement EXACTLY; both fail at the WINDING CLASSIFY
+   probe (one seamed=F4, one clean=F5) grazing a near-coplanar face on the filter,
+   exact-kernel-decidable NONZERO (filter precision, not degeneracy).  This
+   ESCALATES to Cluster 3 (winding-probe residue), NOT a collapse into C-2a.
+   Closure is NOT bounded: (a) escalate WindingAt's filter-0 to the exact kernel
+   (a new exact call-site family in the winding half -> kernel-tripwire / vendor-
+   Shewchuk owner decision), or (b) re-architect the WIND phase to the coupled-
+   integer flood the spec describes (research).  The O4 seed-policy reprobe is
+   MEASURED insufficient (clears seamed multi-tri cells, not the clean single-tri
+   near-coplanar graze).  Fail-closed, pinned (Corpus_GenericTwin7081_FailClosed
+   stands, comment tightened).  SURFACED (owner triage, out of scope): the capvert
+   recovery-WIDENING recovers the fold-owned vertex-on-plane touches openscad's
+   proper-cross gate excludes (reg3d-c2a per-pair count), but F3 is explicitly
+   UNAFFECTED (RecordSeams-only; the failing component is seamedCluster>0), so it
+   does NOT unlock openscad alone - an emission-side follow-up, not a completion.
 3. CRUCIBLE C-1a (RESEARCH).  GT7863 near-coplanar sliver: widen the stage-5 fold
    above eps under a per-sub-face thinness bound.  Proof sketch = the
    global-planarity guard argument extended to the thin sub-face; shared with
