@@ -236,7 +236,10 @@ rounded geometry, and never a lossy fallback. The queued completions:
   (touching-sheet / sub-eps slivers - the stage-7 thin-cell axis); (ii) genuine >2-sheet
   junctions (entangled bars, openscad) fail at the non-2-endpoint-seam wall (the
   triple-point open); (iii) axis-aligned integer geometry can graze every winding probe
-  seed (the component-local seed-policy open).
+  seed - NARROWED (reg3d-arr): the CLEAN-face classify now re-probes other interior
+  points of the same uncrossed triangle (a constant winding cell above it), so BarsCrossZ
+  resolves oracle-true; only the SEAMED path's per-cell centroid probe can still graze
+  (the residual seed-policy open).
 - Stage 7 - THIN-CELL representability at rounding. A cell thinner than eps has no
   representable double boundary; decide its retention exactly from input data, do not emit a
   sub-eps sliver.
@@ -281,7 +284,17 @@ correctness change (the sequential result is the spec the parallel one must matc
   {w_S>=1} threshold read should absorb it, but no subtraction carrier has exercised
   it.
 - COMPONENT-LOCAL SEED policy. One ray per connected cell-component with a direction
-  policy that avoids the far-seed near-grazing measured on siA; micro cost, unbuilt.
+  policy that avoids the far-seed near-grazing measured on siA; micro cost.  PARTIALLY
+  CLOSED (reg3d-arr): the CLEAN-face classify dodges the graze by re-sampling the
+  constant winding cell above an uncrossed triangle at several interior points (sound,
+  no uniformity assumption) - closes BarsCrossZ.  The SEAMED path's per-cell centroid
+  probe is the remaining graze site.
+- CLEAN-FACE classification is PER-FACE (reg3d-s7b/arr), not a per-patch representative
+  flood.  The flood assumed uniform coverage per clean-clean-connected patch; a severely
+  folded soup (PokedCube's everted corner) breaks that (a shares-vertex-skip crossing
+  puts differently-wound faces in one patch), so the representative wrongly dropped
+  genuine boundary faces = a latent silent-wrongness class.  Per-face directly measures
+  each face's own winding.  Bitwise-identical to the flood on uniform patches (siA/siB).
 - ONCE-ONLY under a genuine triple point. The corpus forces zero triple points, so the
   once-only construction rule is unstressed; a synthetic co-axial-3-face carrier is the
   attack that would exercise it.

@@ -2813,50 +2813,69 @@ void FoldCoplanarClusters(std::vector<OutTri3D>& out, const Manifold::Impl& in,
   }
 }
 
-// Classify + emit the CLEAN (un-seamed, un-folded) faces.  g_above is constant
-// across any mesh edge that carries no seam transition, and clean-clean edges
-// never do, so clean faces partition into patches of uniform coverage; one
-// winding probe per patch decides keep-whole vs drop by the SAME witness rule
-// as the seamed path (keep iff w_above == 0).  A NEGATIVE w_above is exterior
-// on both sides and DROPS (the axis-1 subtraction absorption), not a
-// fail-closed; only a filter-uncertain probe (the SoS axis) fails closed.
+// Classify + emit the CLEAN (un-seamed, un-folded) faces.  Retention rule (SAME
+// witness rule as the seamed path): keep iff the face's +n winding w_above == 0
+// (the witness theorem makes every single face m=+1, so the solid is on the -n
+// side of a retained face -> original orientation, flip-free).  A NEGATIVE
+// w_above is exterior on both sides and DROPS (the axis-1 subtraction
+// absorption), not a fail-closed.
+//
+// PER-FACE, not per-patch (reg3d-s7b/reg3d-arr).  Clean faces partition into
+// clean-clean-connected patches; the coverage is CONSTANT across an uncrossed
+// clean-clean edge UNLESS the arrangement is incomplete (a shares-vertex-skip
+// crossing, the everted-corner defect).  The earlier flood decided a whole
+// patch by ONE representative probe, ASSUMING uniformity - which holds on mild
+// self-intersectors (siA/siB) but BREAKS on a folded soup: PokedCube's everted
+// corner puts a w_above==0 boundary face and a w_above==-1 exterior face in ONE
+// clean patch, so a w<0 representative wrongly DROPPED the boundary faces (a
+// latent SILENT-WRONGNESS class - the mirror config would EMIT unverified
+// faces), leaving the open fan the carrier fails on.
+//
+// So: probe each face by its OWN winding (this RETAINS the everted-corner
+// boundary faces the flood dropped).  The coverage just above a CLEAN
+// (uncrossed, non-near-coplanar post stage-5) triangle is CONSTANT across its
+// interior - no face is crossed moving the query point at height eps over the
+// triangle - so when the centroid probe GRAZES every seed (the
+// component-local-seed axis, hit by axis-aligned integer geometry:
+// BridgedCaps/TJunction/BarsCrossZ) we re-probe at OTHER interior points of the
+// SAME triangle, which sample the SAME winding cell.  This dodges the graze
+// WITHOUT any patch-uniformity assumption (fully sound: a wrong retain is
+// impossible - every emitted face's winding was directly measured).  Only a
+// face that grazes at EVERY interior point fails closed (never emit unverified
+// geometry).  Cost: O(nTri) winding queries worst case (the doc's named
+// winding-query perf axis; BVH is the later pass).
 bool EmitCleanFaces(std::vector<OutTri3D>& out, const Manifold::Impl& in,
                     const BuildArrangement& A,
                     const std::vector<int>& face2cluster,
                     const std::vector<vec3>& seeds, double eps) {
   const int nTri = static_cast<int>(in.NumTri());
   // A face is "clean" only if it is neither seamed nor part of a coplanar
-  // cluster (the fold owns cluster faces); cluster faces bound the flood so a
-  // patch never crosses into folded content.
+  // cluster (the fold owns cluster faces).
   auto isClean = [&](int t) { return !A.seamed[t] && face2cluster[t] < 0; };
-  DisjointSets patches(nTri);
-  for (int h = 0; h < static_cast<int>(in.halfedge_.size()); ++h) {
-    const int t = h / 3, u = in.halfedge_.Pair(h) / 3;
-    if (isClean(t) && isClean(u)) patches.unite(t, u);
-  }
-  std::unordered_map<int, int> patchKeep;  // root -> 0 drop, 1 keep
+  // Interior barycentric samples, centroid first (so a non-grazing face is
+  // bitwise-identical to the old single-centroid probe); the rest are the
+  // graze-dodge fallbacks on the SAME (constant-winding) cell above the
+  // triangle.
+  static constexpr double kBary[][3] = {{1.0 / 3, 1.0 / 3, 1.0 / 3},
+                                        {0.6, 0.2, 0.2},
+                                        {0.2, 0.6, 0.2},
+                                        {0.2, 0.2, 0.6},
+                                        {0.5, 0.3, 0.2},
+                                        {0.2, 0.5, 0.3}};
   for (int t = 0; t < nTri; ++t) {
     if (!isClean(t)) continue;
-    const int root = static_cast<int>(patches.find(t));
-    auto it = patchKeep.find(root);
-    int keep;
-    if (it == patchKeep.end()) {
-      const vec3 cen = (A.tri[t][0] + A.tri[t][1] + A.tri[t][2]) / 3.0;
-      const double nLen = la::length(A.faceN[t]);
-      if (!(nLen > 0.0)) return false;
-      const vec3 nHat = A.faceN[t] / nLen;
-      const std::optional<int> g = RobustWinding(in, cen + eps * nHat, seeds);
-      if (!g)
-        return false;  // filter-uncertain deciding predicate (SoS): closed
-      // Same witness rule as the seamed path: keep iff w_above == 0.  A
-      // negative w_above (subtraction / openscad-class) is exterior on both
-      // sides -> drop (keep=0), NOT a fail-closed.
-      keep = (*g == 0) ? 1 : 0;
-      patchKeep.emplace(root, keep);
-    } else {
-      keep = it->second;
+    const double nLen = la::length(A.faceN[t]);
+    if (!(nLen > 0.0)) return false;
+    const vec3 nHat = A.faceN[t] / nLen;
+    std::optional<int> g;
+    for (const auto& w : kBary) {
+      const vec3 p =
+          w[0] * A.tri[t][0] + w[1] * A.tri[t][1] + w[2] * A.tri[t][2];
+      g = RobustWinding(in, p + eps * nHat, seeds);
+      if (g) break;  // any interior sample measures the (constant) cell winding
     }
-    if (keep == 1) out.push_back({A.tri[t][0], A.tri[t][1], A.tri[t][2]});
+    if (!g) return false;  // grazes at every interior point (SoS): fail closed
+    if (*g == 0) out.push_back({A.tri[t][0], A.tri[t][1], A.tri[t][2]});
   }
   return true;
 }
@@ -3288,6 +3307,54 @@ CandidateBProbe RegularizeB_Probe(const Manifold::Impl& dirty,
   for (const vec3& p : probes) {
     const std::optional<int> w = WindingAt(dirty, p, seed);
     out.probeWinding.push_back(w.has_value() ? *w : kWindingUncertain);
+  }
+  return out;
+}
+
+CleanFaceProbe RegularizeCleanFaces_Probe(const Manifold::Impl& soup) {
+  CleanFaceProbe out;
+  double eps = EpsilonFromScale(soup.bBox_.Scale(), 1000);
+  if (!(eps > 0.0) || !std::isfinite(eps)) return out;
+  // Mirror RunCandidateB's prefix so the classify inputs match production
+  // exactly (snap near-coplanar, detect exact-coplanar clusters, record seams).
+  StageResult<Manifold::Impl> snapped = SnapNearCoplanarClusters(soup, eps);
+  if (snapped.fatal) return out;
+  const Manifold::Impl& in = snapped.value ? *snapped.value : soup;
+  const std::vector<int> face2cluster = DetectCoplanarClusters(in);
+  const BuildArrangement A = RecordSeams(in, face2cluster);
+  // Same winding seeds as RunCandidateBBuild.
+  const vec3 c = in.bBox_.Center();
+  const double L = in.bBox_.Scale() + 1.0;
+  const std::vector<vec3> seeds = {
+      c + L * vec3(3.13, 5.71, 1.37),   c + L * vec3(-2.71, 1.41, 4.19),
+      c + L * vec3(1.73, -3.31, -2.23), c + L * vec3(-4.27, -1.19, 2.83),
+      c + L * vec3(2.39, -4.61, 3.07),  c + L * vec3(-1.51, 3.89, -4.43)};
+  // Run the REAL (compiled) EmitCleanFaces and record which clean faces it kept
+  // by matching their exact vertex triple (clean faces emit verbatim, unsplit),
+  // so this hook reflects whichever classification is compiled - the mutation
+  // (revert to the flood) flips `kept` for the mislabeled boundary faces.
+  std::vector<OutTri3D> emitted;
+  EmitCleanFaces(emitted, in, A, face2cluster, seeds, eps);
+  using TriKey = std::tuple<double, double, double, double, double, double,
+                            double, double, double>;
+  auto keyOf = [](const vec3& a, const vec3& b, const vec3& d) {
+    return TriKey{a.x, a.y, a.z, b.x, b.y, b.z, d.x, d.y, d.z};
+  };
+  std::set<TriKey> keptSet;
+  for (const OutTri3D& t : emitted)
+    keptSet.insert(keyOf(t.v[0], t.v[1], t.v[2]));
+  const int nTri = static_cast<int>(in.NumTri());
+  for (int t = 0; t < nTri; ++t) {
+    if (A.seamed[t] || face2cluster[t] >= 0) continue;  // clean only
+    out.faceIdx.push_back(t);
+    const vec3 cen = (A.tri[t][0] + A.tri[t][1] + A.tri[t][2]) / 3.0;
+    const double nLen = la::length(A.faceN[t]);
+    std::optional<int> g;
+    if (nLen > 0.0)
+      g = RobustWinding(in, cen + eps * (A.faceN[t] / nLen), seeds);
+    out.ownWinding.push_back(g ? *g : kWindingUncertain);
+    out.kept.push_back(
+        keptSet.count(keyOf(A.tri[t][0], A.tri[t][1], A.tri[t][2])) ? 1 : 0);
   }
   return out;
 }

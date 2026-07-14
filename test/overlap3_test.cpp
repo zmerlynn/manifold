@@ -1788,6 +1788,62 @@ TEST(Overlap3, Regularize_DirtySingleComponent_RoutesToFailClosedStub) {
   EXPECT_FALSE(r.impl.has_value());
 }
 
+// White-box classification pin (reg3d-s7b + reg3d-arr): the clean-face
+// retention inside candidate B's EmitCleanFaces must be PER-FACE, not
+// per-patch.  The everted-corner carrier (PokedCube: the +++ corner collapsed
+// onto ---) puts genuine {w_S>=1} boundary clean faces (own +n winding == 0)
+// and exterior clean faces (own winding == -1) in ONE clean-clean-connected
+// patch.  The old flood classified the whole patch by one representative; here
+// the representative is exterior (w=-1) -> it DROPPED the boundary faces,
+// leaving the open fan the carrier fails on - AND, in the mirror config where
+// the representative is a boundary face, it would EMIT the exterior faces = a
+// silent wrong retain (this is the latent-wrongness class, not merely a
+// fail-closed).  Per-face is uniformly correct: keep iff the face's OWN winding
+// == 0.
+//
+// This pins the FIX at the classification level even though the whole carrier
+// still fails downstream (the unmatched pierce points at the everted spike are
+// a separate arrangement-incompleteness wall, reg3d Stage 2/3).  MUTATION:
+// revert EmitCleanFaces to the per-patch representative flood -> the boundary
+// faces (own winding == 0) are dropped with their patch -> `kept != (ownWinding
+// == 0)`
+// -> this pin REDs.  Bitwise-safe on the resolving fixtures (siA/siB: every
+// face in a patch reaches the same decision, so the emitted set is unchanged).
+TEST(Overlap3, Regularize_CleanFacePerFace_RetainsEvertedBoundary) {
+  const Manifold::Impl in = PokedCube();
+  const CleanFaceProbe p = RegularizeCleanFaces_Probe(in);
+  ASSERT_FALSE(p.faceIdx.empty()) << "PokedCube must reach EmitCleanFaces with "
+                                     "clean faces (arrangement prefix must not "
+                                     "fail before the clean pass)";
+  int nBoundary = 0, nExterior = 0, nUncertain = 0;
+  for (size_t i = 0; i < p.faceIdx.size(); ++i) {
+    // Per-face invariant: a clean face is retained IFF its OWN winding == 0.
+    // This is the mutation-sensitive assertion - the flood breaks it on the
+    // mixed everted-corner patch.
+    const bool ownBoundary = p.ownWinding[i] == 0;
+    EXPECT_EQ(static_cast<bool>(p.kept[i]), ownBoundary)
+        << "clean face " << p.faceIdx[i] << " ownWinding=" << p.ownWinding[i]
+        << " kept=" << static_cast<int>(p.kept[i])
+        << " - retention must follow the face's OWN winding, not a patch "
+           "representative";
+    if (p.ownWinding[i] == kWindingUncertain)
+      ++nUncertain;
+    else if (ownBoundary)
+      ++nBoundary;
+    else if (p.ownWinding[i] < 0)
+      ++nExterior;
+  }
+  EXPECT_EQ(nUncertain, 0) << "no clean face's winding may be filter-uncertain "
+                              "on this fixture (else the pin is vacuous)";
+  // Non-vacuity: the everted corner is a GENUINELY MIXED patch (>=1 boundary
+  // AND
+  // >=1 exterior clean face), which is exactly the config the flood mislabels.
+  EXPECT_GT(nBoundary, 0) << "everted corner must present >=1 genuine boundary "
+                             "clean face (own winding == 0)";
+  EXPECT_GT(nExterior, 0) << "and >=1 exterior clean face (own winding < 0) - "
+                             "the mixed patch the flood dropped wholesale";
+}
+
 // Pin 5 (Stage-2 acceptance, RED now / GREEN when B lands): the corpus single-
 // shell self-intersectors self_intersectA/B - genuine w_S in {0,1,2} dirty
 // components with NO negative winding (the clean, safe-by-margin B target;
@@ -2807,14 +2863,19 @@ TEST(Overlap3, Regularize_ExactZeroTie_EntangledBars_FailClosed) {
 }
 
 // TARGET (e) variant: the same two bars OFFSET in z (no coincident caps - the
-// fold is NOT reached, coplanarClusterFaces == 0), walls still crossing
-// edge-on-edge at exact ties (the SoS axis, decided).  The seamed faces build,
-// then the CLEAN-FACE winding classify hits a filter-uncertain probe from every
-// seed on this axis-aligned integer geometry (the probe segment grazes
-// edges/vertices exactly) - the COMPONENT-LOCAL SEED POLICY named open (docs
-// open list), a distinct axis beyond stage-6, NOT forced.  Hard fail-closed, no
-// output, never a silent wrong resolve.
-TEST(Overlap3, Regularize_ExactZeroTie_BarsCrossZ_FailClosed) {
+// fold is NOT reached, coplanarClusterFaces == 0), walls crossing edge-on-edge
+// at exact ties (the SoS axis, decided).  The seamed faces build; the
+// clean-face winding classify then GRAZED every seed at the triangle centroid
+// on this axis-aligned integer geometry - the old flood, probing one centroid
+// per patch, fail-closed on the COMPONENT-LOCAL SEED graze.  The per-face clean
+// rule (reg3d-arr) re-probes OTHER interior points of the same clean triangle,
+// which sample the SAME (constant) winding cell above an uncrossed face,
+// dodging the graze SOUNDLY (every emitted face's winding is directly measured,
+// no uniformity/borrow assumption).  So this now RESOLVES oracle-true: the
+// {w_S>=1} boundary is the exact union of the two bars.  This CLOSES the
+// component-local seed-policy open for this carrier (a bounded
+// decision-completion: sample the constant cell, not a global seed policy).
+TEST(Overlap3, Regularize_ExactZeroTie_BarsCrossZ_Resolves) {
   const Manifold::Impl in =
       TwoBoxSoup(Manifold::Cube({6, 2, 4}).Translate({0, 2, 0}),
                  Manifold::Cube({2, 6, 2}).Translate({2, 0, 1}));
@@ -2824,14 +2885,52 @@ TEST(Overlap3, Regularize_ExactZeroTie_BarsCrossZ_FailClosed) {
   EXPECT_GT(p.seamCount, 0) << "must reach transversal crossings";
   EXPECT_EQ(p.coplanarClusterFaces, 0) << "no coplanar caps (fold not reached)";
 
-  const RegularizeResult r =
-      RegularizeDirtyDirect(in, EpsilonFromScale(in.bBox_.Scale(), 1000));
-  ASSERT_TRUE(r.fatal.has_value())
-      << "the seed-policy graze must fail closed, never a silent wrong resolve";
-  EXPECT_EQ(*r.fatal, FatalReason::DirtyComponentUnresolved) << r.detail;
-  EXPECT_NE(r.detail.find("winding probe"), std::string::npos)
-      << "residue must name the winding-probe graze: " << r.detail;
-  EXPECT_FALSE(r.impl.has_value());
+  const double eps = EpsilonFromScale(in.bBox_.Scale(), 1000);
+  const RegularizeResult r = RegularizeDirtyDirect(in, eps);
+  ASSERT_FALSE(r.fatal.has_value()) << "the per-face clean rule must resolve "
+                                       "the seed-graze, not fail closed: "
+                                    << r.detail;
+  ASSERT_TRUE(r.impl.has_value());
+  EXPECT_EQ(r.counters.regularized, 1);
+  const Manifold out(GetMeshGLImpl<double, uint64_t>(*r.impl, -1));
+  EXPECT_EQ(out.Status(), Manifold::Error::NoError);
+  EXPECT_FALSE(r.impl->IsSelfIntersecting()) << "output self-intersects";
+  EXPECT_EQ(out.Decompose().size(), 1u) << "must be one solid";
+  // Exact union of the two bars: 48 + 24 - 8 (the 2x2x2 overlap) = 64.
+  const double vol = out.Volume();
+  EXPECT_GT(vol, 63.999) << "volume below the exact-union band";
+  EXPECT_LT(vol, 64.001) << "volume above the exact-union band";
+
+  // INDEPENDENT GWN oracle: (w_soup>=1) == (w_out>0) at every unambiguous
+  // point.
+  const auto inTris = SoupTris(in);
+  std::mt19937 rng(0xBC0FF);
+  const Box bb = out.BoundingBox();
+  const vec3 mn = bb.min - (bb.max - bb.min) * 0.05;
+  const vec3 mx = bb.max + (bb.max - bb.min) * 0.05;
+  std::uniform_real_distribution<double> U(0, 1);
+  std::vector<vec3> qs;
+  for (int k = 0; k < 20000; ++k)
+    qs.push_back(mn + (mx - mn) * vec3(U(rng), U(rng), U(rng)));
+  const auto wOut = out.WindingNumber(qs);
+  int disagree = 0, checked = 0;
+  for (int k = 0; k < static_cast<int>(qs.size()) && disagree < 5; ++k) {
+    const double g = GWN(inTris, qs[k]);
+    if (std::abs(g - std::round(g)) > 0.15) continue;  // near-surface skip
+    ++checked;
+    if ((std::lround(g) >= 1) != (wOut[k] > 0.5)) {
+      ++disagree;
+      ADD_FAILURE() << "GWN membership disagreement at (" << qs[k].x << ","
+                    << qs[k].y << "," << qs[k].z << ")";
+    }
+  }
+  EXPECT_GT(checked, 3000) << "oracle undersampled";
+
+  // TOL-INVARIANCE: the retained topology is decided from input data.
+  const RegularizeResult r2 = RegularizeDirtyDirect(in, eps * 0.5);
+  ASSERT_TRUE(r2.impl.has_value()) << "tol-variant fatal: " << r2.detail;
+  const Manifold out2(GetMeshGLImpl<double, uint64_t>(*r2.impl, -1));
+  EXPECT_NEAR(vol, out2.Volume(), 1e-6 * vol) << "not tol-invariant";
 }
 
 TEST(Overlap3, Regularize_WithinComponentCoplanar_BridgedCaps_Resolves) {
