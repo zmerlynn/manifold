@@ -1915,28 +1915,41 @@ TEST(Overlap3, Corpus_Offsets_CleanPassThrough) {
 }
 
 // GenericTwin7081: the pair decomposes into 13 components; 11 gate clean but 2
-// carry a within-component defect the resolver declines to resolve exactly. The
-// fatal STRING is "seam sub-face arrangement not exactly resolvable", but the
-// measured anatomy (reg3d-c2b) narrows it: the 2D seam sub-face arrangement
-// RESOLVES EXACTLY (preimage-strict reconstruct, zero triple points) - both
-// dirty shells fail at the WINDING CLASSIFY probe (one on the seamed per-cell
-// centroid = this F4, one on a clean face = F5) grazing a near-coplanar face on
-// the FILTER: the near-tangent 0.002deg geometry puts the probe within the
-// filter's uncertainty band of a face the exact kernel decides NONZERO (filter
-// precision, not a degeneracy or a >2-sheet junction).  This is the
-// WINDING-PROBE residue (Cluster 3 / O4), kernel-tripwire-or-research to close,
-// NOT a Cluster-2 seam-arrangement failure.  Any component fail-closed
-// suppresses output, so the whole compose fails closed - the honest recorded
-// refusal, never a silent wrong resolve.  HEAVY (~20s: the resolver runs its
-// O(ntri) winding on the dirty shells); run under the corpus resource cap
-// (ulimit -v 4000000; timeout 900).
+// carry a within-component defect that fails closed NARROWER than before.  Its
+// history is two reclassifications: the census scoped it as a Cluster-2 seam
+// sub-face arrangement ("not exactly resolvable"); reg3d-c2b's anatomy REFUTED
+// that (the 2D seam sub-face arrangement resolves EXACTLY - zero triple points)
+// and re-scoped it to the WINDING-PROBE filter-precision residue (both dirty
+// shells fail at the winding CLASSIFY probe grazing a near-coplanar shallow-
+// dihedral face on the static filter, which the exact kernel decides NONZERO).
+// The reg3d-c2bx escalation (WindingAt filter-0 -> Orient3DExactSign) now
+// CLOSES that winding-probe residue: both shells decide the classify exactly
+// (measured zero genuine ties - every graze is decidably off-plane).  That
+// reveals the DEEPER pre-existing wall underneath: both dirty shells now fail
+// at emission - "unresolvable sheet contact" (SplitTouchingSheets ->
+// NonManifoldEmission), the CLUSTER-1 EMISSION REPRESENTABILITY wall, IDENTICAL
+// to GT7863's (near-coplanar sliver: GT7081's 0.002deg near-tangent geometry
+// reduces the {w>=1} boundary to touching sheets with no representable
+// double-manifold).  So GT7081 RECLASSIFIES AGAIN (Cluster 3 winding-probe ->
+// Cluster 1 emission) and folds into the C-1a crucible with GT7863.
+// MUTATION-VERIFIED: disabling the escalation reverts this to
+// FatalReason::DirtyComponentUnresolved (the winding-probe wall); the current
+// pin asserts the narrower emission wall.  Any component fail-closed suppresses
+// output, so the whole compose fails closed - the honest recorded refusal,
+// never a silent wrong resolve.  HEAVY (~37s: the escalation runs the exact
+// tie-test on the near-tangent grazes, then reaches emission); run under the
+// corpus resource cap (ulimit -v 4000000; timeout 900).
 TEST(Overlap3, Corpus_GenericTwin7081_FailClosed) {
   const auto in = LoadCorpusPair("Generic_Twin_7081.1.t0_left.obj",
                                  "Generic_Twin_7081.1.t0_right.obj");
   if (!in) GTEST_SKIP() << "model not found";
   const RegularizeResult r = RemoveOverlaps3D(*in, ImplEps(*in));
   ASSERT_TRUE(r.fatal.has_value()) << "GT7081 must fail closed, not resolve";
-  EXPECT_EQ(*r.fatal, FatalReason::DirtyComponentUnresolved) << r.detail;
+  // NARROWED past the winding-probe graze (reg3d-c2bx): the terminal wall is
+  // now the Cluster-1 emission representability wall, GT7863-class.
+  EXPECT_EQ(*r.fatal, FatalReason::NonManifoldEmission) << r.detail;
+  EXPECT_NE(r.detail.find("unresolvable sheet contact"), std::string::npos)
+      << "residue must name the emission wall: " << r.detail;
   EXPECT_FALSE(r.impl.has_value()) << "fail-closed yields no partial output";
   EXPECT_EQ(r.counters.components, 13) << "decompose count";
   EXPECT_EQ(r.counters.clean, 11);

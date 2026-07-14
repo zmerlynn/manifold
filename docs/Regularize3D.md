@@ -277,7 +277,14 @@ rounded geometry, and never a lossy fallback. The queued completions:
   seed - NARROWED (reg3d-arr): the CLEAN-face classify now re-probes other interior
   points of the same uncrossed triangle (a constant winding cell above it), so BarsCrossZ
   resolves oracle-true; only the SEAMED path's per-cell centroid probe can still graze
-  (the residual seed-policy open).
+  (the residual seed-policy open).  A SEPARATE winding-probe residue - a filter-PRECISION
+  graze where a near-tangent shallow-dihedral face is filter-uncertain but exact-decidably
+  off-plane (GT7081's 0.002deg geometry) - is now CLOSED (reg3d-c2bx): WindingAt's filter-0
+  terms ESCALATE to Orient3DExactSign (the blessed third caller, filter-first), deciding the
+  graze exactly.  This is distinct from the seed-policy graze (moving the probe cannot escape
+  a face near-tangent over its whole extent; deciding it exactly can).  MEASURED on GT7081:
+  both dirty shells now clear the winding classify with zero genuine ties, revealing the
+  Cluster-1 emission wall underneath (below).
 - Stage 7 - THIN-CELL representability at rounding. A cell thinner than eps has no
   representable double boundary; decide its retention exactly from input data, do not emit a
   sub-eps sliver.
@@ -321,11 +328,16 @@ correctness change (the sequential result is the spec the parallel one must matc
 - EXACT-KERNEL SURFACE, QUEUED FOR REVISIT (owner contract, reluctant acceptance).
   Whether the arrangement can be structured to avoid needing an exact orient3d kernel
   at all is still open; the current integer Orient3DExactSign / SoS cascade is the
-  reluctantly-accepted answer, not a settled one.  TRIPWIRE: this integer path is
-  legitimate ONLY as ONE predicate at ONE call site (~100 lines, exhaustively testable).
-  If a SECOND exact predicate or a SECOND call site is ever needed, VENDOR Shewchuk's
-  public-domain predicates.c instead of growing this - do NOT rebuild expansion
-  arithmetic piecemeal.
+  reluctantly-accepted answer, not a settled one.  TRIPWIRE, RELAXED by the owner to
+  ONE PREDICATE, ONE IMPLEMENTATION (reg3d-c2bx): the integer path is legitimate as
+  ONE exact predicate FORM (this ~100-line adaptive-integer orient3d), and ADDITIONAL
+  CALLERS are within the blessed pattern (zero new arithmetic) as long as each stays
+  FILTER-FIRST (exact fires only behind a filter 0).  Caller inventory: the SoS tie
+  cascade (Orient3DSoS), the EdgePiercesTriSoS edge-in-plane guard, and the
+  winding-probe escalation (WindingAt, reg3d-c2bx); the >2-sheet radial rule is a
+  BANKED (unbuilt) prospective caller.  What stays tripwired is a SECOND predicate
+  FORM: if one is ever needed, VENDOR Shewchuk's public-domain predicates.c instead of
+  growing this - do NOT rebuild expansion arithmetic piecemeal.
 - NEGATIVE WINDING / subtraction, untested. openscad's soup winding reaches -1; the
   {w_S>=1} threshold read should absorb it, but no subtraction carrier has exercised
   it.
@@ -333,8 +345,13 @@ correctness change (the sequential result is the spec the parallel one must matc
   policy that avoids the far-seed near-grazing measured on siA; micro cost.  PARTIALLY
   CLOSED (reg3d-arr): the CLEAN-face classify dodges the graze by re-sampling the
   constant winding cell above an uncrossed triangle at several interior points (sound,
-  no uniformity assumption) - closes BarsCrossZ.  The SEAMED path's per-cell centroid
-  probe is the remaining graze site.
+  no uniformity assumption) - closes BarsCrossZ.  A DISTINCT graze - the winding-probe
+  FILTER-PRECISION residue (a near-tangent face filter-uncertain but exact-decidably
+  off-plane) - is closed by the WindingAt exact escalation (reg3d-c2bx), which decides
+  the graze rather than moving the probe.  What remains open is the pure SEED-POSITION
+  graze on the SEAMED per-cell centroid probe (a genuine exact-zero tie moving the
+  probe could escape but the escalation fails closed on): no corpus carrier forces it
+  (GT7081's grazes were all filter-precision, not genuine ties).
 - CLEAN-FACE classification is PER-FACE (reg3d-s7b/arr), not a per-patch representative
   flood.  The flood assumed uniform coverage per clean-clean-connected patch; a severely
   folded soup (PokedCube's everted corner) breaks that (a shares-vertex-skip crossing
@@ -446,22 +463,25 @@ reverted):
   PokedCube        | 1 EMISSION (1b)    | unresolvable sheet contact    | constructed
   GT7863 pair      | 1 EMISSION (1a)    | unresolvable sheet contact    | corpus
   openscad soup    | 2 SEAM-SUBFACE(2a) | non-2-endpoint / degenerate   | corpus
-  GT7081 pair      | 3 WINDING-PROBE(2b)| winding classify filter-graze | corpus
+  GT7081 pair      | 1 EMISSION (1a)    | unresolvable sheet contact    | corpus
   NearCoplanarChain| 4 PLANARIZE-GUARD  | global-planarity guard        | constructed
   BridgedCaps      | (RESOLVES)         | -                             | resolves
 
-  RECLASSIFICATION (reg3d-c2b, measured): GT7081's F4 string reads "seam sub-face
-  arrangement not exactly resolvable" but the anatomy REFUTES the Cluster-2
-  reading.  Its 2D seam sub-face arrangement RESOLVES EXACTLY (every seamed face
-  passes the preimage-strict reconstruct - zero triple points, zero degenerate
-  projections, zero malformed cells).  BOTH dirty shells fail at the WINDING
-  CLASSIFY probe (one on the seamed per-cell centroid = F4, one on a clean face =
-  F5) grazing a near-coplanar face on the FILTER: the exact kernel decides that
-  same tie NONZERO (the probe is decidably off-plane, gap a few eps), so it is
-  filter PRECISION, not a genuine degeneracy or a >2-sheet junction.  This is the
-  C-2a pattern again (the census over-scoped the cluster).  GT7081 therefore
-  belongs to the WINDING-PROBE axis (Cluster 3 exact-tie residue + the O4
-  component-local seed policy), NOT Cluster 2.
+  RECLASSIFICATION (reg3d-c2b -> reg3d-c2bx, measured): GT7081's original F4
+  string read "seam sub-face arrangement not exactly resolvable"; reg3d-c2b's
+  anatomy REFUTED the Cluster-2 reading (the 2D seam sub-face arrangement resolves
+  EXACTLY - zero triple points) and re-scoped it to the WINDING-PROBE
+  filter-precision residue (both dirty shells fail at the winding CLASSIFY probe
+  grazing a near-coplanar shallow-dihedral face the FILTER cannot decide but the
+  exact kernel decides NONZERO).  reg3d-c2bx then CLOSED that residue with the
+  winding-probe escalation (WindingAt filter-0 -> Orient3DExactSign): both shells
+  now decide the classify exactly (measured zero genuine ties) and fail at the
+  DEEPER pre-existing wall - "unresolvable sheet contact" (SplitTouchingSheets ->
+  NonManifoldEmission), the CLUSTER-1 emission representability wall IDENTICAL to
+  GT7863's near-coplanar sliver (GT7081's 0.002deg near-tangent geometry reduces
+  the {w>=1} boundary to touching sheets with no representable double-manifold).
+  So GT7081 RECLASSIFIES AGAIN to Cluster 1a and folds into the C-1a crucible with
+  GT7863.  Its winding-probe residue is closed; its terminal wall is emission.
 
 MEASURED CORRECTIONS to earlier anatomy (were logged at a pre-entanglement,
 pre-stage-6 HEAD): (1) PokedCube AND GT7863 fail at the SplitTouchingSheets
@@ -475,8 +495,10 @@ Cluster map (root mechanism, not which string fires):
 - CLUSTER 1 - EMISSION REPRESENTABILITY (stage-7 thin-cell / touching sheet).
   The resolved {w_S>=1} boundary reduces to sub-eps / touching sheets with no
   representable double-manifold; BuildImpl declines.  Two sub-shapes:
-  1a near-coplanar sliver (GT7863: two near-parallel seamed faces, gap above the
-  fold threshold but the sub-face is thin); 1b negative-winding double sheet
+  1a near-coplanar sliver (GT7863 AND GT7081 post-reg3d-c2bx: two near-parallel
+  seamed faces, gap above the fold threshold but the sub-face is thin - GT7081's
+  0.002deg shallow-dihedral geometry is the same wall reached once its
+  winding-probe residue closed); 1b negative-winding double sheet
   (PokedCube: an everted corner makes a genuine w_S=-1 region, so the w=-1|w=1
   junction is a double sheet the mult-1 per-face emission opens - s7b refuted the
   simple orientation flip).  Production-reachable.
@@ -496,25 +518,28 @@ Cluster map (root mechanism, not which string fires):
   reconstruct, zero triple points); the fatal is the WINDING CLASSIFY probe
   grazing a near-coplanar face on the filter, so they move to the WINDING-PROBE
   axis (Cluster 3 / O4 seed policy) below.  Production-reachable.
-- CLUSTER 3 - SoS / EXACT-TIE RESIDUE + the unbuilt >2-sheet radial branch +
-  the WINDING-PROBE FILTER-PRECISION residue.  The >2-sheet radial branch is not
-  corpus-forced (reg3d-radial: zero book-of-pages lines; every corpus nPts!=2 is
-  a 2-sheet truncation, not a triple point); its reduction is proven sound but
-  fires zero times.  The WINDING-PROBE residue (reg3d-c2b, GT7081) IS corpus-
-  forced: the winding CLASSIFY probe (WindingAt, used by both the seamed per-cell
-  and clean-face paths) decides ray crossings on the FILTER only (Orient3DFilterSign)
-  and fails closed on a filter-0, never escalating to the exact kernel.  GT7081's
-  near-tangent 0.002deg geometry puts the constructed probe point (cell centroid +
-  eps*n) within the filter's uncertainty band of a near-coplanar face whose exact
-  sign is NONZERO (decidably off-plane) - so the winding is well-defined but the
-  filter refuses.  The O4 component-local seed reprobe is MEASURED insufficient
-  (reg3d-c2b: it clears the multi-triangle seamed cells but not a single-triangle
-  clean face near-coplanar over its whole extent).  Both closures are
-  kernel-tripwire-gated: escalating WindingAt to the exact kernel is a NEW exact
-  call-site FAMILY in the winding half (the "FP-safe by construction" claim covers
-  the +-1 deltas, NOT the ray crossing-detection) -> vendor-Shewchuk owner
-  decision; the alternative is the coupled-integer-flood re-architecture of the
-  WIND phase (research, not bounded).
+- CLUSTER 3 - SoS / EXACT-TIE RESIDUE + the unbuilt >2-sheet radial branch.  The
+  >2-sheet radial branch is not corpus-forced (reg3d-radial: zero book-of-pages
+  lines; every corpus nPts!=2 is a 2-sheet truncation, not a triple point); its
+  reduction is proven sound but fires zero times.  The WINDING-PROBE
+  FILTER-PRECISION residue (reg3d-c2b, GT7081) that once lived here is CLOSED
+  (reg3d-c2bx): the winding CLASSIFY probe (WindingAt, both the seamed per-cell and
+  clean-face paths) previously decided ray crossings on the FILTER only
+  (Orient3DFilterSign) and failed closed on a filter-0; it now ESCALATES each
+  filter-0 term to Orient3DExactSign (the blessed third caller, filter-first).
+  GT7081's near-tangent 0.002deg geometry put the constructed probe (cell centroid
+  + eps*n) within the filter's uncertainty band of a face whose exact sign is
+  NONZERO (decidably off-plane); the escalation decides it exactly (measured zero
+  genuine ties).  The O4 component-local seed reprobe was MEASURED insufficient
+  (reg3d-c2b: it cleared multi-triangle seamed cells but not a single-triangle
+  clean face near-coplanar over its whole extent) AND is now redundant (the
+  escalation clears the graze exactly, so it was adjudicated OUT, reg3d-c2bx).
+  Closing the winding-probe residue did NOT resolve GT7081 end-to-end: it revealed
+  the pre-existing Cluster-1a emission wall underneath (both shells now fail at
+  "unresolvable sheet contact"), so GT7081 moved to Cluster 1a.  The
+  coupled-integer-flood re-architecture of the WIND phase (which would remove the
+  ray-cast winding altogether) remains a named research axis, no longer needed for
+  this residue.
 - CLUSTER 4 - NEAR-COPLANAR PLANARIZE GUARD / SNAP refusals.  A curved near-band
   is genuinely not one plane; the guard fails closed rather than fold to a wrong
   plane.  These are CORRECT, decision-complete refusals (the exact procedure DOES
@@ -549,23 +574,28 @@ RESEARCH = memo with a required proof sketch, TRIPWIRE = kernel-vendor decision)
    entanglement recovery's proper-cross gate excludes fold-owned vertex-on-plane
    touches) - it does NOT unlock openscad alone (F3 underneath), so it is an
    emission-side follow-up, not this completion.
-2. CRUCIBLE C-2b (RESEARCH/TRIPWIRE - reclassified from probe-first; reg3d-c2b).
-   The anatomy REFUTES the Cluster-2 reading: GT7081's two dirty shells resolve
-   their 2D seam sub-face arrangement EXACTLY; both fail at the WINDING CLASSIFY
-   probe (one seamed=F4, one clean=F5) grazing a near-coplanar face on the filter,
-   exact-kernel-decidable NONZERO (filter precision, not degeneracy).  This
-   ESCALATES to Cluster 3 (winding-probe residue), NOT a collapse into C-2a.
-   Closure is NOT bounded: (a) escalate WindingAt's filter-0 to the exact kernel
-   (a new exact call-site family in the winding half -> kernel-tripwire / vendor-
-   Shewchuk owner decision), or (b) re-architect the WIND phase to the coupled-
-   integer flood the spec describes (research).  The O4 seed-policy reprobe is
-   MEASURED insufficient (clears seamed multi-tri cells, not the clean single-tri
-   near-coplanar graze).  Fail-closed, pinned (Corpus_GenericTwin7081_FailClosed
-   stands, comment tightened).  SURFACED (owner triage, out of scope): the capvert
-   recovery-WIDENING recovers the fold-owned vertex-on-plane touches openscad's
-   proper-cross gate excludes (reg3d-c2a per-pair count), but F3 is explicitly
-   UNAFFECTED (RecordSeams-only; the failing component is seamedCluster>0), so it
-   does NOT unlock openscad alone - an emission-side follow-up, not a completion.
+2. CRUCIBLE C-2b (LANDED escalation; residue -> C-1a; reg3d-c2b -> reg3d-c2bx).
+   reg3d-c2b's anatomy REFUTED the Cluster-2 reading (GT7081's 2D seam sub-face
+   arrangement resolves EXACTLY; both shells fail at the WINDING CLASSIFY probe
+   grazing a near-coplanar face on the filter, exact-decidable NONZERO).  The owner
+   RELAXED the tripwire to ONE PREDICATE, ONE IMPLEMENTATION (same
+   Orient3DExactSign, additional CALLERS blessed, zero new arithmetic), so
+   reg3d-c2bx LANDED closure (a): WindingAt's filter-0 terms ESCALATE to
+   Orient3DExactSign (the third caller, filter-first).  MEASURED: both dirty shells
+   clear the winding classify exactly (zero genuine ties, so no wrong resolve), but
+   the escalation reveals a DEEPER pre-existing wall - both fail at emission
+   ("unresolvable sheet contact"), the Cluster-1a near-coplanar-sliver wall
+   IDENTICAL to GT7863.  So GT7081 does NOT resolve end-to-end; it RECLASSIFIES to
+   Cluster 1a and its terminal closure is C-1a (below).  The pin flips
+   FatalReason DirtyComponentUnresolved -> NonManifoldEmission (narrower, mutation-
+   verified: disabling the escalation reverts it).  The O4 seed-policy reprobe was
+   ADJUDICATED OUT (the escalation makes it redundant; measured, reg3d-c2bx).  The
+   coupled-integer-flood WIND re-architecture (b) is no longer needed for this
+   residue.  SURFACED earlier (owner triage, out of scope): the capvert
+   recovery-WIDENING recovers openscad's fold-owned vertex-on-plane touches but F3
+   is UNAFFECTED, so it does NOT unlock openscad alone - an emission-side follow-up.
+   (openscad is UNCHANGED by the escalation: it fails UPSTREAM at RecordSeams
+   "degenerate incidence"; the winding probe fires zero times, reg3d-c2bx.)
 3. CRUCIBLE C-1a (RESEARCH).  GT7863 near-coplanar sliver: widen the stage-5 fold
    above eps under a per-sub-face thinness bound.  Proof sketch = the
    global-planarity guard argument extended to the thin sub-face; shared with

@@ -706,14 +706,19 @@ inline int Orient3DFilterSign(const vec3& a, const vec3& b, const vec3& c,
 // TOTAL for every finite-double input - no window-fail, no expansion fallback.
 // RELUCTANT ACCEPTANCE: this exact kernel is net-new surface the design had
 // declined ("no exact kernel in the tree", docs/Regularize3D.md resolver
-// mechanism); the owner accepted it NARROWLY for the stage-6 tie residue - its
-// ONLY call sites are behind a filter 0 (Orient3DSoS, the EdgePiercesTriSoS
-// edge-in-plane guard, the test probe), never the certified fast path. QUEUED
-// FOR REVISIT / TRIPWIRE (docs/Regularize3D.md open list): this integer path is
-// legitimate ONLY as ONE predicate at ONE call site (~100 lines, exhaustively
-// testable).  If a SECOND exact predicate or a SECOND call site is ever needed,
-// VENDOR Shewchuk's public-domain predicates.c instead of growing this - do NOT
-// rebuild expansion arithmetic piecemeal.
+// mechanism); the owner accepted it NARROWLY for the stage-6 tie residue.
+// TRIPWIRE (docs/Regularize3D.md open list), RELAXED by the owner to ONE
+// PREDICATE, ONE IMPLEMENTATION: this is legitimate as ONE exact predicate FORM
+// (this ~100-line adaptive-integer orient3d), and ADDITIONAL CALLERS are within
+// the blessed pattern (zero new arithmetic) as long as each stays FILTER-FIRST
+// (exact fires only behind a filter 0).  Current caller inventory: the SoS tie
+// cascade (Orient3DSoS), the EdgePiercesTriSoS edge-in-plane guard, the
+// winding-probe escalation (WindingAt, reg3d-c2bx), and the test probe.  The
+// >2-sheet radial rule is a BANKED (unbuilt) prospective caller.  What stays
+// tripwired is a SECOND predicate FORM: if one is ever needed, VENDOR
+// Shewchuk's public-domain predicates.c instead of growing this - do NOT
+// rebuild expansion arithmetic piecemeal.  The certified fast path never
+// touches it.
 inline int Orient3DExactSign(const vec3& a, const vec3& b, const vec3& c,
                              const vec3& d) {
   const double pts[4][3] = {
@@ -969,8 +974,12 @@ std::vector<int> DetectCoplanarClusters(const Manifold::Impl& in) {
 // the ray p->seed, every crossing decided by level-0 orient3d through the
 // static filter (the Winding03 discipline, boolean3.cpp:388).  The delta per
 // crossed face is sign(dot(seed-p, n_f)) on the input normal - a +/-1 integer,
-// FP-safe by construction.  Returns nullopt if any deciding predicate was
-// filter-uncertain (grazed a vertex/edge): the caller re-seeds or fails closed.
+// FP-safe by construction.  A filter-uncertain deciding predicate ESCALATES to
+// the exact tie-test (below), which decides the near-tangent graze the filter
+// refuses (reg3d-c2bx: GT7081's near-coplanar shallow-dihedral faces).  Returns
+// nullopt only when the escalation finds a GENUINE exact-zero tie (the probe
+// grazes a vertex/edge/plane exactly): there the caller re-seeds or fails
+// closed, since the soup winding is single-valued only OFF the surface.
 std::optional<int> WindingAt(const Manifold::Impl& in, const vec3& p,
                              const vec3& seed) {
   int w = 0;
@@ -979,13 +988,28 @@ std::optional<int> WindingAt(const Manifold::Impl& in, const vec3& p,
     const vec3 a = in.vertPos_[in.halfedge_.Start(3 * t)];
     const vec3 b = in.vertPos_[in.halfedge_.Start(3 * t + 1)];
     const vec3 c = in.vertPos_[in.halfedge_.Start(3 * t + 2)];
-    const int da = Orient3DFilterSign(a, b, c, p);
-    const int db = Orient3DFilterSign(a, b, c, seed);
+    int da = Orient3DFilterSign(a, b, c, p);
+    int db = Orient3DFilterSign(a, b, c, seed);
+    // TRIPWIRE caller (winding probe, docs/Regularize3D.md open list): a
+    // filter-0 plane-side tie is NOT a fail-closed boundary - it ESCALATES to
+    // the exact tie-test (filter-first: exact fires only on filter-0).  A
+    // near-tangent shallow-dihedral face grazes the static filter's uncertainty
+    // band while the exact kernel decides the constructed probe DECIDABLY off
+    // the plane (reg3d-c2b: GT7081's minGap is a few eps, exactly ONE such face
+    // per shell). The probe is a constructed double the exact kernel reads
+    // verbatim, so no SoS / vertex index is needed; a GENUINE exact zero (the
+    // probe lies ON the face plane) stays nullopt = re-seed / fail closed,
+    // since the soup winding is single-valued only OFF the surface.
+    if (da == 0) da = Orient3DExactSign(a, b, c, p);
+    if (db == 0) db = Orient3DExactSign(a, b, c, seed);
     if (da == 0 || db == 0) return std::nullopt;
     if (da == db) continue;  // p and seed on the same side of the plane
-    const int o1 = Orient3DFilterSign(p, seed, a, b);
-    const int o2 = Orient3DFilterSign(p, seed, b, c);
-    const int o3 = Orient3DFilterSign(p, seed, c, a);
+    int o1 = Orient3DFilterSign(p, seed, a, b);
+    int o2 = Orient3DFilterSign(p, seed, b, c);
+    int o3 = Orient3DFilterSign(p, seed, c, a);
+    if (o1 == 0) o1 = Orient3DExactSign(p, seed, a, b);
+    if (o2 == 0) o2 = Orient3DExactSign(p, seed, b, c);
+    if (o3 == 0) o3 = Orient3DExactSign(p, seed, c, a);
     if (o1 == 0 || o2 == 0 || o3 == 0) return std::nullopt;
     if (o1 == o2 && o2 == o3) {
       const vec3 n = la::cross(b - a, c - a);
