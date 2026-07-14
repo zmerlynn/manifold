@@ -2900,6 +2900,41 @@ TEST(Overlap3, Regularize_WithinComponentCoplanar_BridgedCaps_Resolves) {
   EXPECT_NEAR(vol, out2.Volume(), 1e-6 * vol) << "not tol-invariant";
 }
 
+// TARGET (c), docs/Regularize3D.md stage-5 + non-fusion contract: the hull
+// (body + mask) carries the corpus's real near-coplanar overlap geometry - two
+// large flat facets within eps of coplanar (research memo: 14 decidable-thin
+// near-coplanar pairs).  But that overlap is CROSS-component (between the body
+// and mask solids), so RegularizeImpl decomposes into separate clean components
+// and passes them through UNCHANGED under the uniform non-fusion contract - the
+// per-component near-coplanar widen never sees a cross-component cluster (and
+// no component is dirty).  A regression guard: a gate that wrongly fused or
+// routed the cross-component overlap dirty would change the component count /
+// output.
+#ifndef MANIFOLD_NO_FILESYSTEM
+TEST(Overlap3, Regularize_Hull_CrossComponent_PassThrough) {
+  std::filesystem::path file(__FILE__);
+  auto modelDir = file.parent_path() / "models";
+  std::ifstream fBody((modelDir / "hull-body.obj").string());
+  std::ifstream fMask((modelDir / "hull-mask.obj").string());
+  if (!fBody.is_open() || !fMask.is_open()) GTEST_SKIP() << "hull model absent";
+  const Manifold::Impl impl =
+      ComposeImpl(Manifold::ReadOBJ(fBody), Manifold::ReadOBJ(fMask));
+  const RegularizeResult r = RegularizeImpl(impl, ImplEps(impl));
+  ASSERT_FALSE(r.fatal.has_value()) << r.detail;
+  EXPECT_GT(r.counters.components, 1) << "body + mask are distinct components";
+  EXPECT_EQ(r.counters.clean, r.counters.components)
+      << "every component is clean; the near-coplanar overlap is "
+         "cross-component";
+  EXPECT_EQ(r.counters.dirty, 0);
+  EXPECT_EQ(r.counters.regularized, 0);
+  ASSERT_TRUE(r.impl.has_value());
+  EXPECT_EQ(r.impl->NumTri(), impl.NumTri()) << "cross-component pass-through";
+  // The output remains self-intersecting BY CONTRACT: the body/mask overlap is
+  // cross-component, which this operator never resolves (fusion is the
+  // Boolean's job) - the near-coplanar widen is within-component only.
+}
+#endif
+
 // ===========================================================================
 // STAGE-5: NEAR-COPLANAR widen + global-planarity guard (reg3d-s5,
 // docs/Regularize3D.md; reg3d-nearcoplanar-research candidate (a)).  A face
