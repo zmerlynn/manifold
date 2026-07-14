@@ -12,9 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// The 3D sweep-native emission prototype: canonicalize -> seams -> slabs ->
-// caps -> strips -> assembly.  Slab construction lives in overlap3_sweep.cpp.
-// Design: docs/SweepEmit3D.md (three crucible rounds).
+// RemoveOverlaps3D: the regularization operator (valid oriented soup ->
+// boundary of {w_S >= 1}).  Phases: decompose -> gate -> planarize ->
+// arrange -> wind -> emit -> re-gate.  Design: docs/Regularize3D.md.
 
 #include "overlap3.h"
 
