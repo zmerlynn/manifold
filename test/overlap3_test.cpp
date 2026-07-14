@@ -2635,6 +2635,88 @@ TEST(Overlap3, Regularize_SlantPlug_CrossComponent_PassThrough) {
 // load-bearing); flipping the global perturbation direction still resolves
 // oracle-true (the exact e^0 sign is unaffected, only sub-eps ties flip, not
 // the {w>=1} topology).
+// Compose two closed manifolds into one position-only (numProp=3) soup.
+static Manifold::Impl TwoBoxSoup(const Manifold& a, const Manifold& b) {
+  MeshGL64 out;
+  out.numProp = 3;
+  auto app = [&](const Manifold& m) {
+    const MeshGL64 g = m.GetMeshGL64();
+    const uint64_t base = out.NumVert();
+    const size_t np = g.numProp;
+    for (uint64_t v = 0; v < g.NumVert(); ++v)
+      for (int k = 0; k < 3; ++k)
+        out.vertProperties.push_back(g.vertProperties[v * np + k]);
+    for (uint64_t t : g.triVerts) out.triVerts.push_back(t + base);
+  };
+  app(a);
+  app(b);
+  out.runOriginalID.push_back(Manifold::ReserveIDs(1));
+  return Manifold::Impl(out);
+}
+
+// TARGET (e), docs/Regularize3D.md: ENTANGLED PRISMS.  Two axis-aligned bars
+// crossing at right angles and sharing z[2,4] - a 3D plus.  The coincident
+// z-caps over the crossing are a COPLANAR overlap (the FOLD's), and the
+// transversal x/y walls cross EDGE-ON-EDGE at exact points like (2,2,2) - the
+// stage-6 SoS tie the convention now DECIDES.  This carrier REACHES both
+// (probe: coplanar clusters > 0 AND transversal seams > 0), so the SoS is
+// exercised; but its junction is a genuine >2-SHEET triple point (FOUR walls
+// meet at (2,2,2)), which the two-endpoint seam model cannot represent (a
+// "non-2-endpoint seam / degenerate incidence").  So it fails closed NARROWER,
+// at the >2-sheet / once-only-triple-point axis (a distinct named open, docs
+// open list) - NOT the SoS-orient3d axis, and NOT a silent wrong resolve.  The
+// vertex-on-face / edge-on-edge SoS family itself resolves oracle-true on
+// BridgedCaps (above).
+TEST(Overlap3, Regularize_ExactZeroTie_EntangledBars_FailClosed) {
+  const Manifold::Impl in =
+      TwoBoxSoup(Manifold::Cube({6, 2, 2}).Translate({0, 2, 2}),
+                 Manifold::Cube({2, 6, 2}).Translate({2, 0, 2}));
+  ASSERT_TRUE(in.IsManifold() && in.Is2Manifold());
+  const CandidateBProbe p =
+      RegularizeB_Probe(in, {}, in.bBox_.Center() + vec3(97.1, 33.7, 51.3));
+  EXPECT_GT(p.seamCount, 0) << "must reach a transversal crossing (SoS axis)";
+  EXPECT_GT(p.coplanarClusterFaces, 0) << "must reach the coplanar caps (fold)";
+
+  const RegularizeResult r =
+      RegularizeDirtyDirect(in, EpsilonFromScale(in.bBox_.Scale(), 1000));
+  ASSERT_TRUE(r.fatal.has_value())
+      << "the >2-sheet junction must fail closed, never a silent wrong resolve";
+  EXPECT_EQ(*r.fatal, FatalReason::DirtyComponentUnresolved) << r.detail;
+  // NARROWED past the SoS gate: the >2-sheet triple-point / degenerate-seam
+  // axis.
+  EXPECT_NE(r.detail.find("degenerate incidence"), std::string::npos)
+      << "residue must name the >2-sheet / degenerate-seam wall: " << r.detail;
+  EXPECT_FALSE(r.impl.has_value());
+}
+
+// TARGET (e) variant: the same two bars OFFSET in z (no coincident caps - the
+// fold is NOT reached, coplanarClusterFaces == 0), walls still crossing
+// edge-on-edge at exact ties (the SoS axis, decided).  The seamed faces build,
+// then the CLEAN-FACE winding classify hits a filter-uncertain probe from every
+// seed on this axis-aligned integer geometry (the probe segment grazes
+// edges/vertices exactly) - the COMPONENT-LOCAL SEED POLICY named open (docs
+// open list), a distinct axis beyond stage-6, NOT forced.  Hard fail-closed, no
+// output, never a silent wrong resolve.
+TEST(Overlap3, Regularize_ExactZeroTie_BarsCrossZ_FailClosed) {
+  const Manifold::Impl in =
+      TwoBoxSoup(Manifold::Cube({6, 2, 4}).Translate({0, 2, 0}),
+                 Manifold::Cube({2, 6, 2}).Translate({2, 0, 1}));
+  ASSERT_TRUE(in.IsManifold() && in.Is2Manifold());
+  const CandidateBProbe p =
+      RegularizeB_Probe(in, {}, in.bBox_.Center() + vec3(97.1, 33.7, 51.3));
+  EXPECT_GT(p.seamCount, 0) << "must reach transversal crossings";
+  EXPECT_EQ(p.coplanarClusterFaces, 0) << "no coplanar caps (fold not reached)";
+
+  const RegularizeResult r =
+      RegularizeDirtyDirect(in, EpsilonFromScale(in.bBox_.Scale(), 1000));
+  ASSERT_TRUE(r.fatal.has_value())
+      << "the seed-policy graze must fail closed, never a silent wrong resolve";
+  EXPECT_EQ(*r.fatal, FatalReason::DirtyComponentUnresolved) << r.detail;
+  EXPECT_NE(r.detail.find("winding probe"), std::string::npos)
+      << "residue must name the winding-probe graze: " << r.detail;
+  EXPECT_FALSE(r.impl.has_value());
+}
+
 TEST(Overlap3, Regularize_WithinComponentCoplanar_BridgedCaps_Resolves) {
   const Manifold::Impl in(BridgedCaps());
   ASSERT_TRUE(in.IsManifold() && in.Is2Manifold())
