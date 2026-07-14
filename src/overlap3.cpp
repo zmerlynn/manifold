@@ -1939,9 +1939,10 @@ bool TrianglesOverlap2D(const std::array<vec3, 3>& Ti,
 // only when the vertex is within ~1 ULP (relative) of the plane, i.e. the
 // coplanarity gap is far below eps (the machine weld radius), so projecting the
 // cluster onto one plane is eps-valid.  The NEAR-coplanar thin band (gap above
-// the filter's error bound but below eps) has a NONZERO filter sign, is NOT
-// clustered here, and stays the transversal / fail-closed residue the mission
-// leaves open.  Returns a per-face cluster id, or -1 for a face in no
+// the filter's error bound but below eps) has a NONZERO filter sign and is NOT
+// clustered here - it is PLANARIZED upstream by SnapNearCoplanarClusters (stage
+// 5) so that by the time this exact detector runs its clusters are exactly
+// coplanar again.  Returns a per-face cluster id, or -1 for a face in no
 // multi-face coplanar cluster (the ordinary transversal path).
 std::vector<int> DetectCoplanarClusters(const Manifold::Impl& in) {
   const int nTri = static_cast<int>(in.NumTri());
@@ -3124,8 +3125,9 @@ StageResult<Manifold::Impl> RunCandidateB(const Manifold::Impl& dirty,
     // A deciding pierce predicate hit an exact-zero / filter-uncertain boundary
     // that the coplanar fold does NOT consume: a NON-coplanar vertex-on-face /
     // edge-in-face incidence (the residual single-global SoS tie family,
-    // PokedCube-class), or the near-coplanar thin band.  Guessing a sign would
-    // risk an oracle-wrong resolve.  Fail closed.
+    // PokedCube-class), or a near-coplanar tie the stage-5 pre-pass did not
+    // fold (no 2D overlap, or a guard-refused curved chain).  Guessing a sign
+    // would risk an oracle-wrong resolve.  Fail closed.
     return StageResult<Manifold::Impl>::Fatal(
         FatalReason::DirtyComponentUnresolved,
         "candidate B: non-coplanar exact-zero tie; single-global SoS "

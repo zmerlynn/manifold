@@ -181,9 +181,32 @@ COUNTEREXAMPLE queued as correctness work. The rule: every solution must be a DE
 COMPLETION (extend the exact decision procedure to cover the case), never a repair pass on
 rounded geometry, and never a lossy fallback. The queued completions:
 
-- Stage 5 - NEAR-COPLANAR widen + guard. The thin band whose coplanarity gap is above the
-  filter's error bound but below eps is neither clustered (the fold owns only exact
-  coplanarity) nor safely transversal; widen the coplanar decision with a guarded band.
+- Stage 5 - NEAR-COPLANAR widen + guard: LANDED (reg3d-s5).  The thin band whose
+  coplanarity gap is above the filter's error bound but below eps is neither clustered by
+  the exact fold nor safely transversal; enumerated transversally its sub-eps-thin cell
+  double-rounds to a sliver (the "unresolvable sheet contact" emission).  It is now closed
+  by INPUT-SIDE PLANARIZATION in front of candidate B (research memo candidate (a)): a
+  pre-pass clusters bbox-overlapping, non-adjacent, 2D-overlapping faces whose LOCAL
+  coplanarity gap (the smaller of the two directional vertex-plane maxes - the larger is
+  diameter-amplified, a red herring) is below eps; a GLOBAL-PLANARITY GUARD fits one plane
+  per cluster (centroid + area-weighted normal) and FAILS CLOSED, distinctly named, when any
+  member vertex deviates beyond eps (the anti-chain-reaction net that catches a curved
+  near-tangent tessellation); admitted clusters SNAP onto the fitted plane (a <= eps input
+  perturbation inside the standing epsilon-valid contract).  B then RE-DERIVES the whole
+  arrangement / coupled winding / cell-classify / emit from the snapped, now
+  exactly-coplanar input, so the landed exact fold handles it verbatim and the m ==
+  winding-jump self-check holds by the exact argument.  This is coordinated-by-construction,
+  NOT an emission-time snap (those fight decisions the arrangement already made,
+  ExactArrangement3D variant-E kill) - it perturbs the INPUT before enumeration.  The exact
+  path is bitwise-unperturbed (a cluster with no near-band pair, and any input with no near
+  cluster, is left untouched).  MEASURED: a same-oriented mult-2 buried plug and an
+  anti-oriented cancellation with sub-eps-tilted caps resolve oracle-true (GWN membership +
+  volume band + tol-invariance; mutation-verified: disabling the snap reverts to the sliver
+  fail-closed, disabling the guard makes a curved chain WRONGLY fold to one plane).  A pure
+  near-coplanar overlap (deviation < 2eps) is invisible to IsSelfIntersecting (its 2*eps
+  normal-nudge separates two near-coplanar faces), so - like the exact fold - the widen is
+  reached when B already runs on a dirty component; the corpus's real near-coplanar geometry
+  (the hull's body/mask facets) is CROSS-component and stays pass-through under non-fusion.
 - Stage 6 - SINGLE-CONVENTION SoS: LANDED (reg3d-s6, reworked reg3d-s6r). One global
   symbolic-perturbation convention (the Shadows pattern lifted to orient3d = 0:
   Edelsbrunner-Mucke perturbation keyed by global vertex index; local-rank reduction
