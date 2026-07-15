@@ -289,7 +289,7 @@ rounded geometry, and never a lossy fallback. The queued completions:
   (the residual seed-policy open).  A SEPARATE winding-probe residue - a filter-PRECISION
   graze where a near-tangent shallow-dihedral face is filter-uncertain but exact-decidably
   off-plane (GT7081's 0.002deg geometry) - is now CLOSED (reg3d-c2bx): WindingAt's filter-0
-  terms ESCALATE to Orient3DExactSign (the blessed third caller, filter-first), deciding the
+  terms ESCALATE to Orient3DExactSign (the blessed winding-probe caller, filter-first), deciding the
   graze exactly.  This is distinct from the seed-policy graze (moving the probe cannot escape
   a face near-tangent over its whole extent; deciding it exactly can).  MEASURED on GT7081:
   both dirty shells now clear the winding classify with zero genuine ties, revealing the
@@ -341,12 +341,47 @@ correctness change (the sequential result is the spec the parallel one must matc
   ONE PREDICATE, ONE IMPLEMENTATION (reg3d-c2bx): the integer path is legitimate as
   ONE exact predicate FORM (this ~100-line adaptive-integer orient3d), and ADDITIONAL
   CALLERS are within the blessed pattern (zero new arithmetic) as long as each stays
-  FILTER-FIRST (exact fires only behind a filter 0).  Caller inventory: the SoS tie
-  cascade (Orient3DSoS), the EdgePiercesTriSoS edge-in-plane guard, and the
-  winding-probe escalation (WindingAt, reg3d-c2bx); the >2-sheet radial rule is a
-  BANKED (unbuilt) prospective caller.  What stays tripwired is a SECOND predicate
-  FORM: if one is ever needed, VENDOR Shewchuk's public-domain predicates.c instead of
-  growing this - do NOT rebuild expansion arithmetic piecemeal.
+  FILTER-FIRST (exact fires only behind a filter 0).  FIRE CENSUS (orient-land
+  necessity attack): the exact cascade earns its keep in two roles.  (i) STRUCTURAL-TIE
+  DETECTION - the bulk of the tie-cascade fallback: genuine exact-zeros, overwhelmingly
+  STRUCTURAL (two boxes sharing an axis coordinate, or a repeated point), where the e^0
+  sum is provably zero; these route to the single-global SoS, which breaks them by
+  perturbation.  (ii) NEAR-TANGENT SIGN DECISIONS - a filter-uncertain but
+  exact-decidably-NONZERO e^0, concentrated almost entirely on the largest corpus
+  component (GT7081) and its ~0.002deg twin faces; this is the winding-probe graze the
+  exact sign resolves.  CALLER INVENTORY of the exact e^0 predicate (Orient3DExactSign):
+  the EdgePiercesTriSoS edge-in-plane guard and the WindingAt winding-probe escalation -
+  TWO production callers (plus the test probe).  The tie cascade Orient3DSoS is NO LONGER
+  among them (orient-land item 1): its SoS e^0 (K==0) monomial group IS the exact
+  orient3d - the same real terms over the same accumulator - so a pre-SoS ExactSign
+  shortcut returned the identical sign and was provably redundant; it was dropped, a
+  bitwise no-op on the corpus carriers.  The >2-sheet radial rule remains a BANKED
+  (unbuilt) prospective caller.
+  Why the count is TWO and not one (orient-land item 2, an explicit soundness
+  adjudication): the EG-guard exact call is a NEVER-EXERCISED-ON-CORPUS SOUNDNESS
+  BACKSTOP, deliberately KEPT.  On every corpus carrier the guard's filter-0 endpoints
+  are also exact-0 (the exact check always confirms the filter's "both near plane"), so a
+  FILTER-ONLY guard would be corpus-identical.  But off-corpus it is a lossy guess: a
+  filter-0 edge whose two endpoints straddle the plane exactly (a near-tangent transversal
+  pierce - both endpoints within filter-eps of the plane but on OPPOSITE exact sides)
+  genuinely pierces, and the exact call is what routes it to the TOTAL SoS instead of
+  suppressing it.  A filter-only guard would return "no seam" for that edge WITHOUT
+  routing to SoS - a definite geometric answer on uncertainty, i.e. a silent guess, not a
+  fail-closed refusal.  Zero-oracle-wrong is corpus-graded; fail-closed is global; a guard
+  that guesses off-corpus is banned.  So the exact call stays and the count is honestly
+  TWO.
+  PRICING the WindingAt caller (the 1 -> 0 the attack priced): it is load-bearing for
+  GT7081's resolve ALONE - removing it regresses GT7081 to a fail-closed
+  DirtyComponentUnresolved, and is a no-op everywhere else.  Its fires are
+  da = Orient3DFilterSign(a, b, c, p), which takes NO seed argument, so they are
+  SEED-INVARIANT: a margin-max ray or a probe/path reroute changes only the seed-side
+  terms and cannot clear a da graze (refuted by construction, not by measurement).  The
+  only genuine route to zero is a coupled-integer WIND re-architecture that removes
+  ray-casting entirely, or accepting the loss of GT7081's oracle-true resolve - a research
+  axis, not a tweak.
+  What stays tripwired is a SECOND predicate FORM: if one is ever needed, VENDOR
+  Shewchuk's public-domain predicates.c instead of growing this - do NOT rebuild
+  expansion arithmetic piecemeal.
 - NEGATIVE WINDING / subtraction, untested. openscad's soup winding reaches -1; the
   {w_S>=1} threshold read should absorb it, but no subtraction carrier has exercised
   it.
@@ -568,7 +603,7 @@ Cluster map (root mechanism, not which string fires):
   (reg3d-c2bx): the winding CLASSIFY probe (WindingAt, both the seamed per-cell and
   clean-face paths) previously decided ray crossings on the FILTER only
   (Orient3DFilterSign) and failed closed on a filter-0; it now ESCALATES each
-  filter-0 term to Orient3DExactSign (the blessed third caller, filter-first).
+  filter-0 term to Orient3DExactSign (the blessed winding-probe caller, filter-first).
   GT7081's near-tangent 0.002deg geometry put the constructed probe (cell centroid
   + eps*n) within the filter's uncertainty band of a face whose exact sign is
   NONZERO (decidably off-plane); the escalation decides it exactly (measured zero
@@ -640,7 +675,7 @@ RESEARCH = memo with a required proof sketch, TRIPWIRE = kernel-vendor decision)
    RELAXED the tripwire to ONE PREDICATE, ONE IMPLEMENTATION (same
    Orient3DExactSign, additional CALLERS blessed, zero new arithmetic), so
    reg3d-c2bx LANDED closure (a): WindingAt's filter-0 terms ESCALATE to
-   Orient3DExactSign (the third caller, filter-first).  MEASURED: both dirty shells
+   Orient3DExactSign (the winding-probe caller, filter-first).  MEASURED: both dirty shells
    clear the winding classify exactly (zero genuine ties, so no wrong resolve), but
    the escalation reveals a DEEPER pre-existing wall - both fail at emission
    ("unresolvable sheet contact"), the Cluster-1a near-coplanar-sliver wall
