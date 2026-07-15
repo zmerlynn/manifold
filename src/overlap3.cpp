@@ -2515,12 +2515,15 @@ RegularizeResult RemoveOverlaps3D(const Manifold::Impl& in, double eps) {
   std::vector<Manifold::Impl> outComponents;
 
   // Components are independent by contract (no cross-component weld), so
-  // gate+resolve is order-free.  Two-pass keeps the counters, firstFatal, and
-  // output order bitwise-identical to the sequential loop: resolve every
-  // component in parallel into a slot (manifold::for_each_n / autoPolicy), then
-  // reduce in index order.  (meshID is assigned once, sequentially, in
-  // ComposeComponents, so the atomic-counter order is output-invariant.)
-  if (components.size() > 1) {
+  // gate+resolve is order-free.  A single two-pass path covers every component
+  // count: resolve each component in parallel into a slot (manifold::for_each_n
+  // / autoPolicy), then reduce in index order.  This keeps the counters,
+  // firstFatal, and output order bitwise-identical to a sequential loop; at one
+  // component autoPolicy is Seq, so it degenerates to exactly that loop and the
+  // reduce over a single slot reproduces the old single-component result.
+  // (meshID is assigned once, sequentially, in ComposeComponents, so the
+  // atomic-counter order is output-invariant.)
+  {
     enum { KClean, KReg, KFail };
     struct CompOut {
       int kind = KFail;
@@ -2553,6 +2556,21 @@ RegularizeResult RemoveOverlaps3D(const Manifold::Impl& in, double eps) {
                  }
                  Manifold::Impl bImpl = std::move(*bRes.value);
                  bImpl.epsilon_ = eps;
+                 // RE-GATE the resolver's output once (same gate as the input;
+                 // the resolver's coords are double-rounded).  A clean pass
+                 // composes in; a failure is the honest fail-closed, never a
+                 // silent wrong result.  This is a PRODUCTION fail-closed
+                 // backstop for the R1/R2 weld-fold blind spot (BuildImpl
+                 // already gates non-manifold emission; the re-gate's
+                 // non-redundant job is catching a MANIFOLD-but-self-
+                 // intersecting output = a weld-manufactured fold).  It is
+                 // verified UNREACHED on constructible general-position
+                 // fixtures (reg3d-s3: 0/180 sphere variants produce
+                 // re-gate-catchable output - every bad case is caught earlier
+                 // by BuildImpl's manifold gate), i.e. it fires only in the
+                 // unbuilt weld-fold regime.  It is deliberately NOT demoted to
+                 // a DEBUG_ASSERT: it must fail closed in RELEASE, not compile
+                 // out and admit wrong geometry.
                  if (GateComponent(bImpl) != GateVerdict::Clean) {
                    co[i].fatal = FatalReason::NonManifoldEmission;
                    co[i].detail = "resolver output failed the re-gate";
@@ -2577,63 +2595,7 @@ RegularizeResult RemoveOverlaps3D(const Manifold::Impl& in, double eps) {
         }
       }
     }
-  } else
-    for (Manifold::Impl& comp : components) {
-      const GateVerdict verdict = GateComponent(comp);
-      if (verdict == GateVerdict::Invalid) {
-        // Defensive: a component of a valid input is valid; a non-manifold one
-        // is neither early-exitable nor a case the resolver resolves.  Fail
-        // closed.
-        ++result.counters.failClosed;
-        if (!firstFatal) {
-          firstFatal = FatalReason::NonManifoldEmission;
-          firstDetail = "input component is not 2-manifold";
-        }
-        continue;
-      }
-      if (verdict == GateVerdict::Clean) {
-        // 3. EARLY-EXIT: already the boundary of a simple solid.
-        ++result.counters.clean;
-        outComponents.push_back(std::move(comp));
-        continue;
-      }
-
-      // 4. DIRTY -> the resolver.
-      ++result.counters.dirty;
-      StageResult<Manifold::Impl> bRes = ResolveComponent(comp, eps);
-      if (!bRes.ok()) {
-        ++result.counters.failClosed;
-        if (!firstFatal) {
-          firstFatal = bRes.fatal;
-          firstDetail = std::move(bRes.detail);
-        }
-        continue;
-      }
-      // 5. RE-GATE the resolver's output once (same gate as the input; the
-      // resolver's coords are double-rounded).  A clean pass composes in; a
-      // failure is the honest fail-closed, never a silent wrong result.  This
-      // is a PRODUCTION fail-closed backstop for the R1/R2 weld-fold blind spot
-      // (BuildImpl already gates non-manifold emission; the re-gate's
-      // non-redundant job is catching a MANIFOLD-but-self-intersecting output =
-      // a weld-manufactured fold).  It is verified UNREACHED on constructible
-      // general-position fixtures (reg3d-s3: 0/180 sphere variants produce
-      // re-gate-catchable output - every bad case is caught earlier by
-      // BuildImpl's manifold gate), i.e. it fires only in the unbuilt weld-fold
-      // regime.  It is deliberately NOT demoted to a DEBUG_ASSERT: it must fail
-      // closed in RELEASE, not compile out and admit wrong geometry.
-      Manifold::Impl bImpl = std::move(*bRes.value);
-      bImpl.epsilon_ = eps;
-      if (GateComponent(bImpl) != GateVerdict::Clean) {
-        ++result.counters.failClosed;
-        if (!firstFatal) {
-          firstFatal = FatalReason::NonManifoldEmission;
-          firstDetail = "resolver output failed the re-gate";
-        }
-        continue;
-      }
-      ++result.counters.regularized;
-      outComponents.push_back(std::move(bImpl));
-    }
+  }
 
   if (firstFatal) {
     // Fail-closed: a recorded reason, no partial output.
