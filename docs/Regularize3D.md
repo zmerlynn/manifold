@@ -321,9 +321,21 @@ the bridged carrier is the family's oracle-true resolve pin.
 The operator is order-free: the output is bit-identical regardless of component / face /
 query order (the compose is concatenation, the winding is a coupled integer read, the
 predicates are level-0 on input coords). So it is embarrassingly parallel - per-component,
-per-face-pair enumeration, and per-query winding are all independent. A BVH-accelerated
-winding query plus threading over components/queries is a named LATER perf pass, not a
-correctness change (the sequential result is the spec the parallel one must match bitwise).
+per-face-pair enumeration, and per-query winding are all independent.
+
+LANDED (winding-query perf axis): the clean-face winding walked every triangle per query
+(the resolve hot loop on single-component shells). It now queries a per-component Morton
+triangle collider with each winding ray's SEGMENT AABB - a PROVEN EXACT crossing-superset
+(a genuine crossing point lies in both the segment box and the triangle box, and both are
+the componentwise min/max of the same doubles the exact predicates read, so the closed-
+interval overlap test cannot exclude it; no box inflation, no eps). The seed plane-side
+sign is precomputed once per component (pure per triangle for a fixed seed). Both are
+bit-identical to the walk on the corpus (validated: winding-value divergence and
+crossing-superset violations both zero). LANDED (order-freeness): the clean-face classify
+and the per-component gate+resolve run through manifold::for_each_n / autoPolicy as
+two-pass (classify in parallel, reduce in ascending index), so the output is bitwise-
+identical across thread counts and equal to the sequential build - the determinism the
+order-freeness promises, now a standing rail.
 
 
 ## Open list (honest)

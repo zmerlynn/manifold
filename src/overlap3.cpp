@@ -693,9 +693,11 @@ inline int Orient3DFilterSign(const vec3& a, const vec3& b, const vec3& c,
 // TRIPWIRE (owner contract, docs/Regularize3D.md open list): this is the ONE
 // blessed exact predicate FORM.  Additional CALLERS are fine as long as each
 // stays FILTER-FIRST (exact fires only behind a filter 0, zero new arithmetic)
-// - current callers: the EdgePiercesTriSoS edge-in-plane guard, the WindingAt
-// escalation, and the RecordSeams phantom-guard pierce completion (cleanPierce)
-// (plus the test probe).  The tie cascade Orient3DSoS no
+// - current callers: the EdgePiercesTriSoS edge-in-plane guard, the
+// winding-crossing escalation (WindCrossTri, shared by the O(nTri) walk and the
+// winding broadphase, plus the once-per-component seed-sign precompute), and
+// the RecordSeams phantom-guard pierce completion (cleanPierce) (plus the test
+// probe).  The tie cascade Orient3DSoS no
 // longer calls it: its SoS K==0 group already IS this exact sign, so a pre-SoS
 // shortcut was provably redundant and was dropped.  A SECOND predicate FORM
 // stays tripwired: if one is ever needed, VENDOR Shewchuk's public-domain
@@ -2152,7 +2154,6 @@ bool EmitCleanFaces(std::vector<OutTri3D>& out, const Manifold::Impl& in,
   const TriWindBVH bvh = BuildTriWindBVH(A.tri, in.bBox_);
   const std::vector<signed char> seedSign0 =
       PrecomputeSeedSign(A.tri, seeds[0]);
-  std::vector<int> cands;  // reused across queries
   // A face is "clean" only if it is neither seamed nor part of a coplanar
   // cluster (the fold owns cluster faces).
   auto isClean = [&](int t) { return !A.seamed[t] && face2cluster[t] < 0; };
@@ -2166,11 +2167,18 @@ bool EmitCleanFaces(std::vector<OutTri3D>& out, const Manifold::Impl& in,
                                         {0.2, 0.2, 0.6},
                                         {0.5, 0.3, 0.2},
                                         {0.2, 0.5, 0.3}};
-  for (int t = 0; t < nTri; ++t) {
-    if (!isClean(t)) continue;
+  // The winding of a clean face is read-only on `in` and independent per face,
+  // so the classification is order-free.  Two-pass keeps the emit ORDER (and
+  // thus the output) bitwise-identical regardless of thread count: classify in
+  // parallel (manifold::for_each_n / autoPolicy - sequential in a series
+  // build), then append in ascending face index.
+  //   status: -2 not-clean, -1 fail-closed (degenerate/SoS), 0 drop, 1 emit.
+  auto classify = [&](int t) -> int {
+    if (!isClean(t)) return -2;
     const double nLen = la::length(A.faceN[t]);
-    if (!(nLen > 0.0)) return false;
+    if (!(nLen > 0.0)) return -1;
     const vec3 nHat = A.faceN[t] / nLen;
+    std::vector<int> cands;  // per-task candidate scratch
     std::optional<int> g;
     for (const auto& w : kBary) {
       const vec3 p =
@@ -2179,8 +2187,15 @@ bool EmitCleanFaces(std::vector<OutTri3D>& out, const Manifold::Impl& in,
                            seedSign0.data());
       if (g) break;  // any interior sample measures the (constant) cell winding
     }
-    if (!g) return false;  // grazes at every interior point (SoS): fail closed
-    if (*g == 0) out.push_back({A.tri[t][0], A.tri[t][1], A.tri[t][2]});
+    if (!g) return -1;  // grazes at every interior point (SoS): fail closed
+    return (*g == 0) ? 1 : 0;
+  };
+  std::vector<signed char> status(nTri, -2);
+  for_each_n(autoPolicy(nTri, 256), countAt(0), static_cast<size_t>(nTri),
+             [&](int t) { status[t] = static_cast<signed char>(classify(t)); });
+  for (int t = 0; t < nTri; ++t) {
+    if (status[t] == -1) return false;  // fail closed (same as the walk)
+    if (status[t] == 1) out.push_back({A.tri[t][0], A.tri[t][1], A.tri[t][2]});
   }
   return true;
 }
@@ -2499,61 +2514,126 @@ RegularizeResult RemoveOverlaps3D(const Manifold::Impl& in, double eps) {
   std::string firstDetail;
   std::vector<Manifold::Impl> outComponents;
 
-  for (Manifold::Impl& comp : components) {
-    const GateVerdict verdict = GateComponent(comp);
-    if (verdict == GateVerdict::Invalid) {
-      // Defensive: a component of a valid input is valid; a non-manifold one is
-      // neither early-exitable nor a case the resolver resolves.  Fail closed.
-      ++result.counters.failClosed;
-      if (!firstFatal) {
-        firstFatal = FatalReason::NonManifoldEmission;
-        firstDetail = "input component is not 2-manifold";
+  // Components are independent by contract (no cross-component weld), so
+  // gate+resolve is order-free.  Two-pass keeps the counters, firstFatal, and
+  // output order bitwise-identical to the sequential loop: resolve every
+  // component in parallel into a slot (manifold::for_each_n / autoPolicy), then
+  // reduce in index order.  (meshID is assigned once, sequentially, in
+  // ComposeComponents, so the atomic-counter order is output-invariant.)
+  if (components.size() > 1) {
+    enum { KClean, KReg, KFail };
+    struct CompOut {
+      int kind = KFail;
+      bool dirty = false;
+      std::optional<FatalReason> fatal;
+      std::string detail;
+      Manifold::Impl impl;
+    };
+    std::vector<CompOut> co(components.size());
+    for_each_n(autoPolicy(components.size(), 1), countAt(0), components.size(),
+               [&](int i) {
+                 Manifold::Impl& comp = components[i];
+                 const GateVerdict verdict = GateComponent(comp);
+                 if (verdict == GateVerdict::Invalid) {
+                   co[i].fatal = FatalReason::NonManifoldEmission;
+                   co[i].detail = "input component is not 2-manifold";
+                   return;
+                 }
+                 if (verdict == GateVerdict::Clean) {
+                   co[i].kind = KClean;
+                   co[i].impl = std::move(comp);
+                   return;
+                 }
+                 co[i].dirty = true;
+                 StageResult<Manifold::Impl> bRes = ResolveComponent(comp, eps);
+                 if (!bRes.ok()) {
+                   co[i].fatal = bRes.fatal;
+                   co[i].detail = std::move(bRes.detail);
+                   return;
+                 }
+                 Manifold::Impl bImpl = std::move(*bRes.value);
+                 bImpl.epsilon_ = eps;
+                 if (GateComponent(bImpl) != GateVerdict::Clean) {
+                   co[i].fatal = FatalReason::NonManifoldEmission;
+                   co[i].detail = "resolver output failed the re-gate";
+                   return;
+                 }
+                 co[i].kind = KReg;
+                 co[i].impl = std::move(bImpl);
+               });
+    for (auto& c : co) {
+      if (c.dirty) ++result.counters.dirty;
+      if (c.kind == KClean) {
+        ++result.counters.clean;
+        outComponents.push_back(std::move(c.impl));
+      } else if (c.kind == KReg) {
+        ++result.counters.regularized;
+        outComponents.push_back(std::move(c.impl));
+      } else {
+        ++result.counters.failClosed;
+        if (!firstFatal) {
+          firstFatal = c.fatal;
+          firstDetail = std::move(c.detail);
+        }
       }
-      continue;
     }
-    if (verdict == GateVerdict::Clean) {
-      // 3. EARLY-EXIT: already the boundary of a simple solid.
-      ++result.counters.clean;
-      outComponents.push_back(std::move(comp));
-      continue;
-    }
+  } else
+    for (Manifold::Impl& comp : components) {
+      const GateVerdict verdict = GateComponent(comp);
+      if (verdict == GateVerdict::Invalid) {
+        // Defensive: a component of a valid input is valid; a non-manifold one
+        // is neither early-exitable nor a case the resolver resolves.  Fail
+        // closed.
+        ++result.counters.failClosed;
+        if (!firstFatal) {
+          firstFatal = FatalReason::NonManifoldEmission;
+          firstDetail = "input component is not 2-manifold";
+        }
+        continue;
+      }
+      if (verdict == GateVerdict::Clean) {
+        // 3. EARLY-EXIT: already the boundary of a simple solid.
+        ++result.counters.clean;
+        outComponents.push_back(std::move(comp));
+        continue;
+      }
 
-    // 4. DIRTY -> the resolver.
-    ++result.counters.dirty;
-    StageResult<Manifold::Impl> bRes = ResolveComponent(comp, eps);
-    if (!bRes.ok()) {
-      ++result.counters.failClosed;
-      if (!firstFatal) {
-        firstFatal = bRes.fatal;
-        firstDetail = std::move(bRes.detail);
+      // 4. DIRTY -> the resolver.
+      ++result.counters.dirty;
+      StageResult<Manifold::Impl> bRes = ResolveComponent(comp, eps);
+      if (!bRes.ok()) {
+        ++result.counters.failClosed;
+        if (!firstFatal) {
+          firstFatal = bRes.fatal;
+          firstDetail = std::move(bRes.detail);
+        }
+        continue;
       }
-      continue;
-    }
-    // 5. RE-GATE the resolver's output once (same gate as the input; the
-    // resolver's coords are double-rounded).  A clean pass composes in; a
-    // failure is the honest fail-closed, never a silent wrong result.  This is
-    // a PRODUCTION fail-closed backstop for the R1/R2 weld-fold blind spot
-    // (BuildImpl already gates non-manifold emission; the re-gate's
-    // non-redundant job is catching a MANIFOLD-but-self-intersecting output = a
-    // weld-manufactured fold).  It is verified UNREACHED on constructible
-    // general-position fixtures (reg3d-s3: 0/180 sphere variants produce
-    // re-gate-catchable output - every bad case is caught earlier by
-    // BuildImpl's manifold gate), i.e. it fires only in the unbuilt weld-fold
-    // regime.  It is deliberately NOT demoted to a DEBUG_ASSERT: it must fail
-    // closed in RELEASE, not compile out and admit wrong geometry.
-    Manifold::Impl bImpl = std::move(*bRes.value);
-    bImpl.epsilon_ = eps;
-    if (GateComponent(bImpl) != GateVerdict::Clean) {
-      ++result.counters.failClosed;
-      if (!firstFatal) {
-        firstFatal = FatalReason::NonManifoldEmission;
-        firstDetail = "resolver output failed the re-gate";
+      // 5. RE-GATE the resolver's output once (same gate as the input; the
+      // resolver's coords are double-rounded).  A clean pass composes in; a
+      // failure is the honest fail-closed, never a silent wrong result.  This
+      // is a PRODUCTION fail-closed backstop for the R1/R2 weld-fold blind spot
+      // (BuildImpl already gates non-manifold emission; the re-gate's
+      // non-redundant job is catching a MANIFOLD-but-self-intersecting output =
+      // a weld-manufactured fold).  It is verified UNREACHED on constructible
+      // general-position fixtures (reg3d-s3: 0/180 sphere variants produce
+      // re-gate-catchable output - every bad case is caught earlier by
+      // BuildImpl's manifold gate), i.e. it fires only in the unbuilt weld-fold
+      // regime.  It is deliberately NOT demoted to a DEBUG_ASSERT: it must fail
+      // closed in RELEASE, not compile out and admit wrong geometry.
+      Manifold::Impl bImpl = std::move(*bRes.value);
+      bImpl.epsilon_ = eps;
+      if (GateComponent(bImpl) != GateVerdict::Clean) {
+        ++result.counters.failClosed;
+        if (!firstFatal) {
+          firstFatal = FatalReason::NonManifoldEmission;
+          firstDetail = "resolver output failed the re-gate";
+        }
+        continue;
       }
-      continue;
+      ++result.counters.regularized;
+      outComponents.push_back(std::move(bImpl));
     }
-    ++result.counters.regularized;
-    outComponents.push_back(std::move(bImpl));
-  }
 
   if (firstFatal) {
     // Fail-closed: a recorded reason, no partial output.
