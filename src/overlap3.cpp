@@ -693,11 +693,12 @@ inline int Orient3DFilterSign(const vec3& a, const vec3& b, const vec3& c,
 // TRIPWIRE (owner contract, docs/Regularize3D.md open list): this is the ONE
 // blessed exact predicate FORM.  Additional CALLERS are fine as long as each
 // stays FILTER-FIRST (exact fires only behind a filter 0, zero new arithmetic)
-// - current callers: the EdgePiercesTriSoS edge-in-plane guard, the
-// winding-crossing escalation (WindCrossTri, shared by the O(nTri) walk and the
-// winding broadphase, plus the once-per-component seed-sign precompute), and
-// the RecordSeams phantom-guard pierce completion (cleanPierce) (plus the test
-// probe).  The tie cascade Orient3DSoS no
+// - current callers: the EdgePiercesTriSoS edge-in-plane guard and the
+// winding-crossing escalation (WindCrossTri, shared by the O(nTri) walk, the
+// winding broadphase, the once-per-component seed-sign precompute, and the
+// RecordSeams phantom-seam guard's strict-interior pierce test - cleanPierce is
+// not a distinct caller, it rides this chain) (plus the test probe).  The tie
+// cascade Orient3DSoS no
 // longer calls it: its SoS K==0 group already IS this exact sign, so a pre-SoS
 // shortcut was provably redundant and was dropped.  A SECOND predicate FORM
 // stays tripwired: if one is ever needed, VENDOR Shewchuk's public-domain
@@ -1607,28 +1608,27 @@ BuildArrangement RecordSeams(const Manifold::Impl& in,
         // strict-interior pierce).  A genuine near-tangent crossing the filter
         // cannot certify IS caught (exact-completed to a strict pierce) and, at
         // nPts!=2, fails closed - never a silent drop.
+        // A strict-interior pierce IS a DECIDED WindCrossTri with a nonzero
+        // crossing delta, so this rides the ONE blessed WindCrossTri escalation
+        // chain instead of re-rolling the predicate.  For owner edge (u,w) vs
+        // triangle Tt, WindCrossTri(Tt0,Tt1,Tt2, u, w, delta) runs the SAME
+        // plane-side (da/db) and edge-edge (o1/o2/o3) orient chain in the SAME
+        // order with the SAME filter-then-exact completion.  It returns false
+        // on any exact-zero (endpoint on-plane / crossing on the tri boundary =
+        // a measure-zero contact) and on same-side (no straddle); delta!=0
+        // exactly on the strict-interior crossing (da!=db forces dot(w-u,n)!=0,
+        // so the sign is +/-1).  The extra cross/dot only sets delta's sign,
+        // which the delta!=0 test collapses - bitwise-identical verdict, no new
+        // exact call.
         auto cleanPierce = [&](int owner, int tgt) {
           const auto& To = A.tri[owner];
           const auto& Tt = A.tri[tgt];
-          auto sgn = [&](const vec3& a, const vec3& b, const vec3& c,
-                         const vec3& d) {
-            const int s = Orient3DFilterSign(a, b, c, d);
-            return s != 0 ? s : Orient3DExactSign(a, b, c, d);
-          };
           for (int e = 0; e < 3; ++e) {
-            const vec3& u = To[e];
-            const vec3& w = To[(e + 1) % 3];
-            const int su = sgn(Tt[0], Tt[1], Tt[2], u);
-            const int sv = sgn(Tt[0], Tt[1], Tt[2], w);
-            if (su == 0 || sv == 0 || su == sv)
-              continue;  // endpoint on-plane (touch) or same side: no straddle
-            const int o1 = sgn(u, w, Tt[0], Tt[1]);
-            const int o2 = sgn(u, w, Tt[1], Tt[2]);
-            const int o3 = sgn(u, w, Tt[2], Tt[0]);
-            if (o1 == 0 || o2 == 0 || o3 == 0)
-              continue;  // crossing on the triangle boundary: not strict
-                         // interior
-            if (o1 == o2 && o2 == o3) return true;  // strict-interior pierce
+            int delta;
+            if (WindCrossTri(Tt[0], Tt[1], Tt[2], To[e], To[(e + 1) % 3],
+                             delta) &&
+                delta != 0)
+              return true;  // strict-interior pierce
           }
           return false;
         };

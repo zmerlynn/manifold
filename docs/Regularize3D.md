@@ -371,8 +371,9 @@ order-freeness promises, now a standing rail.
   exact-decidably-NONZERO e^0, concentrated almost entirely on the largest corpus
   component (GT7081) and its ~0.002deg twin faces; this is the winding-probe graze the
   exact sign resolves.  CALLER INVENTORY of the exact e^0 predicate (Orient3DExactSign):
-  the EdgePiercesTriSoS edge-in-plane guard, the WindingAt winding-probe escalation, and
-  the RecordSeams phantom-seam guard (cleanPierce) - the production callers (plus the test
+  the EdgePiercesTriSoS edge-in-plane guard and the WindCrossTri winding-crossing escalation
+  (both the WindingAt winding-probe AND the RecordSeams phantom-seam guard ride it -
+  cleanPierce is no longer a distinct exact-call site) - the production callers (plus the test
   probe), each FILTER-FIRST (exact fires only behind a filter 0).  The tie cascade Orient3DSoS is NO LONGER
   among them (orient-land item 1): its SoS e^0 (K==0) monomial group IS the exact
   orient3d - the same real terms over the same accumulator - so a pre-SoS ExactSign
@@ -391,8 +392,9 @@ order-freeness promises, now a standing rail.
   routing to SoS - a definite geometric answer on uncertainty, i.e. a silent guess, not a
   fail-closed refusal.  Zero-oracle-wrong is corpus-graded; fail-closed is global; a guard
   that guesses off-corpus is banned.  So the exact call stays.  The phantom-seam guard's
-  cleanPierce is the same backstop kind (reg3d-phantom-close): it completes each
-  filter-refused straddle/interior sign with Orient3DExactSign - never the SoS convention,
+  cleanPierce is the same backstop kind (reg3d-phantom-close): it now RIDES the WindCrossTri
+  filter-then-exact chain, completing each filter-refused straddle/interior sign with
+  Orient3DExactSign behind a filter 0 - never the SoS convention,
   whose perturbation would manufacture a PHANTOM strict-interior pierce out of a
   measure-zero contact (endpoint on-plane or crossing on the triangle boundary) - so on
   corpus it never flips a verdict (measured: exact fires but zero pierce deltas, bitwise
