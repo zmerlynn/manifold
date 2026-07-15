@@ -2439,8 +2439,10 @@ void EmitSeamedFace(std::vector<OutTri3D>& out, const BuildArrangement& A,
   for (int k = 0; k < static_cast<int>(A.faceSeams[f].size()); ++k) {
     const BuildSeam& s = A.faceSeams[f][k];
     const int v0 = getV(s.p0), v1 = getV(s.p1);
-    const std::vector<std::pair<vec2, vec3>>& pre =
-        A.seamTriples.empty() ? kNoSplits : A.seamTriples[f][k];
+    // EnumerateTriplePoints (always run by ResolveComponent before any seamed
+    // emit) sizes seamTriples to nTri, and a seamed face has index < nTri, so
+    // this is never empty here.
+    const std::vector<std::pair<vec2, vec3>>& pre = A.seamTriples[f][k];
     pushChain(v0, v1, s.p0, s.p1, pre);
   }
 

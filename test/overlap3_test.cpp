@@ -63,22 +63,6 @@ Manifold::Impl ComposeImpl(const Manifold& a, const Manifold& b) {
   return Manifold::Impl(combined);
 }
 
-// Compose N manifolds.
-Manifold::Impl ComposeMany(std::initializer_list<Manifold> ms) {
-  MeshGL64 combined;
-  combined.numProp = 3;
-  for (const auto& m : ms) {
-    const auto mg = m.GetMeshGL64();
-    const uint64_t base = combined.NumVert();
-    for (size_t i = 0; i < mg.vertProperties.size(); ++i)
-      combined.vertProperties.push_back(mg.vertProperties[i]);
-    for (size_t i = 0; i < mg.triVerts.size(); ++i)
-      combined.triVerts.push_back(mg.triVerts[i] + base);
-  }
-  combined.runOriginalID.push_back(Manifold::ReserveIDs(1));
-  return Manifold::Impl(combined);
-}
-
 double ImplEps(const Manifold::Impl& impl) {
   return EpsilonFromScale(impl.bBox_.Scale(), 1000);
 }
