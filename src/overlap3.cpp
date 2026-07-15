@@ -774,8 +774,8 @@ inline int Orient3DFilterSign(const vec3& a, const vec3& b, const vec3& c,
 // winding broadphase, the once-per-component seed-sign precompute, and the
 // RecordSeams phantom-seam guard's strict-interior pierce test - cleanPierce is
 // not a distinct caller, it rides this chain), the junction registry's
-// input-vertex-on-edge arm (OrientProj2D/InputVertexStrictlyOnEdge - exact
-// collinearity/between-ness on input doubles), and the triple-point
+// input-vertex-on-edge arm (InputVertexStrictlyOnEdge - exact collinearity/
+// between-ness on input doubles, via ExactOrient2DDrop), and the triple-point
 // seam-crossing test (ExactSegProperCross/ExactOrient2DDrop - exact in-plane
 // orient2d, drop the dominant normal axis, refuting the near-tangent phantom
 // crossings the rounded-projection double crossing test over-detected in
@@ -1950,11 +1950,11 @@ vec2 SegLineIntersect2D(const vec2& a, const vec2& b, const vec2& c,
 // dominant axis of the (unnormalized) face normal and take the exact 2D orient
 // of the surviving axis pair as the padded orient3d (embed at z=0, lift the
 // first point in +z) through the ONE blessed exact predicate FORM
-// (Orient3DExactSign), FILTER-FIRST - the same "2D projection route" the
-// input-vertex T-junction arm (OrientProj2D) uses.  Dropping the dominant
-// normal axis keeps the projection non-degenerate.  NO new predicate FORM, NO
-// exact-on-constructed (dyadic input coords only).  The crossing test below
-// compares only relative signs, so the projection handedness is irrelevant.
+// (Orient3DExactSign), FILTER-FIRST - the SAME exact helper the input-vertex
+// T-junction arm (InputVertexStrictlyOnEdge) now uses for its collinearity
+// test.  Dropping the dominant normal axis keeps the projection non-degenerate.
+// NO new predicate FORM, NO exact-on-constructed (dyadic input coords only).
+// The crossing test below compares only relative signs, so handedness is moot.
 inline int ExactOrient2DDrop(const vec3& p, const vec3& q, const vec3& r,
                              int axis) {
   auto proj = [&](const vec3& v) -> vec3 {
@@ -2127,21 +2127,14 @@ void EnumerateTriplePoints(BuildArrangement& A,
 // T-junctions, so the arm is a no-op wherever no input vertex is EXACTLY on a
 // foreign edge (the whole corpus off openscad).
 
-// Exact 2D orient of (V,a,b) in the (i,j) projection, as the padded orient3d
-// (lift the query point in +z): reuses the blessed exact predicate FORM,
-// filter-first (the exact sign fires only behind a Shewchuk-filter 0).
-inline int OrientProj2D(double vi, double vj, double ai, double aj, double bi,
-                        double bj) {
-  const vec3 A(vi, vj, 0.0), B(ai, aj, 0.0), C(bi, bj, 0.0), D(vi, vj, 1.0);
-  const int f = Orient3DFilterSign(A, B, C, D);
-  return f != 0 ? f : Orient3DExactSign(A, B, C, D);
-}
-
 // V exactly collinear with [a,b] AND strictly interior (V != a, V != b).
 bool InputVertexStrictlyOnEdge(const vec3& V, const vec3& a, const vec3& b) {
-  if (OrientProj2D(V.x, V.y, a.x, a.y, b.x, b.y) != 0) return false;
-  if (OrientProj2D(V.y, V.z, a.y, a.z, b.y, b.z) != 0) return false;
-  if (OrientProj2D(V.z, V.x, a.z, a.x, b.z, b.x) != 0) return false;
+  // Collinear iff all three axis-drop 2D orients vanish - the same exact FORM
+  // as the seam-crossing test's ExactOrient2DDrop (the drop-y case is coord-
+  // order transposed, a sign flip that is invariant under the == 0 test).
+  if (ExactOrient2DDrop(V, a, b, 2) != 0) return false;  // drop z (x,y)
+  if (ExactOrient2DDrop(V, a, b, 0) != 0) return false;  // drop x (y,z)
+  if (ExactOrient2DDrop(V, a, b, 1) != 0) return false;  // drop y (x,z)
   // Collinear: strict between-ness on the widest axis (a != b -> nonzero span),
   // an exact strict double compare (endpoints excluded).
   const vec3 d = b - a;
