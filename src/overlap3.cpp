@@ -1333,6 +1333,18 @@ struct BuildArrangement {
   // Empty for every seam when the component has no 3-face triple point (the
   // whole corpus off openscad), so EmitSeamedFace is a byte-identical no-op.
   std::vector<std::vector<std::vector<std::pair<vec2, vec3>>>> seamTriples;
+  // GLOBAL JUNCTION REGISTRY (f4-junction): every once-only arrangement vertex
+  // of the component - all seam endpoints AND all triple points - deduped to a
+  // canonical 3D position.  A T-junction opens the emission fan when such a
+  // vertex sits strictly interior to a NEIGHBOUR / PARTNER / THIRD face's
+  // emitted edge without a shared split (openscad's dominant open residue).
+  // Every emit path (seamed, clean, fold) pre-splits each of its emitted edges
+  // at every registry vertex strictly interior to it (level-0 on-segment test
+  // in the face frame, keyed by the once-only 3D bits), so all incident faces
+  // split at the IDENTICAL point and the fans close.  Empty on any component
+  // whose seams never terminate interior to another edge (the whole corpus off
+  // openscad), so all three paths stay byte-identical there.
+  std::vector<vec3> junctions;
   bool ok = true;  // false = a structural anomaly (fail closed)
 };
 
@@ -2034,6 +2046,118 @@ void EnumerateTriplePoints(BuildArrangement& A,
   }
 }
 
+// ---------------------------------------------------------------------------
+// GLOBAL JUNCTION REGISTRY (f4-junction): the once-only completion of the
+// per-face arrangement at NON-proper-crossing junctions.  EnumerateTriplePoints
+// only welds PROPER seam X-crossings; the dominant openscad open residue is
+// T-junctions where a seam ENDPOINT (or a triple that TERMINATES a seam on the
+// third face) lands strictly interior to a neighbour / partner / third face's
+// emitted edge, which that face fails to split -> an unbalanced fan.  The
+// registry gathers EVERY once-only arrangement vertex (all seam endpoints + all
+// triple points), deduped to a canonical 3D position, so all three emit paths
+// (seamed, clean, fold) can split each emitted edge at every registry vertex
+// strictly interior to it - the SAME point on every incident face.
+// ---------------------------------------------------------------------------
+
+// Build A.junctions: all seam endpoints + all triple points, deduped so no two
+// registry vertices are within eps (a within-eps merge to the sorted-lowest
+// representative - deterministic, order-independent; the seam endpoints and
+// triples are already once-only constructions, so equal geometry gives equal or
+// within-eps bits).  Empty of interior landings on any complete arrangement
+// (the whole corpus off openscad), so consumption stays byte-identical there.
+void BuildJunctionRegistry(BuildArrangement& A, double eps) {
+  // MUTATION lever (measurement only): F4J_NOREG leaves the registry empty, so
+  // every emit path reverts to its pre-junction single-edge push (proves the
+  // registry is load-bearing - the openscad open residue jumps back up).
+  if (std::getenv("F4J_NOREG") != nullptr) return;
+  const int nTri = static_cast<int>(A.tri.size());
+  std::vector<vec3> raw;
+  for (int f = 0; f < nTri; ++f)
+    for (const auto& s : A.faceSeams[f]) {
+      raw.push_back(s.p0);
+      raw.push_back(s.p1);
+    }
+  for (const auto& ff : A.seamTriples)
+    for (const auto& sk : ff)
+      for (const auto& xp : sk) raw.push_back(xp.second);
+  std::sort(raw.begin(), raw.end(), [](const vec3& p, const vec3& q) {
+    return std::tie(p.x, p.y, p.z) < std::tie(q.x, q.y, q.z);
+  });
+  A.junctions.clear();
+  for (const vec3& p : raw) {
+    bool dup = false;
+    for (int k = static_cast<int>(A.junctions.size()) - 1; k >= 0; --k) {
+      // sorted by x first: once an accepted vertex is more than eps below in x,
+      // no earlier one can be within eps.
+      if (A.junctions[k].x < p.x - eps) break;
+      if (la::length(A.junctions[k] - p) <= eps) {
+        dup = true;
+        break;
+      }
+    }
+    if (!dup) A.junctions.push_back(p);
+  }
+}
+
+// The registry vertices strictly interior to segment [P0,P1] in frame pf, each
+// returned as {on-line 2D foot, canonical 3D vertex} ordered along the segment.
+// The 2D position is the perpendicular FOOT on the segment line (NOT proj(V),
+// which rounds off-line and would make RemoveOverlaps2D manufacture a fold-back
+// crossing - the B1 lesson), keyed by the once-only 3D bits so every incident
+// face welds onto the identical vertex.  Strict-interior in PARAMETER (never
+// within eps of an endpoint -> no degenerate sub-edge) and on-line within eps.
+std::vector<std::pair<vec2, vec3>> JunctionSplitsOnSegment(
+    const PlaneFrame& pf, const vec3& P0, const vec3& P1,
+    const std::vector<vec3>& junctions, double eps,
+    const std::vector<vec3>* skipNear = nullptr) {
+  std::vector<std::pair<double, std::pair<vec2, vec3>>> ord;
+  const vec3 d3 = P1 - P0;
+  const double len2 = la::dot(d3, d3);
+  if (!(len2 > 0.0)) return {};
+  const double len = std::sqrt(len2);
+  const double tlo = eps / len, thi = 1.0 - eps / len;
+  const vec2 q0 = pf.proj(P0), q1 = pf.proj(P1);
+  for (const vec3& V : junctions) {
+    // The split DECISION is a pure 3D on-segment test against the segment's own
+    // endpoints, so the two incident faces (which see the IDENTICAL 3D
+    // endpoints of a shared seam / mesh edge) split at the SAME junction set -
+    // no per-frame disagreement near an endpoint (which manufactures new
+    // T-junctions).  An over-inclusive collinear hit is then HARMLESS: both
+    // faces take it, so the sub-edges still pair.
+    const vec3 w = V - P0;
+    const double t = la::dot(w, d3) / len2;
+    if (!(t > tlo && t < thi)) continue;         // strictly interior in param
+    if (la::length(w - t * d3) > eps) continue;  // on the segment line
+    // Skip a junction the face already introduces itself: a vertex coincident
+    // with one of the face's OWN seam endpoints is split into this edge by the
+    // face's own RemoveOverlaps2D, so pre-splitting it would only re-tessellate
+    // an already-complete arrangement (a spurious non-no-op on carriers like
+    // EntangledBars whose seam endpoints land interior to their own wall
+    // edges).  Only FOREIGN junctions - vertices no seam of this face ends at -
+    // are the T-junctions the neighbour fails to split.
+    if (skipNear) {
+      bool own = false;
+      for (const vec3& s : *skipNear)
+        if (la::length(V - s) <= eps) {
+          own = true;
+          break;
+        }
+      if (own) continue;
+    }
+    // 2D position = the on-line foot in THIS face's frame (proj is affine, so
+    // proj(P0 + t*d3) = q0 + t*(q1-q0)), keyed by the once-only 3D bits.  On-
+    // line by construction -> no RemoveOverlaps2D fold-back (the B1 lesson).
+    const vec2 foot = q0 + t * (q1 - q0);
+    ord.push_back({t, {foot, V}});
+  }
+  std::sort(ord.begin(), ord.end(),
+            [](const auto& x, const auto& y) { return x.first < y.first; });
+  std::vector<std::pair<vec2, vec3>> out;
+  out.reserve(ord.size());
+  for (auto& e : ord) out.push_back(e.second);
+  return out;
+}
+
 // Index of the largest-area triangle of `tris` over `pts` (its
 // centroid/incenter is the most robust interior classify point); |2*area|
 // returned in area2.
@@ -2085,43 +2209,69 @@ void EmitSeamedFace(std::vector<OutTri3D>& out, const BuildArrangement& A,
     ok = false;  // left-handed basis or degenerate projection
     return;
   }
-  std::vector<EdgeM> edges = {{iA, iB, 1}, {iB, iC, 1}, {iC, iA, 1}};
+  std::vector<EdgeM> edges;
   static const std::vector<std::pair<vec2, vec3>> kNoSplits;
-  for (int k = 0; k < static_cast<int>(A.faceSeams[f].size()); ++k) {
-    const BuildSeam& s = A.faceSeams[f][k];
-    // B1: the triple points on this seam PRE-SPLIT it, so each seam-seam
-    // crossing becomes an explicit shared input vertex - registered at its
-    // exact on-seam 2D position but keyed (via addAt) by the ONCE-ONLY 3D
-    // triple point, so all three incident faces weld onto the identical 3D
-    // vertex instead of three per-face constructed crossings the pos2in map
-    // refuses. With no triple on the seam this is byte-identical to the
-    // single-edge push.
-    const std::vector<std::pair<vec2, vec3>>& splits =
-        A.seamTriples.empty() ? kNoSplits : A.seamTriples[f][k];
-    if (splits.empty()) {
-      const int v0 = getV(s.p0), v1 = getV(s.p1);
-      if (v0 != v1) edges.push_back({v0, v1, 1});
-      continue;
+  // Chain vFrom -> (interior splits ordered along [P0,P1]) -> vTo.  `pre` are
+  // the exact-crossing TRIPLE splits already computed for this segment (B1's
+  // seam splits: the on-seam 2D crossing, on-line for BOTH crossing seams, so
+  // all three incident faces weld onto the identical 3D vertex the pos2in map
+  // would otherwise refuse).  The registry then adds every OTHER junction
+  // strictly interior to the segment at its on-line FOOT, so the
+  // non-proper-crossing T-junctions (seam-endpoint-on-edge / seam-endpoint-on-
+  // seam) that open the fan get the SAME shared split on every incident face.
+  // With no triple and no interior junction this is byte-identical to the plain
+  // single-edge push (the whole corpus off openscad).
+  // The face's own seam endpoints: those are split into its edges by its own
+  // RemoveOverlaps2D, so the registry must NOT re-inject them (no-op rail).
+  std::vector<vec3> ownEnds;
+  for (const auto& s : A.faceSeams[f]) {
+    ownEnds.push_back(s.p0);
+    ownEnds.push_back(s.p1);
+  }
+  auto pushChain = [&](int vFrom, int vTo, const vec3& P0, const vec3& P1,
+                       const std::vector<std::pair<vec2, vec3>>& pre) {
+    std::vector<std::pair<vec2, vec3>> splits = pre;
+    for (const auto& js :
+         JunctionSplitsOnSegment(pf, P0, P1, A.junctions, eps, &ownEnds)) {
+      bool dup = false;
+      for (const auto& s : splits)
+        if (la::length(s.second - js.second) <= eps) {
+          dup = true;
+          break;
+        }
+      if (!dup) splits.push_back(js);
     }
-    // Chain p0 -> triples (ordered along the seam by the 2D crossing) -> p1.
-    const vec2 q0 = pf.proj(s.p0);
-    const vec2 dir = pf.proj(s.p1) - q0;
+    if (splits.empty()) {
+      if (vFrom != vTo) edges.push_back({vFrom, vTo, 1});
+      return;
+    }
+    const vec2 q0 = pf.proj(P0), dir = pf.proj(P1) - q0;
     const double len2 = la::dot(dir, dir);
-    std::vector<std::pair<double, std::pair<vec2, vec3>>> ord;
-    ord.reserve(splits.size());
-    for (const auto& xp : splits)
-      ord.push_back(
-          {len2 > 0.0 ? la::dot(xp.first - q0, dir) / len2 : 0.0, xp});
-    std::sort(ord.begin(), ord.end(),
-              [](const auto& x, const auto& y) { return x.first < y.first; });
-    int prev = getV(s.p0);
-    for (const auto& e : ord) {
-      const int v = pf.addAt(e.second.first, e.second.second);
+    auto param = [&](const vec2& p) {
+      return len2 > 0.0 ? la::dot(p - q0, dir) / len2 : 0.0;
+    };
+    std::sort(
+        splits.begin(), splits.end(),
+        [&](const std::pair<vec2, vec3>& x, const std::pair<vec2, vec3>& y) {
+          return param(x.first) < param(y.first);
+        });
+    int prev = vFrom;
+    for (const auto& e : splits) {
+      const int v = pf.addAt(e.first, e.second);
       if (v != prev) edges.push_back({prev, v, 1});
       prev = v;
     }
-    const int vend = getV(s.p1);
-    if (vend != prev) edges.push_back({prev, vend, 1});
+    if (vTo != prev) edges.push_back({prev, vTo, 1});
+  };
+  pushChain(iA, iB, a, b, kNoSplits);
+  pushChain(iB, iC, b, c, kNoSplits);
+  pushChain(iC, iA, c, a, kNoSplits);
+  for (int k = 0; k < static_cast<int>(A.faceSeams[f].size()); ++k) {
+    const BuildSeam& s = A.faceSeams[f][k];
+    const int v0 = getV(s.p0), v1 = getV(s.p1);
+    const std::vector<std::pair<vec2, vec3>>& pre =
+        A.seamTriples.empty() ? kNoSplits : A.seamTriples[f][k];
+    pushChain(v0, v1, s.p0, s.p1, pre);
   }
 
   // ARRANGEMENT via RemoveOverlaps2D: edgeSubdiv gives the exact per-input-edge
@@ -2303,10 +2453,50 @@ void FoldCoplanarClusters(std::vector<OutTri3D>& out, const Manifold::Impl& in,
       const int s = (la::dot(A.faceN[f], nHat) > 0.0) ? 1 : -1;
       ftris.push_back({verts2[i0], verts2[i1], verts2[i2], s});
     }
-    std::vector<EdgeM> segEdges;
+    // Boundary segments (net!=0): the fold's own RemoveOverlaps2D already
+    // splits these at their mutual crossings / T-junctions / shared corners, so
+    // a registry junction lying on TWO of them is produced by the fold itself
+    // and must NOT be re-injected (a spurious re-tessellation - the no-op rail;
+    // e.g. EntangledBars' coincident caps, whose wall seam endpoints coincide
+    // with cap-cap crossings).  Only a junction on EXACTLY ONE boundary (a
+    // seamed wall's endpoint entangled with the fold) is foreign and threaded
+    // in.
+    std::vector<std::pair<vec3, vec3>> bsegs;
     for (const auto& [e, net] : dir)
-      if (net != 0)
-        segEdges.push_back({e.first, e.second, 1});  // boundary only
+      if (net != 0) bsegs.push_back({canon3[e.first], canon3[e.second]});
+    auto onBoundarySeg = [&](const vec3& V, const vec3& S0, const vec3& S1) {
+      const vec3 d = S1 - S0;
+      const double l2 = la::dot(d, d);
+      if (!(l2 > 0.0)) return false;
+      const double margin = eps / std::sqrt(l2);
+      const double t = la::dot(V - S0, d) / l2;
+      if (t < -margin || t > 1.0 + margin) return false;  // inclusive endpoints
+      return la::length((V - S0) - t * d) <= eps;
+    };
+    std::vector<EdgeM> segEdges;
+    for (const auto& [e, net] : dir) {
+      if (net == 0) continue;  // interior (cancelled) diagonal: not a boundary
+      // f4-junction: split this fold-boundary edge at every FOREIGN registry
+      // junction strictly interior to it (a seamed wall's endpoint lands ON the
+      // fold's boundary - the coplanar/transversal junction), so the fold
+      // arranges AROUND it (threaded through this RemoveOverlaps2D input, not
+      // around it) and the fold cell + the seamed wall weld shut at the
+      // reentrant corner.  No foreign junction -> the plain boundary edge,
+      // byte-identical.
+      const std::vector<std::pair<vec2, vec3>> splits = JunctionSplitsOnSegment(
+          pf, canon3[e.first], canon3[e.second], A.junctions, eps);
+      int prev = e.first;
+      for (const auto& sp : splits) {
+        int onCount = 0;
+        for (const auto& bs : bsegs)
+          if (onBoundarySeg(sp.second, bs.first, bs.second)) ++onCount;
+        if (onCount >= 2) continue;  // a member-member crossing: RO2D owns it
+        const int v = pf.addAt(sp.first, sp.second);
+        if (v != prev) segEdges.push_back({prev, v, 1});
+        prev = v;
+      }
+      if (e.second != prev) segEdges.push_back({prev, e.second, 1});
+    }
 
     // ARRANGEMENT via RemoveOverlaps2D (the same primitive the seamed path
     // reuses at EmitSeamedFace): the member triangles' boundary edges overlap
@@ -2524,7 +2714,49 @@ bool EmitCleanFaces(std::vector<OutTri3D>& out, const Manifold::Impl& in,
              [&](int t) { status[t] = static_cast<signed char>(classify(t)); });
   for (int t = 0; t < nTri; ++t) {
     if (status[t] == -1) return false;  // fail closed (same as the walk)
-    if (status[t] == 1) out.push_back({A.tri[t][0], A.tri[t][1], A.tri[t][2]});
+    if (status[t] != 1) continue;
+    // f4-junction: split the retained clean face's boundary at any registry
+    // junction strictly interior to one of its edges (a neighbour's seam
+    // endpoint / triple lands here), so the shared mesh edge is split on BOTH
+    // sides and the emission fan closes.  A clean face is a single winding cell
+    // (uniform coverage), so every sub-triangle carries its OWN retained
+    // orientation (2D-CCW -> +nHat = original).  No interior junction -> the
+    // single-triangle emit, byte-identical (the whole corpus off openscad).
+    PlaneFrame pf;
+    if (A.junctions.empty() ||
+        !BuildPlaneFrame(A.faceN[t], A.tri[t][0], A.tri[t][1], pf)) {
+      out.push_back({A.tri[t][0], A.tri[t][1], A.tri[t][2]});
+      continue;
+    }
+    const vec3 P[3] = {A.tri[t][0], A.tri[t][1], A.tri[t][2]};
+    const int corner[3] = {pf.add(P[0]), pf.add(P[1]), pf.add(P[2])};
+    std::vector<int> loop;
+    bool anySplit = false;
+    for (int e = 0; e < 3; ++e) {
+      loop.push_back(corner[e]);
+      for (const auto& js : JunctionSplitsOnSegment(pf, P[e], P[(e + 1) % 3],
+                                                    A.junctions, eps)) {
+        const int v = pf.addAt(js.first, js.second);
+        if (v != loop.back()) {
+          loop.push_back(v);
+          anySplit = true;
+        }
+      }
+    }
+    if (!anySplit) {
+      out.push_back({A.tri[t][0], A.tri[t][1], A.tri[t][2]});
+      continue;
+    }
+    PolygonsIdx pidx(1);
+    for (int idx : loop) pidx[0].push_back({pf.verts2[idx], idx});
+    std::vector<ivec3> ctris;
+    try {
+      ctris = TriangulateIdx(pidx, eps);
+    } catch (...) {
+      return false;  // malformed split polygon: fail closed
+    }
+    for (const ivec3& tr : ctris)
+      out.push_back({pf.canon3[tr.x], pf.canon3[tr.y], pf.canon3[tr.z]});
   }
   return true;
 }
@@ -2799,6 +3031,10 @@ StageResult<Manifold::Impl> ResolveComponent(const Manifold::Impl& dirty,
   // B1: enumerate the once-only 3-face triple points before per-face emission
   // (no-op off openscad; the whole point on the triple-point-dense soup).
   EnumerateTriplePoints(A, face2cluster);
+  // f4-junction: gather the once-only junction registry (seam endpoints +
+  // triples) so every emit path splits its edges at the non-proper-crossing
+  // junctions the triple enumeration misses (no-op off openscad).
+  BuildJunctionRegistry(A, eps);
   return EmitComponentBoundary(in, A, face2cluster, eps);
 }
 
