@@ -1436,27 +1436,50 @@ BuildArrangement RecordSeams(const Manifold::Impl& in,
         // that actually recorded a second endpoint within eps collapses, so a
         // genuine >eps seam cannot be dropped here.
         if (nPts == 1 && nPtsPre >= 2) continue;
-        // MEASURE-ZERO CONTACT: a seam is real only where a clean off-plane
-        // edge (both endpoints strictly off the other's plane, opposite sides)
-        // pierces its STRICT interior - a self-certifying transversal crossing
-        // (r==1, filter only, no SoS).  No clean pierce -> no crossing -> no
-        // seam; skip (not a truncation, not fail-closed).
+        // MEASURE-ZERO CONTACT: a seam is real only where an edge CLEANLY
+        // pierces the other's STRICT interior - both endpoints strictly off the
+        // plane on OPPOSITE sides AND the crossing strictly inside the triangle
+        // (all three edge-edge orientations one nonzero sign).  This is the
+        // EXACT, NON-PERTURBING completion of EdgePiercesTri: a filter-REFUSED
+        // sign is completed by the EXACT predicate (Orient3DExactSign, filter-
+        // first), and ANY exact-zero - an endpoint exactly ON the plane
+        // (vertex-on-face / edge T-junction) or a crossing exactly ON the
+        // triangle boundary (collinear edge-on-edge graze) - is a MEASURE-ZERO
+        // contact, NOT a clean pierce, so that edge is skipped.  It must NOT be
+        // handed to the SoS convention (EdgePiercesTriSoS): SoS answers "which
+        // way under perturbation", which manufactures a PHANTOM pierce out of
+        // exactly these measure-zero contacts (the openscad soup is dense with
+        // them; the oscad-reopen exact reconstruction proved NONE has a clean
+        // strict-interior pierce).  A genuine near-tangent crossing the filter
+        // cannot certify IS caught (exact-completed to a strict pierce) and, at
+        // nPts!=2, fails closed - never a silent drop.
         auto cleanPierce = [&](int owner, int tgt) {
           const auto& To = A.tri[owner];
           const auto& Tt = A.tri[tgt];
+          auto sgn = [&](const vec3& a, const vec3& b, const vec3& c,
+                         const vec3& d) {
+            const int s = Orient3DFilterSign(a, b, c, d);
+            return s != 0 ? s : Orient3DExactSign(a, b, c, d);
+          };
           for (int e = 0; e < 3; ++e) {
             const vec3& u = To[e];
             const vec3& w = To[(e + 1) % 3];
-            const int su = Orient3DFilterSign(Tt[0], Tt[1], Tt[2], u);
-            const int sv = Orient3DFilterSign(Tt[0], Tt[1], Tt[2], w);
+            const int su = sgn(Tt[0], Tt[1], Tt[2], u);
+            const int sv = sgn(Tt[0], Tt[1], Tt[2], w);
             if (su == 0 || sv == 0 || su == sv)
-              continue;  // not a clean straddle
-            if (EdgePiercesTri(u, w, Tt[0], Tt[1], Tt[2]) == 1) return true;
+              continue;  // endpoint on-plane (touch) or same side: no straddle
+            const int o1 = sgn(u, w, Tt[0], Tt[1]);
+            const int o2 = sgn(u, w, Tt[1], Tt[2]);
+            const int o3 = sgn(u, w, Tt[2], Tt[0]);
+            if (o1 == 0 || o2 == 0 || o3 == 0)
+              continue;  // crossing on the triangle boundary: not strict
+                         // interior
+            if (o1 == o2 && o2 == o3) return true;  // strict-interior pierce
           }
           return false;
         };
         if (!cleanPierce(i, j) && !cleanPierce(j, i))
-          continue;  // measure-zero contact: no seam
+          continue;  // certified (filter/exact) no clean pierce: measure-zero
         // A genuine transversal crossing whose two eps-separated endpoints did
         // not both record is an honestly-open degenerate incidence - fail
         // closed.

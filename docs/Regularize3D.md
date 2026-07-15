@@ -359,14 +359,15 @@ correctness change (the sequential result is the spec the parallel one must matc
   exact-decidably-NONZERO e^0, concentrated almost entirely on the largest corpus
   component (GT7081) and its ~0.002deg twin faces; this is the winding-probe graze the
   exact sign resolves.  CALLER INVENTORY of the exact e^0 predicate (Orient3DExactSign):
-  the EdgePiercesTriSoS edge-in-plane guard and the WindingAt winding-probe escalation -
-  TWO production callers (plus the test probe).  The tie cascade Orient3DSoS is NO LONGER
+  the EdgePiercesTriSoS edge-in-plane guard, the WindingAt winding-probe escalation, and
+  the RecordSeams phantom-seam guard (cleanPierce) - the production callers (plus the test
+  probe), each FILTER-FIRST (exact fires only behind a filter 0).  The tie cascade Orient3DSoS is NO LONGER
   among them (orient-land item 1): its SoS e^0 (K==0) monomial group IS the exact
   orient3d - the same real terms over the same accumulator - so a pre-SoS ExactSign
   shortcut returned the identical sign and was provably redundant; it was dropped, a
   bitwise no-op on the corpus carriers.  The >2-sheet radial rule remains a BANKED
   (unbuilt) prospective caller.
-  Why the count is TWO and not one (orient-land item 2, an explicit soundness
+  Why these exact calls stay, not filter-only (orient-land item 2, an explicit soundness
   adjudication): the EG-guard exact call is a NEVER-EXERCISED-ON-CORPUS SOUNDNESS
   BACKSTOP, deliberately KEPT.  On every corpus carrier the guard's filter-0 endpoints
   are also exact-0 (the exact check always confirms the filter's "both near plane"), so a
@@ -377,8 +378,14 @@ correctness change (the sequential result is the spec the parallel one must matc
   suppressing it.  A filter-only guard would return "no seam" for that edge WITHOUT
   routing to SoS - a definite geometric answer on uncertainty, i.e. a silent guess, not a
   fail-closed refusal.  Zero-oracle-wrong is corpus-graded; fail-closed is global; a guard
-  that guesses off-corpus is banned.  So the exact call stays and the count is honestly
-  TWO.
+  that guesses off-corpus is banned.  So the exact call stays.  The phantom-seam guard's
+  cleanPierce is the same backstop kind (reg3d-phantom-close): it completes each
+  filter-refused straddle/interior sign with Orient3DExactSign - never the SoS convention,
+  whose perturbation would manufacture a PHANTOM strict-interior pierce out of a
+  measure-zero contact (endpoint on-plane or crossing on the triangle boundary) - so on
+  corpus it never flips a verdict (measured: exact fires but zero pierce deltas, bitwise
+  no-op) yet off-corpus it catches a near-tangent genuine crossing the filter cannot
+  certify and fails closed instead of silently dropping it.
   PRICING the WindingAt caller (the 1 -> 0 the attack priced): it is load-bearing for
   GT7081's resolve ALONE - removing it regresses GT7081 to a fail-closed
   DirtyComponentUnresolved, and is a no-op everywhere else.  Its fires are
