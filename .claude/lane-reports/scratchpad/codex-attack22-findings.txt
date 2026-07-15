@@ -1,0 +1,148 @@
+RAW FINDINGS - ATTACK lane 3/3 (CODEX OPERATOR): adversarial review of the
+"last 22 need exact-rational-2D / vendored Shewchuk" conclusion (Regularize3D).
+Disposable copy: /tmp/codex-attack22/tree (rsync of working-tree src+test+docs +
+lane notebooks). Codex CLI 0.139.0, model default, run via
+  codex exec --dangerously-bypass-approvals-and-sandbox "$(cat prompt.txt)"
+Prompt: /tmp/codex-attack22/prompt.txt (~1pg, 3 attack axes + c3 flagged hard).
+Full transcript: /tmp/codex-attack22/codex-log.txt (7500+ lines; final answer at tail).
+
+================================================================================
+CODEX OUTPUT (8 ranked ideas, verbatim gist)
+================================================================================
+1. [C3, novel] Signed output-boundary repair (NOT naive loop fill). In BuildImpl
+   after the eps-weld/dedup, before SplitTouchingSheets fails: compute the signed
+   residual boundary chain from the fwd!=bwd edges (combinatorial on welded soup,
+   not a 2D arrangement); decompose into loops; ADD candidate patch triangles that
+   cancel the residual AND DELETE adjacent emitted tris the both-sides RobustWinding
+   says are not boundary (must be add/delete since 13/19 thin-cell edges are pure
+   over-emission). Codex: loop-matching likely clean, fill-only fails on
+   over-emission, signed add/delete "may close the 3 seam fans + some thin-cell
+   residue; not confident it closes all 22."
+2. [C1, novel/narrow] 3D-native local seam graph for flagged near-tangent faces:
+   bypass RemoveOverlaps2D, build the planar graph from existing canonical 3D seam
+   endpoints/triples/junctions, sort along each seam by double line-param, trace
+   cells, use the winding oracle. Codex predicts "becomes exact-2D-lite once cell
+   tracing needs inside/outside among constructed intersections."
+3. [A, contract-hostile] Per-face conditioned 2D eps (eps/K on flagged faces) so
+   collapsed crossings stay distinct. Codex predicts explosion past a threshold
+   like routeA; violates single-global-eps.
+4. [B, novel] Snap the TANGENT FACE (not the walls) within eps so its two wall-cut
+   lines separate >eps. Codex: geometric feasibility probe first; likely breaks
+   shared verts / fires on GT7081-class.
+5. [B/C] Labelled stacked 2D vertices (keep multiple 3D identities at a merged 2D
+   vertex, emit by labels/radial order). Codex: "generalizing = symbolic cell
+   extraction = the exact-2D tripwire by another name."
+6. [C2, low] Local half-edge rewiring in SplitTouchingSheets (pair fan3/fan4 excess
+   / collapse sliver). Codex: can make A manifold, can't prove it's the CORRECT
+   boundary; too easy to mask a wrong resolve (fail-closed-hostile).
+7. [A, retread] Better witness sampling (incenter+jitter / per-subtri / more samples).
+8. [A, retread] Loosen/complete pos2in (back-project new RO2D verts to 3D).
+
+================================================================================
+MY TRIAGE (against the lane notebooks)
+================================================================================
+REFUTED-ALREADY (direct retread, notebook-cited):
+- #7 sampling: f4-residue MEASUREMENT 1 (retention/probe not the lever; wbFail=0),
+  routeA (nNull=0 - winding resolves exactly), f4-r5 F4R_PERTRI (22->37 WORSE +
+  PokedCube/EntangledBarsRotated fail-closed). Codex correctly self-marked killed.
+- #8 pos2in: f4-r6 - the 22 do NOT fail through pos2in (all 574 seamed faces emit
+  okfaces; b3faces=0; the failure is DOWNSTREAM at SplitTouchingSheets). Misdiagnosis;
+  Codex correctly self-marked killed.
+- #5 labelled-stacked: = the "coordinated cross-face substrate" of f4-r6's terminal
+  completion spec (symbolic cell extraction = orient2d-on-constructed). The exact-2D
+  tripwire relabeled. Codex self-marked.
+ADJACENT-REFUTED (extends a measured route; not an exact retread):
+- #3 per-face eps/K: routeA idea 3 measured the K->inf limit (exact incidence, defer
+  merge) = 22->696/724 (disconnects; eps-snap load-bearing for connectivity). r6
+  swept BAND=K*eps (LARGER) K=1..1024. Nobody swept eps/K (SMALLER, finite K>1); the
+  routeA endpoint predicts monotone explosion. Cheap to sweep but low value.
+- #4 face-snap: routeB PIVOTAL MEASUREMENT already established the near-coincident
+  seam lines come from f being near-TANGENT to the walls (ill-conditioned crossing),
+  NOT the walls being near-coincident; and forced snaps manufacture new degeneracies
+  and fire on GT7081/GT7863 (same near-tangent regime). Moving the face is a NEW knob
+  routeB didn't literally test, but the regime argument predicts the same wall +
+  shared-vertex breakage. Feasibility-probe-able (no build); low conviction.
+- #6 C2 rewire: not measured as topology-aware, but violates zero-oracle-wrong /
+  fail-closed (a manifold-but-unverified boundary). C3's add/delete is the
+  winding-grounded version; C2-alone correctly ranked low.
+NOVEL SURVIVORS (worth a decisive test):
+- #1 C3 signed output-boundary repair - TESTED (below). Not directly killed: the four
+  refutations are ALL UPSTREAM of emission (cell-drop in EmitSeamedFace, wall-snap on
+  input, deferred-merge before ExtractCells, seam-graph quotient pre-overlay). C3 acts
+  on the FINAL welded soup with full radial-fan visibility - a surface the campaign has
+  NOT measured. Tripwire-free (blessed RobustWinding only + double loop geometry).
+- #2 C1 3D-native cell tracing - PARTIALLY pre-validated by routeA (triples already
+  enumerated+pre-split at shared canonical verts = 0-cells EXIST; long-double atan2
+  tracing = census 22 unchanged = tracing is NOT the defect). The eps-merge/connectivity
+  tension (routeA 22->696) is the wall it inherits. Overlaps routeA's refuted
+  exact-incidence; narrowest form untested. Specced, not built (budget spent on C3).
+
+================================================================================
+DECISIVE TEST RUN - C3 FIRST GATE (residual-halfedge loop topology)
+================================================================================
+Instrumented SplitTouchingSheets (disposable tree only, F4B_HEDUMP gated,
+measurement-only): dump every residual/dangling halfedge (pairedHe==-1) as its
+welded from/to vertex ids + positions. Ran the openscad carrier
+(Overlap3.Regularize_ExactZeroTie_Openscad_FailClosed) F4B_DUMP=1 F4B_HEDUMP=1,
+ulimit -v 6000000, timeout 900. Baseline reproduced: large comp openEdges=22
+(fan1=12 fan3=9 fan4=1), small comp 0; F4B_TRIPLES distinct=162 (post e55082e1).
+43 dangling halfedges dumped (= 12x1 + 9x3 + 1x4 - confirms the flap census).
+
+Offline analysis (analyze_residual.py):
+  residual dangling halfedges : 43
+  distinct residual vertices  : 20
+  undirected incidence-degree : {2:7, 4:7, 6:4, 8:1, 12:1}
+  indeg != outdeg vertices    : 0        <- DIRECTIONALLY BALANCED
+  branch nodes (undir deg>2)  : 13 of 20 <- deg up to 12 (v709: 6-in 6-out)
+  greedy directed cycles      : 11 closed (decomposition NON-UNIQUE at branches)
+  residual bbox diagonal span : 12.85    <- MACROSCOPIC, not one local tangle
+
+INTERPRETATION (the C3 verdict):
+- GOOD (validates the signed-chain premise, owner + Codex): the residual is a proper
+  SIGNED 1-cycle - indeg==outdeg at EVERY vertex, so boundary-of-boundary=0 holds and
+  the completion is well-posed as a signed problem. Winding is exact (established). A
+  winding-only output-side completion crosses NO tripwire. So the owner's framing -
+  "the witness theorem constrains the boundary SET, not its triangulation" - is
+  structurally sound, and the completion is legitimately IN-FORM (not a heuristic
+  repair): it re-derives boundary triangles from the exact winding oracle.
+- KILLER for NAIVE loop-fill: 13/20 residual vertices are BRANCH NODES (undirected
+  degree up to 12). The dangling halfedges do NOT decompose into UNIQUE simple loops;
+  the greedy 11-cycle decomposition is arbitrary at every branch node. A degree-12
+  welded vertex is where ~6 open edges meet (near-coincident triple points the eps-grid
+  weld collapsed to one id) - to complete the boundary there you must know the CYCLIC
+  (radial) order of those edges in the tangent plane. That radial order at a near-tangent
+  junction is EXACTLY the ill-conditioned ~1e-8 quantity the 2D eps-merge destroyed.
+  So the branch-node pairing IS a ~1e-8 arrangement problem (the owner's own worry,
+  CONFIRMED): C3 does not dodge the fundamental near-tangent information loss - it
+  RELOCATES it from "cell extraction on the near-tangent face" to "radial pairing of
+  open edges at ~13 welded junctions."
+- NUANCE that SHARPENS (does not overturn) the conclusion: C3 shows the minimal exact
+  info needed is NOT a full rational 2D arrangement of every near-tangent seamed face
+  (the 600-1300 LOC r6 priced) - it is the RADIAL ORDER at ~13 junction vertices. That
+  is a strictly SMALLER exact surface. BUT ordering the fan there still compares
+  CONSTRUCTED (triple-point) directions around the edge axis = orient-on-constructed =
+  the same tripwire, just localized. So C3 changes the SHAPE and SIZE of the exact
+  requirement, not its existence. Codex's own prediction ("may close the 3 seam fans +
+  SOME thin-cell residue, not all 22") is consistent: the 3 A1 seam-endpoint fans +
+  the 7 clean degree-2 residual verts are likely completable winding-only; the 13
+  branch nodes are not, without the localized radial predicate.
+
+STANDING vs the four refutations: C3 is NOT refuted by them (it is a genuinely
+different, downstream, tripwire-free surface), and it MEASURABLY narrows the exact
+requirement - but it does NOT eliminate the exact-arrangement need for the branch-node
+subset. The "needs exact info at the near-tangent junctions" core of the current
+conclusion SURVIVES; its PRICE and LOCATION are what C3 revises (junction radial order,
+not full rational face arrangement).
+
+RAILS / hygiene: disposable copy only; canonical repo untouched except this lane's
+notebook. F4B_HEDUMP is measurement-only, env-gated, in the /tmp copy - never in
+canonical. AXIS-A projection measurement (F4P_PROJ hook) is a CONCURRENT SIBLING
+lane's (its hook appeared then was reverted in the shared working tree mid-session);
+not run here to avoid duplicating their work.
+
+NEXT (if owner pursues C3): (1) split the 43 by residual-vertex degree - confirm the
+7 deg-2 verts + 3 A1 fans complete winding-only (a bounded win, tripwire-free); (2) for
+the 13 branch nodes, measure whether the localized radial order is decidable by the
+EXISTING exact fan-order (SplitTouchingSheets already radial-sorts by atan2; an exact
+variant would order emitted-tri directions = constructed points) - if yes, C3 is a
+SMALLER completion than r6's rational 2D arrangement, same tripwire class.
