@@ -2184,25 +2184,38 @@ void EmitSeamedFace(std::vector<OutTri3D>& out, const BuildArrangement& A,
         (verts2[tris[best].x] + verts2[tris[best].y] + verts2[tris[best].z]) /
         3.0;
     const vec3 cen3 = a + cen2.x * e1 + cen2.y * e2;
+    // BOTH-SIDES RETENTION (f4-junction, port of the coplanar fold's rule):
+    // probe w_S on BOTH sides of the sub-cell and retain iff EXACTLY ONE side
+    // is inside {w_S>=1}; the solid side fixes the emitted orientation.  This
+    // is the general d{w_S>=1} boundary criterion, not the mult-1
+    // specialization.  For an oriented mult-1 face w_below = w_above + 1 (the
+    // +/-1 crossing delta, seed-independent), so aboveIn!=belowIn holds EXACTLY
+    // at w_above==0 with the solid on the -n side (belowIn) -> original
+    // orientation: BITWISE-IDENTICAL to the former w_above==0 rule on every
+    // jump==1 cell (the whole corpus off openscad).  Where the true jump is NOT
+    // 1 (a coplanar coincidence a transversal seam sub-cell can carry -
+    // openscad's tangent/overlap fans), the one-sided rule mis-orients or
+    // wrongly drops the sub-face (the F4B census's radial ties + material
+    // overlaps); the both-sides read decides them correctly.  A negative
+    // w_above (both sides exterior) drops, NOT fail-closed (subtraction
+    // absorption).
     const std::optional<int> g = RobustWinding(in, cen3 + eps * nHat, seeds);
-    if (!g) {  // filter-uncertain deciding predicate (SoS axis): fail closed
-      if (kF4BDump) ++gF4BSeam.b5faces;
+    const std::optional<int> gb = RobustWinding(in, cen3 - eps * nHat, seeds);
+    if (!g || !gb) {  // filter-uncertain deciding predicate (SoS axis): fail
+      if (kF4BDump) ++gF4BSeam.b5faces;  // closed
       ok = false;
       return;
     }
-    // Witness theorem, general form: for an oriented mult-1 face w_below =
-    // w_above + 1 universally (the +/-1 crossing delta, seed-independent), so a
-    // cell is on d{w_S>=1} iff EXACTLY ONE side has w>=1, which for mult-1 is
-    // exactly w_above == 0 (w_above<=0 && w_above+1>=1).  A negative w_above
-    // means w_below = w_above+1 <= 0: BOTH sides exterior to {w_S>=1}, so the
-    // cell is dropped, NOT failed closed (openscad/subtraction absorption).
-    // The solid, when retained, is always on the -n_f side -> original
-    // orientation, flip-free.
-    if (*g != 0)
-      continue;  // w_above != 0: buried (>=1) or exterior (<=0): drop
-    // Retained: emit at canonical 3D, 2D-CCW -> +nHat = original orientation.
-    for (const ivec3& t : tris)
-      out.push_back({canon3[t.x], canon3[t.y], canon3[t.z]});
+    const bool aboveIn = *g >= 1, belowIn = *gb >= 1;
+    if (aboveIn == belowIn) continue;  // both sides same class: not a boundary
+    // Retained: solid on the -nHat side (belowIn) keeps the CCW 2D winding
+    // (+nHat = original orientation); solid on +nHat reverses.
+    for (const ivec3& t : tris) {
+      if (belowIn)
+        out.push_back({canon3[t.x], canon3[t.y], canon3[t.z]});
+      else
+        out.push_back({canon3[t.x], canon3[t.z], canon3[t.y]});
+    }
   }
   if (kF4BDump) ++gF4BSeam.okfaces;
 }
