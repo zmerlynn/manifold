@@ -2644,10 +2644,15 @@ void FoldCoplanarClusters(std::vector<OutTri3D>& out, const Manifold::Impl& in,
 }
 
 // Classify + emit the CLEAN (un-seamed, un-folded) faces.  Retention rule (SAME
-// witness rule as the seamed path): keep iff the face's +n winding w_above == 0
-// (the witness theorem makes every single face m=+1, so the solid is on the -n
-// side of a retained face -> original orientation, flip-free).  A NEGATIVE
-// w_above is exterior on both sides and DROPS (the axis-1 subtraction
+// witness rule as the seamed path): BOTH-SIDES retention - probe w_S on each
+// side of the face and keep iff EXACTLY ONE side is inside {w_S>=1}; the solid
+// side fixes orientation (solid on -n -> original, on +n -> reversed).  For an
+// oriented mult-1 clean face w_below = w_above + 1, so this reduces EXACTLY to
+// the former w_above==0 / original-orientation rule (bit-identical off
+// openscad); it additionally drops a clean tile that is coplanar-coincident
+// with an unclustered seamed face (w_above==w_below==0, exterior on both
+// sides), the one-sided-rule over-emission the whole-face read cannot see.  A
+// NEGATIVE w_above (both sides exterior) still DROPS (the axis-1 subtraction
 // absorption), not a fail-closed.
 //
 // PER-FACE, not per-patch: coverage is constant across an uncrossed clean-clean
@@ -2691,30 +2696,61 @@ bool EmitCleanFaces(std::vector<OutTri3D>& out, const Manifold::Impl& in,
   // thus the output) bitwise-identical regardless of thread count: classify in
   // parallel (manifold::for_each_n / autoPolicy - sequential in a series
   // build), then append in ascending face index.
-  //   status: -2 not-clean, -1 fail-closed (degenerate/SoS), 0 drop, 1 emit.
+  //   status: -2 not-clean, -1 fail-closed (degenerate/SoS), 0 drop,
+  //           1 emit original orientation, 2 emit reversed orientation.
+  // BOTH-SIDES RETENTION (f4-r5, port of EmitSeamedFace's rule to clean faces):
+  // probe w_S on BOTH sides of the face and retain iff EXACTLY ONE side is
+  // inside {w_S>=1}; the solid side fixes the emitted orientation.  For an
+  // oriented mult-1 clean face w_below = w_above + 1, so aboveIn!=belowIn holds
+  // EXACTLY at w_above==0 with the solid on the -nHat side (belowIn) ->
+  // original orientation: BITWISE-IDENTICAL to the former w_above==0 rule on
+  // the whole corpus off openscad.  Under a coplanar coincidence (a clean tile
+  // oppositely coincident with a seamed face the shares-vertex skip left
+  // unclustered) w_above==w_below==0, and the one-sided rule over-emits it; the
+  // both-sides read drops it.  F4R_ONESIDE reverts to the one-sided rule
+  // (mutation lever).
+  static const bool kOneSide = std::getenv("F4R_ONESIDE") != nullptr;
   auto classify = [&](int t) -> int {
     if (!isClean(t)) return -2;
     const double nLen = la::length(A.faceN[t]);
     if (!(nLen > 0.0)) return -1;
     const vec3 nHat = A.faceN[t] / nLen;
     std::vector<int> cands;  // per-task candidate scratch
-    std::optional<int> g;
+    std::optional<int> g, gb;
     for (const auto& w : kBary) {
       const vec3 p =
           w[0] * A.tri[t][0] + w[1] * A.tri[t][1] + w[2] * A.tri[t][2];
       g = RobustWindingBVH(A.tri, bvh, p + eps * nHat, seeds, cands,
                            seedSign0.data());
-      if (g) break;  // any interior sample measures the (constant) cell winding
+      if (kOneSide) {
+        if (g) break;  // any interior sample measures the (constant) cell
+        continue;
+      }
+      gb = RobustWindingBVH(A.tri, bvh, p - eps * nHat, seeds, cands,
+                            seedSign0.data());
+      if (g && gb) break;  // both interior samples measure the constant cells
     }
-    if (!g) return -1;  // grazes at every interior point (SoS): fail closed
-    return (*g == 0) ? 1 : 0;
+    if (kOneSide) {
+      if (!g) return -1;  // grazes at every interior point (SoS): fail closed
+      return (*g == 0) ? 1 : 0;
+    }
+    if (!g || !gb) return -1;  // grazes everywhere (SoS): fail closed
+    const bool aboveIn = *g >= 1, belowIn = *gb >= 1;
+    if (aboveIn == belowIn) return 0;  // both sides same class: not a boundary
+    return belowIn ? 1 : 2;  // solid on -nHat -> original; else reversed
   };
   std::vector<signed char> status(nTri, -2);
   for_each_n(autoPolicy(nTri, 256), countAt(0), static_cast<size_t>(nTri),
              [&](int t) { status[t] = static_cast<signed char>(classify(t)); });
   for (int t = 0; t < nTri; ++t) {
     if (status[t] == -1) return false;  // fail closed (same as the walk)
-    if (status[t] != 1) continue;
+    if (status[t] != 1 && status[t] != 2) continue;
+    // The solid side fixes orientation: status 1 (solid on -nHat) keeps the
+    // face's original CCW (+nHat) winding; status 2 (solid on +nHat) reverses.
+    // On the whole corpus off openscad every retained clean face is status 1
+    // (mult-1 -> belowIn), so the reversed branch is a defensive completion,
+    // never a byte-identity divergence.
+    const bool rev = (status[t] == 2);
     // f4-junction: split the retained clean face's boundary at any registry
     // junction strictly interior to one of its edges (a neighbour's seam
     // endpoint / triple lands here), so the shared mesh edge is split on BOTH
@@ -2725,7 +2761,10 @@ bool EmitCleanFaces(std::vector<OutTri3D>& out, const Manifold::Impl& in,
     PlaneFrame pf;
     if (A.junctions.empty() ||
         !BuildPlaneFrame(A.faceN[t], A.tri[t][0], A.tri[t][1], pf)) {
-      out.push_back({A.tri[t][0], A.tri[t][1], A.tri[t][2]});
+      if (rev)
+        out.push_back({A.tri[t][0], A.tri[t][2], A.tri[t][1]});
+      else
+        out.push_back({A.tri[t][0], A.tri[t][1], A.tri[t][2]});
       continue;
     }
     const vec3 P[3] = {A.tri[t][0], A.tri[t][1], A.tri[t][2]};
@@ -2744,7 +2783,10 @@ bool EmitCleanFaces(std::vector<OutTri3D>& out, const Manifold::Impl& in,
       }
     }
     if (!anySplit) {
-      out.push_back({A.tri[t][0], A.tri[t][1], A.tri[t][2]});
+      if (rev)
+        out.push_back({A.tri[t][0], A.tri[t][2], A.tri[t][1]});
+      else
+        out.push_back({A.tri[t][0], A.tri[t][1], A.tri[t][2]});
       continue;
     }
     PolygonsIdx pidx(1);
@@ -2755,8 +2797,12 @@ bool EmitCleanFaces(std::vector<OutTri3D>& out, const Manifold::Impl& in,
     } catch (...) {
       return false;  // malformed split polygon: fail closed
     }
-    for (const ivec3& tr : ctris)
-      out.push_back({pf.canon3[tr.x], pf.canon3[tr.y], pf.canon3[tr.z]});
+    for (const ivec3& tr : ctris) {
+      if (rev)
+        out.push_back({pf.canon3[tr.x], pf.canon3[tr.z], pf.canon3[tr.y]});
+      else
+        out.push_back({pf.canon3[tr.x], pf.canon3[tr.y], pf.canon3[tr.z]});
+    }
   }
   return true;
 }
