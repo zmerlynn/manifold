@@ -1354,6 +1354,26 @@ struct BuildArrangement {
   bool ok = true;  // false = a structural anomaly (fail closed)
 };
 
+// 3D point-vs-triangle classification with an area-scaled margin - the shared
+// core of RecordSeams' vertex-on-face graze test and the cap-plane seam
+// endpoint test.  P is assumed on the triangle's plane; n = the raw
+// (unnormalized) normal, area2 = |n|^2, margin = area2 * 1e-9.  Returns
+// kDegenerate if area2 == 0, else kInside if P is within margin of all three
+// directed edges, else kOutside.
+enum class TriSide { kDegenerate, kInside, kOutside };
+inline TriSide ClassifyPointInTri3D(const vec3& P, const vec3& t0,
+                                    const vec3& t1, const vec3& t2) {
+  const vec3 n = la::cross(t1 - t0, t2 - t0);
+  const double area2 = la::length2(n);
+  if (!(area2 > 0.0)) return TriSide::kDegenerate;
+  const double margin = area2 * 1e-9;
+  const double s0 = la::dot(n, la::cross(t1 - t0, P - t0));
+  const double s1 = la::dot(n, la::cross(t2 - t1, P - t1));
+  const double s2 = la::dot(n, la::cross(t0 - t2, P - t2));
+  return (s0 >= -margin && s1 >= -margin && s2 >= -margin) ? TriSide::kInside
+                                                           : TriSide::kOutside;
+}
+
 // Enumerate the self-crossing arrangement AND record each seam's canonical 3D
 // segment per incident face.  `face2cluster` (from DetectCoplanarClusters)
 // marks exactly-coplanar face groups: same-cluster pairs are SKIPPED here (the
@@ -1565,18 +1585,10 @@ BuildArrangement RecordSeams(const Manifold::Impl& in,
           // is the vertex-on-face SoS tie.
           const vec3& p =
               A.vid[owner][e] == onV ? A.tri[owner][e] : A.tri[owner][e1];
-          const vec3 n = la::cross(A.tri[tgt][1] - A.tri[tgt][0],
-                                   A.tri[tgt][2] - A.tri[tgt][0]);
-          const double area2 = la::length2(n);
-          if (!(area2 > 0.0)) return false;
-          const double margin = area2 * 1e-9;
-          const double s0 = la::dot(
-              n, la::cross(A.tri[tgt][1] - A.tri[tgt][0], p - A.tri[tgt][0]));
-          const double s1 = la::dot(
-              n, la::cross(A.tri[tgt][2] - A.tri[tgt][1], p - A.tri[tgt][1]));
-          const double s2 = la::dot(
-              n, la::cross(A.tri[tgt][0] - A.tri[tgt][2], p - A.tri[tgt][2]));
-          return s0 < -margin || s1 < -margin || s2 < -margin;
+          // Benign iff p lies strictly OUTSIDE tgt's triangle; a degenerate
+          // tgt is treated as a real tie (not benign), matching the old guard.
+          return ClassifyPointInTri3D(p, A.tri[tgt][0], A.tri[tgt][1],
+                                      A.tri[tgt][2]) == TriSide::kOutside;
         }
         return false;  // edge-edge crossing tie: real
       };
@@ -1642,15 +1654,8 @@ BuildArrangement RecordSeams(const Manifold::Impl& in,
           const int sv = Orient3DFilterSign(T[0], T[1], T[2], w);
           if (su != 0 && sv != 0 && su != sv) {
             const vec3 P = SegPlanePoint(u, w, T[0], T[1], T[2]);
-            const vec3 n = la::cross(T[1] - T[0], T[2] - T[0]);
-            const double area2 = la::length2(n);
-            if (area2 > 0.0) {
-              const double margin = area2 * 1e-9;
-              const double s0 = la::dot(n, la::cross(T[1] - T[0], P - T[0]));
-              const double s1 = la::dot(n, la::cross(T[2] - T[1], P - T[1]));
-              const double s2 = la::dot(n, la::cross(T[0] - T[2], P - T[2]));
-              if (s0 >= -margin && s1 >= -margin && s2 >= -margin) hit = true;
-            }
+            if (ClassifyPointInTri3D(P, T[0], T[1], T[2]) == TriSide::kInside)
+              hit = true;
           }
         }
         if (hit && nPts < 4)
