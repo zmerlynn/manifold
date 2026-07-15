@@ -610,10 +610,10 @@ reverted):
   "once-only closes the near-triple majority" prediction (its near/far split was
   confounded, as its own notebook warned) AND design-a's winding-jump re-emission
   rule (measured to move the count the WRONG way).  Closing the residue is the
-  exact-radial substrate (the tripwire), RECORDED not built.  (Aside: at CLEAN
-  HEAD the openscad wall is MANIFOLD_PAR-dependent - F4 under PAR=OFF, already the
-  emission wall under PAR=ON; with B1 it is the emission wall under BOTH, so the
-  once-only construction also makes the openscad terminal PAR-consistent.)
+  exact-radial substrate (the tripwire), RECORDED not built.  (An earlier aside
+  here claimed the pre-B1 wall was MANIFOLD_PAR-dependent; the verification lane
+  could not reproduce that - pre-B1 is F4 under both settings in from-scratch
+  builds.  With B1 the terminal is the emission wall under both settings.)
 
 MEASURED CORRECTIONS to earlier anatomy (were logged at a pre-entanglement,
 pre-stage-6 HEAD): (1) PokedCube AND GT7863 fail at the SplitTouchingSheets
