@@ -19,6 +19,7 @@
 #include "overlap3.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -985,6 +986,133 @@ bool HasCoplanarOverlap(const Manifold::Impl& in) {
 // nullopt only when the escalation finds a GENUINE exact-zero tie (the probe
 // grazes a vertex/edge/plane exactly): there the caller re-seeds or fails
 // closed, since the soup winding is single-valued only OFF the surface.
+// One triangle's oriented crossing contribution for the winding ray p->seed,
+// factored so the O(nTri) walk and the winding broadphase (below) share ONE
+// exact predicate chain (the "one predicate / one implementation" discipline).
+// TRIPWIRE caller (winding probe, docs/Regularize3D.md open list): a filter-0
+// plane-side tie is NOT a fail-closed boundary - it ESCALATES to the exact
+// tie-test (filter-first: exact fires only on filter-0).  A near-tangent
+// shallow-dihedral face grazes the static filter's uncertainty band while the
+// exact kernel decides the constructed probe DECIDABLY off the plane
+// (reg3d-c2b: GT7081's minGap is a few eps, exactly ONE such face per shell).
+// The probe is a constructed double the exact kernel reads verbatim, so no SoS
+// / vertex index is needed.  Returns false on a GENUINE exact-zero tie (p/seed
+// lie ON a face plane, or the segment grazes an edge/vertex exactly) - the soup
+// winding is single-valued only OFF the surface, so the caller re-seeds / fails
+// closed; on true, `delta` is the signed crossing (0 none, +/-1).
+inline bool WindCrossTri(const vec3& a, const vec3& b, const vec3& c,
+                         const vec3& p, const vec3& seed, int& delta) {
+  delta = 0;
+  int da = Orient3DFilterSign(a, b, c, p);
+  int db = Orient3DFilterSign(a, b, c, seed);
+  if (da == 0) da = Orient3DExactSign(a, b, c, p);
+  if (db == 0) db = Orient3DExactSign(a, b, c, seed);
+  if (da == 0 || db == 0) return false;
+  if (da == db) return true;  // p and seed on the same side of the plane
+  int o1 = Orient3DFilterSign(p, seed, a, b);
+  int o2 = Orient3DFilterSign(p, seed, b, c);
+  int o3 = Orient3DFilterSign(p, seed, c, a);
+  if (o1 == 0) o1 = Orient3DExactSign(p, seed, a, b);
+  if (o2 == 0) o2 = Orient3DExactSign(p, seed, b, c);
+  if (o3 == 0) o3 = Orient3DExactSign(p, seed, c, a);
+  if (o1 == 0 || o2 == 0 || o3 == 0) return false;
+  if (o1 == o2 && o2 == o3) {
+    const vec3 n = la::cross(b - a, c - a);
+    delta = (la::dot(seed - p, n) > 0.0) ? 1 : -1;
+  }
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// WINDING BROADPHASE (perf: docs/Regularize3D.md winding-query axis).  The
+// clean-face winding walks EVERY triangle per query (O(nTri * cleanFaces), the
+// resolve hot loop on single-component shells).  A per-component Morton
+// triangle collider shrinks each query to the triangles whose AABB overlaps the
+// winding SEGMENT's AABB - a PROVEN EXACT SUPERSET of the segment's crossings,
+// so the result is unchanged:
+//   If the segment p->seed genuinely crosses triangle T (WindCrossTri delta!=0)
+//   the crossing point x lies in BOTH the segment box Box(p,seed) and T's box
+//   (x is a convex combination of the segment endpoints, and of T's vertices).
+//   Both boxes are the componentwise min/max of the SAME doubles the exact
+//   predicates read (min/max of doubles is exact), so x witnesses the closed-
+//   interval Box::DoesOverlap and T is a candidate.  No box inflation, no eps.
+// The only behavior the broadphase drops is the walk's OVER-conservative
+// re-seed when p or seed lies exactly on a DISTANT triangle's plane the segment
+// never reaches (that triangle contributes no crossing); the winding is
+// single-valued off-surface so the value from this seed already equals what the
+// walk returns from the next seed - strictly more permissive, never wrong
+// (validated: windDiverge=0 and crossing-superset violations=0 across the
+// corpus).
+struct TriWindBVH {
+  Collider collider;
+  Vec<int> leaf2tri;  // leaf index -> original triangle index
+  bool built = false;
+};
+
+TriWindBVH BuildTriWindBVH(const std::vector<std::array<vec3, 3>>& tri,
+                           const Box& bBox) {
+  TriWindBVH out;
+  const int nTri = static_cast<int>(tri.size());
+  if (nTri == 0) return out;
+  std::vector<Box> box(nTri);
+  std::vector<uint32_t> morton(nTri);
+  for (int t = 0; t < nTri; ++t) {
+    Box bx;
+    bx.Union(tri[t][0]);
+    bx.Union(tri[t][1]);
+    bx.Union(tri[t][2]);
+    box[t] = bx;
+    morton[t] =
+        Collider::MortonCode((tri[t][0] + tri[t][1] + tri[t][2]) / 3.0, bBox);
+  }
+  // LBVH construction needs Morton-sorted leaves; the sort only orders leaves
+  // (a tree-quality heuristic), never the true leaf boxes, so it cannot drop a
+  // candidate.
+  std::vector<int> perm(nTri);
+  for (int i = 0; i < nTri; ++i) perm[i] = i;
+  std::stable_sort(perm.begin(), perm.end(),
+                   [&](int x, int y) { return morton[x] < morton[y]; });
+  Vec<Box> sbox(nTri);
+  Vec<uint32_t> smort(nTri);
+  out.leaf2tri.resize(nTri);
+  for (int i = 0; i < nTri; ++i) {
+    sbox[i] = box[perm[i]];
+    smort[i] = morton[perm[i]];
+    out.leaf2tri[i] = perm[i];
+  }
+  out.collider = Collider(sbox, smort);
+  out.built = true;
+  return out;
+}
+
+// Triangles whose AABB overlaps the winding segment p->seed (the crossing
+// superset).  Single-query sequential descent (safe to call concurrently on a
+// const collider).
+void WindCandidates(const TriWindBVH& bvh, const vec3& p, const vec3& seed,
+                    std::vector<int>& out) {
+  out.clear();
+  const Box qbox(p, seed);
+  auto rec = [&](int, int leaf) { out.push_back(bvh.leaf2tri[leaf]); };
+  auto recorder = MakeSimpleRecorder(rec);
+  auto f = [&](int) { return qbox; };
+  bvh.collider.Collisions<false>(recorder, f, 1, /*parallel=*/false, nullptr);
+}
+
+// Winding over the candidate triangle list (SAME exact per-triangle chain as
+// the walk; only the iteration set shrinks).
+std::optional<int> WindingAtCands(const std::vector<std::array<vec3, 3>>& tri,
+                                  const vec3& p, const vec3& seed,
+                                  const std::vector<int>& cands) {
+  int w = 0;
+  for (int t : cands) {
+    int delta;
+    if (!WindCrossTri(tri[t][0], tri[t][1], tri[t][2], p, seed, delta))
+      return std::nullopt;
+    w += delta;
+  }
+  return w;
+}
+
 std::optional<int> WindingAt(const Manifold::Impl& in, const vec3& p,
                              const vec3& seed) {
   int w = 0;
@@ -993,33 +1121,9 @@ std::optional<int> WindingAt(const Manifold::Impl& in, const vec3& p,
     const vec3 a = in.vertPos_[in.halfedge_.Start(3 * t)];
     const vec3 b = in.vertPos_[in.halfedge_.Start(3 * t + 1)];
     const vec3 c = in.vertPos_[in.halfedge_.Start(3 * t + 2)];
-    int da = Orient3DFilterSign(a, b, c, p);
-    int db = Orient3DFilterSign(a, b, c, seed);
-    // TRIPWIRE caller (winding probe, docs/Regularize3D.md open list): a
-    // filter-0 plane-side tie is NOT a fail-closed boundary - it ESCALATES to
-    // the exact tie-test (filter-first: exact fires only on filter-0).  A
-    // near-tangent shallow-dihedral face grazes the static filter's uncertainty
-    // band while the exact kernel decides the constructed probe DECIDABLY off
-    // the plane (reg3d-c2b: GT7081's minGap is a few eps, exactly ONE such face
-    // per shell). The probe is a constructed double the exact kernel reads
-    // verbatim, so no SoS / vertex index is needed; a GENUINE exact zero (the
-    // probe lies ON the face plane) stays nullopt = re-seed / fail closed,
-    // since the soup winding is single-valued only OFF the surface.
-    if (da == 0) da = Orient3DExactSign(a, b, c, p);
-    if (db == 0) db = Orient3DExactSign(a, b, c, seed);
-    if (da == 0 || db == 0) return std::nullopt;
-    if (da == db) continue;  // p and seed on the same side of the plane
-    int o1 = Orient3DFilterSign(p, seed, a, b);
-    int o2 = Orient3DFilterSign(p, seed, b, c);
-    int o3 = Orient3DFilterSign(p, seed, c, a);
-    if (o1 == 0) o1 = Orient3DExactSign(p, seed, a, b);
-    if (o2 == 0) o2 = Orient3DExactSign(p, seed, b, c);
-    if (o3 == 0) o3 = Orient3DExactSign(p, seed, c, a);
-    if (o1 == 0 || o2 == 0 || o3 == 0) return std::nullopt;
-    if (o1 == o2 && o2 == o3) {
-      const vec3 n = la::cross(b - a, c - a);
-      w += (la::dot(seed - p, n) > 0.0) ? 1 : -1;
-    }
+    int delta;
+    if (!WindCrossTri(a, b, c, p, seed, delta)) return std::nullopt;
+    w += delta;
   }
   return w;
 }
@@ -1033,6 +1137,20 @@ std::optional<int> RobustWinding(const Manifold::Impl& in, const vec3& p,
   for (const vec3& s : seeds) {
     const std::optional<int> w = WindingAt(in, p, s);
     if (w) return w;
+  }
+  return std::nullopt;
+}
+
+// RobustWinding through the winding broadphase (clean-face path).  `cands` is a
+// caller-owned scratch buffer reused across queries.  Bit-identical winding
+// VALUE to the walk (crossing-superset proof above), hence identical keep/drop.
+std::optional<int> RobustWindingBVH(const std::vector<std::array<vec3, 3>>& tri,
+                                    const TriWindBVH& bvh, const vec3& p,
+                                    const std::vector<vec3>& seeds,
+                                    std::vector<int>& cands) {
+  for (const vec3& s : seeds) {
+    WindCandidates(bvh, p, s, cands);
+    if (const std::optional<int> w = WindingAtCands(tri, p, s, cands)) return w;
   }
   return std::nullopt;
 }
@@ -1996,6 +2114,10 @@ bool EmitCleanFaces(std::vector<OutTri3D>& out, const Manifold::Impl& in,
                     const std::vector<int>& face2cluster,
                     const std::vector<vec3>& seeds, double eps) {
   const int nTri = static_cast<int>(in.NumTri());
+  // Build the winding broadphase once for this component (a proven exact
+  // crossing-superset; the clean-face winding hot loop).
+  const TriWindBVH bvh = BuildTriWindBVH(A.tri, in.bBox_);
+  std::vector<int> cands;  // reused across queries
   // A face is "clean" only if it is neither seamed nor part of a coplanar
   // cluster (the fold owns cluster faces).
   auto isClean = [&](int t) { return !A.seamed[t] && face2cluster[t] < 0; };
@@ -2018,7 +2140,7 @@ bool EmitCleanFaces(std::vector<OutTri3D>& out, const Manifold::Impl& in,
     for (const auto& w : kBary) {
       const vec3 p =
           w[0] * A.tri[t][0] + w[1] * A.tri[t][1] + w[2] * A.tri[t][2];
-      g = RobustWinding(in, p + eps * nHat, seeds);
+      g = RobustWindingBVH(A.tri, bvh, p + eps * nHat, seeds, cands);
       if (g) break;  // any interior sample measures the (constant) cell winding
     }
     if (!g) return false;  // grazes at every interior point (SoS): fail closed
