@@ -773,7 +773,9 @@ inline int Orient3DFilterSign(const vec3& a, const vec3& b, const vec3& c,
 // winding-crossing escalation (WindCrossTri, shared by the O(nTri) walk, the
 // winding broadphase, the once-per-component seed-sign precompute, and the
 // RecordSeams phantom-seam guard's strict-interior pierce test - cleanPierce is
-// not a distinct caller, it rides this chain) (plus the test probe).  The tie
+// not a distinct caller, it rides this chain), and the junction registry's
+// input-vertex-on-edge arm (OrientProj2D/InputVertexStrictlyOnEdge - exact
+// collinearity/between-ness on input doubles) (plus the test probe).  The tie
 // cascade Orient3DSoS no
 // longer calls it: its SoS K==0 group already IS this exact sign, so a pre-SoS
 // shortcut was provably redundant and was dropped.  A SECOND predicate FORM
