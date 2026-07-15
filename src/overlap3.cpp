@@ -289,6 +289,14 @@ StageResult<Manifold::Impl> BuildImpl(const std::vector<OutTri3D>& tris,
 // misses).
 std::vector<int> DetectCoplanarClusters(const Manifold::Impl& in);
 
+// Forward decl (defined below): does `in` carry ANY within-component coplanar
+// overlap?  Exactly DetectCoplanarClusters' pass-1 seed existence: pass 2 only
+// EXTENDS pass-1 clusters (it unites only when a side is already clustered), so
+// a face gets a cluster id iff pass 1 seeded one.  The gate reads this bool
+// with an early-out instead of computing the full labeling (which the resolver
+// still does on the dirty path).
+bool HasCoplanarOverlap(const Manifold::Impl& in);
+
 // Split `in` into connected components by halfedge connectivity - the Decompose
 // primitive (constructors.cpp:455) mirrored at the Impl level so the operator
 // never round-trips through the CSG layer.  Each returned component is a
@@ -397,8 +405,7 @@ GateVerdict GateComponent(const Manifold::Impl& comp) {
   // job).  A clean solid with no internal coplanar overlap detects nothing and
   // stays Clean (bitwise pass-through); the cost is the prefiltered scan,
   // proportional to the input.
-  for (int c : DetectCoplanarClusters(comp))
-    if (c >= 0) return GateVerdict::Dirty;
+  if (HasCoplanarOverlap(comp)) return GateVerdict::Dirty;
   return GateVerdict::Clean;
 }
 
@@ -971,6 +978,28 @@ std::vector<int> DetectCoplanarClusters(const Manifold::Impl& in) {
     }
   }
   return face2cluster;
+}
+
+// The gate's cheap existence probe: DetectCoplanarClusters' pass-1 seed test
+// with an early-out - the FIRST distinct-patch (non-self-adjacent) coplanar
+// overlap makes the component dirty, without building the DisjointSets, the
+// shared-corner extension, or the id renumber.  Answer-identical to
+// "any face id >= 0 from DetectCoplanarClusters" (proven above: pass 2 only
+// extends pass-1 seeds, so a face is clustered iff pass 1 seeded).
+bool HasCoplanarOverlap(const Manifold::Impl& in) {
+  const int nTri = static_cast<int>(in.NumTri());
+  const TriSoup soup(in);
+  const auto& tri = soup.tri;
+  for (int i = 0; i < nTri; ++i)
+    for (int j = i + 1; j < nTri; ++j) {
+      if (!soup.BBoxOverlap(i, j)) continue;
+      if (soup.SharesVert(i, j))
+        continue;  // distinct-patch seeds only (pass 1)
+      if (FacesFilterCoplanar(tri[i], tri[j]) &&
+          TrianglesOverlap2D(tri[i], tri[j]))
+        return true;
+    }
+  return false;
 }
 
 // Coupled soup winding w_S(p): the signed count of oriented-face crossings on
