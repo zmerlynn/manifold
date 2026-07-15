@@ -1091,15 +1091,11 @@ std::optional<int> RobustWinding(const Manifold::Impl& in, const vec3& p,
 // ---------------------------------------------------------------------------
 
 // One seam segment as seen from a specific face: its two canonical 3D endpoints
-// (on this face's plane) and the OUTWARD normal of the crossing face (the sign
-// source that orients the 2D edge's winding contribution).  p*Interior flags an
-// endpoint that lies in this face's INTERIOR (the crossing face's edge pierced
-// this triangle) rather than on this face's boundary edge - the marker the spur
-// prune reads (an interior degree-1 end dangles and does not bound {G==0}).
+// on this face's plane.  (Retention is decided by the real 3D coupled winding,
+// so the crossing face's normal and endpoint-interiority markers a seam-sign
+// scheme once needed are no longer carried.)
 struct BuildSeam {
   vec3 p0, p1;
-  vec3 nOther;
-  bool p0Interior, p1Interior;
 };
 
 using PierceKey =
@@ -1122,17 +1118,15 @@ struct BuildArrangement {
   std::vector<vec3> faceN;  // la::cross(b-a,c-a), unnormalized outward
   std::vector<std::vector<BuildSeam>> faceSeams;
   std::vector<char> seamed;
-  bool boundaryTouch = false;
   bool ok = true;  // false = a structural anomaly (fail closed)
 };
 
 // Enumerate the self-crossing arrangement AND record each seam's canonical 3D
-// segment per incident face (the geometry EnumerateSelfCrossings only counted).
-// `face2cluster` (from DetectCoplanarClusters) marks exactly-coplanar face
-// groups: same-cluster pairs are SKIPPED here (the in-plane fold resolves them,
-// not the transversal seam machinery), so their exact-zero pierce ties do not
-// raise A.boundaryTouch.  A cross-cluster / non-coplanar exact-zero tie still
-// sets boundaryTouch (the SoS residue).
+// segment per incident face.  `face2cluster` (from DetectCoplanarClusters)
+// marks exactly-coplanar face groups: same-cluster pairs are SKIPPED here (the
+// in-plane fold resolves them, not the transversal seam machinery).  The
+// optional seamCountOut/boundaryTouchOut fold the test probe's level-0
+// self-crossing counts onto this scan (nullptr in production).
 BuildArrangement RecordSeams(const Manifold::Impl& in,
                              const std::vector<int>& face2cluster, double eps,
                              int* seamCountOut = nullptr,
@@ -1284,7 +1278,6 @@ BuildArrangement RecordSeams(const Manifold::Impl& in,
       // endpoint lands on the plane-i/\plane-j intersection line, so it is
       // exact in both faces' bases.
       std::array<vec3, 4> pts;
-      std::array<int, 4> ptTri;  // piercedTri per endpoint (interiority source)
       int nPts = 0;
       // An edge of `owner` that only TOUCHES `tgt`'s plane (does not cross it)
       // is a boundary contact, not a transversal crossing, so it adds no
@@ -1374,17 +1367,14 @@ BuildArrangement RecordSeams(const Manifold::Impl& in,
         if (r == -1 && !pairCoplanar && !edgeInClusterPlane(owner, e) &&
             !benignInPlane(owner, e, tgt)) {
           // Genuine non-coplanar transversal exact-zero residue: the single-
-          // global SoS (stage 6) DECIDES it (pierce / no-pierce).  A NON-
-          // decision is only reachable with the convention disabled, and is the
-          // documented fail-closed slot (A.boundaryTouch, ResolveComponent).
+          // global SoS (stage 6) DECIDES it - pierce (1) or no-pierce (0),
+          // never a refusal (EdgePiercesTriSoS is TOTAL: every leg is
+          // Orient3DSoS, which never returns 0).
           const int sp =
               EdgePiercesTriSoS(u, w, T[0], T[1], T[2], A.vid[owner][e],
                                 A.vid[owner][(e + 1) % 3], A.vid[tgt][0],
                                 A.vid[tgt][1], A.vid[tgt][2]);
-          if (sp == 1)
-            hit = true;
-          else if (sp != 0)
-            A.boundaryTouch = true;
+          if (sp == 1) hit = true;
         }
         // CAP-PLANE SEAM ENDPOINT (coplanar/transversal junction completion):
         // when BOTH faces of a wall-wall pair are non-cluster (neither is a
@@ -1417,10 +1407,8 @@ BuildArrangement RecordSeams(const Manifold::Impl& in,
             }
           }
         }
-        if (hit && nPts < 4) {
-          ptTri[nPts] = tgt;  // pierces tri tgt -> interior to tgt
+        if (hit && nPts < 4)
           pts[nPts++] = pierce(A.vid[owner][e], A.vid[owner][(e + 1) % 3], tgt);
-        }
       };
       for (int e = 0; e < 3; ++e) recordEdge(i, e, j);
       for (int e = 0; e < 3; ++e) recordEdge(j, e, i);
@@ -1433,7 +1421,6 @@ BuildArrangement RecordSeams(const Manifold::Impl& in,
         for (int b = nPts - 1; b > a; --b)
           if (la::length(pts[a] - pts[b]) <= eps) {
             pts[b] = pts[nPts - 1];
-            ptTri[b] = ptTri[nPts - 1];
             --nPts;
           }
       if (nPts == 0) continue;  // no genuine crossing
@@ -1442,11 +1429,10 @@ BuildArrangement RecordSeams(const Manifold::Impl& in,
       // the recorded off-vertex crossing and V is the shared corner (on both
       // planes, on both boundaries).  The edges incident to V only TOUCH at V
       // (not a transversal pierce), so V is not collected; supply it as the
-      // second seam endpoint (ptTri=-1: on both faces' boundary).
+      // second seam endpoint (on both faces' boundary).
       if (nPts == 1 && recoveredSV && nShared == 1 &&
           la::length(pts[0] - svPos) > eps) {
         pts[1] = svPos;
-        ptTri[1] = -1;
         nPts = 2;
       }
       if (nPts != 2) {
@@ -1455,12 +1441,8 @@ BuildArrangement RecordSeams(const Manifold::Impl& in,
         A.ok = false;
         continue;
       }
-      // Interior-to-face flag: an endpoint is interior to face i iff it was
-      // built by piercing tri i (ptTri==i), else it lies on face i's edge.
-      A.faceSeams[i].push_back(
-          {pts[0], pts[1], A.faceN[j], ptTri[0] == i, ptTri[1] == i});
-      A.faceSeams[j].push_back(
-          {pts[0], pts[1], A.faceN[i], ptTri[0] == j, ptTri[1] == j});
+      A.faceSeams[i].push_back({pts[0], pts[1]});
+      A.faceSeams[j].push_back({pts[0], pts[1]});
       A.seamed[i] = 1;
       A.seamed[j] = 1;
     }
@@ -2013,19 +1995,24 @@ bool EmitCleanFaces(std::vector<OutTri3D>& out, const Manifold::Impl& in,
   return true;
 }
 
+// Winding seeds: a few far points in unrelated directions off the bbox (the
+// coupled winding is single-valued off-surface, so any certified seed is
+// authoritative; several give the robust-winding graze fallbacks).
+std::vector<vec3> WindingSeeds(const Box& bBox) {
+  const vec3 c = bBox.Center();
+  const double L = bBox.Scale() + 1.0;
+  return {c + L * vec3(3.13, 5.71, 1.37),   c + L * vec3(-2.71, 1.41, 4.19),
+          c + L * vec3(1.73, -3.31, -2.23), c + L * vec3(-4.27, -1.19, 2.83),
+          c + L * vec3(2.39, -4.61, 3.07),  c + L * vec3(-1.51, 3.89, -4.43)};
+}
+
 // THE BUILD driver: fold exactly-coplanar clusters in-plane, emit seamed
 // sub-faces + clean faces, assemble + weld.  Returns the regularized Impl, or a
 // fatal.
 StageResult<Manifold::Impl> EmitComponentBoundary(
     const Manifold::Impl& in, const BuildArrangement& A,
     const std::vector<int>& face2cluster, double eps) {
-  // Winding seeds: a few far points in unrelated directions off the bbox.
-  const vec3 c = in.bBox_.Center();
-  const double L = in.bBox_.Scale() + 1.0;
-  const std::vector<vec3> seeds = {
-      c + L * vec3(3.13, 5.71, 1.37),   c + L * vec3(-2.71, 1.41, 4.19),
-      c + L * vec3(1.73, -3.31, -2.23), c + L * vec3(-4.27, -1.19, 2.83),
-      c + L * vec3(2.39, -4.61, 3.07),  c + L * vec3(-1.51, 3.89, -4.43)};
+  const std::vector<vec3> seeds = WindingSeeds(in.bBox_);
 
   std::vector<OutTri3D> emitted;
   bool ok = true;
@@ -2244,22 +2231,12 @@ StageResult<Manifold::Impl> ResolveComponent(const Manifold::Impl& dirty,
   const Manifold::Impl& in = snapped.value ? *snapped.value : dirty;
 
   // Exactly-coplanar face clusters are resolved by the in-plane fold; the
-  // transversal seam enumeration skips their pairs so their exact-zero coplanar
-  // ties do not raise boundaryTouch.
+  // transversal seam enumeration skips their pairs.  The single-global SoS
+  // decides every non-coplanar transversal exact-zero tie (pierce / no-pierce),
+  // so there is no "SoS refused" fail-closed slot left here - a residue instead
+  // surfaces as a non-2-endpoint seam (A.ok) or downstream at emission.
   const std::vector<int> face2cluster = DetectCoplanarClusters(in);
   const BuildArrangement A = RecordSeams(in, face2cluster, eps);
-  if (A.boundaryTouch) {
-    // A deciding pierce predicate hit an exact-zero / filter-uncertain boundary
-    // that the coplanar fold does NOT consume: a NON-coplanar vertex-on-face /
-    // edge-in-face incidence (the residual single-global SoS tie family,
-    // PokedCube-class), or a near-coplanar tie the stage-5 pre-pass did not
-    // fold (no 2D overlap, or a guard-refused curved chain).  Guessing a sign
-    // would risk an oracle-wrong resolve.  Fail closed.
-    return StageResult<Manifold::Impl>::Fatal(
-        FatalReason::DirtyComponentUnresolved,
-        "resolver: non-coplanar exact-zero tie; single-global SoS "
-        "(PokedCube-class) unbuilt - fail-closed");
-  }
   if (!A.ok) {
     return StageResult<Manifold::Impl>::Fatal(
         FatalReason::DirtyComponentUnresolved,
@@ -2435,13 +2412,7 @@ CleanFaceProbe ClassifyCleanFaces_Probe(const Manifold::Impl& soup) {
   const Manifold::Impl& in = snapped.value ? *snapped.value : soup;
   const std::vector<int> face2cluster = DetectCoplanarClusters(in);
   const BuildArrangement A = RecordSeams(in, face2cluster, eps);
-  // Same winding seeds as EmitComponentBoundary.
-  const vec3 c = in.bBox_.Center();
-  const double L = in.bBox_.Scale() + 1.0;
-  const std::vector<vec3> seeds = {
-      c + L * vec3(3.13, 5.71, 1.37),   c + L * vec3(-2.71, 1.41, 4.19),
-      c + L * vec3(1.73, -3.31, -2.23), c + L * vec3(-4.27, -1.19, 2.83),
-      c + L * vec3(2.39, -4.61, 3.07),  c + L * vec3(-1.51, 3.89, -4.43)};
+  const std::vector<vec3> seeds = WindingSeeds(in.bBox_);
   // Run the REAL (compiled) EmitCleanFaces and record which clean faces it kept
   // by matching their exact vertex triple (clean faces emit verbatim, unsplit),
   // so this hook reflects whichever classification is compiled - the mutation
