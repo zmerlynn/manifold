@@ -815,22 +815,27 @@ TEST(Overlap3, Regularize_ExactZeroTie_Constructed_Resolves) {
 
 // Real carrier: the GT7863 twin pair composed as ONE soup.  Connectivity splits
 // it into 4 pieces (non-fusion contract: they stay separate).  TWO route dirty:
-// one is SELF-INTERSECTING (the 8-edge-hole emission carrier), and one carries
-// a WITHIN-component COPLANAR OVERLAP (a double sheet).  NARROWED by
-// reg3d-wjump: the shares-vertex genuine-crossing recovery CLOSES the
-// self-intersecting component's 8-edge hole - measured white-box below:
-// decomposed, that component RESOLVES oracle-true (its {w>=1} volume is
-// preserved to the input's signed volume, tol-invariant,
-// non-self-intersecting).  The compose still fails closed on the OTHER dirty
-// component: the coplanar double sheet fails the fold self-check (in-plane
-// cover m=2, but the 3D winding jumps 1 - GWN-verified a single-sheet {w>=1}
-// exists, but the doubled connectivity is the Cluster-1a emission
-// REPRESENTABILITY wall, reg3d-wjump honest wall).  So the terminal fatal moves
-// from NonManifoldEmission to DirtyComponentUnresolved (narrower;
-// mutation-verified: reverting the recovery reopens the 8-edge hole and the
-// fatal returns to NonManifoldEmission).  Any component fail-closed suppresses
-// output, so the whole compose fails closed - never a silent wrong resolve.
-TEST(Overlap3, Regularize_ExactZeroTie_GT7863_FailClosed) {
+// one is SELF-INTERSECTING (the 8-edge-hole emission carrier, closed by
+// reg3d-wjump's shares-vertex genuine-crossing recovery), and one carries a
+// WITHIN-component COPLANAR SELF-OVERLAP - a flat face of the twin composition
+// triangulated with overlapping tiles (including a near-collinear sliver).
+// reg3d-7863c1 CLOSES the coplanar component: DetectCoplanarClusters was
+// SKIPPING shares-vertex pairs, so the flat face's overlapping tiles that share
+// a corner were left OUT of the fold cluster; the partial cluster's in-plane
+// cover then disagreed with the 3D winding (the fold self-check fired) and the
+// partial re-triangulation T-junctioned against the un-clustered coplanar
+// neighbours (an OPEN-BOUNDARY emission fail).  Narrowing that skip -
+// TrianglesOverlap2D (exact strict-interior / proper-crossing) is the real
+// area-overlap gate and already excludes mere abutment - clusters the whole
+// coplanar-overlap group, completing the arrangement so the existing
+// mult+winding rule emits ONE sheet.  BOTH dirty components now RESOLVE
+// oracle-true, so the whole compose regularizes.  White-box below grades each
+// dirty component's {w>=1} volume against its input signed volume (a
+// 0/1-winding solid, so the signed volume IS the exact {w>=1} volume; GWN
+// independently confirmed ~2830 for the coplanar component and ~855 for the
+// hole) + tol-invariance + non-self-intersection.  Mutation: reverting the skip
+// narrowing reopens the coplanar T-junction and this component fails closed.
+TEST(Overlap3, Regularize_ExactZeroTie_GT7863_Resolves) {
   std::filesystem::path file(__FILE__);
   auto load = [&](const char* n) -> std::optional<MeshGL64> {
     std::ifstream fin((file.parent_path() / "models" / n).string());
@@ -857,36 +862,38 @@ TEST(Overlap3, Regularize_ExactZeroTie_GT7863_FailClosed) {
   EXPECT_EQ(r.counters.clean, 2) << "2 components early-exit clean";
   EXPECT_EQ(r.counters.dirty, 2)
       << "1 self-intersecting + 1 within-component coplanar overlap";
-  ASSERT_TRUE(r.fatal.has_value())
-      << "the coplanar double-sheet residue must fail closed";
-  // NARROWED (reg3d-wjump): the 8-edge-hole emission carrier now resolves; the
-  // terminal wall is the coplanar double-sheet fold self-check decline.
-  EXPECT_EQ(*r.fatal, FatalReason::DirtyComponentUnresolved) << r.detail;
-  EXPECT_FALSE(r.impl.has_value())
-      << "any component fail-closed suppresses the whole compose (no partial)";
+  EXPECT_EQ(r.counters.regularized, 2) << "both dirty components resolve";
+  EXPECT_EQ(r.counters.failClosed, 0);
+  ASSERT_FALSE(r.fatal.has_value())
+      << "both dirty components resolve - no fail-closed: " << r.detail;
+  ASSERT_TRUE(r.impl.has_value()) << "the whole compose regularizes";
 
-  // WHITE-BOX: the SELF-INTERSECTING component (the 8-edge hole) now RESOLVES
-  // oracle-true - the reg3d-wjump recovery closes the hole.  Decompose, find
-  // it, resolve it in isolation, and grade its volume against the input soup's
-  // signed volume (the near-tangent self-overlap is measure-~0 so {w>=1} volume
-  // is preserved) + tol-invariance + non-self-intersection.
+  // WHITE-BOX: BOTH dirty components resolve oracle-true.  Decompose, resolve
+  // each in isolation, grade the two dirty ones: the SELF-INTERSECTING 8-edge
+  // hole (vol ~855) and the non-self-intersecting COPLANAR self-overlap
+  // (vol ~2830, the reg3d-7863c1 target).  A clean component's {w>=1} volume is
+  // its input volume unchanged; a dirty one has an overlap removed, so we pin
+  // the two dirty volumes explicitly.
   const Manifold M(GetMeshGLImpl<double, uint64_t>(in, -1));
-  int resolvedSI = 0;
+  int resolvedSI = 0, resolvedCoplanar = 0;
   for (const Manifold& c : M.Decompose()) {
     Manifold::Impl ci(c.GetMeshGL64());
-    if (!ci.IsSelfIntersecting()) continue;
+    const bool si = ci.IsSelfIntersecting();
     const double ceps = ImplEps(ci);
-    const RegularizeResult rc = ResolveComponentDirect(ci, ceps);
-    ASSERT_FALSE(rc.fatal.has_value())
-        << "the 8-edge-hole component must resolve: " << rc.detail;
-    ASSERT_TRUE(rc.impl.has_value());
-    EXPECT_FALSE(rc.impl->IsSelfIntersecting());
     const double inVol =
         Manifold(GetMeshGLImpl<double, uint64_t>(ci, -1)).Volume();
+    const RegularizeResult rc = ResolveComponentDirect(ci, ceps);
+    ASSERT_FALSE(rc.fatal.has_value())
+        << "component must resolve (si=" << si << " vol=" << inVol
+        << "): " << rc.detail;
+    ASSERT_TRUE(rc.impl.has_value());
+    EXPECT_FALSE(rc.impl->IsSelfIntersecting())
+        << "resolved component is self-intersecting";
     const double outVol =
         Manifold(GetMeshGLImpl<double, uint64_t>(*rc.impl, -1)).Volume();
+    // {w>=1} volume preserved (signed volume is exact for a 0/1-winding solid).
     EXPECT_NEAR(outVol, inVol, 1e-3 * std::abs(inVol))
-        << "resolved {w>=1} volume must preserve the near-tangent soup volume";
+        << "resolved {w>=1} volume must preserve the input signed volume";
     const RegularizeResult rc2 = ResolveComponentDirect(ci, ceps * 0.5);
     ASSERT_TRUE(rc2.impl.has_value());
     EXPECT_NEAR(
@@ -894,10 +901,15 @@ TEST(Overlap3, Regularize_ExactZeroTie_GT7863_FailClosed) {
         Manifold(GetMeshGLImpl<double, uint64_t>(*rc2.impl, -1)).Volume(),
         1e-6 * std::abs(outVol) + 1e-9)
         << "resolved volume not tol-invariant";
-    ++resolvedSI;
+    if (si) ++resolvedSI;
+    // The coplanar self-overlap component: non-self-intersecting, vol ~2830,
+    // and its 144-tri input carries a coplanar cluster (the fold consumes it).
+    if (!si && std::abs(inVol - 2829.92) < 5.0) ++resolvedCoplanar;
   }
   EXPECT_EQ(resolvedSI, 1)
-      << "exactly one self-intersecting component resolves";
+      << "exactly one self-intersecting component (the 8-edge hole) resolves";
+  EXPECT_EQ(resolvedCoplanar, 1)
+      << "the ~2830 coplanar self-overlap component resolves (reg3d-7863c1)";
 }
 
 // ===========================================================================

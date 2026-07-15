@@ -461,7 +461,7 @@ reverted):
   carrier          | cluster            | fatal (measured)              | reach
   -----------------|--------------------|-------------------------------|--------
   PokedCube        | (RESOLVES wjump)   | - (vol 0.25, GWN-oracle)      | constructed
-  GT7863 pair      | 1 EMISSION (1a')   | DirtyComponentUnresolved      | corpus
+  GT7863 pair      | (RESOLVES 7863c1)  | - (both dirty comps, GWN)     | corpus
   openscad soup    | 2 SEAM-SUBFACE(2a) | non-2-endpoint / degenerate   | corpus
   GT7081 pair      | (RESOLVES wjump)   | - (both shells, vol-preserved)| corpus
   NearCoplanarChain| 4 PLANARIZE-GUARD  | global-planarity guard        | constructed
@@ -527,7 +527,11 @@ Cluster map (root mechanism, not which string fires):
   sliver - the "887-2259 ULP sliver" is CROSS-mesh pass-through; the dirty-component
   wall is exact-incident edge-on-edge seam endpoints <1 ULP + a double-sheet /
   everted-region winding drop, the reg3d-wjump completion; options a/b both refuted
-  with empty patches); 1b negative-winding double sheet
+  with empty patches).  CLOSED for its named carriers: reg3d-wjump resolved
+  GT7863's 8-edge hole + GT7081 + PokedCube; reg3d-7863c1 resolved GT7863's
+  coplanar comp#1 - both were ARRANGEMENT-INCOMPLETENESS from an unsound
+  shares-vertex skip, not an emission-representability wall.  1b negative-winding
+  double sheet
   (PokedCube: an everted corner makes a genuine w_S=-1 region, so the w=-1|w=1
   junction is a double sheet the mult-1 per-face emission opens - s7b refuted the
   simple orientation flip).  Production-reachable.
@@ -691,16 +695,29 @@ RESEARCH = memo with a required proof sketch, TRIPWIRE = kernel-vendor decision)
    oracle-graded: PokedCube (vol=0.25 == GWN oracle), GT7081 (both shells,
    volume-preserved), GT7863's self-intersecting component (vol 855).  No new
    predicate FORM, no kernel escalation - so the earlier plane-based-rep /
-   Shewchuk-tripwire conclusion is REFUTED for these carriers.  RESIDUAL (honest
-   wall, GT7863 comp#1): a WITHIN-component COPLANAR overlap where the fold
-   self-check fires (in-plane cover m=2, but the reliable coupled winding jumps 1 -
-   GWN-verified a single-sheet {w>=1} of vol ~2830 exists).  A fold escalation
-   (trust the reliability-certified winding over the mult-algebra) gets it past the
-   self-check but it then hits the Cluster-1a EMISSION representability wall
-   underneath (the doubled connectivity is not a representable single-sheet
-   manifold); it resolves no carrier end-to-end, so it is BANKED unbuilt (sound:
-   only fires where the fold already declines).  GT7863 stays fail-closed on
-   comp#1 (narrower: DirtyComponentUnresolved), the whole-compose refusal.
+   Shewchuk-tripwire conclusion is REFUTED for these carriers.
+   GT7863 comp#1 CLOSED (reg3d-7863c1).  The prior "honest wall" reading was
+   WRONG about the mechanism (the fold-escalation was the wrong lever - it was
+   BANKED and stays UNBUILT, never landed).  comp#1 is NOT a clean doubled sheet:
+   it is the twin composition's FLAT FACE triangulated with overlapping tiles
+   (including a near-collinear sliver).  DetectCoplanarClusters was SKIPPING
+   shares-vertex pairs, so the flat face's tiles that touch the overlap AT A
+   CORNER were left OUT of the fold cluster.  The partial cluster's in-plane
+   cover then disagreed with the 3D winding (the self-check fired, m=2 vs jump=1)
+   and forcing emission T-junctioned against the un-clustered coplanar neighbours
+   (an OPEN-BOUNDARY emission fail - the Cluster-1a anatomy).  FIX (decision-
+   completion, arrangement-completeness - the exact shape reg3d-wjump used on the
+   RecordSeams shares-vertex skip): a two-pass cluster detect - SEED from
+   distinct-patch overlaps (share no vertex), then EXTEND a seeded cluster
+   through shared-corner overlaps, but do NOT seed a cluster from a
+   shared-corner-only overlap (that is a local FOLD-BACK, e.g. an everted-spike
+   face pair, which the per-face winding rule owns - PokedCube stays bitwise).
+   Completing the cluster makes the in-plane cover match the winding (m=1==jump),
+   the self-check PASSES with NO escalation, and the existing mult+winding rule
+   emits one sheet.  comp#1 RESOLVES oracle-true (vol ~2830 == signed volume ==
+   GWN, tol-invariant, non-self-int); both GT7863 dirty components now resolve so
+   the whole compose regularizes.  Mutation-verified (revert the skip narrowing
+   -> comp#1 reverts to the coplanar-fold decline).
 4. CRUCIBLE C-1b (CLOSED by reg3d-wjump; was folded into C-1a).  PokedCube's
    everted corner IS a w=-1|w=1 double-sheet AND a degenerate near-triple-point -
    but the near-triple-point was the shares-vertex-skipped crossings, not a

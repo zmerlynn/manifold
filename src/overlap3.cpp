@@ -944,15 +944,60 @@ std::vector<int> DetectCoplanarClusters(const Manifold::Impl& in) {
   const auto& tri = soup.tri;
   DisjointSets uf(nTri);
   bool any = false;
+  // PASS 1 - SEED clusters from DISTINCT-PATCH overlaps: coplanar faces that
+  // overlap in area and share NO vertex.  These are unambiguously two separate
+  // coplanar sheets covering common ground (a buried plug's cap, the twin
+  // composition's doubled flat face).  TrianglesOverlap2D (exact
+  // strict-interior / proper-crossing) already excludes the mere ABUTMENT of
+  // one flat face's tiles.  A SHARES-VERTEX overlap is deferred to pass 2.
+  std::vector<std::pair<int, int>> sharedCornerOverlaps;
   for (int i = 0; i < nTri; ++i)
     for (int j = i + 1; j < nTri; ++j) {
-      if (!soup.BBoxOverlap(i, j) || soup.SharesVert(i, j)) continue;
-      if (FacesFilterCoplanar(tri[i], tri[j]) &&
-          TrianglesOverlap2D(tri[i], tri[j])) {
+      if (!soup.BBoxOverlap(i, j)) continue;
+      if (!FacesFilterCoplanar(tri[i], tri[j]) ||
+          !TrianglesOverlap2D(tri[i], tri[j]))
+        continue;
+      if (soup.SharesVert(i, j)) {
+        sharedCornerOverlaps.emplace_back(i, j);
+        continue;
+      }
+      uf.unite(i, j);
+      any = true;
+    }
+  // PASS 2 - EXTEND a seeded cluster through SHARED-CORNER overlaps.  A
+  // coplanar self-overlap group's faces meet at shared corners/edges too (the
+  // GT7863 flat face's tiles that touch a distinct-patch overlap at a vertex);
+  // leaving them out made the fold's cluster INCOMPLETE, so its in-plane cover
+  // disagreed with the 3D winding (the self-check fired) and the partial
+  // re-triangulation T-junctioned against the un-clustered coplanar neighbours
+  // (an OPEN-BOUNDARY emission fail).  But a shares-vertex overlap with NO
+  // distinct-patch seed is a LOCAL FOLD-BACK (an everted-spike face pair,
+  // PokedCube) that the per-face winding rule owns - do NOT seed a cluster from
+  // it.  So only join a shared-corner pair when one side already belongs to a
+  // seeded cluster; iterate to a fixpoint so a chain extends fully.  (This
+  // mirrors the shares-vertex arrangement-completeness fix reg3d-wjump made in
+  // RecordSeams; reg3d-7863c1.)
+  if (any) {
+    std::vector<int> setSize(nTri, 0);
+    for (int f = 0; f < nTri; ++f) ++setSize[static_cast<int>(uf.find(f))];
+    auto inCluster = [&](int f) {
+      return setSize[static_cast<int>(uf.find(f))] > 1;
+    };
+    bool changed = true;
+    while (changed) {
+      changed = false;
+      for (const auto& [i, j] : sharedCornerOverlaps) {
+        if (uf.same(i, j)) continue;
+        if (!inCluster(i) && !inCluster(j)) continue;
+        const int ri = static_cast<int>(uf.find(i)),
+                  rj = static_cast<int>(uf.find(j));
+        const int merged = setSize[ri] + setSize[rj];
         uf.unite(i, j);
-        any = true;
+        setSize[static_cast<int>(uf.find(i))] = merged;
+        changed = true;
       }
     }
+  }
   std::vector<int> face2cluster(nTri, -1);
   if (!any) return face2cluster;
   std::map<int, int> rootCount;
