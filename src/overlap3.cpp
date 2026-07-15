@@ -2059,12 +2059,121 @@ void EnumerateTriplePoints(BuildArrangement& A,
 // strictly interior to it - the SAME point on every incident face.
 // ---------------------------------------------------------------------------
 
-// Build A.junctions: all seam endpoints + all triple points, deduped so no two
-// registry vertices are within eps (a within-eps merge to the sorted-lowest
-// representative - deterministic, order-independent; the seam endpoints and
-// triples are already once-only constructions, so equal geometry gives equal or
-// within-eps bits).  Empty of interior landings on any complete arrangement
-// (the whole corpus off openscad), so consumption stays byte-identical there.
+// A1 INPUT-VERTEX-ON-EDGE T-JUNCTIONS (f4-r5): the seam/triple registry omits
+// plain input vertices, but a self-overlap can land an INPUT vertex STRICTLY
+// INTERIOR to a FOREIGN triangle's edge.  That foreign face emits the edge
+// unsplit while the vertex's own emission fan terminates there -> an unbalanced
+// (open) fan.  Registering the vertex makes the foreign face split its edge at
+// the SAME once-only point, closing the fan.  The decision is EXACT and level-0
+// (input mesh doubles only, never a constructed point): (a) collinear - the 3D
+// cross (V-a)x(b-a)==0, tested as the three axis-projected 2D orients, each the
+// padded orient3d through the ONE blessed exact predicate FORM, filter-first;
+// and (b) strictly between the endpoints - an exact strict compare on the
+// widest axis, well-defined once collinear.  The eps registry extension (all
+// verts, eps on-segment) splits near-touching corners and is MEASURED
+// rail-breaking (f4-r4); the exact predicate registers ONLY genuine
+// T-junctions, so the arm is a no-op wherever no input vertex is EXACTLY on a
+// foreign edge (the whole corpus off openscad).
+
+// Exact 2D orient of (V,a,b) in the (i,j) projection, as the padded orient3d
+// (lift the query point in +z): reuses the blessed exact predicate FORM,
+// filter-first (the exact sign fires only behind a Shewchuk-filter 0).
+inline int OrientProj2D(double vi, double vj, double ai, double aj, double bi,
+                        double bj) {
+  const vec3 A(vi, vj, 0.0), B(ai, aj, 0.0), C(bi, bj, 0.0), D(vi, vj, 1.0);
+  const int f = Orient3DFilterSign(A, B, C, D);
+  return f != 0 ? f : Orient3DExactSign(A, B, C, D);
+}
+
+// V exactly collinear with [a,b] AND strictly interior (V != a, V != b).
+bool InputVertexStrictlyOnEdge(const vec3& V, const vec3& a, const vec3& b) {
+  if (OrientProj2D(V.x, V.y, a.x, a.y, b.x, b.y) != 0) return false;
+  if (OrientProj2D(V.y, V.z, a.y, a.z, b.y, b.z) != 0) return false;
+  if (OrientProj2D(V.z, V.x, a.z, a.x, b.z, b.x) != 0) return false;
+  // Collinear: strict between-ness on the widest axis (a != b -> nonzero span),
+  // an exact strict double compare (endpoints excluded).
+  const vec3 d = b - a;
+  const double adx = std::abs(d.x), ady = std::abs(d.y), adz = std::abs(d.z);
+  double av, bv, vv;
+  if (adx >= ady && adx >= adz) {
+    av = a.x;
+    bv = b.x;
+    vv = V.x;
+  } else if (ady >= adz) {
+    av = a.y;
+    bv = b.y;
+    vv = V.y;
+  } else {
+    av = a.z;
+    bv = b.z;
+    vv = V.z;
+  }
+  return (av < vv && vv < bv) || (bv < vv && vv < av);
+}
+
+// The genuine input-vertex-on-edge T-junction positions of the component: for
+// each distinct input vertex, a triangle-AABB broadphase (the winding BVH)
+// gates the exact on-edge confirm; the vertex's OWN incident triangles are
+// skipped (adjacency), so only foreign self-overlap T-junctions register.
+std::vector<vec3> CollectInputVertexTJunctions(const BuildArrangement& A,
+                                               double eps) {
+  std::vector<vec3> out;
+  const int nTri = static_cast<int>(A.tri.size());
+  if (nTri == 0) return out;
+  Box bBox;
+  for (int t = 0; t < nTri; ++t)
+    for (int k = 0; k < 3; ++k) bBox.Union(A.tri[t][k]);
+  const TriWindBVH bvh = BuildTriWindBVH(A.tri, bBox);
+  std::unordered_map<int, vec3> vpos;  // global vid -> position
+  for (int t = 0; t < nTri; ++t)
+    for (int k = 0; k < 3; ++k) vpos[A.vid[t][k]] = A.tri[t][k];
+  const vec3 pad(eps, eps, eps);
+  std::vector<int> cand;
+  for (const auto& kv : vpos) {
+    const int vid = kv.first;
+    const vec3& V = kv.second;
+    cand.clear();
+    auto rec = [&](int, int leaf) { cand.push_back(bvh.leaf2tri[leaf]); };
+    auto recorder = MakeSimpleRecorder(rec);
+    const Box qbox(V - pad, V + pad);
+    auto qf = [&](int) { return qbox; };
+    bvh.collider.Collisions<false>(recorder, qf, 1, /*parallel=*/false,
+                                   nullptr);
+    bool hit = false;
+    for (int t : cand) {
+      if (A.vid[t][0] == vid || A.vid[t][1] == vid || A.vid[t][2] == vid)
+        continue;  // adjacency: skip the vertex's own incident triangles
+      for (int e = 0; e < 3; ++e) {
+        const vec3& a = A.tri[t][e];
+        const vec3& b = A.tri[t][(e + 1) % 3];
+        // Broadphase gate: V within eps of the segment interior (cheap double
+        // test) before the exact on-edge confirm.
+        const vec3 d3 = b - a;
+        const double len2 = la::dot(d3, d3);
+        if (!(len2 > 0.0)) continue;
+        const vec3 w = V - a;
+        const double tp = la::dot(w, d3) / len2;
+        if (!(tp > 0.0 && tp < 1.0)) continue;
+        if (la::length(w - tp * d3) > eps) continue;
+        if (InputVertexStrictlyOnEdge(V, a, b)) {
+          hit = true;
+          break;
+        }
+      }
+      if (hit) break;
+    }
+    if (hit) out.push_back(V);
+  }
+  return out;
+}
+
+// Build A.junctions: all seam endpoints + all triple points + the exact
+// input-vertex-on-edge T-junctions, deduped so no two registry vertices are
+// within eps (a within-eps merge to the sorted-lowest representative -
+// deterministic, order-independent; the seam endpoints and triples are already
+// once-only constructions, so equal geometry gives equal or within-eps bits).
+// Empty of interior landings on any complete arrangement (the whole corpus off
+// openscad), so consumption stays byte-identical there.
 void BuildJunctionRegistry(BuildArrangement& A, double eps) {
   // MUTATION lever (measurement only): F4J_NOREG leaves the registry empty, so
   // every emit path reverts to its pre-junction single-edge push (proves the
@@ -2080,6 +2189,10 @@ void BuildJunctionRegistry(BuildArrangement& A, double eps) {
   for (const auto& ff : A.seamTriples)
     for (const auto& sk : ff)
       for (const auto& xp : sk) raw.push_back(xp.second);
+  // A1 arm (f4-r5): the exact input-vertex-on-edge T-junctions.  F4R_NOVJUNC
+  // leaves them out (mutation lever: the openscad A1 fans reopen).
+  if (std::getenv("F4R_NOVJUNC") == nullptr)
+    for (const vec3& v : CollectInputVertexTJunctions(A, eps)) raw.push_back(v);
   std::sort(raw.begin(), raw.end(), [](const vec3& p, const vec3& q) {
     return std::tie(p.x, p.y, p.z) < std::tie(q.x, q.y, q.z);
   });
