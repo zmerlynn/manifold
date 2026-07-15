@@ -773,9 +773,13 @@ inline int Orient3DFilterSign(const vec3& a, const vec3& b, const vec3& c,
 // winding-crossing escalation (WindCrossTri, shared by the O(nTri) walk, the
 // winding broadphase, the once-per-component seed-sign precompute, and the
 // RecordSeams phantom-seam guard's strict-interior pierce test - cleanPierce is
-// not a distinct caller, it rides this chain), and the junction registry's
+// not a distinct caller, it rides this chain), the junction registry's
 // input-vertex-on-edge arm (OrientProj2D/InputVertexStrictlyOnEdge - exact
-// collinearity/between-ness on input doubles) (plus the test probe).  The tie
+// collinearity/between-ness on input doubles), and the triple-point
+// seam-crossing test (ExactSegProperCross/ExactOrient2DDrop - exact in-plane
+// orient2d, drop the dominant normal axis, refuting the near-tangent phantom
+// crossings the rounded-projection double crossing test over-detected in
+// EnumerateTriplePoints) (plus the test probe).  The tie
 // cascade Orient3DSoS no
 // longer calls it: its SoS K==0 group already IS this exact sign, so a pre-SoS
 // shortcut was provably redundant and was dropped.  A SECOND predicate FORM
@@ -1930,17 +1934,6 @@ bool Intersect3Planes(const vec3& n0, const vec3& a0, const vec3& n1,
   return std::isfinite(out.x) && std::isfinite(out.y) && std::isfinite(out.z);
 }
 
-// Strict proper crossing of 2D segments [a,b] and [c,d]: each segment's
-// endpoints strictly straddle the other's supporting line (the same level-0
-// orient2d = la::cross RemoveOverlaps2D uses).  Excludes collinear and
-// endpoint-touching contacts (measure-zero, not a transversal triple).
-bool SegProperCross2D(const vec2& a, const vec2& b, const vec2& c,
-                      const vec2& d) {
-  const double d1 = la::cross(b - a, c - a), d2 = la::cross(b - a, d - a);
-  const double d3 = la::cross(d - c, a - c), d4 = la::cross(d - c, b - c);
-  return d1 * d2 < 0.0 && d3 * d4 < 0.0;
-}
-
 // 2D intersection point of lines through [a,b] and [c,d] (precondition: they
 // properly cross, so the denominator is nonzero).  The exact on-seam crossing:
 // B1 splits the seam here (strictly interior, no fold-back) and keys the vertex
@@ -1951,6 +1944,52 @@ vec2 SegLineIntersect2D(const vec2& a, const vec2& b, const vec2& c,
   const double rxs = la::cross(r, s);
   const double t = la::cross(c - a, s) / rxs;
   return a + t * r;
+}
+
+// EXACT in-plane orientation sign of three coplanar 3D points: drop the
+// dominant axis of the (unnormalized) face normal and take the exact 2D orient
+// of the surviving axis pair as the padded orient3d (embed at z=0, lift the
+// first point in +z) through the ONE blessed exact predicate FORM
+// (Orient3DExactSign), FILTER-FIRST - the same "2D projection route" the
+// input-vertex T-junction arm (OrientProj2D) uses.  Dropping the dominant
+// normal axis keeps the projection non-degenerate.  NO new predicate FORM, NO
+// exact-on-constructed (dyadic input coords only).  The crossing test below
+// compares only relative signs, so the projection handedness is irrelevant.
+inline int ExactOrient2DDrop(const vec3& p, const vec3& q, const vec3& r,
+                             int axis) {
+  auto proj = [&](const vec3& v) -> vec3 {
+    if (axis == 0) return {v.y, v.z, 0.0};
+    if (axis == 1) return {v.x, v.z, 0.0};
+    return {v.x, v.y, 0.0};
+  };
+  const vec3 pp = proj(p), qp = proj(q), rp = proj(r);
+  const vec3 lift{pp.x, pp.y, 1.0};
+  const int s = Orient3DFilterSign(pp, qp, rp, lift);
+  return s != 0 ? s : Orient3DExactSign(pp, qp, rp, lift);
+}
+
+// Dominant axis of a face normal (index of the largest-magnitude component).
+inline int DominantAxis(const vec3& n) {
+  const double ax = std::abs(n.x), ay = std::abs(n.y), az = std::abs(n.z);
+  return (ax >= ay && ax >= az) ? 0 : (ay >= az ? 1 : 2);
+}
+
+// EXACT strict proper crossing of two coplanar 3D segments [p0,p1] and [q0,q1]
+// on a face whose normal's dominant axis is `axis`: each segment's endpoints
+// strictly straddle the other's supporting line (four ExactOrient2DDrop signs),
+// excluding collinear / endpoint-touching contacts.  Replaced the double
+// SegProperCross2D (level-0 la::cross on the ROUNDED per-face PlaneFrame
+// projection) in the triple-point enumeration, which OVER-detected near-tangent
+// phantom crossings (dbl=1/ex=0) the exact sign refutes - byte-identical on
+// every resolving carrier (double and exact agree there), removing only phantom
+// triples on the near-tangent openscad residue.
+inline bool ExactSegProperCross(const vec3& p0, const vec3& p1, const vec3& q0,
+                                const vec3& q1, int axis) {
+  const int o1 = ExactOrient2DDrop(p0, p1, q0, axis);
+  const int o2 = ExactOrient2DDrop(p0, p1, q1, axis);
+  const int o3 = ExactOrient2DDrop(q0, q1, p0, axis);
+  const int o4 = ExactOrient2DDrop(q0, q1, p1, axis);
+  return o1 != 0 && o2 != 0 && o3 != 0 && o4 != 0 && o1 != o2 && o3 != o4;
 }
 
 // Enumerate the component's 3-face triple points ONCE and record, per seam, the
@@ -1999,13 +2038,24 @@ void EnumerateTriplePoints(BuildArrangement& A,
       seg[k][0] = pf.proj(A.faceSeams[f][k].p0);
       seg[k][1] = pf.proj(A.faceSeams[f][k].p1);
     }
+    // Exact in-plane orientation drops the dominant normal axis (once per
+    // face).
+    const int axis = DominantAxis(A.faceN[f]);
     for (int k1 = 0; k1 < ns; ++k1) {
       const int pg = planeId[A.faceSeams[f][k1].other];
       if (pg == planeId[f]) continue;
       for (int k2 = k1 + 1; k2 < ns; ++k2) {
         const int ph = planeId[A.faceSeams[f][k2].other];
         if (ph == planeId[f] || ph == pg) continue;  // collinear / degenerate
-        if (!SegProperCross2D(seg[k1][0], seg[k1][1], seg[k2][0], seg[k2][1]))
+        // EXACT proper crossing on the shared 3D seam endpoints (the once-only
+        // input constructions), filter-first.  The double crossing test on the
+        // ROUNDED per-face pf.proj coords OVER-detected near-tangent phantom
+        // crossings the exact sign refutes; the on-seam split position below
+        // stays double (keyed by the once-only 3D triple point, not a
+        // decision).
+        if (!ExactSegProperCross(A.faceSeams[f][k1].p0, A.faceSeams[f][k1].p1,
+                                 A.faceSeams[f][k2].p0, A.faceSeams[f][k2].p1,
+                                 axis))
           continue;
         // The exact on-seam 2D crossing (strictly interior to both segments):
         // the split position, so the pre-split chain never folds back.

@@ -373,9 +373,13 @@ order-freeness promises, now a standing rail.
   exact sign resolves.  CALLER INVENTORY of the exact e^0 predicate (Orient3DExactSign):
   the EdgePiercesTriSoS edge-in-plane guard, the WindCrossTri winding-crossing escalation
   (both the WindingAt winding-probe AND the RecordSeams phantom-seam guard ride it -
-  cleanPierce is no longer a distinct exact-call site), and the junction registry's
-  input-vertex-on-edge arm (exact collinearity/between-ness on input doubles) - the
-  production callers (plus the test
+  cleanPierce is no longer a distinct exact-call site), the junction registry's
+  input-vertex-on-edge arm (exact collinearity/between-ness on input doubles), and
+  the triple-point seam-crossing test (ExactSegProperCross - exact in-plane
+  orient2d, drop the dominant normal axis, refuting the near-tangent phantom
+  crossings the rounded-PlaneFrame double crossing test it replaced over-detected
+  in EnumerateTriplePoints; byte-identical on the resolving corpus, removes only
+  phantom triples on the near-tangent openscad residue) - the production callers (plus the test
   probe), each FILTER-FIRST (exact fires only behind a filter 0).  The tie cascade Orient3DSoS is NO LONGER
   among them (orient-land item 1): its SoS e^0 (K==0) monomial group IS the exact
   orient3d - the same real terms over the same accumulator - so a pre-SoS ExactSign
