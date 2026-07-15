@@ -22,6 +22,8 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <limits>
 #include <map>
 #include <set>
@@ -66,6 +68,12 @@ struct OutTri3D {
 // (tangent sheets - either pairing is a coin flip and the wrong one keeps
 // volume while garbling topology), or a non-alternating pattern
 // (overlapping material - upstream resolution failed).
+// MEASUREMENT ONLY (f4-b1): the once-only triple positions, so the emission-
+// wall census can classify each open-boundary edge by triple-point incidence
+// (design-b's decisive census on a BUILT arrangement).  Populated by
+// EnumerateTriplePoints under F4B_DUMP; empty in production.
+static std::set<std::tuple<double, double, double>> gF4BTriplePts;
+
 bool SplitTouchingSheets(std::vector<vec3>& verts, Vec<ivec3>& tv) {
   const int nTri = static_cast<int>(tv.size());
   auto heFrom = [&](int h) { return tv[h / 3][h % 3]; };
@@ -77,11 +85,50 @@ bool SplitTouchingSheets(std::vector<vec3>& verts, Vec<ivec3>& tv) {
     edge2He[{std::min(a, b), std::max(a, b)}].push_back(h);
   }
 
+  // MEASUREMENT ONLY (f4-b1): F4B_DUMP counts the emission fan anomalies at
+  // this wall (open boundary = fwd!=bwd, slivers, radial ties, material
+  // overlaps) instead of failing closed on the first, prints one census line,
+  // then still fails closed.  Env-gated: production behavior (the plain `return
+  // false`) is byte-unchanged when it is unset.
+  static const bool kF4BDump = std::getenv("F4B_DUMP") != nullptr;
+  int cOpen = 0, cSliver = 0, cTie = 0, cOverlap = 0;
+  int cOpenAtTriple = 0, cOpenOneTriple = 0, cOpenNoTriple = 0;
+  int cOpenFan1 = 0, cOpenFan2 = 0, cOpenFan3 = 0, cOpenFan4 = 0,
+      cOpenFanBig = 0;
+  double tieMinGap = 1e300;
+  auto atTriple = [&](int v) {
+    const vec3& p = verts[v];
+    return gF4BTriplePts.count({p.x, p.y, p.z}) > 0;
+  };
   std::vector<int> pairedHe(3 * nTri, -1);
   for (const auto& [edge, hes] : edge2He) {
+    bool badFan = false;
     std::vector<int> fwd, bwd;
     for (const int h : hes) (heFrom(h) == edge.first ? fwd : bwd).push_back(h);
-    if (fwd.size() != bwd.size()) return false;
+    if (fwd.size() != bwd.size()) {
+      if (!kF4BDump) return false;
+      ++cOpen;
+      const int nt =
+          (atTriple(edge.first) ? 1 : 0) + (atTriple(edge.second) ? 1 : 0);
+      if (nt == 2)
+        ++cOpenAtTriple;
+      else if (nt == 1)
+        ++cOpenOneTriple;
+      else
+        ++cOpenNoTriple;
+      const size_t fan = hes.size();
+      if (fan == 1)
+        ++cOpenFan1;
+      else if (fan == 2)
+        ++cOpenFan2;
+      else if (fan == 3)
+        ++cOpenFan3;
+      else if (fan == 4)
+        ++cOpenFan4;
+      else
+        ++cOpenFanBig;
+      continue;
+    }
     if (fwd.size() == 1) {
       pairedHe[fwd[0]] = bwd[0];
       pairedHe[bwd[0]] = fwd[0];
@@ -103,7 +150,12 @@ bool SplitTouchingSheets(std::vector<vec3>& verts, Vec<ivec3>& tv) {
       vec3 d = verts[c] - pa;
       d -= la::dot(d, ax) * ax;
       const double len = la::length(d);
-      if (len == 0.0) return false;  // sliver: third vert on the edge line
+      if (len == 0.0) {  // sliver: third vert on the edge line
+        if (!kF4BDump) return false;
+        ++cSliver;
+        badFan = true;
+        break;
+      }
       d /= len;
       if (ring.empty()) {
         u = d;
@@ -113,6 +165,7 @@ bool SplitTouchingSheets(std::vector<vec3>& verts, Vec<ivec3>& tv) {
       if (angle < 0.0) angle += kTwoPi;
       ring.push_back({angle, h, heFrom(h) == edge.first});
     }
+    if (badFan) continue;  // dump mode: sliver counted, skip this fan
     std::sort(ring.begin(), ring.end(),
               [](const RingEntry& a, const RingEntry& b) {
                 return a.angle < b.angle;
@@ -127,15 +180,39 @@ bool SplitTouchingSheets(std::vector<vec3>& verts, Vec<ivec3>& tv) {
       const RingEntry& nxt = ring[(i + 1) % k];
       const double gap =
           (i + 1 < k) ? nxt.angle - cur.angle : nxt.angle + kTwoPi - cur.angle;
-      if (gap < kAngleTie) return false;
-      if (cur.fwd == nxt.fwd) return false;  // material overlap
+      if (gap < kAngleTie) {
+        if (!kF4BDump) return false;
+        ++cTie;
+        tieMinGap = std::min(tieMinGap, gap);
+        badFan = true;
+        break;
+      }
+      if (cur.fwd == nxt.fwd) {  // material overlap
+        if (!kF4BDump) return false;
+        ++cOverlap;
+        badFan = true;
+        break;
+      }
     }
+    if (badFan) continue;  // dump mode: tie/overlap counted, skip this fan
     for (int i = 0; i < k; ++i) {
       if (ring[i].fwd) continue;
       const RingEntry& partner = ring[(i + 1) % k];  // next CCW is forward
       pairedHe[ring[i].he] = partner.he;
       pairedHe[partner.he] = ring[i].he;
     }
+  }
+  if (kF4BDump) {
+    std::fprintf(stderr,
+                 "F4B_CENSUS openEdges=%d slivers=%d ties=%d overlaps=%d\n",
+                 cOpen, cSliver, cTie, cOverlap);
+    std::fprintf(
+        stderr,
+        "F4B_OPEN atTriple=%d oneTriple=%d noTriple=%d | fan1=%d fan2=%d "
+        "fan3=%d fan4=%d fanBig=%d | tieMinGap=%g\n",
+        cOpenAtTriple, cOpenOneTriple, cOpenNoTriple, cOpenFan1, cOpenFan2,
+        cOpenFan3, cOpenFan4, cOpenFanBig, cTie ? tieMinGap : 0.0);
+    if (cOpen + cSliver + cTie + cOverlap > 0) return false;
   }
 
   // Vertex split by paired-fan connectivity.
@@ -1220,6 +1297,11 @@ std::optional<int> RobustWindingBVH(const std::vector<std::array<vec3, 3>>& tri,
 // scheme once needed are no longer carried.)
 struct BuildSeam {
   vec3 p0, p1;
+  // The PARTNER face whose plane cut this seam (B1 triple-point naming): a seam
+  // on face f from the pair (f,other) lies on plane(f) INT plane(other).  Two
+  // seams on f with distinct partner planes that cross in f's interior name a
+  // 3-face triple point {f, other_1, other_2}.
+  int other = -1;
 };
 
 using PierceKey =
@@ -1242,6 +1324,15 @@ struct BuildArrangement {
   std::vector<vec3> faceN;  // la::cross(b-a,c-a), unnormalized outward
   std::vector<std::vector<BuildSeam>> faceSeams;
   std::vector<char> seamed;
+  // B1 once-only triple points (EnumerateTriplePoints).  seamTriples[f][k] =
+  // one (2D on-seam crossing position, canonical 3D triple position) per triple
+  // point on seam k of face f, used to PRE-SPLIT that seam at the shared
+  // vertex.  The 2D position is the exact intersection of the two crossing
+  // seams in f's frame (strictly on-segment, so the split never folds back);
+  // the 3D position is the ONCE-ONLY point every incident face welds onto.
+  // Empty for every seam when the component has no 3-face triple point (the
+  // whole corpus off openscad), so EmitSeamedFace is a byte-identical no-op.
+  std::vector<std::vector<std::vector<std::pair<vec2, vec3>>>> seamTriples;
   bool ok = true;  // false = a structural anomaly (fail closed)
 };
 
@@ -1642,8 +1733,8 @@ BuildArrangement RecordSeams(const Manifold::Impl& in,
         A.ok = false;
         continue;
       }
-      A.faceSeams[i].push_back({pts[0], pts[1]});
-      A.faceSeams[j].push_back({pts[0], pts[1]});
+      A.faceSeams[i].push_back({pts[0], pts[1], j});
+      A.faceSeams[j].push_back({pts[0], pts[1], i});
       A.seamed[i] = 1;
       A.seamed[j] = 1;
     }
@@ -1757,6 +1848,20 @@ struct PlaneFrame {
     vidx.emplace(key, id);
     return id;
   }
+  // Insert at an EXPLICIT 2D position (e.g. an exact on-seam crossing) but
+  // dedup by the 3D canonical bits, so every reference to one once-only triple
+  // point collapses to a single face vertex even though its projection is off
+  // the constructed point by rounding (B1 pre-split).
+  int addAt(const vec2& p2, const vec3& canon) {
+    const std::tuple<double, double, double> key{canon.x, canon.y, canon.z};
+    auto it = vidx.find(key);
+    if (it != vidx.end()) return it->second;
+    const int id = static_cast<int>(verts2.size());
+    verts2.push_back(p2);
+    canon3.push_back(canon);
+    vidx.emplace(key, id);
+    return id;
+  }
 };
 // Build the frame for a face with unnormalized outward normal faceN, in-plane
 // origin, and second basis point edgeTip.  Returns false (caller fails closed)
@@ -1774,6 +1879,161 @@ bool BuildPlaneFrame(const vec3& faceN, const vec3& origin, const vec3& edgeTip,
   pf.e2 = la::cross(pf.nHat, pf.e1);
   return true;
 }
+
+// ---------------------------------------------------------------------------
+// B1: ONCE-ONLY 3-FACE TRIPLE POINTS (arrangement-vertex-first, f4-design-b/c).
+//
+// A transversal 3-face triple point T = plane(f) INT plane(g) INT plane(h) is a
+// 0-cell where two seams of face f (from partners g and h) cross in f's
+// interior.  The per-face resolver builds it THREE times (once per incident
+// face's frame), so the three double-rounded images and three independent
+// radial subdivisions disagree and the emission fans open (the 121-open-edge
+// wall, oscad-f4).  B1 enumerates each triple ONCE globally, constructs ONE
+// canonical double-precision position keyed by the sorted plane triple, and
+// threads it into every incident face's overlay by PRE-SPLITTING the seams at
+// the shared vertex - so all three faces reference the identical 3D point and
+// their sub-faces weld bit-identically (the arrangement is complete at the
+// 0-cell).  Tripwire-free: the position is a CONSTRUCTION (like SegPlanePoint),
+// never a decision; the crossing test and the winding classify stay the
+// existing level-0 predicates.
+// ---------------------------------------------------------------------------
+
+// The double solution of the three planes n_i . (x - a_i) = 0, i in {0,1,2},
+// via Cramer over the (unnormalized) input normals.  Symmetric in the three
+// planes, so a sorted key feeds identical bits for all three incident faces.
+// Returns false on a (near-)degenerate triple (planes not independent): the
+// caller then declines to pre-split and the crossing falls to the pos2in
+// fail-closed backstop - never a garbage constructed vertex.
+bool Intersect3Planes(const vec3& n0, const vec3& a0, const vec3& n1,
+                      const vec3& a1, const vec3& n2, const vec3& a2,
+                      vec3& out) {
+  const vec3 c12 = la::cross(n1, n2), c20 = la::cross(n2, n0),
+             c01 = la::cross(n0, n1);
+  const double det = la::dot(n0, c12);
+  if (!(std::abs(det) > 0.0)) return false;
+  const double d0 = la::dot(n0, a0), d1 = la::dot(n1, a1), d2 = la::dot(n2, a2);
+  out = (d0 * c12 + d1 * c20 + d2 * c01) / det;
+  return std::isfinite(out.x) && std::isfinite(out.y) && std::isfinite(out.z);
+}
+
+// Strict proper crossing of 2D segments [a,b] and [c,d]: each segment's
+// endpoints strictly straddle the other's supporting line (the same level-0
+// orient2d = la::cross RemoveOverlaps2D uses).  Excludes collinear and
+// endpoint-touching contacts (measure-zero, not a transversal triple).
+bool SegProperCross2D(const vec2& a, const vec2& b, const vec2& c,
+                      const vec2& d) {
+  const double d1 = la::cross(b - a, c - a), d2 = la::cross(b - a, d - a);
+  const double d3 = la::cross(d - c, a - c), d4 = la::cross(d - c, b - c);
+  return d1 * d2 < 0.0 && d3 * d4 < 0.0;
+}
+
+// 2D intersection point of lines through [a,b] and [c,d] (precondition: they
+// properly cross, so the denominator is nonzero).  The exact on-seam crossing:
+// B1 splits the seam here (strictly interior, no fold-back) and keys the vertex
+// by the once-only 3D triple point.
+vec2 SegLineIntersect2D(const vec2& a, const vec2& b, const vec2& c,
+                        const vec2& d) {
+  const vec2 r = b - a, s = d - c;
+  const double rxs = la::cross(r, s);
+  const double t = la::cross(c - a, s) / rxs;
+  return a + t * r;
+}
+
+// Enumerate the component's 3-face triple points ONCE and record, per seam, the
+// canonical 3D positions that split it.  Populates A.seamTriples (parallel to
+// A.faceSeams).  A no-op (all-empty) on any component whose seams never cross
+// in a face interior (the whole corpus off openscad), so EmitSeamedFace stays
+// byte-identical there.
+void EnumerateTriplePoints(BuildArrangement& A,
+                           const std::vector<int>& face2cluster) {
+  const int nTri = static_cast<int>(A.tri.size());
+  A.seamTriples.assign(nTri, {});
+  for (int f = 0; f < nTri; ++f)
+    A.seamTriples[f].assign(A.faceSeams[f].size(), {});
+  gF4BTriplePts.clear();  // measurement only (per component)
+
+  // planeId collapses exactly-coplanar faces onto one plane id, so a triple
+  // reached through different coplanar representatives is keyed - and thus
+  // constructed - ONCE (openscad is coplanar-dominated).  Coplanar face ids and
+  // cluster ids are kept disjoint by the nTri offset.
+  std::vector<int> planeId(nTri);
+  for (int f = 0; f < nTri; ++f)
+    planeId[f] = face2cluster[f] >= 0 ? nTri + face2cluster[f] : f;
+  // Canonical plane (normal + a point) per plane id = the lowest-index face
+  // carrying it, so all three incident faces read identical plane bits.
+  std::map<int, int> rep;
+  for (int f = 0; f < nTri; ++f) {
+    auto it = rep.find(planeId[f]);
+    if (it == rep.end()) rep.emplace(planeId[f], f);
+  }
+
+  // MUTATION (measurement only): per-face back-projection of the crossing
+  // instead of the once-only canonical point.  The three incident faces then
+  // get three double-rounded images -> the fans reopen (proves the once-only
+  // keying is load-bearing; f4-design-b P4, f4-design-a baseline).
+  const bool perFace = std::getenv("F4B_PERFACE") != nullptr;
+
+  std::map<std::array<int, 3>, vec3> tripleTab;  // sorted plane triple -> pos
+  for (int f = 0; f < nTri; ++f) {
+    if (!A.seamed[f]) continue;
+    const int ns = static_cast<int>(A.faceSeams[f].size());
+    if (ns < 2) continue;
+    PlaneFrame pf;
+    if (!BuildPlaneFrame(A.faceN[f], A.tri[f][0], A.tri[f][1], pf)) continue;
+    std::vector<std::array<vec2, 2>> seg(ns);
+    for (int k = 0; k < ns; ++k) {
+      seg[k][0] = pf.proj(A.faceSeams[f][k].p0);
+      seg[k][1] = pf.proj(A.faceSeams[f][k].p1);
+    }
+    for (int k1 = 0; k1 < ns; ++k1) {
+      const int pg = planeId[A.faceSeams[f][k1].other];
+      if (pg == planeId[f]) continue;
+      for (int k2 = k1 + 1; k2 < ns; ++k2) {
+        const int ph = planeId[A.faceSeams[f][k2].other];
+        if (ph == planeId[f] || ph == pg) continue;  // collinear / degenerate
+        if (!SegProperCross2D(seg[k1][0], seg[k1][1], seg[k2][0], seg[k2][1]))
+          continue;
+        // The exact on-seam 2D crossing (strictly interior to both segments):
+        // the split position, so the pre-split chain never folds back.
+        const vec2 x =
+            SegLineIntersect2D(seg[k1][0], seg[k1][1], seg[k2][0], seg[k2][1]);
+        if (!(std::isfinite(x.x) && std::isfinite(x.y))) continue;
+        vec3 pos;
+        if (perFace) {
+          pos = pf.origin + x.x * pf.e1 + x.y * pf.e2;  // this face's image
+          if (!(std::isfinite(pos.x) && std::isfinite(pos.y) &&
+                std::isfinite(pos.z)))
+            continue;
+        } else {
+          std::array<int, 3> key = {planeId[f], pg, ph};
+          std::sort(key.begin(), key.end());
+          auto it = tripleTab.find(key);
+          if (it != tripleTab.end()) {
+            pos = it->second;
+          } else {
+            const int r0 = rep[key[0]], r1 = rep[key[1]], r2 = rep[key[2]];
+            if (!Intersect3Planes(A.faceN[r0], A.tri[r0][0], A.faceN[r1],
+                                  A.tri[r1][0], A.faceN[r2], A.tri[r2][0], pos))
+              continue;  // degenerate triple: leave to the pos2in backstop
+            tripleTab.emplace(key, pos);
+          }
+        }
+        A.seamTriples[f][k1].push_back({x, pos});
+        A.seamTriples[f][k2].push_back({x, pos});
+        if (std::getenv("F4B_DUMP") != nullptr)
+          gF4BTriplePts.insert({pos.x, pos.y, pos.z});
+      }
+    }
+  }
+  if (std::getenv("F4B_DUMP") != nullptr) {  // measurement only
+    int inc = 0;
+    for (const auto& ff : A.seamTriples)
+      for (const auto& sk : ff) inc += static_cast<int>(sk.size());
+    std::fprintf(stderr, "F4B_TRIPLES distinct=%d incidences=%d perFace=%d\n",
+                 static_cast<int>(tripleTab.size()), inc, perFace ? 1 : 0);
+  }
+}
+
 // Index of the largest-area triangle of `tris` over `pts` (its
 // centroid/incenter is the most robust interior classify point); |2*area|
 // returned in area2.
@@ -1791,6 +2051,14 @@ int LargestSubTri(const std::vector<ivec3>& tris, const std::vector<vec2>& pts,
   }
   return best;
 }
+
+// MEASUREMENT ONLY (f4-b1): per-branch fail-closed census for EmitSeamedFace,
+// gated by F4B_DUMP, printed by EmitComponentBoundary.  Never touched in
+// production (kF4BDump false).
+struct F4BSeamCensus {
+  int b3faces = 0, b3verts = 0, b4faces = 0, b5faces = 0, okfaces = 0;
+};
+static F4BSeamCensus gF4BSeam;
 
 // Emit the retained sub-faces of one SEAMED face into `out` (3D triangles at
 // canonical positions), or set ok=false to fail closed.  Reuse RemoveOverlaps2D
@@ -1818,9 +2086,42 @@ void EmitSeamedFace(std::vector<OutTri3D>& out, const BuildArrangement& A,
     return;
   }
   std::vector<EdgeM> edges = {{iA, iB, 1}, {iB, iC, 1}, {iC, iA, 1}};
-  for (const BuildSeam& s : A.faceSeams[f]) {
-    const int v0 = getV(s.p0), v1 = getV(s.p1);
-    if (v0 != v1) edges.push_back({v0, v1, 1});
+  static const std::vector<std::pair<vec2, vec3>> kNoSplits;
+  for (int k = 0; k < static_cast<int>(A.faceSeams[f].size()); ++k) {
+    const BuildSeam& s = A.faceSeams[f][k];
+    // B1: the triple points on this seam PRE-SPLIT it, so each seam-seam
+    // crossing becomes an explicit shared input vertex - registered at its
+    // exact on-seam 2D position but keyed (via addAt) by the ONCE-ONLY 3D
+    // triple point, so all three incident faces weld onto the identical 3D
+    // vertex instead of three per-face constructed crossings the pos2in map
+    // refuses. With no triple on the seam this is byte-identical to the
+    // single-edge push.
+    const std::vector<std::pair<vec2, vec3>>& splits =
+        A.seamTriples.empty() ? kNoSplits : A.seamTriples[f][k];
+    if (splits.empty()) {
+      const int v0 = getV(s.p0), v1 = getV(s.p1);
+      if (v0 != v1) edges.push_back({v0, v1, 1});
+      continue;
+    }
+    // Chain p0 -> triples (ordered along the seam by the 2D crossing) -> p1.
+    const vec2 q0 = pf.proj(s.p0);
+    const vec2 dir = pf.proj(s.p1) - q0;
+    const double len2 = la::dot(dir, dir);
+    std::vector<std::pair<double, std::pair<vec2, vec3>>> ord;
+    ord.reserve(splits.size());
+    for (const auto& xp : splits)
+      ord.push_back(
+          {len2 > 0.0 ? la::dot(xp.first - q0, dir) / len2 : 0.0, xp});
+    std::sort(ord.begin(), ord.end(),
+              [](const auto& x, const auto& y) { return x.first < y.first; });
+    int prev = getV(s.p0);
+    for (const auto& e : ord) {
+      const int v = pf.addAt(e.second.first, e.second.second);
+      if (v != prev) edges.push_back({prev, v, 1});
+      prev = v;
+    }
+    const int vend = getV(s.p1);
+    if (vend != prev) edges.push_back({prev, vend, 1});
   }
 
   // ARRANGEMENT via RemoveOverlaps2D: edgeSubdiv gives the exact per-input-edge
@@ -1840,12 +2141,22 @@ void EmitSeamedFace(std::vector<OutTri3D>& out, const BuildArrangement& A,
   std::map<std::tuple<double, double>, int> pos2in;
   for (int k = 0; k < static_cast<int>(verts2.size()); ++k)
     pos2in.emplace(std::tuple<double, double>{verts2[k].x, verts2[k].y}, k);
+  static const bool kF4BDump = std::getenv("F4B_DUMP") != nullptr;
   std::vector<std::pair<int, int>> uedges;
   for (const auto& poly : sub) {
     for (size_t k = 0; k + 1 < poly.size(); ++k) {
       const auto i0 = pos2in.find({poly[k].x, poly[k].y});
       const auto i1 = pos2in.find({poly[k + 1].x, poly[k + 1].y});
       if (i0 == pos2in.end() || i1 == pos2in.end()) {
+        if (kF4BDump) {  // census: count every residual constructed vertex
+          std::set<std::tuple<double, double>> miss;
+          for (const auto& p : sub)
+            for (const vec2& q : p)
+              if (pos2in.find({q.x, q.y}) == pos2in.end())
+                miss.insert({q.x, q.y});
+          ++gF4BSeam.b3faces;
+          gF4BSeam.b3verts += static_cast<int>(miss.size());
+        }
         ok = false;
         return;
       }
@@ -1855,6 +2166,7 @@ void EmitSeamedFace(std::vector<OutTri3D>& out, const BuildArrangement& A,
 
   std::vector<std::vector<int>> cells;
   if (!ExtractCells(verts2, uedges, cells)) {
+    if (kF4BDump) ++gF4BSeam.b4faces;
     ok = false;
     return;
   }
@@ -1874,6 +2186,7 @@ void EmitSeamedFace(std::vector<OutTri3D>& out, const BuildArrangement& A,
     const vec3 cen3 = a + cen2.x * e1 + cen2.y * e2;
     const std::optional<int> g = RobustWinding(in, cen3 + eps * nHat, seeds);
     if (!g) {  // filter-uncertain deciding predicate (SoS axis): fail closed
+      if (kF4BDump) ++gF4BSeam.b5faces;
       ok = false;
       return;
     }
@@ -1891,6 +2204,7 @@ void EmitSeamedFace(std::vector<OutTri3D>& out, const BuildArrangement& A,
     for (const ivec3& t : tris)
       out.push_back({canon3[t.x], canon3[t.y], canon3[t.z]});
   }
+  if (kF4BDump) ++gF4BSeam.okfaces;
 }
 
 // 2D point-in-triangle (inclusive), orientation-agnostic: true iff p is on the
@@ -2233,8 +2547,27 @@ StageResult<Manifold::Impl> EmitComponentBoundary(
         "entanglement, degenerate projection, or filter-uncertain classify) - "
         "fail-closed");
   const int nTri = static_cast<int>(in.NumTri());
-  for (int f = 0; f < nTri && ok; ++f)
-    if (A.seamed[f]) EmitSeamedFace(emitted, A, f, in, seeds, eps, ok);
+  static const bool kF4BDump = std::getenv("F4B_DUMP") != nullptr;
+  if (kF4BDump) {  // census: run EVERY seamed face, count the fail-closed
+                   // branch
+    gF4BSeam = F4BSeamCensus{};
+    bool anyFail = false;
+    for (int f = 0; f < nTri; ++f) {
+      if (!A.seamed[f]) continue;
+      bool fok = true;
+      EmitSeamedFace(emitted, A, f, in, seeds, eps, fok);
+      if (!fok) anyFail = true;
+    }
+    std::fprintf(stderr,
+                 "F4B_SEAM b3faces=%d b3verts=%d b4faces=%d b5faces=%d "
+                 "okfaces=%d\n",
+                 gF4BSeam.b3faces, gF4BSeam.b3verts, gF4BSeam.b4faces,
+                 gF4BSeam.b5faces, gF4BSeam.okfaces);
+    ok = !anyFail;
+  } else {
+    for (int f = 0; f < nTri && ok; ++f)
+      if (A.seamed[f]) EmitSeamedFace(emitted, A, f, in, seeds, eps, ok);
+  }
   if (!ok)
     // The resolver declined to build this face's arrangement exactly: a
     // >2-sheet triple point, a coplanar/degenerate projection, a malformed cell
@@ -2443,13 +2776,16 @@ StageResult<Manifold::Impl> ResolveComponent(const Manifold::Impl& dirty,
   // so there is no "SoS refused" fail-closed slot left here - a residue instead
   // surfaces as a non-2-endpoint seam (A.ok) or downstream at emission.
   const std::vector<int> face2cluster = DetectCoplanarClusters(in);
-  const BuildArrangement A = RecordSeams(in, face2cluster, eps);
+  BuildArrangement A = RecordSeams(in, face2cluster, eps);
   if (!A.ok) {
     return StageResult<Manifold::Impl>::Fatal(
         FatalReason::DirtyComponentUnresolved,
         "resolver: a self-crossing pair had a non-2-endpoint seam "
         "(degenerate incidence) - fail-closed");
   }
+  // B1: enumerate the once-only 3-face triple points before per-face emission
+  // (no-op off openscad; the whole point on the triple-point-dense soup).
+  EnumerateTriplePoints(A, face2cluster);
   return EmitComponentBoundary(in, A, face2cluster, eps);
 }
 
