@@ -2334,6 +2334,18 @@ int LargestSubTri(const std::vector<ivec3>& tris, const std::vector<vec2>& pts,
   return best;
 }
 
+// The both-sides {w_S>=1} boundary witness - the single retention rule shared
+// by the seamed, fold, and clean emit paths.  A sub-face is on d{w_S>=1} iff
+// EXACTLY ONE side is inside {w_S>=1}; the solid side fixes orientation.
+// wAbove / wBelow are the +nHat / -nHat winding probes.  Returns 0 (drop: both
+// sides same class), 1 (emit ORIGINAL orientation: solid on the -nHat side), or
+// 2 (emit REVERSED: solid on +nHat) - matching EmitCleanFaces' status codes.
+inline int BothSidesRetain(int wAbove, int wBelow) {
+  const bool aboveIn = wAbove >= 1, belowIn = wBelow >= 1;
+  if (aboveIn == belowIn) return 0;
+  return belowIn ? 1 : 2;
+}
+
 // MEASUREMENT ONLY (f4-b1): per-branch fail-closed census for EmitSeamedFace,
 // gated by F4B_DUMP, printed by EmitComponentBoundary.  Never touched in
 // production (kF4BDump false).
@@ -2514,12 +2526,12 @@ void EmitSeamedFace(std::vector<OutTri3D>& out, const BuildArrangement& A,
       ok = false;
       return;
     }
-    const bool aboveIn = *g >= 1, belowIn = *gb >= 1;
-    if (aboveIn == belowIn) continue;  // both sides same class: not a boundary
-    // Retained: solid on the -nHat side (belowIn) keeps the CCW 2D winding
-    // (+nHat = original orientation); solid on +nHat reverses.
+    const int keep = BothSidesRetain(*g, *gb);
+    if (keep == 0) continue;  // both sides same class: not a boundary
+    // Retained: keep==1 (solid on the -nHat side) keeps the CCW 2D winding
+    // (+nHat = original orientation); keep==2 (solid on +nHat) reverses.
     for (const ivec3& t : tris) {
-      if (belowIn)
+      if (keep == 1)
         out.push_back({canon3[t.x], canon3[t.y], canon3[t.z]});
       else
         out.push_back({canon3[t.x], canon3[t.z], canon3[t.y]});
@@ -2785,14 +2797,12 @@ void FoldCoplanarClusters(std::vector<OutTri3D>& out, const Manifold::Impl& in,
         ok = false;
         return;
       }
-      const bool aboveIn = *wa >= 1, belowIn = *wb >= 1;
-      if (aboveIn == belowIn)
-        continue;  // both sides same class: not a boundary
-      // Retained. Solid on the {w>=1} side fixes orientation: solid on the
-      // -nHat side (belowIn) keeps the CCW 2D winding (+nHat); solid on +nHat
-      // reverses.
+      const int keep = BothSidesRetain(*wa, *wb);
+      if (keep == 0) continue;  // both sides same class: not a boundary
+      // Retained. keep==1 (solid on the -nHat side) keeps the CCW 2D winding
+      // (+nHat); keep==2 (solid on +nHat) reverses.
       for (const ivec3& t : tris) {
-        if (belowIn)
+        if (keep == 1)
           out.push_back({pts3[t.x], pts3[t.y], pts3[t.z]});
         else
           out.push_back({pts3[t.x], pts3[t.z], pts3[t.y]});
@@ -2892,10 +2902,8 @@ bool EmitCleanFaces(std::vector<OutTri3D>& out, const Manifold::Impl& in,
       if (!g) return -1;  // grazes at every interior point (SoS): fail closed
       return (*g == 0) ? 1 : 0;
     }
-    if (!g || !gb) return -1;  // grazes everywhere (SoS): fail closed
-    const bool aboveIn = *g >= 1, belowIn = *gb >= 1;
-    if (aboveIn == belowIn) return 0;  // both sides same class: not a boundary
-    return belowIn ? 1 : 2;  // solid on -nHat -> original; else reversed
+    if (!g || !gb) return -1;         // grazes everywhere (SoS): fail closed
+    return BothSidesRetain(*g, *gb);  // 0 drop / 1 original / 2 reversed
   };
   std::vector<signed char> status(nTri, -2);
   for_each_n(autoPolicy(nTri, 256), countAt(0), static_cast<size_t>(nTri),
