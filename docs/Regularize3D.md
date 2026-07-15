@@ -500,10 +500,12 @@ Cluster map (root mechanism, not which string fires):
   twins and zero non-manifold edges on all of them; the wall needs MORE emitted
   faces, so C-5's twin-identity unification is a measured no-op here (see closure
   plan 5).  Two sub-shapes:
-  1a near-coplanar sliver (GT7863 AND GT7081 post-reg3d-c2bx: two near-parallel
-  seamed faces, gap above the fold threshold but the sub-face is thin - GT7081's
-  0.002deg shallow-dihedral geometry is the same wall reached once its
-  winding-probe residue closed); 1b negative-winding double sheet
+  1a EXACT-INCIDENT / everted-emission (GT7863 AND GT7081 post-reg3d-c2bx;
+  root label CORRECTED by the bake-off, reg3d-1a/1b: NOT a near-coplanar input
+  sliver - the "887-2259 ULP sliver" is CROSS-mesh pass-through; the dirty-component
+  wall is exact-incident edge-on-edge seam endpoints <1 ULP + a double-sheet /
+  everted-region winding drop, the reg3d-wjump completion; options a/b both refuted
+  with empty patches); 1b negative-winding double sheet
   (PokedCube: an everted corner makes a genuine w_S=-1 region, so the w=-1|w=1
   junction is a double sheet the mult-1 per-face emission opens - s7b refuted the
   simple orientation flip).  Production-reachable.
@@ -635,6 +637,24 @@ RESEARCH = memo with a required proof sketch, TRIPWIRE = kernel-vendor decision)
    (vendor Shewchuk).  RECORDED (build nothing on it).  The cap-seaming fixture is
    NOT on this wall - its failing component dies UPSTREAM at RecordSeams F11/F3
    (its non-piercing control emits clean); the C-2a research adjudication stands.
+   BAKE-OFF CORRECTION (reg3d-1a / reg3d-1b-optB, both REFUTED-WITH-EVIDENCE, empty
+   patches): the "1a near-coplanar sliver" ROOT LABEL is corrected by
+   dirty-component measurement.  Option (a) [stage-5 near-coplanar WIDENING] has NO
+   admissible target - zero near-coplanar 2D-AREA overlap below eps (or 100*eps) in
+   EITHER carrier's dirty components; a 1000x widen mutation still leaves GT7863
+   fail-closed.  Option (b) [thinness-aware WELD] has NO target - ZERO
+   face-collapsing weld merges corpus-wide; the defect is ~500-1000x the weld radius.
+   The documented "887-2259 ULP near-coplanar sliver" (planerep probe) is CROSS-MESH
+   (LxR): the resolver decomposes L/R into separate components (dirty comps carry
+   ~0-1 self-crossings, not the ~266 LxR interpenetration), so that wall is
+   CROSS-COMPONENT PASS-THROUGH under the standing non-fusion contract - it never
+   reaches per-component emission (folding it = breaking non-fusion, out of scope).
+   The ACTUAL dirty-component wall is: (i) EXACT-INCIDENT edge-on-edge seam endpoints
+   (<1 ULP = genuine form-independent ties, SoS jurisdiction) + winding classify;
+   (ii) a DOUBLE-SHEET / everted-region emission (GT7863: 2 faces dropped at
+   w_above=-1, GWN-confirmed everted; GT7081: 18 dropped faces) whose closure needs
+   the winding-jump / degenerate-incidence EMISSION completion (this crucible,
+   reg3d-wjump), NOT input-snap (a) and NOT weld (b).
 4. CRUCIBLE C-1b (PROOF; folded into C-1a).  PokedCube negative-winding double
    sheet - measured above: the everted corner is a w=-1|w=1 double-sheet junction
    AND a degenerate near-triple-point; the mult-1 per-face emission drops the
