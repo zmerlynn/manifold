@@ -536,7 +536,7 @@ reverted):
   -----------------|--------------------|-------------------------------|--------
   PokedCube        | (RESOLVES wjump)   | - (vol 0.25, GWN-oracle)      | constructed
   GT7863 pair      | (RESOLVES 7863c1)  | - (both dirty comps, GWN)     | corpus
-  openscad soup    | 1 EMISSION (f4-b1) | unresolvable sheet contact    | corpus
+  openscad soup    | 1 EMISSION (f4-junc| unresolvable sheet contact    | corpus
   GT7081 pair      | (RESOLVES wjump)   | - (both shells, vol-preserved)| corpus
   NearCoplanarChain| 4 PLANARIZE-GUARD  | global-planarity guard        | constructed
   BridgedCaps      | (RESOLVES)         | -                             | resolves
@@ -615,6 +615,36 @@ reverted):
   could not reproduce that - pre-B1 is F4 under both settings in from-scratch
   builds.  With B1 the terminal is the emission wall under both settings.)
 
+  reg3d-f4-junction LANDED (the emission residue NARROWED in-form, byte-for-byte
+  no-op off openscad).  (1) BOTH-SIDES RETENTION: EmitSeamedFace now probes w_S
+  on BOTH sides of each sub-cell and retains iff exactly one is inside {w_S>=1}
+  (the coplanar fold's general rule, the m==1 case of which is byte-identical to
+  the former w_above==0 rule), closing the radial ties + material overlaps - a
+  one-sided-rule artifact where the seam sub-cell's true jump != 1.  (2) GLOBAL
+  JUNCTION REGISTRY: the per-face arrangement wove PROPER seam crossings (B1) but
+  not the NON-proper-crossing junctions - a seam endpoint (or a triple that
+  TERMINATES a seam on the third face) landing strictly interior to a neighbour /
+  partner / third face's emitted edge without a shared split, which opens the
+  fan.  BuildJunctionRegistry dedups every once-only arrangement vertex (seam
+  endpoints + triples) to a canonical 3D point, and every emit path (seamed,
+  clean, fold) pre-splits its edges at each registry vertex strictly interior to
+  it - the split DECISION a pure 3D on-segment test on the SHARED endpoints (so
+  both incident faces decide identically; a per-frame 2D test disagreed near
+  endpoints and manufactured fresh T-junctions), the 2D foot only the on-line
+  addAt position (no RemoveOverlaps2D fold-back).  No new predicate FORM, no
+  exact-on-constructed-point (level-0 3D on-segment on existing once-only
+  constructions), so the design lanes' "exact-radial substrate needed for the
+  T-junction residue" reading is REFUTED for the dominant class: the registry
+  closes ~two thirds of the open edges in-form, mutation-verified load-bearing
+  (registry off reopens them), FNV-identical on all resolving carriers.  The
+  SURVIVING residue is near-degenerate and stays fail-closed: near-tangent
+  >2-SHEET RADIAL junctions (the unbuilt radial branch), genuinely-distinct
+  near-coincident vertices from near-PARALLEL planes, a coplanar/transversal
+  ENTANGLEMENT line (the fold's cap-cap crossing and a seamed wall's endpoint
+  differ by more than eps), and collinear clean-clean overlaps - the
+  plane-based-representation escalation the campaign gates behind the kernel
+  tripwire.  openscad stays at the emission wall, now much narrower.
+
 MEASURED CORRECTIONS to earlier anatomy (were logged at a pre-entanglement,
 pre-stage-6 HEAD): (1) PokedCube AND GT7863 fail at the SplitTouchingSheets
 "unresolvable sheet contact" EMISSION string, which fires BEFORE the 2-manifold
@@ -685,12 +715,13 @@ Cluster map (root mechanism, not which string fires):
   "unresolvable sheet contact"), so GT7081 moved to Cluster 1a.  The
   coupled-integer-flood re-architecture of the WIND phase (which would remove the
   ray-cast winding altogether) remains a named research axis, no longer needed for
-  this residue.  openscad now OCCUPIES this axis (reg3d-oscad REOPEN): with its F11
-  seam-truncation wall closed, its large component fails at the seam sub-face WINDING CLASSIFY
-  probe (F4) - the SAME near-tangent winding-probe phenomenon as GT7081, at a seam-path probe
-  site the reg3d-c2bx WindingAt escalation does not cover (filter-gated, kernel-tripwire-gated).
-  Fail-closed, no wrong resolve; the exact-kernel load underneath is the terminal shared with
-  GT7081.
+  this residue.  openscad's large component moved PAST this axis: reg3d-f4-b1
+  (once-only triple points) then reg3d-f4-junction (both-sides retention + the
+  global junction registry) carried it through the seam sub-face winding classify
+  and the T-junction arrangement completion to the EMISSION wall (Cluster 1a),
+  where its near-degenerate residue - near-tangent >2-sheet radial junctions plus
+  the coplanar/transversal entanglement - joins GT7081/GT7863 behind the
+  plane-based-representation tripwire.  Fail-closed, no wrong resolve.
 - CLUSTER 4 - NEAR-COPLANAR PLANARIZE GUARD / SNAP refusals.  A curved near-band
   is genuinely not one plane; the guard fails closed rather than fold to a wrong
   plane.  These are CORRECT, decision-complete refusals (the exact procedure DOES

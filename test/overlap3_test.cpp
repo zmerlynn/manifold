@@ -1177,29 +1177,38 @@ TEST(Overlap3, Regularize_CoplanarFold_Mult3Nested_Resolves) {
 // the F11 seam-truncation wall is CLOSED.
 //
 // B1 ONCE-ONLY TRIPLE POINTS (f4-b1) DISSOLVE the F4 seam-arrangement wall: the
-// ~150 genuine 3-face triple points on the large dirty component are enumerated
-// ONCE (EnumerateTriplePoints), each built as ONE canonical 3D point keyed by
-// its sorted plane triple, and threaded into all three incident faces' overlays
-// by pre-splitting the seams at the exact on-seam crossing (keyed to the shared
-// 3D point).  Every seam sub-face vertex now has an input preimage, so the
-// pos2in "not exactly resolvable" refusal (F4) no longer fires - the
-// arrangement completes at the 0-cells.
+// genuine 3-face triple points on the large dirty component are enumerated ONCE
+// (EnumerateTriplePoints), each built as ONE canonical 3D point keyed by its
+// sorted plane triple, and threaded into all three incident faces' overlays by
+// pre-splitting the seams at the exact on-seam crossing (keyed to the shared 3D
+// point).  Every seam sub-face vertex now has an input preimage, so the pos2in
+// "not exactly resolvable" refusal (F4) no longer fires; openscad then fails
+// one wall DEEPER, at the EMISSION wall (SplitTouchingSheets open boundary ->
+// NonManifoldEmission "unresolvable sheet contact").
 //
-// openscad then fails one wall DEEPER, at the EMISSION wall
-// (SplitTouchingSheets open boundary -> NonManifoldEmission "unresolvable sheet
-// contact").  Measured (f4-b1 notebook, F4B_DUMP census): after the once-only
-// welding, the dominant open-boundary residue is the DROPPED-BOUNDARY class
-// AWAY from the triple points (the everted / high-cover strata; most open edges
-// are single dangling halfedges with neither endpoint at a triple), plus a few
-// EXACT-coincident radial-tangent ties (gap exactly 0 = genuine tangent sheets,
-// not rounding) and a few material overlaps.  The once-only construction is
-// LOAD-BEARING (the per-face-reconstruct mutation reopens the triple-incident
-// holes) but NOT sufficient: it closes only the triple-incident holes,
-// confirming design-a's radial-arrangement residue / design-c's falsifier (open
-// edges persist on a once-only-consistent arrangement with the retention rule
-// BYTE-UNCHANGED - design-a refuted the winding-jump re-emission rule). Closing
-// the residue is the exact-radial substrate (tripwire), recorded not built.
-// Still fail-closed, never a silent wrong resolve.
+// f4-junction NARROWS that emission residue in two in-form steps (both a
+// byte-for-byte no-op off openscad; the resolving corpus is FNV-identical
+// pre/post): (1) BOTH-SIDES RETENTION - EmitSeamedFace probes w_S on both sides
+// and retains iff exactly one is inside {w_S>=1} (the coplanar fold's rule),
+// closing the radial ties + material overlaps that were a one-sided-rule
+// artifact where the true jump != 1; (2) the GLOBAL JUNCTION REGISTRY - every
+// once-only arrangement vertex (seam endpoints + triples) is deduped canonical
+// and every emit path (seamed / clean / fold) pre-splits its edges at each
+// registry vertex strictly interior to it (a pure 3D on-segment decision on the
+// shared endpoints, so both incident faces split identically).  This closes the
+// dominant T-junction residue - a seam endpoint / triple that terminated
+// interior to a neighbour's / third face's edge without a shared split (~2/3 of
+// the open edges).
+//
+// The surviving residue is near-degenerate and fails closed: near-tangent
+// >2-SHEET RADIAL junctions (unbalanced 3-4 halfedge fans; the unbuilt radial
+// branch), genuinely-distinct near-coincident vertices from near-PARALLEL
+// planes (separated far below the model scale but well above eps), a coplanar/
+// transversal ENTANGLEMENT line where the fold's cap-cap crossing and a seamed
+// wall's endpoint differ by more than eps, and collinear clean-clean edge
+// overlaps.  Closing these needs the exact symbolic 3-plane vertex the campaign
+// gates behind the kernel tripwire (the plane-based-representation escalation)
+// - recorded, not built.  Still fail-closed, never a silent wrong resolve.
 TEST(Overlap3, Regularize_ExactZeroTie_Openscad_FailClosed) {
   std::filesystem::path file(__FILE__);
   std::ifstream fin(
