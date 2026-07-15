@@ -1000,13 +1000,23 @@ bool HasCoplanarOverlap(const Manifold::Impl& in) {
 // lie ON a face plane, or the segment grazes an edge/vertex exactly) - the soup
 // winding is single-valued only OFF the surface, so the caller re-seeds / fails
 // closed; on true, `delta` is the signed crossing (0 none, +/-1).
+// dbCached == kWindDbLive: compute the seed's plane-side sign live (the walk).
+// Otherwise dbCached IS that sign (already filter-then-exact escalated) - the
+// per-seed precompute (PrecomputeSeedSign): for a FIXED seed the plane-side
+// sign is pure per triangle, so it is computed ONCE instead of once per
+// clean-face query.  The looked-up value is bit-identical to the live one (same
+// predicate chain), so the winding is unchanged; a stored 0 reproduces the live
+// genuine tie.
+inline constexpr int kWindDbLive = 2;  // not a valid orient3d sign (-1/0/+1)
 inline bool WindCrossTri(const vec3& a, const vec3& b, const vec3& c,
-                         const vec3& p, const vec3& seed, int& delta) {
+                         const vec3& p, const vec3& seed, int& delta,
+                         int dbCached = kWindDbLive) {
   delta = 0;
   int da = Orient3DFilterSign(a, b, c, p);
-  int db = Orient3DFilterSign(a, b, c, seed);
+  int db =
+      (dbCached == kWindDbLive) ? Orient3DFilterSign(a, b, c, seed) : dbCached;
   if (da == 0) da = Orient3DExactSign(a, b, c, p);
-  if (db == 0) db = Orient3DExactSign(a, b, c, seed);
+  if (db == 0 && dbCached == kWindDbLive) db = Orient3DExactSign(a, b, c, seed);
   if (da == 0 || db == 0) return false;
   if (da == db) return true;  // p and seed on the same side of the plane
   int o1 = Orient3DFilterSign(p, seed, a, b);
@@ -1102,15 +1112,32 @@ void WindCandidates(const TriWindBVH& bvh, const vec3& p, const vec3& seed,
 // the walk; only the iteration set shrinks).
 std::optional<int> WindingAtCands(const std::vector<std::array<vec3, 3>>& tri,
                                   const vec3& p, const vec3& seed,
-                                  const std::vector<int>& cands) {
+                                  const std::vector<int>& cands,
+                                  const signed char* seedSign) {
   int w = 0;
   for (int t : cands) {
     int delta;
-    if (!WindCrossTri(tri[t][0], tri[t][1], tri[t][2], p, seed, delta))
+    const int db = seedSign ? static_cast<int>(seedSign[t]) : kWindDbLive;
+    if (!WindCrossTri(tri[t][0], tri[t][1], tri[t][2], p, seed, delta, db))
       return std::nullopt;
     w += delta;
   }
   return w;
+}
+
+// The seed's plane-side sign per triangle, precomputed once (all clean-face
+// probes share seeds[0]).  filter-then-exact, so the value the winding looks up
+// is bit-identical to the live path.
+std::vector<signed char> PrecomputeSeedSign(
+    const std::vector<std::array<vec3, 3>>& tri, const vec3& seed) {
+  const int nTri = static_cast<int>(tri.size());
+  std::vector<signed char> sign(nTri);
+  for (int t = 0; t < nTri; ++t) {
+    int db = Orient3DFilterSign(tri[t][0], tri[t][1], tri[t][2], seed);
+    if (db == 0) db = Orient3DExactSign(tri[t][0], tri[t][1], tri[t][2], seed);
+    sign[t] = static_cast<signed char>(db);
+  }
+  return sign;
 }
 
 std::optional<int> WindingAt(const Manifold::Impl& in, const vec3& p,
@@ -1147,10 +1174,16 @@ std::optional<int> RobustWinding(const Manifold::Impl& in, const vec3& p,
 std::optional<int> RobustWindingBVH(const std::vector<std::array<vec3, 3>>& tri,
                                     const TriWindBVH& bvh, const vec3& p,
                                     const std::vector<vec3>& seeds,
-                                    std::vector<int>& cands) {
-  for (const vec3& s : seeds) {
-    WindCandidates(bvh, p, s, cands);
-    if (const std::optional<int> w = WindingAtCands(tri, p, s, cands)) return w;
+                                    std::vector<int>& cands,
+                                    const signed char* seedSign0) {
+  for (size_t i = 0; i < seeds.size(); ++i) {
+    WindCandidates(bvh, p, seeds[i], cands);
+    // The precomputed table is for seeds[0]; the rare seeds[1..] retries go
+    // live.
+    const signed char* sign = (i == 0) ? seedSign0 : nullptr;
+    if (const std::optional<int> w =
+            WindingAtCands(tri, p, seeds[i], cands, sign))
+      return w;
   }
   return std::nullopt;
 }
@@ -2117,6 +2150,8 @@ bool EmitCleanFaces(std::vector<OutTri3D>& out, const Manifold::Impl& in,
   // Build the winding broadphase once for this component (a proven exact
   // crossing-superset; the clean-face winding hot loop).
   const TriWindBVH bvh = BuildTriWindBVH(A.tri, in.bBox_);
+  const std::vector<signed char> seedSign0 =
+      PrecomputeSeedSign(A.tri, seeds[0]);
   std::vector<int> cands;  // reused across queries
   // A face is "clean" only if it is neither seamed nor part of a coplanar
   // cluster (the fold owns cluster faces).
@@ -2140,7 +2175,8 @@ bool EmitCleanFaces(std::vector<OutTri3D>& out, const Manifold::Impl& in,
     for (const auto& w : kBary) {
       const vec3 p =
           w[0] * A.tri[t][0] + w[1] * A.tri[t][1] + w[2] * A.tri[t][2];
-      g = RobustWindingBVH(A.tri, bvh, p + eps * nHat, seeds, cands);
+      g = RobustWindingBVH(A.tri, bvh, p + eps * nHat, seeds, cands,
+                           seedSign0.data());
       if (g) break;  // any interior sample measures the (constant) cell winding
     }
     if (!g) return false;  // grazes at every interior point (SoS): fail closed
