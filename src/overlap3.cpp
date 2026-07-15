@@ -692,8 +692,9 @@ inline int Orient3DFilterSign(const vec3& a, const vec3& b, const vec3& c,
 // TRIPWIRE (owner contract, docs/Regularize3D.md open list): this is the ONE
 // blessed exact predicate FORM.  Additional CALLERS are fine as long as each
 // stays FILTER-FIRST (exact fires only behind a filter 0, zero new arithmetic)
-// - current callers: the EdgePiercesTriSoS edge-in-plane guard and the
-// WindingAt escalation (plus the test probe).  The tie cascade Orient3DSoS no
+// - current callers: the EdgePiercesTriSoS edge-in-plane guard, the WindingAt
+// escalation, and the RecordSeams phantom-guard pierce completion (cleanPierce)
+// (plus the test probe).  The tie cascade Orient3DSoS no
 // longer calls it: its SoS K==0 group already IS this exact sign, so a pre-SoS
 // shortcut was provably redundant and was dropped.  A SECOND predicate FORM
 // stays tripwired: if one is ever needed, VENDOR Shewchuk's public-domain
