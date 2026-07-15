@@ -33,7 +33,6 @@
 #include "boolean2.h"
 #include "disjoint_sets.h"
 #include "impl.h"
-#include "manifold/optional_assert.h"
 #include "polygon_internal.h"
 #include "shared.h"
 
@@ -1059,7 +1058,6 @@ inline bool WindCrossTri(const vec3& a, const vec3& b, const vec3& c,
 struct TriWindBVH {
   Collider collider;
   Vec<int> leaf2tri;  // leaf index -> original triangle index
-  bool built = false;
 };
 
 TriWindBVH BuildTriWindBVH(const std::vector<std::array<vec3, 3>>& tri,
@@ -1094,7 +1092,6 @@ TriWindBVH BuildTriWindBVH(const std::vector<std::array<vec3, 3>>& tri,
     out.leaf2tri[i] = perm[i];
   }
   out.collider = Collider(sbox, smort);
-  out.built = true;
   return out;
 }
 
