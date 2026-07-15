@@ -530,10 +530,11 @@ notebook's).  The sites, by kind, are: two EMISSION strings (BuildImpl: "unresol
 sheet contact" from SplitTouchingSheets, "emitted triangulation not 2-manifold");
 one COPLANAR-FOLD decline; the SEAM-SUBFACE "not exactly resolvable"; the
 non-2-endpoint-seam "degenerate incidence"; the clean-face "filter-uncertain"
-graze; four NEAR-COPLANAR planarize refusals (degenerate face / degenerate normal
-/ global-planarity guard / inconsistent snap); the non-coplanar exact-zero SoS
-tie; the "epsilon not computable" input guard; the "input not 2-manifold"
-defensive gate; and the "resolver output failed the re-gate" R1/R2 backstop.
+graze; two NEAR-COPLANAR planarize refusals (global-planarity guard /
+inconsistent snap); the non-coplanar exact-zero SoS tie; the "epsilon not
+computable" input guard; the "input not 2-manifold" reachable defensive guard
+(fires only on the direct-Impl path); and the "resolver output failed the
+re-gate" R1/R2 backstop.
 
 Live fail-closed carriers (measured at HEAD, ZZZ_CENSUS instrumented then
 reverted):

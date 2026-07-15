@@ -3145,25 +3145,20 @@ StageResult<Manifold::Impl> SnapNearCoplanarClusters(const Manifold::Impl& in,
     std::set<int> verts;
     for (int f : faces)
       for (int k = 0; k < 3; ++k) verts.insert(vid[f][k]);
+    // faces[0] is non-degenerate by construction: a degenerate face has
+    // pairGap == +inf (unitN false), so it never unites and stays a singleton
+    // (skipped at faces.size() < 2), never entering a size>=2 cluster.
     vec3 ref;
-    if (!unitN(faces[0], ref)) {
-      return StageResult<Manifold::Impl>::Fatal(
-          FatalReason::DirtyComponentUnresolved,
-          "resolver: near-coplanar cluster has a degenerate face - "
-          "fail-closed");
-    }
+    unitN(faces[0], ref);
     vec3 nSum(0.0, 0.0, 0.0);
     for (int f : faces) {
       const vec3 raw = la::cross(tri[f][1] - tri[f][0], tri[f][2] - tri[f][0]);
       nSum += (la::dot(raw, ref) < 0.0) ? -raw : raw;
     }
+    // nl > 0 always: every raw is sign-aligned to the unit ref, and the
+    // faces[0] term contributes dot(raw_0, ref) = |raw_0| > 0, so
+    // dot(nSum, ref) >= |raw_0| > 0 and thus |nSum| > 0.
     const double nl = la::length(nSum);
-    if (!(nl > 0.0)) {
-      return StageResult<Manifold::Impl>::Fatal(
-          FatalReason::DirtyComponentUnresolved,
-          "resolver: near-coplanar cluster normal is degenerate - "
-          "fail-closed");
-    }
     const vec3 N = nSum / nl;
     vec3 cen(0.0, 0.0, 0.0);
     for (int v : verts) cen += in.vertPos_[v];
@@ -3328,6 +3323,10 @@ RegularizeResult RemoveOverlaps3D(const Manifold::Impl& in, double eps) {
                [&](int i) {
                  Manifold::Impl& comp = components[i];
                  const GateVerdict verdict = GateComponent(comp);
+                 // Reachable defensive guard on the direct-Impl path only: the
+                 // public Impl(MeshGL64) ctor sanitizes a non-manifold soup to
+                 // empty (early-returns before here), but an internally-built
+                 // Impl can present a non-manifold component. Fail closed.
                  if (verdict == GateVerdict::Invalid) {
                    co[i].fatal = FatalReason::NonManifoldEmission;
                    co[i].detail = "input component is not 2-manifold";
