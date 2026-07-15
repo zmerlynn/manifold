@@ -1846,20 +1846,52 @@ bool ExtractCells(const std::vector<vec2>& pts,
   return true;
 }
 
-// In-plane frame + canonical-vertex table shared by the two per-face
-// arrangement drivers (EmitSeamedFace, FoldCoplanarClusters).  Owns the
-// orthonormal basis (e1 along origin->edgeTip, e2 = nHat x e1 so 2D-CCW maps to
-// +nHat) and the dedup-by-3D-bit-pattern insertion (shared endpoints - chain
-// junctions, corners - collapse to one input vertex with one projection).  The
-// retention rule, the edge set, the new-crossing policy, and the hole handling
-// stay with each driver; only this projection+insertion spine is common.
-struct PlaneFrame {
-  vec3 origin, e1, e2, nHat;
+// Dominant axis of a face normal (index of the largest-magnitude component).
+inline int DominantAxis(const vec3& n) {
+  const double ax = std::abs(n.x), ay = std::abs(n.y), az = std::abs(n.z);
+  return (ax >= ay && ax >= az) ? 0 : (ay >= az ? 1 : 2);
+}
+
+// In-plane 2D flattening + canonical-vertex table shared by the per-face
+// arrangement drivers (EmitSeamedFace, FoldCoplanarClusters, the clean-face
+// junction split).  Flattening is an EXACT axis-drop: the 2D projection SELECTS
+// the two non-dominant coordinates (pure coordinate selection - no arithmetic,
+// no rounding), so every orientation/merge predicate inside RemoveOverlaps2D
+// runs on exact input/construction doubles at level 0.  The dropped axis is the
+// dominant component of the face normal, so |nHat[axis]| is the largest
+// component of a unit vector (>= 1/sqrt(3)) and the plane is never edge-on to
+// the projection.  The surviving pair is (axis+1, axis+2) cyclically so 2D-CCW
+// maps to +axis, SWAPPED when the dropped normal component is negative so 2D-
+// CCW still maps to +nHat (the parity fix).  `lift` inverts the drop for a
+// 2D-BORN point by solving the plane equation for the dropped coordinate.  Owns
+// the dedup-by-3D-bit-pattern insertion (shared endpoints - chain junctions,
+// corners - collapse to one input vertex with one projection).
+struct AxisDropFrame {
+  int axis = 2;         // dropped (dominant normal) axis
+  bool flip = false;    // dropped normal component < 0: swap the 2D pair
+  vec3 nHat;            // unit face normal (the winding-probe offset direction)
+  double planeD = 0.0;  // nHat . (an in-plane point), for the lift
   std::vector<vec2> verts2;
   std::vector<vec3> canon3;
   std::map<std::tuple<double, double, double>, int> vidx;
+  // EXACT axis-drop: select the (axis+1, axis+2) coordinate pair, swapped when
+  // the dropped normal component is negative so 2D-CCW maps to +nHat.  Affine
+  // (a linear projection), so on-line feet and param sorts stay consistent.
   vec2 proj(const vec3& P) const {
-    return vec2(la::dot(P - origin, e1), la::dot(P - origin, e2));
+    const double c1 = P[(axis + 1) % 3], c2 = P[(axis + 2) % 3];
+    return flip ? vec2(c2, c1) : vec2(c1, c2);
+  }
+  // Lift a 2D-BORN point (a RemoveOverlaps2D crossing / an interior probe with
+  // no 3D preimage) back onto the plane: undo the pair swap, then solve
+  // nHat . P = planeD for the dropped (dominant, so nonzero) coordinate.
+  vec3 lift(const vec2& q) const {
+    const int a1 = (axis + 1) % 3, a2 = (axis + 2) % 3;
+    const double c1 = flip ? q.y : q.x, c2 = flip ? q.x : q.y;
+    vec3 P;
+    P[a1] = c1;
+    P[a2] = c2;
+    P[axis] = (planeD - nHat[a1] * c1 - nHat[a2] * c2) / nHat[axis];
+    return P;
   }
   int add(const vec3& P) {
     const std::tuple<double, double, double> key{P.x, P.y, P.z};
@@ -1886,9 +1918,57 @@ struct PlaneFrame {
     return id;
   }
 };
-// Build the frame for a face with unnormalized outward normal faceN, in-plane
-// origin, and second basis point edgeTip.  Returns false (caller fails closed)
-// on a degenerate normal or edge.
+// Build the axis-drop frame for a face with unnormalized outward normal faceN
+// and an in-plane point planePt (a triangle vertex).  Returns false (caller
+// fails closed) on a degenerate normal.  The dominant-axis pick keeps the
+// projection non-degenerate BY CONSTRUCTION (|nHat[axis]| >= 1/sqrt(3)), so an
+// edge-on plane is impossible here - no branch, the invariant is asserted.
+bool BuildAxisDropFrame(const vec3& faceN, const vec3& planePt,
+                        AxisDropFrame& pf) {
+  const double nLen = la::length(faceN);
+  if (!(nLen > 0.0)) return false;
+  pf.nHat = faceN / nLen;
+  pf.axis = DominantAxis(faceN);
+  pf.flip = pf.nHat[pf.axis] < 0.0;
+  pf.planeD = la::dot(pf.nHat, planePt);
+  DEBUG_ASSERT(std::abs(pf.nHat[pf.axis]) > 0.0, logicErr,
+               "axis-drop: dominant normal component is zero");
+  return true;
+}
+
+// LEGACY orthonormal frame (e1 along origin->edgeTip, e2 = nHat x e1). Retained
+// only for the not-yet-migrated FoldCoplanarClusters + clean-face junction
+// split (they still reconstruct in-plane crossings via a0 + x*e1 + y*e2);
+// deleted once those paths move to AxisDropFrame::lift.
+struct PlaneFrame {
+  vec3 origin, e1, e2, nHat;
+  std::vector<vec2> verts2;
+  std::vector<vec3> canon3;
+  std::map<std::tuple<double, double, double>, int> vidx;
+  vec2 proj(const vec3& P) const {
+    return vec2(la::dot(P - origin, e1), la::dot(P - origin, e2));
+  }
+  int add(const vec3& P) {
+    const std::tuple<double, double, double> key{P.x, P.y, P.z};
+    auto it = vidx.find(key);
+    if (it != vidx.end()) return it->second;
+    const int id = static_cast<int>(verts2.size());
+    verts2.push_back(proj(P));
+    canon3.push_back(P);
+    vidx.emplace(key, id);
+    return id;
+  }
+  int addAt(const vec2& p2, const vec3& canon) {
+    const std::tuple<double, double, double> key{canon.x, canon.y, canon.z};
+    auto it = vidx.find(key);
+    if (it != vidx.end()) return it->second;
+    const int id = static_cast<int>(verts2.size());
+    verts2.push_back(p2);
+    canon3.push_back(canon);
+    vidx.emplace(key, id);
+    return id;
+  }
+};
 bool BuildPlaneFrame(const vec3& faceN, const vec3& origin, const vec3& edgeTip,
                      PlaneFrame& pf) {
   const double nLen = la::length(faceN);
@@ -1973,12 +2053,6 @@ inline int ExactOrient2DDrop(const vec3& p, const vec3& q, const vec3& r,
   return s != 0 ? s : Orient3DExactSign(pp, qp, rp, lift);
 }
 
-// Dominant axis of a face normal (index of the largest-magnitude component).
-inline int DominantAxis(const vec3& n) {
-  const double ax = std::abs(n.x), ay = std::abs(n.y), az = std::abs(n.z);
-  return (ax >= ay && ax >= az) ? 0 : (ay >= az ? 1 : 2);
-}
-
 // EXACT strict proper crossing of two coplanar 3D segments [p0,p1] and [q0,q1]
 // on a face whose normal's dominant axis is `axis`: each segment's endpoints
 // strictly straddle the other's supporting line (four ExactOrient2DDrop signs),
@@ -2036,16 +2110,16 @@ void EnumerateTriplePoints(BuildArrangement& A,
     if (!A.seamed[f]) continue;
     const int ns = static_cast<int>(A.faceSeams[f].size());
     if (ns < 2) continue;
-    PlaneFrame pf;
-    if (!BuildPlaneFrame(A.faceN[f], A.tri[f][0], A.tri[f][1], pf)) continue;
+    AxisDropFrame pf;
+    if (!BuildAxisDropFrame(A.faceN[f], A.tri[f][0], pf)) continue;
     std::vector<std::array<vec2, 2>> seg(ns);
     for (int k = 0; k < ns; ++k) {
       seg[k][0] = pf.proj(A.faceSeams[f][k].p0);
       seg[k][1] = pf.proj(A.faceSeams[f][k].p1);
     }
-    // Exact in-plane orientation drops the dominant normal axis (once per
-    // face).
-    const int axis = DominantAxis(A.faceN[f]);
+    // Exact in-plane orientation drops the dominant normal axis (the frame's
+    // dropped axis, computed once per face).
+    const int axis = pf.axis;
     for (int k1 = 0; k1 < ns; ++k1) {
       const int pg = planeId[A.faceSeams[f][k1].other];
       if (pg == planeId[f]) continue;
@@ -2069,7 +2143,7 @@ void EnumerateTriplePoints(BuildArrangement& A,
         if (!(std::isfinite(x.x) && std::isfinite(x.y))) continue;
         vec3 pos;
         if (perFace) {
-          pos = pf.origin + x.x * pf.e1 + x.y * pf.e2;  // this face's image
+          pos = pf.lift(x);  // this face's own image of the crossing
           if (!(std::isfinite(pos.x) && std::isfinite(pos.y) &&
                 std::isfinite(pos.z)))
             continue;
@@ -2270,16 +2344,18 @@ void BuildJunctionRegistry(BuildArrangement& A, double eps) {
 // face welds onto the identical vertex.  Strict-interior in PARAMETER (never
 // within eps of an endpoint -> no degenerate sub-edge) and on-line within eps.
 std::vector<std::pair<vec2, vec3>> JunctionSplitsOnSegment(
-    const PlaneFrame& pf, const vec3& P0, const vec3& P1,
+    const vec2& q0, const vec2& q1, const vec3& P0, const vec3& P1,
     const std::vector<vec3>& junctions, double eps,
     const std::vector<vec3>* skipNear = nullptr) {
+  // q0/q1 are the caller's 2D projection of P0/P1 (any affine in-plane frame -
+  // the on-line foot below is frame-agnostic), so this helper is independent of
+  // which face-flattening the driver uses.
   std::vector<std::pair<double, std::pair<vec2, vec3>>> ord;
   const vec3 d3 = P1 - P0;
   const double len2 = la::dot(d3, d3);
   if (!(len2 > 0.0)) return {};
   const double len = std::sqrt(len2);
   const double tlo = eps / len, thi = 1.0 - eps / len;
-  const vec2 q0 = pf.proj(P0), q1 = pf.proj(P1);
   for (const vec3& V : junctions) {
     // The split DECISION is a pure 3D on-segment test against the segment's own
     // endpoints, so the two incident faces (which see the IDENTICAL 3D
@@ -2369,19 +2445,19 @@ void EmitSeamedFace(std::vector<OutTri3D>& out, const BuildArrangement& A,
                     int f, const Manifold::Impl& in,
                     const std::vector<vec3>& seeds, double eps, bool& ok) {
   const vec3 a = A.tri[f][0], b = A.tri[f][1], c = A.tri[f][2];
-  PlaneFrame pf;
-  if (!BuildPlaneFrame(A.faceN[f], a, b, pf)) {
+  AxisDropFrame pf;
+  if (!BuildAxisDropFrame(A.faceN[f], a, pf)) {
     ok = false;
     return;
   }
-  const vec3 &nHat = pf.nHat, &e1 = pf.e1, &e2 = pf.e2;
+  const vec3& nHat = pf.nHat;
   std::vector<vec2>& verts2 = pf.verts2;
   std::vector<vec3>& canon3 = pf.canon3;
   auto getV = [&](const vec3& P) { return pf.add(P); };
   const int iA = getV(a), iB = getV(b), iC = getV(c);
   const vec2 pa = verts2[iA], pb = verts2[iB], pc = verts2[iC];
   if (!(0.5 * la::cross(pb - pa, pc - pa) > 0.0)) {
-    ok = false;  // left-handed basis or degenerate projection
+    ok = false;  // parity flip did not yield CCW, or degenerate projection
     return;
   }
   std::vector<EdgeM> edges;
@@ -2406,8 +2482,8 @@ void EmitSeamedFace(std::vector<OutTri3D>& out, const BuildArrangement& A,
   auto pushChain = [&](int vFrom, int vTo, const vec3& P0, const vec3& P1,
                        const std::vector<std::pair<vec2, vec3>>& pre) {
     std::vector<std::pair<vec2, vec3>> splits = pre;
-    for (const auto& js :
-         JunctionSplitsOnSegment(pf, P0, P1, A.junctions, eps, &ownEnds)) {
+    for (const auto& js : JunctionSplitsOnSegment(
+             pf.proj(P0), pf.proj(P1), P0, P1, A.junctions, eps, &ownEnds)) {
       bool dup = false;
       for (const auto& s : splits)
         if (la::length(s.second - js.second) <= eps) {
@@ -2507,10 +2583,13 @@ void EmitSeamedFace(std::vector<OutTri3D>& out, const BuildArrangement& A,
     if (tris.empty()) continue;
     double area2;
     const int best = LargestSubTri(tris, verts2, area2);
-    const vec2 cen2 =
-        (verts2[tris[best].x] + verts2[tris[best].y] + verts2[tris[best].z]) /
+    // Interior classify point = the DIRECT 3D centroid of the largest sub-
+    // triangle's canonical points (projection-independent - the sub-triangle
+    // verts are all shared 3D constructions), not a back-projection of the 2D
+    // centroid.  Strictly interior to the cell for the winding probe.
+    const vec3 cen3 =
+        (canon3[tris[best].x] + canon3[tris[best].y] + canon3[tris[best].z]) /
         3.0;
-    const vec3 cen3 = a + cen2.x * e1 + cen2.y * e2;
     // BOTH-SIDES RETENTION (f4-junction, port of the coplanar fold's rule):
     // probe w_S on BOTH sides of the sub-cell and retain iff EXACTLY ONE side
     // is inside {w_S>=1}; the solid side fixes the emitted orientation.  This
@@ -2661,7 +2740,8 @@ void FoldCoplanarClusters(std::vector<OutTri3D>& out, const Manifold::Impl& in,
       // reentrant corner.  No foreign junction -> the plain boundary edge,
       // byte-identical.
       const std::vector<std::pair<vec2, vec3>> splits = JunctionSplitsOnSegment(
-          pf, canon3[e.first], canon3[e.second], A.junctions, eps);
+          pf.proj(canon3[e.first]), pf.proj(canon3[e.second]), canon3[e.first],
+          canon3[e.second], A.junctions, eps);
       int prev = e.first;
       for (const auto& sp : splits) {
         int onCount = 0;
@@ -2946,8 +3026,9 @@ bool EmitCleanFaces(std::vector<OutTri3D>& out, const Manifold::Impl& in,
     bool anySplit = false;
     for (int e = 0; e < 3; ++e) {
       loop.push_back(corner[e]);
-      for (const auto& js : JunctionSplitsOnSegment(pf, P[e], P[(e + 1) % 3],
-                                                    A.junctions, eps)) {
+      for (const auto& js :
+           JunctionSplitsOnSegment(pf.proj(P[e]), pf.proj(P[(e + 1) % 3]), P[e],
+                                   P[(e + 1) % 3], A.junctions, eps)) {
         const int v = pf.addAt(js.first, js.second);
         if (v != loop.back()) {
           loop.push_back(v);
