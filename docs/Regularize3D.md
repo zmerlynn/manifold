@@ -536,7 +536,7 @@ reverted):
   -----------------|--------------------|-------------------------------|--------
   PokedCube        | (RESOLVES wjump)   | - (vol 0.25, GWN-oracle)      | constructed
   GT7863 pair      | (RESOLVES 7863c1)  | - (both dirty comps, GWN)     | corpus
-  openscad soup    | 3 winding-probe    | seam sub-face / winding-probe | corpus
+  openscad soup    | 1 EMISSION (f4-b1) | unresolvable sheet contact    | corpus
   GT7081 pair      | (RESOLVES wjump)   | - (both shells, vol-preserved)| corpus
   NearCoplanarChain| 4 PLANARIZE-GUARD  | global-planarity guard        | constructed
   BridgedCaps      | (RESOLVES)         | -                             | resolves
@@ -578,6 +578,42 @@ reverted):
   the {w>=1} boundary to touching sheets with no representable double-manifold).
   So GT7081 RECLASSIFIES AGAIN to Cluster 1a and folds into the C-1a crucible with
   GT7863.  Its winding-probe residue is closed; its terminal wall is emission.
+
+  reg3d-f4-b1 LANDED (the ONCE-ONLY 3-face triple-point construction): oscad-f4
+  measured that openscad's F4 "seam sub-face not exactly resolvable" wall is
+  ENTIRELY the 3-face TRIPLE-POINT case (the winding probe fires ZERO times -
+  REFUTING the "winding-probe / GT7081-class" reading logged for openscad in
+  Cluster 2a/3 above).  Its large dirty component is triple-point dense, and the
+  per-face resolver builds each triple point three times (once per incident
+  face's frame), so the pos2in input-preimage map refuses the constructed
+  crossings.  EnumerateTriplePoints now enumerates each triple ONCE, constructs
+  ONE canonical double point keyed by the sorted plane triple (Intersect3Planes,
+  a construction sibling of SegPlanePoint, NOT a decision), and threads it into
+  all three incident faces by PRE-SPLITTING the seams at the exact on-seam
+  crossing keyed to the shared point - so the arrangement completes at the
+  0-cells and the triple-point refusal is DISSOLVED.  Tripwire-free: no exact
+  arithmetic on constructed points, the crossing test and the winding classify
+  stay the existing level-0 predicates, and the retention rule is BYTE-UNCHANGED.
+  Bitwise no-op off openscad (zero triple points on every other corpus carrier).
+  openscad then fails one wall DEEPER at the EMISSION wall ("unresolvable sheet
+  contact", SplitTouchingSheets -> NonManifoldEmission), joining GT7081/GT7863 in
+  Cluster 1.  MEASURED (f4-b1 census): the once-only welding is LOAD-BEARING (the
+  per-face-reconstruct MUTATION reopens the triple-incident open edges) but
+  INSUFFICIENT - it closes only the triple-incident holes.  The DOMINANT
+  open-boundary residue is the DROPPED-BOUNDARY class AWAY from the triple points
+  (the everted / high-cover strata; most open edges are single dangling
+  halfedges with neither endpoint at a triple), plus a few EXACT-coincident
+  radial-tangent ties (gap exactly zero = genuine tangent sheets, not double-
+  rounding) and material overlaps.  This CONFIRMS design-a's radial-arrangement
+  residue and design-c's stated FALSIFIER (open edges PERSIST on a once-only-
+  consistent arrangement with the emission rule unchanged), and REFUTES design-b's
+  "once-only closes the near-triple majority" prediction (its near/far split was
+  confounded, as its own notebook warned) AND design-a's winding-jump re-emission
+  rule (measured to move the count the WRONG way).  Closing the residue is the
+  exact-radial substrate (the tripwire), RECORDED not built.  (Aside: at CLEAN
+  HEAD the openscad wall is MANIFOLD_PAR-dependent - F4 under PAR=OFF, already the
+  emission wall under PAR=ON; with B1 it is the emission wall under BOTH, so the
+  once-only construction also makes the openscad terminal PAR-consistent.)
 
 MEASURED CORRECTIONS to earlier anatomy (were logged at a pre-entanglement,
 pre-stage-6 HEAD): (1) PokedCube AND GT7863 fail at the SplitTouchingSheets

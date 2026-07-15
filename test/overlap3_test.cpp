@@ -1176,12 +1176,30 @@ TEST(Overlap3, Regularize_CoplanarFold_Mult3Nested_Resolves) {
 // crossings recovered, and sub-eps crossings collapsed, RecordSeams COMPLETES:
 // the F11 seam-truncation wall is CLOSED.
 //
-// openscad now fails one wall DEEPER, at the seam sub-face arrangement /
-// winding-probe classify (F4) - the SAME wall as GT7081 (reg3d-c2b: a
-// near-coplanar face grazes the winding ray-cast on the FILTER, exact-kernel-
-// decidable but the winding half does not escalate = WINDING-PROBE FILTER
-// PRECISION, kernel-tripwire-gated).  Still fail-closed, never a silent wrong
-// resolve, no OOM (bbox-prefiltered on this model).
+// B1 ONCE-ONLY TRIPLE POINTS (f4-b1) DISSOLVE the F4 seam-arrangement wall: the
+// ~150 genuine 3-face triple points on the large dirty component are enumerated
+// ONCE (EnumerateTriplePoints), each built as ONE canonical 3D point keyed by
+// its sorted plane triple, and threaded into all three incident faces' overlays
+// by pre-splitting the seams at the exact on-seam crossing (keyed to the shared
+// 3D point).  Every seam sub-face vertex now has an input preimage, so the
+// pos2in "not exactly resolvable" refusal (F4) no longer fires - the
+// arrangement completes at the 0-cells.
+//
+// openscad then fails one wall DEEPER, at the EMISSION wall
+// (SplitTouchingSheets open boundary -> NonManifoldEmission "unresolvable sheet
+// contact").  Measured (f4-b1 notebook, F4B_DUMP census): after the once-only
+// welding, the dominant open-boundary residue is the DROPPED-BOUNDARY class
+// AWAY from the triple points (the everted / high-cover strata; most open edges
+// are single dangling halfedges with neither endpoint at a triple), plus a few
+// EXACT-coincident radial-tangent ties (gap exactly 0 = genuine tangent sheets,
+// not rounding) and a few material overlaps.  The once-only construction is
+// LOAD-BEARING (the per-face-reconstruct mutation reopens the triple-incident
+// holes) but NOT sufficient: it closes only the triple-incident holes,
+// confirming design-a's radial-arrangement residue / design-c's falsifier (open
+// edges persist on a once-only-consistent arrangement with the retention rule
+// BYTE-UNCHANGED - design-a refuted the winding-jump re-emission rule). Closing
+// the residue is the exact-radial substrate (tripwire), recorded not built.
+// Still fail-closed, never a silent wrong resolve.
 TEST(Overlap3, Regularize_ExactZeroTie_Openscad_FailClosed) {
   std::filesystem::path file(__FILE__);
   std::ifstream fin(
@@ -1193,15 +1211,11 @@ TEST(Overlap3, Regularize_ExactZeroTie_Openscad_FailClosed) {
   EXPECT_GE(r.counters.dirty, 1) << "coplanar overlap must route to B";
   ASSERT_TRUE(r.fatal.has_value())
       << "the narrowed residue must fail closed, never silently resolve";
-  EXPECT_EQ(*r.fatal, FatalReason::DirtyComponentUnresolved) << r.detail;
-  // CLOSED the F11 seam-truncation wall (reg3d-oscad REOPEN: the nPts==1
-  // truncations were measure-zero phantom contacts + position-wjump crossings +
-  // sub-eps collapses, all exact-reconstructed).  The residue is now the DEEPER
-  // seam sub-face arrangement / winding-probe wall (F4, the GT7081-class
-  // winding-probe filter-precision axis, kernel-tripwire-gated).
-  EXPECT_NE(r.detail.find("seam sub-face arrangement not exactly resolvable"),
-            std::string::npos)
-      << "residue must name the deeper winding-probe wall: " << r.detail;
+  // The triple-point (F4) refusal is DISSOLVED by the once-only construction;
+  // the honest terminal is now the DEEPER emission wall.
+  EXPECT_EQ(*r.fatal, FatalReason::NonManifoldEmission) << r.detail;
+  EXPECT_NE(r.detail.find("unresolvable sheet contact"), std::string::npos)
+      << "residue must name the deeper emission wall: " << r.detail;
   EXPECT_FALSE(r.impl.has_value()) << "fail-closed yields no partial output";
 }
 
