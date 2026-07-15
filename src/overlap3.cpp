@@ -803,26 +803,22 @@ int EdgePiercesTriSoS(const vec3& u, const vec3& v, const vec3& a,
 struct TriSoup {
   std::vector<std::array<vec3, 3>> tri;
   std::vector<std::array<int, 3>> vid;
-  std::vector<vec3> lo, hi;
+  std::vector<Box> box;
   explicit TriSoup(const Manifold::Impl& in) {
     const int nTri = static_cast<int>(in.NumTri());
     tri.resize(nTri);
     vid.resize(nTri);
-    lo.resize(nTri);
-    hi.resize(nTri);
+    box.resize(nTri);
     for (int t = 0; t < nTri; ++t) {
       for (int k = 0; k < 3; ++k) {
         vid[t][k] = in.halfedge_.Start(3 * t + k);
         tri[t][k] = in.vertPos_[vid[t][k]];
       }
-      lo[t] = la::min(la::min(tri[t][0], tri[t][1]), tri[t][2]);
-      hi[t] = la::max(la::max(tri[t][0], tri[t][1]), tri[t][2]);
+      box[t].min = la::min(la::min(tri[t][0], tri[t][1]), tri[t][2]);
+      box[t].max = la::max(la::max(tri[t][0], tri[t][1]), tri[t][2]);
     }
   }
-  bool BBoxOverlap(int i, int j) const {
-    return !(hi[i].x < lo[j].x || hi[j].x < lo[i].x || hi[i].y < lo[j].y ||
-             hi[j].y < lo[i].y || hi[i].z < lo[j].z || hi[j].z < lo[i].z);
-  }
+  bool BBoxOverlap(int i, int j) const { return box[i].DoesOverlap(box[j]); }
   bool SharesVert(int i, int j) const {
     for (int a = 0; a < 3; ++a)
       for (int b = 0; b < 3; ++b)
@@ -867,11 +863,10 @@ bool TrianglesOverlap2D(const std::array<vec3, 3>& Ti,
   };
   vec2 A[3] = {pr(Ti[0]), pr(Ti[1]), pr(Ti[2])};
   vec2 B[3] = {pr(Tj[0]), pr(Tj[1]), pr(Tj[2])};
-  auto cr = [](const vec2& u, const vec2& v) { return u.x * v.y - u.y * v.x; };
   auto strictIn = [&](const vec2& p, const vec2* T) {
-    const double d0 = cr(T[1] - T[0], p - T[0]);
-    const double d1 = cr(T[2] - T[1], p - T[1]);
-    const double d2 = cr(T[0] - T[2], p - T[2]);
+    const double d0 = la::cross(T[1] - T[0], p - T[0]);
+    const double d1 = la::cross(T[2] - T[1], p - T[1]);
+    const double d2 = la::cross(T[0] - T[2], p - T[2]);
     const bool neg = d0 < 0 || d1 < 0 || d2 < 0;
     const bool pos = d0 > 0 || d1 > 0 || d2 > 0;
     return !(neg && pos) && d0 != 0 && d1 != 0 && d2 != 0;
@@ -880,8 +875,10 @@ bool TrianglesOverlap2D(const std::array<vec3, 3>& Ti,
     if (strictIn(A[k], B) || strictIn(B[k], A)) return true;
   auto proper = [&](const vec2& p1, const vec2& p2, const vec2& p3,
                     const vec2& p4) {
-    const double d1 = cr(p2 - p1, p3 - p1), d2 = cr(p2 - p1, p4 - p1);
-    const double d3 = cr(p4 - p3, p1 - p3), d4 = cr(p4 - p3, p2 - p3);
+    const double d1 = la::cross(p2 - p1, p3 - p1),
+                 d2 = la::cross(p2 - p1, p4 - p1);
+    const double d3 = la::cross(p4 - p3, p1 - p3),
+                 d4 = la::cross(p4 - p3, p2 - p3);
     return ((d1 > 0) != (d2 > 0)) && ((d3 > 0) != (d4 > 0)) && d1 != 0 &&
            d2 != 0 && d3 != 0 && d4 != 0;
   };
@@ -1138,7 +1135,7 @@ BuildArrangement RecordSeams(const Manifold::Impl& in,
   A.faceN.resize(nTri);
   A.faceSeams.resize(nTri);
   A.seamed.assign(nTri, 0);
-  std::vector<vec3> lo(nTri), hi(nTri);
+  std::vector<Box> box(nTri);
   for (int t = 0; t < nTri; ++t) {
     for (int k = 0; k < 3; ++k) {
       A.vid[t][k] = in.halfedge_.Start(3 * t + k);
@@ -1146,8 +1143,8 @@ BuildArrangement RecordSeams(const Manifold::Impl& in,
     }
     A.faceN[t] =
         la::cross(A.tri[t][1] - A.tri[t][0], A.tri[t][2] - A.tri[t][0]);
-    lo[t] = la::min(la::min(A.tri[t][0], A.tri[t][1]), A.tri[t][2]);
-    hi[t] = la::max(la::max(A.tri[t][0], A.tri[t][1]), A.tri[t][2]);
+    box[t].min = la::min(la::min(A.tri[t][0], A.tri[t][1]), A.tri[t][2]);
+    box[t].max = la::max(la::max(A.tri[t][0], A.tri[t][1]), A.tri[t][2]);
   }
   // Once-only pierce cache (doc R1): the UNDIRECTED (min,max) edge key makes a
   // shared mesh edge traversed in opposite order by two adjacent faces resolve
@@ -1171,10 +1168,7 @@ BuildArrangement RecordSeams(const Manifold::Impl& in,
     cache.emplace(key, p);
     return p;
   };
-  auto bboxOverlap = [&](int i, int j) {
-    return !(hi[i].x < lo[j].x || hi[j].x < lo[i].x || hi[i].y < lo[j].y ||
-             hi[j].y < lo[i].y || hi[i].z < lo[j].z || hi[j].z < lo[i].z);
-  };
+  auto bboxOverlap = [&](int i, int j) { return box[i].DoesOverlap(box[j]); };
   auto sharesVert = [&](int i, int j) {
     for (int a = 0; a < 3; ++a)
       for (int b = 0; b < 3; ++b)
@@ -1521,7 +1515,7 @@ bool ExtractCells(const std::vector<vec2>& pts,
       double area = 0.0;
       for (size_t k = 0; k < loop.size(); ++k) {
         const vec2 p = pts[loop[k]], q = pts[loop[(k + 1) % loop.size()]];
-        area += p.x * q.y - q.x * p.y;
+        area += la::cross(p, q);
       }
       if (area > 0.0)
         cells.push_back(std::move(loop));
@@ -1582,8 +1576,7 @@ int LargestSubTri(const std::vector<ivec3>& tris, const std::vector<vec2>& pts,
   area2 = -1.0;
   for (int t = 0; t < static_cast<int>(tris.size()); ++t) {
     const vec2 p0 = pts[tris[t].x], p1 = pts[tris[t].y], p2 = pts[tris[t].z];
-    const double ar =
-        std::abs((p1.x - p0.x) * (p2.y - p0.y) - (p1.y - p0.y) * (p2.x - p0.x));
+    const double ar = std::abs(la::cross(p1 - p0, p2 - p0));
     if (ar > area2) {
       area2 = ar;
       best = t;
@@ -1613,8 +1606,7 @@ void EmitSeamedFace(std::vector<OutTri3D>& out, const BuildArrangement& A,
   auto getV = [&](const vec3& P) { return pf.add(P); };
   const int iA = getV(a), iB = getV(b), iC = getV(c);
   const vec2 pa = verts2[iA], pb = verts2[iB], pc = verts2[iC];
-  if (!(0.5 * ((pb.x - pa.x) * (pc.y - pa.y) - (pb.y - pa.y) * (pc.x - pa.x)) >
-        0.0)) {
+  if (!(0.5 * la::cross(pb - pa, pc - pa) > 0.0)) {
     ok = false;  // left-handed basis or degenerate projection
     return;
   }
@@ -1697,9 +1689,8 @@ void EmitSeamedFace(std::vector<OutTri3D>& out, const BuildArrangement& A,
 // 2D point-in-triangle (inclusive), orientation-agnostic: true iff p is on the
 // same side (or on) all three directed edges under either winding.
 bool PointInTri2D(const vec2& p, const vec2& a, const vec2& b, const vec2& c) {
-  auto cr = [](const vec2& u, const vec2& v) { return u.x * v.y - u.y * v.x; };
-  const double d1 = cr(b - a, p - a), d2 = cr(c - b, p - b),
-               d3 = cr(a - c, p - c);
+  const double d1 = la::cross(b - a, p - a), d2 = la::cross(c - b, p - b),
+               d3 = la::cross(a - c, p - c);
   const bool neg = d1 < 0.0 || d2 < 0.0 || d3 < 0.0;
   const bool pos = d1 > 0.0 || d2 > 0.0 || d3 > 0.0;
   return !(neg && pos);
@@ -1827,7 +1818,7 @@ void FoldCoplanarClusters(std::vector<OutTri3D>& out, const Manifold::Impl& in,
       double ar = 0.0;
       for (size_t k = 0; k < L.size(); ++k) {
         const vec2 p = pts[L[k]], q = pts[L[(k + 1) % L.size()]];
-        ar += p.x * q.y - q.x * p.y;
+        ar += la::cross(p, q);
       }
       return 0.5 * ar;
     };
