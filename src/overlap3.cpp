@@ -410,56 +410,34 @@ GateVerdict GateComponent(const Manifold::Impl& comp) {
 }
 
 // ---------------------------------------------------------------------------
-// The resolver mechanism (docs/Regularize3D.md "the resolver's mechanism"),
-// ported from the FRAGMENT-VALIDATED reference (v5b fragment drivers +
-// v5b-r3/r4 notebooks): operand-agnostic ENUMERATION (level-0 pierce predicates
-// through a static Shewchuk filter) + coupled integer-delta WINDING.  Every
-// crossing DECISION is a level-0 orient3d on INPUT coordinates.  These are the
-// substrate of the resolver; the cell-complex + halfedge {w_S>=1} boundary
-// EMISSION (THE BUILD) sits on top and is the doc's named
-// largest-unbuilt-piece.
+// The resolver mechanism (docs/Regularize3D.md "the resolver's mechanism"):
+// operand-agnostic ENUMERATION (level-0 pierce predicates through a static
+// Shewchuk filter) + coupled integer-delta WINDING.  Every crossing DECISION is
+// a level-0 orient3d on INPUT coordinates.  The cell-complex + halfedge
+// {w_S>=1} boundary EMISSION (THE BUILD) sits on top.
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
 // SINGLE GLOBAL TIE-BREAK CONVENTION (SoS), docs/Regularize3D.md stage 6.
-// ONE exact integer implementation.  The perturbed 4x4 orient3d determinant is
-// sum_K coeff_K * e^K; the SoS sign is the sign of the LOWEST-K nonzero
-// coefficient.  Perturb matrix entry (row r, coord c) by e^(2^(rank(r)*3 +
-// (2-c))), rank = order of the four points' GLOBAL vertex indices; the twelve
-// keys are DISTINCT powers of two, so K is a bitmask of the perturbed entries
-// and every coefficient coeff_K is a signed sum of products of <= 3 of the
-// twelve coordinate MANTISSAS (a minor of degree <= 3 over the same windowed
-// coords).  So the whole cascade - the e^0 exact orient3d AND the higher-e
-// perturbation terms - evaluates on ONE integer path: decompose each coord to
-// (mantissa*2^exp) via frexp, form each term as a 192-bit |product of <= 3
-// mantissas| at a 2-exponent, align a coefficient's terms to their min
-// exponent, and accumulate the sign in a two's-complement bigint.  The
-// accumulator width is ADAPTIVE (limbs computed from the term-exponent spread)
-// and sized to the worst-case finite-double spread, so there is NO window-fail
-// refusal: the sign is TOTAL for every finite-double input (0 means an exact
-// geometric tie, never "uncertain").  Local-rank reduction: the map (local rank
-// r)->(global rank G(r)) is strictly monotonic on the bit positions r*3+(2-c),
-// so the leading monomial - hence the sign - is invariant to using local ranks
-// 0..3 in place of the true global ranks; a per-predicate local computation
-// decides consistently with ONE global perturbation.  This is the ONLY
-// tie-break convention, threaded through every enumeration predicate so a ray
-// or edge grazing a shared boundary resolves identically for every probe.
-// Validated (reg3d-s6r notebook): BITWISE-identical to the prior
-// Shewchuk-expansion cascade on the mesh domain (same-scale + mixed-magnitude,
-// e^0 and SoS, zero mismatch), and exact-correct vs an arbitrary-precision
-// oracle on wild inputs where the expansion overflowed double; the fixed-window
-// predecessor refused a zero-straddling adversary this path decides.  Only
-// invoked on the RARE filter-uncertain (0) fallback, so the certified fast path
-// (and siA/siB, fully certified) is untouched.
+// ONE exact integer implementation, threaded through every enumeration
+// predicate so a ray or edge grazing a shared boundary resolves identically for
+// every probe.  Each coord is decomposed to (mantissa * 2^exp) via frexp; the
+// perturbed 4x4 orient3d cascade (the e^0 exact orient3d plus the symbolic
+// higher-e terms) evaluates on one integer path - products of <= 3 mantissas
+// accumulated in an adaptive-width two's-complement bigint.  TOTAL for every
+// finite-double input: no window-fail, no refusal (0 means an exact geometric
+// tie, never "uncertain").  The derivation - the e^K expansion, the
+// accumulator-width bound, and the local-rank reduction that lets a per-
+// predicate LOCAL rank stand in for the global one - is in docs/Regularize3D.md
+// stage 6.  Only invoked on the RARE filter-uncertain (0) fallback, so the
+// certified fast path is untouched.
 //
 // RELUCTANT ACCEPTANCE (owner contract): this integer exact kernel is net-new
-// surface the design had declined ("no exact kernel in the tree",
-// docs/Regularize3D.md resolver mechanism).  It is accepted NARROWLY as the
-// stage-6 filter-0 fallback - one implementation, single call site discipline,
-// off every certified path.  QUEUED FOR REVISIT (docs/Regularize3D.md open
-// list): whether the arrangement can be structured to avoid needing an exact
-// orient3d kernel at all remains an open question; this kernel is the current,
-// reluctantly-accepted answer, not a settled one.
+// surface the design had declined ("no exact kernel in the tree").  Accepted
+// NARROWLY as the stage-6 filter-0 fallback - one implementation, single call
+// site discipline, off every certified path.  QUEUED FOR REVISIT
+// (docs/Regularize3D.md open list): whether the arrangement can be structured
+// to avoid an exact orient3d kernel at all remains open.
 namespace sos {
 constexpr int kPerm[24][4] = {
     {0, 1, 2, 3}, {0, 1, 3, 2}, {0, 2, 1, 3}, {0, 2, 3, 1}, {0, 3, 1, 2},
@@ -708,24 +686,17 @@ inline int Orient3DFilterSign(const vec3& a, const vec3& b, const vec3& c,
   return 0;  // uncertain -> Orient3DExactSign, then SoS (Orient3DSoS)
 }
 
-// The micro exact tie-test (owner contract): the EXACT orient3d sign, 0 iff the
-// four points are exactly coplanar.  ONE integer path (sos::ExactOrient3D),
-// TOTAL for every finite-double input - no window-fail, no expansion fallback.
-// RELUCTANT ACCEPTANCE: this exact kernel is net-new surface the design had
-// declined ("no exact kernel in the tree", docs/Regularize3D.md resolver
-// mechanism); the owner accepted it NARROWLY for the stage-6 tie residue.
-// TRIPWIRE (docs/Regularize3D.md open list), RELAXED by the owner to ONE
-// PREDICATE, ONE IMPLEMENTATION: this is legitimate as ONE exact predicate FORM
-// (this ~100-line adaptive-integer orient3d), and ADDITIONAL CALLERS are within
-// the blessed pattern (zero new arithmetic) as long as each stays FILTER-FIRST
-// (exact fires only behind a filter 0).  Current caller inventory: the SoS tie
-// cascade (Orient3DSoS), the EdgePiercesTriSoS edge-in-plane guard, the
-// winding-probe escalation (WindingAt, reg3d-c2bx), and the test probe.  The
-// >2-sheet radial rule is a BANKED (unbuilt) prospective caller.  What stays
-// tripwired is a SECOND predicate FORM: if one is ever needed, VENDOR
-// Shewchuk's public-domain predicates.c instead of growing this - do NOT
-// rebuild expansion arithmetic piecemeal.  The certified fast path never
-// touches it.
+// The micro exact tie-test: the EXACT orient3d sign, 0 iff the four points are
+// exactly coplanar.  ONE integer path (sos::ExactOrient3D), TOTAL for every
+// finite-double input.
+// TRIPWIRE (owner contract, docs/Regularize3D.md open list): this is the ONE
+// blessed exact predicate FORM.  Additional CALLERS are fine as long as each
+// stays FILTER-FIRST (exact fires only behind a filter 0, zero new arithmetic)
+// - current callers: Orient3DSoS, the EdgePiercesTriSoS edge-in-plane guard,
+// the WindingAt escalation, and the test probe.  A SECOND predicate FORM stays
+// tripwired: if one is ever needed, VENDOR Shewchuk's public-domain
+// predicates.c - do NOT rebuild expansion arithmetic piecemeal.  The certified
+// fast path never touches it.
 inline int Orient3DExactSign(const vec3& a, const vec3& b, const vec3& c,
                              const vec3& d) {
   const double pts[4][3] = {
@@ -1149,13 +1120,9 @@ BuildArrangement RecordSeams(const Manifold::Impl& in,
   // Once-only pierce cache (doc R1): the UNDIRECTED (min,max) edge key makes a
   // shared mesh edge traversed in opposite order by two adjacent faces resolve
   // to ONE bit-identical pierce point, so chaining seams meet exactly and the
-  // cross-face weld cannot manufacture a twin.  This is a CORRECTNESS-by-
-  // construction backstop for the near-parallel tail (R1), not a runtime check:
-  // it is verified NON-load-bearing on the shipped corpus (s2-verify) AND on a
-  // broad general-position sphere family (reg3d-s3: bit-identical emitted
-  // volume under a directed-key mutation, the eps weld absorbing the sub-ULP
-  // divergence), so there is no DEBUG_ASSERT to demote it to - it stays as the
-  // R1 backstop.
+  // cross-face weld cannot manufacture a twin.  A correctness-by-construction
+  // backstop for the near-parallel tail, not a runtime check (measured
+  // non-load-bearing on the corpus, but retained; docs/Regularize3D.md R1).
   std::map<PierceKey, vec3> cache;
   auto pierce = [&](int edgeV0, int edgeV1, int piercedTri) -> vec3 {
     const PierceKey key{std::min(edgeV0, edgeV1), std::max(edgeV0, edgeV1),
@@ -1926,30 +1893,19 @@ void FoldCoplanarClusters(std::vector<OutTri3D>& out, const Manifold::Impl& in,
 // w_above is exterior on both sides and DROPS (the axis-1 subtraction
 // absorption), not a fail-closed.
 //
-// PER-FACE, not per-patch (reg3d-s7b/reg3d-arr).  Clean faces partition into
-// clean-clean-connected patches; the coverage is CONSTANT across an uncrossed
-// clean-clean edge UNLESS the arrangement is incomplete (a shares-vertex-skip
-// crossing, the everted-corner defect).  The earlier flood decided a whole
-// patch by ONE representative probe, ASSUMING uniformity - which holds on mild
-// self-intersectors (siA/siB) but BREAKS on a folded soup: PokedCube's everted
-// corner puts a w_above==0 boundary face and a w_above==-1 exterior face in ONE
-// clean patch, so a w<0 representative wrongly DROPPED the boundary faces (a
-// latent SILENT-WRONGNESS class - the mirror config would EMIT unverified
-// faces), leaving the open fan the carrier fails on.
-//
-// So: probe each face by its OWN winding (this RETAINS the everted-corner
-// boundary faces the flood dropped).  The coverage just above a CLEAN
-// (uncrossed, non-near-coplanar post stage-5) triangle is CONSTANT across its
-// interior - no face is crossed moving the query point at height eps over the
-// triangle - so when the centroid probe GRAZES every seed (the
-// component-local-seed axis, hit by axis-aligned integer geometry:
-// BridgedCaps/TJunction/BarsCrossZ) we re-probe at OTHER interior points of the
-// SAME triangle, which sample the SAME winding cell.  This dodges the graze
-// WITHOUT any patch-uniformity assumption (fully sound: a wrong retain is
-// impossible - every emitted face's winding was directly measured).  Only a
-// face that grazes at EVERY interior point fails closed (never emit unverified
-// geometry).  Cost: O(nTri) winding queries worst case (the doc's named
-// winding-query perf axis; BVH is the later pass).
+// PER-FACE, not per-patch: coverage is constant across an uncrossed clean-clean
+// edge only when the arrangement is complete, so a per-patch representative
+// flood is silently wrong on a folded soup (an everted corner can put a
+// w_above==0 boundary face and a w_above==-1 exterior face in ONE patch, so a
+// w<0 representative would drop genuine boundary faces).  Probing each face by
+// its OWN winding is uniformly sound - a wrong retain is impossible because
+// every emitted face's winding is directly measured.  When the centroid probe
+// GRAZES every seed (axis-aligned integer geometry), re-probe at other interior
+// points of the SAME triangle: the winding cell just above a clean triangle is
+// constant, so this dodges the graze without any patch-uniformity assumption; a
+// face that grazes at EVERY interior point fails closed.  Cost: O(nTri) winding
+// queries worst case (the winding-query perf axis; a BVH is the later pass).
+// The everted-corner rationale is in docs/Regularize3D.md.
 bool EmitCleanFaces(std::vector<OutTri3D>& out, const Manifold::Impl& in,
                     const BuildArrangement& A,
                     const std::vector<int>& face2cluster,
