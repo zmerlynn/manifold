@@ -169,6 +169,41 @@ static Manifold::Impl PokedCube() {
   return Manifold::Impl(poked.GetMeshGL64());
 }
 
+// Independent winding-number volume oracle (Van Oosterom-Strackee solid
+// angle over the raw soup; grid flood of round(GWN)>=1) for the resolver
+// acceptance battery (reg3d-wjump).
+static double GwnVolumeOracle(const Manifold::Impl& in, vec3 lo, vec3 hi,
+                              int G) {
+  const int nTri = static_cast<int>(in.NumTri());
+  std::vector<std::array<vec3, 3>> T(nTri);
+  for (int t = 0; t < nTri; ++t)
+    for (int k = 0; k < 3; ++k)
+      T[t][k] = in.vertPos_[in.halfedge_.Start(3 * t + k)];
+  auto gwn = [&](vec3 p) {
+    double s = 0.0;
+    for (int t = 0; t < nTri; ++t) {
+      const vec3 a = T[t][0] - p, b = T[t][1] - p, c = T[t][2] - p;
+      const double la0 = la::length(a), lb = la::length(b), lc = la::length(c);
+      const double num = la::dot(a, la::cross(b, c));
+      const double den = la0 * lb * lc + la::dot(a, b) * lc +
+                         la::dot(b, c) * la0 + la::dot(c, a) * lb;
+      s += std::atan2(num, den);
+    }
+    return s / (2.0 * 3.14159265358979323846);  // winding number
+  };
+  long inCnt = 0, tot = 0;
+  const vec3 d = hi - lo;
+  for (int ix = 0; ix < G; ++ix)
+    for (int iy = 0; iy < G; ++iy)
+      for (int iz = 0; iz < G; ++iz) {
+        vec3 p(lo.x + d.x * (ix + 0.5) / G, lo.y + d.y * (iy + 0.5) / G,
+               lo.z + d.z * (iz + 0.5) / G);
+        if (std::lround(gwn(p)) >= 1) ++inCnt;
+        ++tot;
+      }
+  return d.x * d.y * d.z * (double)inCnt / (double)tot;
+}
+
 // Pin 1: clean-input identity.  A clean single connected component passes the
 // gate and is copied through BITWISE-unchanged (mesh geometry + topology).
 TEST(Overlap3, Regularize_CleanSingleComponent_BitwisePassThrough) {
@@ -205,46 +240,73 @@ TEST(Overlap3, Regularize_MultiComponent_AllClean_DispatchCounts) {
 }
 
 // Pin 3: multi-component dispatch, one clean + one dirty.  The clean cube
-// early-exits; the poked cube routes to the resolver and fails closed - the
-// whole result is the honest fail-closed, with complete dispatch counts.  Post
-// stage-6 SoS the poked cube PASSES the exact-zero tie gate and fails NARROWER,
-// at emission (NonManifoldEmission: the collapsed-vertex spike is a degenerate
-// touching-sheet contact, no representable manifold boundary - stage-7
-// territory), never a silent wrong result.
+// early-exits; the poked cube routes to the resolver and now RESOLVES (the
+// everted-spike arrangement closes once the shares-vertex genuine-crossing
+// recovery records the crossings the broadphase skip dropped, reg3d-wjump). The
+// dispatch counts show one regularized, none fail-closed; compose-back keeps
+// the two components separate (non-fusion).
 TEST(Overlap3, Regularize_MultiComponent_CleanPlusDirty_DispatchCounts) {
   const Manifold clean = Manifold::Cube({1, 1, 1}).Translate({3, 0, 0});
   const Manifold dirtyM(GetMeshGLImpl<double, uint64_t>(PokedCube(), -1));
   const Manifold::Impl in = ComposeImpl(clean, dirtyM);
   const RegularizeResult r = RemoveOverlaps3D(in, ImplEps(in));
+  ASSERT_FALSE(r.fatal.has_value()) << r.detail;
+  ASSERT_TRUE(r.impl.has_value());
   EXPECT_EQ(r.counters.components, 2);
   EXPECT_EQ(r.counters.clean, 1);
   EXPECT_EQ(r.counters.dirty, 1);
-  EXPECT_EQ(r.counters.regularized, 0);
-  EXPECT_EQ(r.counters.failClosed, 1);
-  ASSERT_TRUE(r.fatal.has_value())
-      << "a dirty component must fail closed, never a silent wrong result";
-  EXPECT_EQ(*r.fatal, FatalReason::NonManifoldEmission) << r.detail;
-  EXPECT_FALSE(r.impl.has_value()) << "fail-closed yields no partial output";
+  EXPECT_EQ(r.counters.regularized, 1);
+  EXPECT_EQ(r.counters.failClosed, 0);
+  const Manifold out(GetMeshGLImpl<double, uint64_t>(*r.impl, -1));
+  EXPECT_EQ(out.Status(), Manifold::Error::NoError);
+  EXPECT_FALSE(r.impl->IsSelfIntersecting()) << "resolved output must be clean";
 }
 
-// Pin 4: a dirty single component routes to the resolver and fails closed. Post
-// stage-6 SoS the poked cube passes the exact-zero tie gate and fails NARROWER,
-// at emission (NonManifoldEmission), never a silent wrong result.
+// Pin 4: a dirty single component (the poked cube) routes to the resolver and
+// now RESOLVES to the boundary of {w_S>=1}.  The everted +++->--- corner is a
+// near-triple-point where three faces sharing the collapsed spike vertex cross
+// transversally OFF the shared vertex; the old shares-vertex broadphase skip
+// dropped those crossings, leaving an incomplete arrangement whose emission
+// opened (unbalanced fans - the 8-edge-hole family, reg3d-c1a).  The
+// reg3d-wjump shares-vertex genuine-crossing recovery records them (SoS-decided
+// pierces, seam [V, offVertexP]), completing the arrangement so the per-face
+// witness rule classifies the everted (w=-1, dropped) region apart from the
+// {w>=1} boundary. Oracle-graded: the emitted volume matches an INDEPENDENT
+// winding-number MC oracle, is tol-invariant, non-self-intersecting, and a
+// valid manifold.
 TEST(Overlap3, Regularize_DirtySingleComponent_RoutesToResolver) {
   const Manifold::Impl dirty = PokedCube();
   ASSERT_TRUE(dirty.IsManifold() && dirty.Is2Manifold())
       << "fixture must be a valid 2-manifold";
   ASSERT_TRUE(dirty.IsSelfIntersecting())
       << "fixture must self-intersect (else it is not a dirty component)";
-  const RegularizeResult r = RemoveOverlaps3D(dirty, ImplEps(dirty));
+  const double eps = ImplEps(dirty);
+  const RegularizeResult r = RemoveOverlaps3D(dirty, eps);
+  ASSERT_FALSE(r.fatal.has_value())
+      << "must resolve, not fail closed: " << r.detail;
+  ASSERT_TRUE(r.impl.has_value());
   EXPECT_EQ(r.counters.components, 1);
-  EXPECT_EQ(r.counters.clean, 0);
   EXPECT_EQ(r.counters.dirty, 1);
-  EXPECT_EQ(r.counters.regularized, 0);
-  EXPECT_EQ(r.counters.failClosed, 1);
-  ASSERT_TRUE(r.fatal.has_value());
-  EXPECT_EQ(*r.fatal, FatalReason::NonManifoldEmission) << r.detail;
-  EXPECT_FALSE(r.impl.has_value());
+  EXPECT_EQ(r.counters.regularized, 1);
+  EXPECT_EQ(r.counters.failClosed, 0);
+
+  const Manifold out(GetMeshGLImpl<double, uint64_t>(*r.impl, -1));
+  EXPECT_EQ(out.Status(), Manifold::Error::NoError) << "output not a manifold";
+  EXPECT_FALSE(r.impl->IsSelfIntersecting()) << "output still self-intersects";
+
+  // GEOMETRIC CORRECTNESS: independent GWN volume oracle over the raw soup.
+  const double oracle = GwnVolumeOracle(dirty, vec3(-1.05), vec3(0.55), 120);
+  const double vol = out.Volume();
+  EXPECT_NEAR(vol, oracle, 0.02)
+      << "resolved {w>=1} volume off the winding oracle";
+
+  // TOL-INVARIANCE: the topology is decided from input data, not rounded
+  // coords.
+  const RegularizeResult r2 = RemoveOverlaps3D(dirty, eps * 0.5);
+  ASSERT_TRUE(r2.impl.has_value()) << r2.detail;
+  const Manifold out2(GetMeshGLImpl<double, uint64_t>(*r2.impl, -1));
+  EXPECT_NEAR(vol, out2.Volume(), 1e-6 * std::abs(vol) + 1e-9)
+      << "enclosed volume is not tol-invariant";
 }
 
 // White-box classification pin (reg3d-s7b + reg3d-arr): the clean-face
@@ -721,10 +783,12 @@ TEST(Overlap3, Orient3DExactSign_PropertyPin) {
 // Constructed carrier: a SINGLE self-intersecting component with ISOLATED
 // exact-zero ties (vertex-on-plane + pierce-on-edge, NO coplanar overlap - the
 // PokedCube's axis-aligned spike pierces the far faces at exact configs).  The
-// SoS now DECIDES those ties (the carrier passes the exact-zero tie gate); it
-// then fails NARROWER, at emission - the collapsed-vertex spike is a degenerate
-// touching-sheet contact (stage-7 thin-cell), not the SoS axis.
-TEST(Overlap3, Regularize_ExactZeroTie_Constructed_FailClosed) {
+// SoS DECIDES those ties (the carrier passes the exact-zero tie gate) AND the
+// shares-vertex genuine-crossing recovery (reg3d-wjump) completes the
+// everted-spike arrangement, so the carrier now RESOLVES oracle-true instead of
+// opening at emission.  Both axes are exercised: the exact-zero tie is reached
+// (boundaryTouchPairs>0) and the resolve is winding-oracle-correct.
+TEST(Overlap3, Regularize_ExactZeroTie_Constructed_Resolves) {
   const Manifold::Impl in = PokedCube();
   ASSERT_TRUE(in.IsManifold() && in.Is2Manifold());
   ASSERT_TRUE(in.IsSelfIntersecting()) << "carrier must be a dirty component";
@@ -736,27 +800,36 @@ TEST(Overlap3, Regularize_ExactZeroTie_Constructed_FailClosed) {
       << "carrier must reach an exact-zero tie (the axis under test)";
 
   const RegularizeResult r = RemoveOverlaps3D(in, ImplEps(in));
-  ASSERT_TRUE(r.fatal.has_value())
-      << "the residue must fail closed, never a silent resolve";
-  // NARROWED: past the SoS gate, now the thin-cell / touching-sheet emission.
-  EXPECT_EQ(*r.fatal, FatalReason::NonManifoldEmission) << r.detail;
-  EXPECT_FALSE(r.impl.has_value()) << "fail-closed yields no partial output";
-  EXPECT_EQ(r.counters.regularized, 0);
-  EXPECT_EQ(r.counters.failClosed, 1);
+  ASSERT_FALSE(r.fatal.has_value())
+      << "must resolve, not fail closed: " << r.detail;
+  ASSERT_TRUE(r.impl.has_value());
+  EXPECT_EQ(r.counters.regularized, 1);
+  EXPECT_EQ(r.counters.failClosed, 0);
+  const Manifold out(GetMeshGLImpl<double, uint64_t>(*r.impl, -1));
+  EXPECT_EQ(out.Status(), Manifold::Error::NoError);
+  EXPECT_FALSE(r.impl->IsSelfIntersecting());
+  const double oracle = GwnVolumeOracle(in, vec3(-1.05), vec3(0.55), 120);
+  EXPECT_NEAR(out.Volume(), oracle, 0.02)
+      << "resolved {w>=1} volume off the winding oracle";
 }
 
 // Real carrier: the GT7863 twin pair composed as ONE soup.  Connectivity splits
 // it into 4 pieces (non-fusion contract: they stay separate).  TWO route dirty:
-// one is self-intersecting, and one carries a WITHIN-component coplanar overlap
-// that the re-scoped coplanar gate catches (IsSelfIntersecting misses it,
-// R2(i)). The other two early-exit clean.  Post stage-6 SoS the dirty pieces
-// PASS the exact-zero tie gate (the NON-coplanar vertex-on-face / edge-on-edge
-// ties now DECIDE), then fail NARROWER, at EMISSION: GT7863's dirty component
-// is COPLANAR-DOMINATED (reg3d-s3: 54 coplanar pairs across 23 of 216 tris),
-// whose resolved boundary reduces to sub-eps / touching-sheet slivers with no
-// representable double manifold boundary (NonManifoldEmission, a hard
-// fail-closed = no output; the doc's stage-7 thin-cell axis, not the SoS axis).
-// The whole compose fail-closes (any component fail-closed suppresses output).
+// one is SELF-INTERSECTING (the 8-edge-hole emission carrier), and one carries
+// a WITHIN-component COPLANAR OVERLAP (a double sheet).  NARROWED by
+// reg3d-wjump: the shares-vertex genuine-crossing recovery CLOSES the
+// self-intersecting component's 8-edge hole - measured white-box below:
+// decomposed, that component RESOLVES oracle-true (its {w>=1} volume is
+// preserved to the input's signed volume, tol-invariant,
+// non-self-intersecting).  The compose still fails closed on the OTHER dirty
+// component: the coplanar double sheet fails the fold self-check (in-plane
+// cover m=2, but the 3D winding jumps 1 - GWN-verified a single-sheet {w>=1}
+// exists, but the doubled connectivity is the Cluster-1a emission
+// REPRESENTABILITY wall, reg3d-wjump honest wall).  So the terminal fatal moves
+// from NonManifoldEmission to DirtyComponentUnresolved (narrower;
+// mutation-verified: reverting the recovery reopens the 8-edge hole and the
+// fatal returns to NonManifoldEmission).  Any component fail-closed suppresses
+// output, so the whole compose fails closed - never a silent wrong resolve.
 TEST(Overlap3, Regularize_ExactZeroTie_GT7863_FailClosed) {
   std::filesystem::path file(__FILE__);
   auto load = [&](const char* n) -> std::optional<MeshGL64> {
@@ -784,12 +857,47 @@ TEST(Overlap3, Regularize_ExactZeroTie_GT7863_FailClosed) {
   EXPECT_EQ(r.counters.clean, 2) << "2 components early-exit clean";
   EXPECT_EQ(r.counters.dirty, 2)
       << "1 self-intersecting + 1 within-component coplanar overlap";
-  ASSERT_TRUE(r.fatal.has_value()) << "the thin-cell residue must fail closed";
-  // NARROWED: past the SoS gate, now the coplanar-sliver / touching-sheet
-  // emission wall (stage-7 thin-cell), never a silent wrong resolve.
-  EXPECT_EQ(*r.fatal, FatalReason::NonManifoldEmission) << r.detail;
+  ASSERT_TRUE(r.fatal.has_value())
+      << "the coplanar double-sheet residue must fail closed";
+  // NARROWED (reg3d-wjump): the 8-edge-hole emission carrier now resolves; the
+  // terminal wall is the coplanar double-sheet fold self-check decline.
+  EXPECT_EQ(*r.fatal, FatalReason::DirtyComponentUnresolved) << r.detail;
   EXPECT_FALSE(r.impl.has_value())
       << "any component fail-closed suppresses the whole compose (no partial)";
+
+  // WHITE-BOX: the SELF-INTERSECTING component (the 8-edge hole) now RESOLVES
+  // oracle-true - the reg3d-wjump recovery closes the hole.  Decompose, find
+  // it, resolve it in isolation, and grade its volume against the input soup's
+  // signed volume (the near-tangent self-overlap is measure-~0 so {w>=1} volume
+  // is preserved) + tol-invariance + non-self-intersection.
+  const Manifold M(GetMeshGLImpl<double, uint64_t>(in, -1));
+  int resolvedSI = 0;
+  for (const Manifold& c : M.Decompose()) {
+    Manifold::Impl ci(c.GetMeshGL64());
+    if (!ci.IsSelfIntersecting()) continue;
+    const double ceps = ImplEps(ci);
+    const RegularizeResult rc = ResolveComponentDirect(ci, ceps);
+    ASSERT_FALSE(rc.fatal.has_value())
+        << "the 8-edge-hole component must resolve: " << rc.detail;
+    ASSERT_TRUE(rc.impl.has_value());
+    EXPECT_FALSE(rc.impl->IsSelfIntersecting());
+    const double inVol =
+        Manifold(GetMeshGLImpl<double, uint64_t>(ci, -1)).Volume();
+    const double outVol =
+        Manifold(GetMeshGLImpl<double, uint64_t>(*rc.impl, -1)).Volume();
+    EXPECT_NEAR(outVol, inVol, 1e-3 * std::abs(inVol))
+        << "resolved {w>=1} volume must preserve the near-tangent soup volume";
+    const RegularizeResult rc2 = ResolveComponentDirect(ci, ceps * 0.5);
+    ASSERT_TRUE(rc2.impl.has_value());
+    EXPECT_NEAR(
+        outVol,
+        Manifold(GetMeshGLImpl<double, uint64_t>(*rc2.impl, -1)).Volume(),
+        1e-6 * std::abs(outVol) + 1e-9)
+        << "resolved volume not tol-invariant";
+    ++resolvedSI;
+  }
+  EXPECT_EQ(resolvedSI, 1)
+      << "exactly one self-intersecting component resolves";
 }
 
 // ===========================================================================
@@ -1914,48 +2022,53 @@ TEST(Overlap3, Corpus_Offsets_CleanPassThrough) {
   }
 }
 
-// GenericTwin7081: the pair decomposes into 13 components; 11 gate clean but 2
-// carry a within-component defect that fails closed NARROWER than before.  Its
-// history is two reclassifications: the census scoped it as a Cluster-2 seam
-// sub-face arrangement ("not exactly resolvable"); reg3d-c2b's anatomy REFUTED
-// that (the 2D seam sub-face arrangement resolves EXACTLY - zero triple points)
-// and re-scoped it to the WINDING-PROBE filter-precision residue (both dirty
-// shells fail at the winding CLASSIFY probe grazing a near-coplanar shallow-
-// dihedral face on the static filter, which the exact kernel decides NONZERO).
-// The reg3d-c2bx escalation (WindingAt filter-0 -> Orient3DExactSign) now
-// CLOSES that winding-probe residue: both shells decide the classify exactly
-// (measured zero genuine ties - every graze is decidably off-plane).  That
-// reveals the DEEPER pre-existing wall underneath: both dirty shells now fail
-// at emission - "unresolvable sheet contact" (SplitTouchingSheets ->
-// NonManifoldEmission), the CLUSTER-1 EMISSION REPRESENTABILITY wall, IDENTICAL
-// to GT7863's (near-coplanar sliver: GT7081's 0.002deg near-tangent geometry
-// reduces the {w>=1} boundary to touching sheets with no representable
-// double-manifold).  So GT7081 RECLASSIFIES AGAIN (Cluster 3 winding-probe ->
-// Cluster 1 emission) and folds into the C-1a crucible with GT7863.
-// MUTATION-VERIFIED: disabling the escalation reverts this to
-// FatalReason::DirtyComponentUnresolved (the winding-probe wall); the current
-// pin asserts the narrower emission wall.  Any component fail-closed suppresses
-// output, so the whole compose fails closed - the honest recorded refusal,
-// never a silent wrong resolve.  HEAVY (~37s: the escalation runs the exact
-// tie-test on the near-tangent grazes, then reaches emission); run under the
-// corpus resource cap (ulimit -v 4000000; timeout 900).
-TEST(Overlap3, Corpus_GenericTwin7081_FailClosed) {
+// GenericTwin7081: the pair decomposes into 13 components; 11 gate clean and 2
+// carry a within-component defect - two near-flat SHELLS with a 0.002deg
+// near-tangent self-overlap.  History: census -> Cluster-2 seam sub-face;
+// reg3d- c2b -> winding-probe filter-precision (closed by the reg3d-c2bx
+// exact-classify escalation); then the pre-existing Cluster-1 emission wall
+// (unbalanced fans from crossings the shares-vertex broadphase skip DROPPED).
+// reg3d-wjump CLOSES it: the shares-vertex genuine-crossing recovery records
+// those crossings, so both shells complete their arrangement and RESOLVE.
+// Oracle: the near-tangent overlap is measure-~0, so each shell's {w>=1} volume
+// is preserved to its input signed volume (a GWN grid oracle is unusable at
+// these near-flat sheets at scale ~20000 - one cell exceeds the whole solid);
+// the resolve is non-self-intersecting, a valid manifold, and tol-invariant.
+// MUTATION-VERIFIED: reverting the recovery reopens the fans ->
+// NonManifoldEmission.  HEAVY (~45s); run under the corpus resource cap (ulimit
+// -v 4000000; timeout 900).
+TEST(Overlap3, Corpus_GenericTwin7081_Resolves) {
   const auto in = LoadCorpusPair("Generic_Twin_7081.1.t0_left.obj",
                                  "Generic_Twin_7081.1.t0_right.obj");
   if (!in) GTEST_SKIP() << "model not found";
+  const double inVol =
+      Manifold(GetMeshGLImpl<double, uint64_t>(*in, -1)).Volume();
   const RegularizeResult r = RemoveOverlaps3D(*in, ImplEps(*in));
-  ASSERT_TRUE(r.fatal.has_value()) << "GT7081 must fail closed, not resolve";
-  // NARROWED past the winding-probe graze (reg3d-c2bx): the terminal wall is
-  // now the Cluster-1 emission representability wall, GT7863-class.
-  EXPECT_EQ(*r.fatal, FatalReason::NonManifoldEmission) << r.detail;
-  EXPECT_NE(r.detail.find("unresolvable sheet contact"), std::string::npos)
-      << "residue must name the emission wall: " << r.detail;
-  EXPECT_FALSE(r.impl.has_value()) << "fail-closed yields no partial output";
+  ASSERT_FALSE(r.fatal.has_value()) << "GT7081 must resolve: " << r.detail;
+  ASSERT_TRUE(r.impl.has_value());
   EXPECT_EQ(r.counters.components, 13) << "decompose count";
   EXPECT_EQ(r.counters.clean, 11);
   EXPECT_EQ(r.counters.dirty, 2)
       << "two shells carry a within-component defect";
-  EXPECT_EQ(r.counters.regularized, 0);
-  EXPECT_EQ(r.counters.failClosed, 2);
+  EXPECT_EQ(r.counters.regularized, 2);
+  EXPECT_EQ(r.counters.failClosed, 0);
+  const Manifold out(GetMeshGLImpl<double, uint64_t>(*r.impl, -1));
+  EXPECT_EQ(out.Status(), Manifold::Error::NoError) << "output not a manifold";
+  // The composed whole self-intersects by design (the two twins overlap in
+  // space - a CROSS-component overlap the non-fusion contract keeps separate,
+  // never this operator's job), so check per-component: every resolved shell is
+  // individually non-self-intersecting (the within-component defect removed).
+  for (const Manifold& c : out.Decompose())
+    EXPECT_FALSE(Manifold::Impl(c.GetMeshGL64()).IsSelfIntersecting())
+        << "a resolved component still self-intersects";
+  // Measure-~0 near-tangent overlap: {w>=1} volume preserved.
+  EXPECT_NEAR(out.Volume(), inVol, 1e-3 * std::abs(inVol))
+      << "resolved volume must preserve the near-tangent soup volume";
+  const RegularizeResult r2 = RemoveOverlaps3D(*in, ImplEps(*in) * 0.5);
+  ASSERT_TRUE(r2.impl.has_value()) << r2.detail;
+  EXPECT_NEAR(out.Volume(),
+              Manifold(GetMeshGLImpl<double, uint64_t>(*r2.impl, -1)).Volume(),
+              1e-6 * std::abs(out.Volume()) + 1e-9)
+      << "enclosed volume is not tol-invariant";
 }
 #endif

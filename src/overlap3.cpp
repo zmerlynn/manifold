@@ -1166,7 +1166,52 @@ BuildArrangement RecordSeams(const Manifold::Impl& in,
   for (int i = 0; i < nTri; ++i) {
     for (int j = i + 1; j < nTri; ++j) {
       if (!bboxOverlap(i, j)) continue;
-      if (sharesVert(i, j)) continue;
+      // SHARES-VERTEX GENUINE-CROSSING RECOVERY (reg3d-wjump
+      // decision-completion 1).  The shared-vertex broadphase skip assumes
+      // shared-vertex => self-adjacent => no transversal crossing, which is
+      // UNSOUND for a self-intersecting soup where two faces sharing a vertex
+      // fold back and cross elsewhere (the everted-corner / near-triple-point
+      // arrangement incompleteness: PokedCube's spike, reg3d-c1a/s7b's
+      // "unmatched seam pierce points").  Recover the pair ONLY when an edge
+      // with NEITHER endpoint a shared vertex genuinely pierces the other
+      // triangle's interior (a real OFF-VERTEX transversal crossing); the
+      // trivial shared-vertex / shared-edge touches the skip correctly drops
+      // have no such off-vertex pierce and stay skipped.  The SoS convention
+      // (EdgePiercesTriSoS) decides the shared-vertex edge incidences when the
+      // seam is assembled below (EXACT-INCIDENT TIES).
+      bool recoveredSV = false;
+      vec3 svPos(0.0);
+      int nShared = 0;
+      if (sharesVert(i, j)) {
+        for (int a = 0; a < 3; ++a)
+          for (int b = 0; b < 3; ++b)
+            if (A.vid[i][a] == A.vid[j][b]) {
+              ++nShared;
+              svPos = A.tri[i][a];
+            }
+        auto offVertexPierces = [&](int owner, int tgt) {
+          for (int e = 0; e < 3; ++e) {
+            const int va = A.vid[owner][e], vb = A.vid[owner][(e + 1) % 3];
+            bool inc = false;
+            for (int k = 0; k < 3; ++k)
+              if (A.vid[tgt][k] == va || A.vid[tgt][k] == vb) inc = true;
+            if (inc)
+              continue;  // edge incident to a shared vertex: trivial touch
+            const vec3& u = A.tri[owner][e];
+            const vec3& w = A.tri[owner][(e + 1) % 3];
+            const auto& T = A.tri[tgt];
+            int r = EdgePiercesTri(u, w, T[0], T[1], T[2]);
+            if (r == -1)
+              r = EdgePiercesTriSoS(u, w, T[0], T[1], T[2], va, vb,
+                                    A.vid[tgt][0], A.vid[tgt][1],
+                                    A.vid[tgt][2]);
+            if (r == 1) return true;
+          }
+          return false;
+        };
+        if (!offVertexPierces(i, j) && !offVertexPierces(j, i)) continue;
+        recoveredSV = true;
+      }
       // Same exactly-coplanar cluster: the in-plane fold owns this pair; its
       // exact-zero pierce ties are not a seam and not an SoS boundary-touch.
       if (face2cluster[i] >= 0 && face2cluster[i] == face2cluster[j]) continue;
@@ -1330,6 +1375,18 @@ BuildArrangement RecordSeams(const Manifold::Impl& in,
             --nPts;
           }
       if (nPts == 0) continue;  // no genuine crossing
+      // Recovered shares-vertex crossing: two triangles sharing exactly one
+      // vertex V and crossing transversally intersect along [V, P], where P is
+      // the recorded off-vertex crossing and V is the shared corner (on both
+      // planes, on both boundaries).  The edges incident to V only TOUCH at V
+      // (not a transversal pierce), so V is not collected; supply it as the
+      // second seam endpoint (ptTri=-1: on both faces' boundary).
+      if (nPts == 1 && recoveredSV && nShared == 1 &&
+          la::length(pts[0] - svPos) > eps) {
+        pts[1] = svPos;
+        ptTri[1] = -1;
+        nPts = 2;
+      }
       if (nPts != 2) {
         // A genuine seam has exactly two endpoints; anything else is a
         // degenerate incidence the level-0 filter did not flag - fail closed.

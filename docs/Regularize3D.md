@@ -460,12 +460,34 @@ reverted):
 
   carrier          | cluster            | fatal (measured)              | reach
   -----------------|--------------------|-------------------------------|--------
-  PokedCube        | 1 EMISSION (1b)    | unresolvable sheet contact    | constructed
-  GT7863 pair      | 1 EMISSION (1a)    | unresolvable sheet contact    | corpus
+  PokedCube        | (RESOLVES wjump)   | - (vol 0.25, GWN-oracle)      | constructed
+  GT7863 pair      | 1 EMISSION (1a')   | DirtyComponentUnresolved      | corpus
   openscad soup    | 2 SEAM-SUBFACE(2a) | non-2-endpoint / degenerate   | corpus
-  GT7081 pair      | 1 EMISSION (1a)    | unresolvable sheet contact    | corpus
+  GT7081 pair      | (RESOLVES wjump)   | - (both shells, vol-preserved)| corpus
   NearCoplanarChain| 4 PLANARIZE-GUARD  | global-planarity guard        | constructed
   BridgedCaps      | (RESOLVES)         | -                             | resolves
+
+  reg3d-wjump LANDED (the winding-jump / degenerate-incidence EMISSION
+  completion): the SHARES-VERTEX GENUINE-CROSSING RECOVERY (RecordSeams) closes
+  the Cluster-1 emission wall for its self-intersecting carriers.  The shared-
+  vertex broadphase skip was UNSOUND for self-intersecting soups (two faces
+  sharing a corner that fold back and cross OFF the corner had their seam dropped,
+  leaving an incomplete arrangement whose emission opened - the unbalanced-fan
+  "8-edge hole").  Recovering those crossings (only genuine off-vertex transversal
+  pierces, SoS-decided; the seam is [V, offVertexP], V the shared corner) COMPLETES
+  the arrangement so the existing per-face witness rule emits the everted
+  double-sheet correctly (decision-completion 2 is SUBSUMED: no new emission rule -
+  s7b was right that the +1-only rule is already general on a COMPLETE
+  arrangement).  RESOLVES (oracle-graded, zero-oracle-wrong): PokedCube (vol=0.25
+  == GWN MC oracle, tol-invariant, non-self-int); GT7081 both dirty shells
+  (volume-preserved, tol-invariant); GT7863's SELF-INTERSECTING component (the
+  8-edge hole, vol 855, tol-invariant).  All resolving fixtures preserved
+  (siA/siB stay in the MC volume band; the retention rule is byte-untouched).
+  Mutation-verified (disable the recovery -> the resolves revert to "unresolvable
+  sheet contact").  NO new predicate FORM (EdgePiercesTriSoS is the existing
+  blessed SoS caller); no kernel escalation - REFUTING the prior lanes'
+  "research-grade / plane-based-rep / kernel-tripwire" conclusion for these
+  carriers.
 
   RECLASSIFICATION (reg3d-c2b -> reg3d-c2bx, measured): GT7081's original F4
   string read "seam sub-face arrangement not exactly resolvable"; reg3d-c2b's
@@ -655,11 +677,36 @@ RESEARCH = memo with a required proof sketch, TRIPWIRE = kernel-vendor decision)
    w_above=-1, GWN-confirmed everted; GT7081: 18 dropped faces) whose closure needs
    the winding-jump / degenerate-incidence EMISSION completion (this crucible,
    reg3d-wjump), NOT input-snap (a) and NOT weld (b).
-4. CRUCIBLE C-1b (PROOF; folded into C-1a).  PokedCube negative-winding double
-   sheet - measured above: the everted corner is a w=-1|w=1 double-sheet junction
-   AND a degenerate near-triple-point; the mult-1 per-face emission drops the
-   inner-sheet connecting faces (s7b: clean-patch flood + shares-vertex-skip
-   crossings).  Same escalation as C-1a.
+   CLOSED (reg3d-wjump LANDED).  The root was NOT a near-coplanar sliver at all: it
+   was ARRANGEMENT INCOMPLETENESS from the SHARES-VERTEX broadphase skip.  The
+   "8-edge hole" fans opened because seams between faces sharing a corner that
+   ALSO cross transversally off the corner (the everted-spike / near-triple-point
+   geometry) were DROPPED by `sharesVert => continue` - unsound for a
+   self-intersecting soup.  Recovering only the genuine OFF-VERTEX transversal
+   crossings (SoS-decided pierce; seam [V, offVertexP], V the shared corner
+   supplied as the second endpoint when the seam assembly yields nPts=1) COMPLETES
+   the arrangement, and the EXISTING per-face witness rule then emits the everted
+   double sheet correctly (the everted w=-1 region drops, the {w>=1} boundary is
+   kept - decision-completion 2 is SUBSUMED, no new emission rule).  RESOLVES
+   oracle-graded: PokedCube (vol=0.25 == GWN oracle), GT7081 (both shells,
+   volume-preserved), GT7863's self-intersecting component (vol 855).  No new
+   predicate FORM, no kernel escalation - so the earlier plane-based-rep /
+   Shewchuk-tripwire conclusion is REFUTED for these carriers.  RESIDUAL (honest
+   wall, GT7863 comp#1): a WITHIN-component COPLANAR overlap where the fold
+   self-check fires (in-plane cover m=2, but the reliable coupled winding jumps 1 -
+   GWN-verified a single-sheet {w>=1} of vol ~2830 exists).  A fold escalation
+   (trust the reliability-certified winding over the mult-algebra) gets it past the
+   self-check but it then hits the Cluster-1a EMISSION representability wall
+   underneath (the doubled connectivity is not a representable single-sheet
+   manifold); it resolves no carrier end-to-end, so it is BANKED unbuilt (sound:
+   only fires where the fold already declines).  GT7863 stays fail-closed on
+   comp#1 (narrower: DirtyComponentUnresolved), the whole-compose refusal.
+4. CRUCIBLE C-1b (CLOSED by reg3d-wjump; was folded into C-1a).  PokedCube's
+   everted corner IS a w=-1|w=1 double-sheet AND a degenerate near-triple-point -
+   but the near-triple-point was the shares-vertex-skipped crossings, not a
+   >2-sheet exact triple point: recovering them completes the arrangement and the
+   witness rule emits it (vol=0.25, GWN-oracle-confirmed).  s7b's clean-patch
+   per-face fix (already landed) + this recovery together close it.
 5. CRUCIBLE C-5 (REFUTED as the emission-wall key; residual = the plane-based-rep
    escalation).  reg3d-c1a MEASURED C-5's predicted effect on every emission fan
    and found it NULL: C-5 unifies within-eps twin identities, but it only changes
