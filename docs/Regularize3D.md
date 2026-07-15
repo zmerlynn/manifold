@@ -645,6 +645,41 @@ reverted):
   plane-based-representation escalation the campaign gates behind the kernel
   tripwire.  openscad stays at the emission wall, now much narrower.
 
+  reg3d-f4-r5 LANDED (the emission residue NARROWED again in-form, byte-for-byte
+  no-op off openscad).  (1) BOTH-SIDES CLEAN RETENTION: the both-sides rule is
+  ported from the seamed/fold paths to EmitCleanFaces - probe w_S on each side of
+  a clean face and retain iff exactly one is inside {w_S>=1}, the mult-1 case
+  byte-identical to the former w_above==0 rule - dropping a clean tile that is
+  coplanar-coincident with an unclustered seamed face (exterior on both sides),
+  the one-sided-rule over-emission the whole-face read could not see (F4R_ONESIDE
+  reverts).  (2) EXACT INPUT-VERTEX-ON-EDGE T-JUNCTIONS: the seam/triple registry
+  omitted plain input vertices, but a self-overlap can land an input vertex
+  strictly interior to a foreign triangle's edge (that face emits the edge
+  unsplit, opening the fan).  BuildJunctionRegistry now registers those vertices
+  behind an EXACT level-0 test - collinear via the three axis-projected 2D orients
+  (each the padded orient3d through the ONE blessed exact predicate, filter-first)
+  plus a strict between-ness compare and an adjacency skip - so only genuine
+  T-junctions register; the eps-tolerant all-vertex version splits near-touching
+  corners and is measured rail-breaking, which the exact predicate avoids
+  (F4R_NOVJUNC reverts).  Both mutation-verified load-bearing, FNV-identical on
+  every resolving carrier, kernel exact-predicate surface untouched.  The
+  SURVIVING residue is the NEAR-TANGENT THIN-CELL representability axis (stage 7):
+  a cluster of genuinely-distinct triple points (spread down to ~2*eps) that
+  RemoveOverlaps2D's eps-merge leaves as ONE cell spanning two winding regions, so
+  its single largest-sub-tri classification emits sub-eps sliver artifacts whose
+  edges do not pair; plus a few seam-endpoint fans whose missing partner sub-face
+  is dropped by the same near-tangent classify.  MEASURED (f4-r5): a finer
+  per-sub-triangle winding read makes it WORSE (dropping the uniform-region
+  slivers unpairs the real neighbour faces) and regresses clean carriers to
+  fail-closed - the exact confirmation that this is REPRESENTATION at
+  double-rounding, not a finer-classify or sliver-drop repair (dropping sub-eps
+  slivers is banned; here measured provably wrong).  Closing it needs the exact
+  sub-eps arrangement (a rational split at the near-tangent crossing + rational
+  retention) or an input-side near-parallel-wall snap (a stage-5 sibling for
+  walls) - the plane-based-representation completion the campaign gates.  openscad
+  stays at the emission wall, narrower again; the anatomy is in
+  .claude/lane-reports/f4-r5-*.md.
+
 MEASURED CORRECTIONS to earlier anatomy (were logged at a pre-entanglement,
 pre-stage-6 HEAD): (1) PokedCube AND GT7863 fail at the SplitTouchingSheets
 "unresolvable sheet contact" EMISSION string, which fires BEFORE the 2-manifold
