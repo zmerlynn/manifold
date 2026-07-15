@@ -1188,44 +1188,59 @@ BuildArrangement RecordSeams(const Manifold::Impl& in,
           ++*boundaryTouchOut;
       }
       // SHARES-VERTEX GENUINE-CROSSING RECOVERY (reg3d-wjump
-      // decision-completion 1).  The shared-vertex broadphase skip assumes
-      // shared-vertex => self-adjacent => no transversal crossing, which is
-      // UNSOUND for a self-intersecting soup where two faces sharing a vertex
-      // fold back and cross elsewhere (the everted-corner / near-triple-point
-      // arrangement incompleteness: PokedCube's spike, reg3d-c1a/s7b's
-      // "unmatched seam pierce points").  Recover the pair ONLY when an edge
-      // with NEITHER endpoint a shared vertex genuinely pierces the other
+      // decision-completion 1), keyed on POSITION coincidence (reg3d-oscad
+      // REOPEN).  The shared-vertex broadphase skip assumes shared-vertex =>
+      // self-adjacent => no transversal crossing, which is UNSOUND for a
+      // self-intersecting soup where two faces sharing a vertex fold back and
+      // cross elsewhere (the everted-corner / near-triple-point arrangement
+      // incompleteness: PokedCube's spike, reg3d-c1a/s7b's "unmatched seam
+      // pierce points").  An imported soup additionally carries UNWELDED
+      // DUPLICATE vertices (identical position, distinct global id); two faces
+      // meeting only at such a coincident corner are self-adjacent-at-a-point
+      // exactly like an index-shared pair, but an index-keyed skip MISSES them
+      // (measuring shares-vertex by INDEX reads no shared vertex and wrongly
+      // rules the family out - it IS the shares-vertex family, keyed on
+      // POSITION).  Key the skip/recovery on position coincidence (index
+      // equality implies it).  Recover the pair ONLY when an edge with NEITHER
+      // endpoint at a coincident-vertex position genuinely pierces the other
       // triangle's interior (a real OFF-VERTEX transversal crossing); the
-      // trivial shared-vertex / shared-edge touches the skip correctly drops
-      // have no such off-vertex pierce and stay skipped.  The SoS convention
+      // coincident-vertex / shared-edge touches the skip correctly drops have
+      // no such off-vertex pierce and stay skipped.  The SoS convention
       // (EdgePiercesTriSoS) decides the shared-vertex edge incidences when the
-      // seam is assembled below (EXACT-INCIDENT TIES).
+      // seam is assembled below (EXACT-INCIDENT TIES).  (The probe classify
+      // above keys sharesVert by INDEX: its welded synthetic meshes carry no
+      // unwelded duplicates, and it never runs on the production path.)
       bool recoveredSV = false;
       vec3 svPos(0.0);
       int nShared = 0;
-      if (sharesVert(i, j)) {
+      bool anyCoinc = false;
+      for (int a = 0; a < 3; ++a)
+        for (int b = 0; b < 3; ++b)
+          if (A.tri[i][a] == A.tri[j][b]) anyCoinc = true;
+      if (anyCoinc) {
         for (int a = 0; a < 3; ++a)
           for (int b = 0; b < 3; ++b)
-            if (A.vid[i][a] == A.vid[j][b]) {
+            if (A.tri[i][a] == A.tri[j][b]) {
               ++nShared;
               svPos = A.tri[i][a];
             }
         auto offVertexPierces = [&](int owner, int tgt) {
+          const auto& To = A.tri[owner];
+          const auto& T = A.tri[tgt];
           for (int e = 0; e < 3; ++e) {
-            const int va = A.vid[owner][e], vb = A.vid[owner][(e + 1) % 3];
+            const vec3& u = To[e];
+            const vec3& w = To[(e + 1) % 3];
             bool inc = false;
             for (int k = 0; k < 3; ++k)
-              if (A.vid[tgt][k] == va || A.vid[tgt][k] == vb) inc = true;
+              if (T[k] == u || T[k] == w)
+                inc = true;  // edge at a coincident vtx
             if (inc)
-              continue;  // edge incident to a shared vertex: trivial touch
-            const vec3& u = A.tri[owner][e];
-            const vec3& w = A.tri[owner][(e + 1) % 3];
-            const auto& T = A.tri[tgt];
+              continue;  // edge incident to a coincident vertex: trivial touch
             int r = EdgePiercesTri(u, w, T[0], T[1], T[2]);
             if (r == -1)
-              r = EdgePiercesTriSoS(u, w, T[0], T[1], T[2], va, vb,
-                                    A.vid[tgt][0], A.vid[tgt][1],
-                                    A.vid[tgt][2]);
+              r = EdgePiercesTriSoS(u, w, T[0], T[1], T[2], A.vid[owner][e],
+                                    A.vid[owner][(e + 1) % 3], A.vid[tgt][0],
+                                    A.vid[tgt][1], A.vid[tgt][2]);
             if (r == 1) return true;
           }
           return false;
@@ -1382,6 +1397,7 @@ BuildArrangement RecordSeams(const Manifold::Impl& in,
       // and so is recorded twice; the emission weld would merge them anyway.
       // Genuine distinct seam endpoints are far more than eps apart, so an
       // ordinary seam is untouched (bitwise).
+      const int nPtsPre = nPts;
       for (int a = 0; a + 1 < nPts; ++a)
         for (int b = nPts - 1; b > a; --b)
           if (la::length(pts[a] - pts[b]) <= eps) {
@@ -1401,8 +1417,49 @@ BuildArrangement RecordSeams(const Manifold::Impl& in,
         nPts = 2;
       }
       if (nPts != 2) {
-        // A genuine seam has exactly two endpoints; anything else is a
-        // degenerate incidence the level-0 filter did not flag - fail closed.
+        // PHANTOM-SEAM GUARD (reg3d-oscad REOPEN).  A lone / absent endpoint is
+        // a genuine seam only where the pair CROSSES TRANSVERSALLY.  Exact
+        // rational reconstruction of the imported-soup residue showed the
+        // dominant nPts==1 truncations are MEASURE-ZERO contacts (coincident-
+        // vertex duplicates, vertex-on-edge / vertex-on-face T-junctions,
+        // collinear edge-on-edge overlaps) whose exact tri-tri intersection is
+        // a POINT or a boundary segment - the filter/SoS recorded a PHANTOM
+        // endpoint but a valid arrangement has NO seam there (proven exactly:
+        // not one has a clean off-plane edge piercing the other's strict
+        // interior).
+        //
+        // SUB-EPS SEAM COLLAPSE (witness theorem): if two or more endpoints
+        // were collected but the dedup merged them under the weld radius to a
+        // single point (nPtsPre>=2 -> nPts==1), the seam degenerates to a point
+        // below eps and its endpoints weld - the cancel/collapse case.  It
+        // contributes NO split; skip it.  Exact (no re-derivation): only a pair
+        // that actually recorded a second endpoint within eps collapses, so a
+        // genuine >eps seam cannot be dropped here.
+        if (nPts == 1 && nPtsPre >= 2) continue;
+        // MEASURE-ZERO CONTACT: a seam is real only where a clean off-plane
+        // edge (both endpoints strictly off the other's plane, opposite sides)
+        // pierces its STRICT interior - a self-certifying transversal crossing
+        // (r==1, filter only, no SoS).  No clean pierce -> no crossing -> no
+        // seam; skip (not a truncation, not fail-closed).
+        auto cleanPierce = [&](int owner, int tgt) {
+          const auto& To = A.tri[owner];
+          const auto& Tt = A.tri[tgt];
+          for (int e = 0; e < 3; ++e) {
+            const vec3& u = To[e];
+            const vec3& w = To[(e + 1) % 3];
+            const int su = Orient3DFilterSign(Tt[0], Tt[1], Tt[2], u);
+            const int sv = Orient3DFilterSign(Tt[0], Tt[1], Tt[2], w);
+            if (su == 0 || sv == 0 || su == sv)
+              continue;  // not a clean straddle
+            if (EdgePiercesTri(u, w, Tt[0], Tt[1], Tt[2]) == 1) return true;
+          }
+          return false;
+        };
+        if (!cleanPierce(i, j) && !cleanPierce(j, i))
+          continue;  // measure-zero contact: no seam
+        // A genuine transversal crossing whose two eps-separated endpoints did
+        // not both record is an honestly-open degenerate incidence - fail
+        // closed.
         A.ok = false;
         continue;
       }

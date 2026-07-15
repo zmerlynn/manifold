@@ -1145,32 +1145,43 @@ TEST(Overlap3, Regularize_CoplanarFold_Mult3Nested_Resolves) {
 // (IsSelfIntersecting=0), so a single connectivity component routes DIRTY on
 // the re-scoped coplanar gate (no cross-component merge - the non-fusion
 // contract).  It decomposes into two dirty components; one (the large,
-// cluster-rich, coplanar-dominated one) fails at RecordSeams with a few hundred
-// nPts==1 seam truncations (F11 "degenerate incidence").  Post stage-6 SoS its
-// non-coplanar ties DECIDE; the reg3d-ent cap-plane junction completion RECORDS
-// the wall-wall PROPER-cross endpoints on cap cluster vertices, narrowing the
-// truncation count (~500 -> ~340), and the reg3d-7863c1 two-pass clustering
-// narrowed it further (magnitude only; the notebook owns the numbers).  The
-// TERMINAL residue (reg3d-oscad, measured at HEAD) is NOT bounded-completable:
-// (1) it is NOT a shares-vertex-skip family instance - ZERO of its truncations
-//     share a vertex, so the wjump/7863c1 recoveries are measured NO-OPS on it;
-// (2) the dominant residue has NO fold-owned completing endpoint - a mix of
-//     near-coplanar near-tangent sheets (the GT7863-class Cluster-1a sliver)
-//     and transversal wall pairs whose SECOND seam endpoint is a degenerate
-//     boundary or near-in-plane incidence = the emission-representability
-//     (plane-based representation) PROOF wall (kernel-tripwire-gated, build
-//     nothing);
-// (3) the remaining "capvert" completing endpoints ARE fold-owned cap cluster
-//     vertices, but they arrive as vertex-on-plane TOUCHES (not proper
-//     crosses), and a vertex-touch WIDENING was empirically REFUTED: a benign
-//     wall corner resting on a cap plane is not a seam endpoint, so recording
-//     touches makes MORE truncations, not fewer (measured: it INCREASES the
-//     count), never narrows. The ent proper-cross gate is load-bearing here.
-//     0 cap-INTERIOR endpoints (the earlier "cap-interior injection" reading
-//     was superseded by reg3d-c2a's per-pair measurement).
-// So the component fails a hard, strictly-narrower fail-closed = no output;
-// still DirtyComponentUnresolved "degenerate incidence", never a silent wrong
-// resolve, no OOM (bbox-prefiltered on this 1442-face model).
+// cluster-rich, coplanar-dominated one) formerly failed at RecordSeams with
+// nPts==1 seam truncations (F11 "degenerate incidence").
+//
+// reg3d-oscad REOPEN: exact rational reconstruction of the TRUE second endpoint
+// of every truncated seam (the intersection segment of the triangle pair, in
+// exact fractions) refutes the earlier "no fold-owned completing endpoint /
+// plane-based-representation PROOF wall".  That reading came from a MEASUREMENT
+// GAP - it searched only for an INTERIOR-PIERCE dropped candidate and measured
+// shares-vertex by INDEX.  Reconstructed exactly, the dominant residue is
+// MEASURE-ZERO contacts, not near-coplanar slivers:
+//  - coincident-position DUPLICATE vertices (identical position, distinct id) -
+//    a shares-vertex family the INDEX-keyed skip misses (measured as no shared
+//    vertex);
+//  - vertex-on-edge / vertex-on-face T-junctions (a vertex exactly on the other
+//    triangle's edge or face, far from its vertices - not a near-duplicate);
+//  - collinear edge-on-edge overlaps (two faces sharing a partial collinear
+//    edge, folding apart).
+// Each has an exact tri-tri intersection that is a single POINT or a boundary
+// segment - NO transversal crossing, so a valid arrangement has NO seam there;
+// the filter/SoS had recorded a PHANTOM endpoint (nPts==1).  Proven exactly:
+// not one of these measure-zero pairs has a clean off-plane edge piercing the
+// other's strict interior, so skipping them drops no crossing.  The genuine
+// crossings among the truncations are (a) transversal crossings that share a
+// coincident-position vertex - recovered by the POSITION-keyed wjump completion
+// (the shared vertex is the second endpoint) - and (b) sub-eps-SHORT crossings
+// (exact seglen far below eps: near-tangent sliver / unwelded near-duplicate)
+// that the witness theorem COLLAPSES (below the weld radius the seam
+// degenerates to a point).  With phantom seams skipped, coincident-vertex
+// crossings recovered, and sub-eps crossings collapsed, RecordSeams COMPLETES:
+// the F11 seam-truncation wall is CLOSED.
+//
+// openscad now fails one wall DEEPER, at the seam sub-face arrangement /
+// winding-probe classify (F4) - the SAME wall as GT7081 (reg3d-c2b: a
+// near-coplanar face grazes the winding ray-cast on the FILTER, exact-kernel-
+// decidable but the winding half does not escalate = WINDING-PROBE FILTER
+// PRECISION, kernel-tripwire-gated).  Still fail-closed, never a silent wrong
+// resolve, no OOM (bbox-prefiltered on this model).
 TEST(Overlap3, Regularize_ExactZeroTie_Openscad_FailClosed) {
   std::filesystem::path file(__FILE__);
   std::ifstream fin(
@@ -1183,12 +1194,14 @@ TEST(Overlap3, Regularize_ExactZeroTie_Openscad_FailClosed) {
   ASSERT_TRUE(r.fatal.has_value())
       << "the narrowed residue must fail closed, never silently resolve";
   EXPECT_EQ(*r.fatal, FatalReason::DirtyComponentUnresolved) << r.detail;
-  // NARROWED: past the SoS gate AND past the cap-plane proper-cross completion;
-  // the terminal residue is the near-coplanar-sliver / degenerate-seam-endpoint
-  // wall (the capvert vertex-touch widening was refuted-unsound; see the
-  // comment above and reg3d-oscad).
-  EXPECT_NE(r.detail.find("degenerate incidence"), std::string::npos)
-      << "residue must name the degenerate-seam wall: " << r.detail;
+  // CLOSED the F11 seam-truncation wall (reg3d-oscad REOPEN: the nPts==1
+  // truncations were measure-zero phantom contacts + position-wjump crossings +
+  // sub-eps collapses, all exact-reconstructed).  The residue is now the DEEPER
+  // seam sub-face arrangement / winding-probe wall (F4, the GT7081-class
+  // winding-probe filter-precision axis, kernel-tripwire-gated).
+  EXPECT_NE(r.detail.find("seam sub-face arrangement not exactly resolvable"),
+            std::string::npos)
+      << "residue must name the deeper winding-probe wall: " << r.detail;
   EXPECT_FALSE(r.impl.has_value()) << "fail-closed yields no partial output";
 }
 
