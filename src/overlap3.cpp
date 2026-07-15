@@ -692,9 +692,11 @@ inline int Orient3DFilterSign(const vec3& a, const vec3& b, const vec3& c,
 // TRIPWIRE (owner contract, docs/Regularize3D.md open list): this is the ONE
 // blessed exact predicate FORM.  Additional CALLERS are fine as long as each
 // stays FILTER-FIRST (exact fires only behind a filter 0, zero new arithmetic)
-// - current callers: Orient3DSoS, the EdgePiercesTriSoS edge-in-plane guard,
-// the WindingAt escalation, and the test probe.  A SECOND predicate FORM stays
-// tripwired: if one is ever needed, VENDOR Shewchuk's public-domain
+// - current callers: the EdgePiercesTriSoS edge-in-plane guard and the
+// WindingAt escalation (plus the test probe).  The tie cascade Orient3DSoS no
+// longer calls it: its SoS K==0 group already IS this exact sign, so a pre-SoS
+// shortcut was provably redundant and was dropped.  A SECOND predicate FORM
+// stays tripwired: if one is ever needed, VENDOR Shewchuk's public-domain
 // predicates.c - do NOT rebuild expansion arithmetic piecemeal.  The certified
 // fast path never touches it.
 inline int Orient3DExactSign(const vec3& a, const vec3& b, const vec3& c,
@@ -705,16 +707,18 @@ inline int Orient3DExactSign(const vec3& a, const vec3& b, const vec3& c,
 }
 
 // The complete orient3d decision (docs/Regularize3D.md stage 6): the certified
-// filter sign on the fast path; else the micro exact tie-test decides the
-// filter-uncertain-but-nonzero band exactly; else (a genuine exact zero) the
-// single-global SoS breaks the tie.  NEVER 0.  `i*` are the four points'
-// global vertex indices.
+// filter sign on the fast path; else the single-global SoS decides.  NEVER 0.
+// `i*` are the four points' global vertex indices.  No pre-SoS exact shortcut:
+// SoSOrient3D's e^0 (K==0) monomial group IS the exact orient3d (the same 24
+// real terms, summed by the same accumulator), so when the four points are NOT
+// exactly coplanar SoS returns that exact sign from its lowest-K group - a
+// separate ExactSign call ahead of it would return the identical value and is
+// provably redundant (a bitwise no-op, verified).  A genuine exact zero (K==0
+// group sums to zero) falls through to the perturbation, as it must.
 inline int Orient3DSoS(const vec3& a, const vec3& b, const vec3& c,
                        const vec3& d, int ia, int ib, int ic, int id) {
   const int s = Orient3DFilterSign(a, b, c, d);
   if (s != 0) return s;
-  const int ex = Orient3DExactSign(a, b, c, d);
-  if (ex != 0) return ex;
   const double pts[4][3] = {
       {a.x, a.y, a.z}, {b.x, b.y, b.z}, {c.x, c.y, c.z}, {d.x, d.y, d.z}};
   const int idx[4] = {ia, ib, ic, id};
