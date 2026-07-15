@@ -520,7 +520,7 @@ crucible or carries a proof-shaped adjudication; "research-grade" is never a bar
 terminal state.
 
 Census (each fatal-string SITE in overlap3.cpp -> its axis; F-ids are the
-notebook's).  The 14 sites are: two EMISSION strings (BuildImpl: "unresolvable
+notebook's).  The sites, by kind, are: two EMISSION strings (BuildImpl: "unresolvable
 sheet contact" from SplitTouchingSheets, "emitted triangulation not 2-manifold");
 one COPLANAR-FOLD decline; the SEAM-SUBFACE "not exactly resolvable"; the
 non-2-endpoint-seam "degenerate incidence"; the clean-face "filter-uncertain"
@@ -830,7 +830,7 @@ RESEARCH = memo with a required proof sketch, TRIPWIRE = kernel-vendor decision)
    (>eps apart) - and there are ZERO such twins on any carrier (the fans need MORE
    faces, not merged twins).  So the census hypothesis that construction-keyed
    identity could make the fans pairable is refuted.  A SOURCE read (RecordSeams
-   recovery + dedup, overlap3.cpp:1416-1486) further shows C-5 "proper"
+   recovery + dedup) further shows C-5 "proper"
    (bit-identical BY CONSTRUCTION rather than the current positional dedup) is NOT
    the bounded DC the census assumed: the symmetric double-pierce is two different
    SegPlanePoint constructions of one reentrant corner, and the fold overlay builds
