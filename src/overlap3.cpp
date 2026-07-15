@@ -1520,6 +1520,67 @@ bool ExtractCells(const std::vector<vec2>& pts,
   return true;
 }
 
+// In-plane frame + canonical-vertex table shared by the two per-face
+// arrangement drivers (EmitSeamedFace, FoldCoplanarClusters).  Owns the
+// orthonormal basis (e1 along origin->edgeTip, e2 = nHat x e1 so 2D-CCW maps to
+// +nHat) and the dedup-by-3D-bit-pattern insertion (shared endpoints - chain
+// junctions, corners - collapse to one input vertex with one projection).  The
+// retention rule, the edge set, the new-crossing policy, and the hole handling
+// stay with each driver; only this projection+insertion spine is common.
+struct PlaneFrame {
+  vec3 origin, e1, e2, nHat;
+  std::vector<vec2> verts2;
+  std::vector<vec3> canon3;
+  std::map<std::tuple<double, double, double>, int> vidx;
+  vec2 proj(const vec3& P) const {
+    return vec2(la::dot(P - origin, e1), la::dot(P - origin, e2));
+  }
+  int add(const vec3& P) {
+    const std::tuple<double, double, double> key{P.x, P.y, P.z};
+    auto it = vidx.find(key);
+    if (it != vidx.end()) return it->second;
+    const int id = static_cast<int>(verts2.size());
+    verts2.push_back(proj(P));
+    canon3.push_back(P);
+    vidx.emplace(key, id);
+    return id;
+  }
+};
+// Build the frame for a face with unnormalized outward normal faceN, in-plane
+// origin, and second basis point edgeTip.  Returns false (caller fails closed)
+// on a degenerate normal or edge.
+bool BuildPlaneFrame(const vec3& faceN, const vec3& origin, const vec3& edgeTip,
+                     PlaneFrame& pf) {
+  const double nLen = la::length(faceN);
+  if (!(nLen > 0.0)) return false;
+  const vec3 e1raw = edgeTip - origin;
+  const double e1Len = la::length(e1raw);
+  if (!(e1Len > 0.0)) return false;
+  pf.nHat = faceN / nLen;
+  pf.origin = origin;
+  pf.e1 = e1raw / e1Len;
+  pf.e2 = la::cross(pf.nHat, pf.e1);
+  return true;
+}
+// Index of the largest-area triangle of `tris` over `pts` (its
+// centroid/incenter is the most robust interior classify point); |2*area|
+// returned in area2.
+int LargestSubTri(const std::vector<ivec3>& tris, const std::vector<vec2>& pts,
+                  double& area2) {
+  int best = 0;
+  area2 = -1.0;
+  for (int t = 0; t < static_cast<int>(tris.size()); ++t) {
+    const vec2 p0 = pts[tris[t].x], p1 = pts[tris[t].y], p2 = pts[tris[t].z];
+    const double ar =
+        std::abs((p1.x - p0.x) * (p2.y - p0.y) - (p1.y - p0.y) * (p2.x - p0.x));
+    if (ar > area2) {
+      area2 = ar;
+      best = t;
+    }
+  }
+  return best;
+}
+
 // Emit the retained sub-faces of one SEAMED face into `out` (3D triangles at
 // canonical positions), or set ok=false to fail closed.  Reuse RemoveOverlaps2D
 // as the ARRANGEMENT primitive (robust crossing-split + eps-merge via
@@ -1530,39 +1591,15 @@ void EmitSeamedFace(std::vector<OutTri3D>& out, const BuildArrangement& A,
                     int f, const Manifold::Impl& in,
                     const std::vector<vec3>& seeds, double eps, bool& ok) {
   const vec3 a = A.tri[f][0], b = A.tri[f][1], c = A.tri[f][2];
-  const double nLen = la::length(A.faceN[f]);
-  if (!(nLen > 0.0)) {
+  PlaneFrame pf;
+  if (!BuildPlaneFrame(A.faceN[f], a, b, pf)) {
     ok = false;
     return;
   }
-  const vec3 nHat = A.faceN[f] / nLen;
-  const vec3 e1raw = b - a;
-  const double e1Len = la::length(e1raw);
-  if (!(e1Len > 0.0)) {
-    ok = false;
-    return;
-  }
-  const vec3 e1 = e1raw / e1Len;
-  const vec3 e2 = la::cross(nHat, e1);  // e1 x e2 == nHat: 2D-CCW -> +nHat
-  auto proj = [&](const vec3& P) {
-    return vec2(la::dot(P - a, e1), la::dot(P - a, e2));
-  };
-
-  // Vertices, deduped by canonical 3D bit pattern so shared endpoints (chain
-  // junctions, corners) collapse to one input vertex with one projection.
-  std::vector<vec2> verts2;
-  std::vector<vec3> canon3;
-  std::map<std::tuple<double, double, double>, int> vidx;
-  auto getV = [&](const vec3& P) {
-    const std::tuple<double, double, double> key{P.x, P.y, P.z};
-    auto it = vidx.find(key);
-    if (it != vidx.end()) return it->second;
-    const int id = static_cast<int>(verts2.size());
-    verts2.push_back(proj(P));
-    canon3.push_back(P);
-    vidx.emplace(key, id);
-    return id;
-  };
+  const vec3 &nHat = pf.nHat, &e1 = pf.e1, &e2 = pf.e2;
+  std::vector<vec2>& verts2 = pf.verts2;
+  std::vector<vec3>& canon3 = pf.canon3;
+  auto getV = [&](const vec3& P) { return pf.add(P); };
   const int iA = getV(a), iB = getV(b), iC = getV(c);
   const vec2 pa = verts2[iA], pb = verts2[iB], pc = verts2[iC];
   if (!(0.5 * ((pb.x - pa.x) * (pc.y - pa.y) - (pb.y - pa.y) * (pc.x - pa.x)) >
@@ -1619,18 +1656,8 @@ void EmitSeamedFace(std::vector<OutTri3D>& out, const BuildArrangement& A,
     for (int idx : cell) pidx[0].push_back({verts2[idx], idx});
     const std::vector<ivec3> tris = TriangulateIdx(pidx, eps);
     if (tris.empty()) continue;
-    int best = 0;
-    double bestArea = -1.0;
-    for (int t = 0; t < static_cast<int>(tris.size()); ++t) {
-      const vec2 p0 = verts2[tris[t].x], p1 = verts2[tris[t].y],
-                 p2 = verts2[tris[t].z];
-      const double ar = std::abs((p1.x - p0.x) * (p2.y - p0.y) -
-                                 (p1.y - p0.y) * (p2.x - p0.x));
-      if (ar > bestArea) {
-        bestArea = ar;
-        best = t;
-      }
-    }
+    double area2;
+    const int best = LargestSubTri(tris, verts2, area2);
     const vec2 cen2 =
         (verts2[tris[best].x] + verts2[tris[best].y] + verts2[tris[best].z]) /
         3.0;
@@ -1706,40 +1733,18 @@ void FoldCoplanarClusters(std::vector<OutTri3D>& out, const Manifold::Impl& in,
         return;
       }
     const int f0 = faces[0];
-    const double nLen = la::length(A.faceN[f0]);
-    if (!(nLen > 0.0)) {
-      ok = false;
-      return;
-    }
-    const vec3 nHat = A.faceN[f0] / nLen;
     const vec3 a0 = A.tri[f0][0];
-    const vec3 e1raw = A.tri[f0][1] - a0;
-    const double e1Len = la::length(e1raw);
-    if (!(e1Len > 0.0)) {
+    PlaneFrame pf;
+    if (!BuildPlaneFrame(A.faceN[f0], a0, A.tri[f0][1], pf)) {
       ok = false;
       return;
     }
-    const vec3 e1 = e1raw / e1Len;
-    const vec3 e2 = la::cross(nHat, e1);
-    auto proj = [&](const vec3& P) {
-      return vec2(la::dot(P - a0, e1), la::dot(P - a0, e2));
-    };
-
+    const vec3 &nHat = pf.nHat, &e1 = pf.e1, &e2 = pf.e2;
     // Input verts (dedup by canonical 3D bit pattern) + triangle-boundary
     // edges; each member triangle carries its signed orientation vs nHat.
-    std::vector<vec2> verts2;
-    std::vector<vec3> canon3;
-    std::map<std::tuple<double, double, double>, int> vidx;
-    auto getV = [&](const vec3& P) {
-      const std::tuple<double, double, double> key{P.x, P.y, P.z};
-      auto it = vidx.find(key);
-      if (it != vidx.end()) return it->second;
-      const int id = static_cast<int>(verts2.size());
-      verts2.push_back(proj(P));
-      canon3.push_back(P);
-      vidx.emplace(key, id);
-      return id;
-    };
+    std::vector<vec2>& verts2 = pf.verts2;
+    std::vector<vec3>& canon3 = pf.canon3;
+    auto getV = [&](const vec3& P) { return pf.add(P); };
     struct FaceTri {
       vec2 p0, p1, p2;
       int s;
@@ -1865,18 +1870,8 @@ void FoldCoplanarClusters(std::vector<OutTri3D>& out, const Manifold::Impl& in,
         return;
       }
       if (tris.empty()) continue;
-      int best = 0;
-      double bestArea = -1.0;
-      for (int t = 0; t < static_cast<int>(tris.size()); ++t) {
-        const vec2 p0 = pts[tris[t].x], p1 = pts[tris[t].y],
-                   p2 = pts[tris[t].z];
-        const double ar = std::abs((p1.x - p0.x) * (p2.y - p0.y) -
-                                   (p1.y - p0.y) * (p2.x - p0.x));
-        if (ar > bestArea) {
-          bestArea = ar;
-          best = t;
-        }
-      }
+      double bestArea;
+      const int best = LargestSubTri(tris, pts, bestArea);
       // Classify at the largest sub-triangle's INCENTER (strictly interior, as
       // far from every edge as possible), then jitter by a fraction of the
       // incircle radius in a GENERIC direction so the point does not land on a
