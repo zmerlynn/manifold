@@ -824,48 +824,6 @@ struct TriSoup {
   }
 };
 
-struct BEnumeration {
-  int seamCount = 0;  // genuine non-adjacent self-crossings
-  int boundaryTouchPairs =
-      0;  // pairs hitting an exact-zero/uncertain predicate
-};
-
-// Enumerate the component's genuine self-crossing arrangement: bbox broadphase
-// + shared-vertex (self-adjacency) skip + level-0 pierce test.  Reproduces the
-// fragment's seam set (v5b-r4: siA/siB = 338 seams, 0 boundary-touch).  Brute
-// bbox broadphase is O(F^2) (17k tris ~0.2s); the collider_ broadphase is the
-// perf path (unbuilt here - correctness-first).
-BEnumeration EnumerateSelfCrossings(const Manifold::Impl& in) {
-  BEnumeration out;
-  const int nTri = static_cast<int>(in.NumTri());
-  const TriSoup soup(in);
-  const auto& tri = soup.tri;
-  for (int i = 0; i < nTri; ++i) {
-    for (int j = i + 1; j < nTri; ++j) {
-      if (!soup.BBoxOverlap(i, j)) continue;
-      if (soup.SharesVert(i, j)) continue;  // self-adjacency skip (S4a)
-      const auto& A = tri[i];
-      const auto& B = tri[j];
-      bool genuine = false, boundary = false;
-      for (int e = 0; e < 3 && !genuine; ++e) {
-        const int r = EdgePiercesTri(A[e], A[(e + 1) % 3], B[0], B[1], B[2]);
-        if (r == 1) genuine = true;
-        if (r == -1) boundary = true;
-      }
-      for (int e = 0; e < 3 && !genuine; ++e) {
-        const int r = EdgePiercesTri(B[e], B[(e + 1) % 3], A[0], A[1], A[2]);
-        if (r == 1) genuine = true;
-        if (r == -1) boundary = true;
-      }
-      if (genuine)
-        ++out.seamCount;
-      else if (boundary)
-        ++out.boundaryTouchPairs;
-    }
-  }
-  return out;
-}
-
 // Are two triangles EXACTLY coplanar at level-0?  Each of the six cross checks
 // (every vertex of one against the other's plane) is a certified orient3d
 // filter sign; a 0 means the vertex is within ~1 ULP of the plane, i.e. the
@@ -1147,7 +1105,9 @@ struct BuildArrangement {
 // raise A.boundaryTouch.  A cross-cluster / non-coplanar exact-zero tie still
 // sets boundaryTouch (the SoS residue).
 BuildArrangement RecordSeams(const Manifold::Impl& in,
-                             const std::vector<int>& face2cluster, double eps) {
+                             const std::vector<int>& face2cluster, double eps,
+                             int* seamCountOut = nullptr,
+                             int* boundaryTouchOut = nullptr) {
   BuildArrangement A;
   const int nTri = static_cast<int>(in.NumTri());
   A.tri.resize(nTri);
@@ -1211,6 +1171,34 @@ BuildArrangement RecordSeams(const Manifold::Impl& in,
   for (int i = 0; i < nTri; ++i) {
     for (int j = i + 1; j < nTri; ++j) {
       if (!bboxOverlap(i, j)) continue;
+      // Probe counters (test hook): the level-0 self-crossing classification
+      // EnumerateComponent_Probe reports, folded onto THIS scan so no separate
+      // enumeration pass is needed.  Non-adjacent (shares-vertex skipped, S4a)
+      // bbox-overlap pairs are graded by the raw level-0 pierce test: a genuine
+      // pierce (r==1) is a seam, else a filter-uncertain touch (r==-1) is a
+      // boundary-touch pair.  nullptr (production) skips this entirely, so the
+      // recorded arrangement is unchanged.
+      if (seamCountOut && boundaryTouchOut && !sharesVert(i, j)) {
+        const auto& Ti = A.tri[i];
+        const auto& Tj = A.tri[j];
+        bool genuine = false, boundary = false;
+        for (int e = 0; e < 3 && !genuine; ++e) {
+          const int r =
+              EdgePiercesTri(Ti[e], Ti[(e + 1) % 3], Tj[0], Tj[1], Tj[2]);
+          if (r == 1) genuine = true;
+          if (r == -1) boundary = true;
+        }
+        for (int e = 0; e < 3 && !genuine; ++e) {
+          const int r =
+              EdgePiercesTri(Tj[e], Tj[(e + 1) % 3], Ti[0], Ti[1], Ti[2]);
+          if (r == 1) genuine = true;
+          if (r == -1) boundary = true;
+        }
+        if (genuine)
+          ++*seamCountOut;
+        else if (boundary)
+          ++*boundaryTouchOut;
+      }
       // SHARES-VERTEX GENUINE-CROSSING RECOVERY (reg3d-wjump
       // decision-completion 1).  The shared-vertex broadphase skip assumes
       // shared-vertex => self-adjacent => no transversal crossing, which is
@@ -2394,10 +2382,15 @@ ComponentEnumProbe EnumerateComponent_Probe(const Manifold::Impl& dirty,
                                             const std::vector<vec3>& probes,
                                             const vec3& seed) {
   ComponentEnumProbe out;
-  const BEnumeration enu = EnumerateSelfCrossings(dirty);
-  out.seamCount = enu.seamCount;
-  out.boundaryTouchPairs = enu.boundaryTouchPairs;
-  for (int c : DetectCoplanarClusters(dirty))
+  // Fold the level-0 self-crossing counts onto the real seam scan (no separate
+  // enumeration pass): DetectCoplanarClusters ONCE, then RecordSeams with the
+  // probe counters.  The counters grade the raw pierce test independently of
+  // the cluster skip, so they reproduce the standalone enumerator's numbers.
+  const std::vector<int> face2cluster = DetectCoplanarClusters(dirty);
+  const double eps = EpsilonFromScale(dirty.bBox_.Scale(), 1000);
+  RecordSeams(dirty, face2cluster, eps, &out.seamCount,
+              &out.boundaryTouchPairs);
+  for (int c : face2cluster)
     if (c >= 0) ++out.coplanarClusterFaces;
   out.probeWinding.reserve(probes.size());
   for (const vec3& p : probes) {
