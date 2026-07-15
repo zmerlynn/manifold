@@ -1292,12 +1292,6 @@ BuildArrangement RecordSeams(const Manifold::Impl& in,
     return p;
   };
   auto bboxOverlap = [&](int i, int j) { return box[i].DoesOverlap(box[j]); };
-  auto sharesVert = [&](int i, int j) {
-    for (int a = 0; a < 3; ++a)
-      for (int b = 0; b < 3; ++b)
-        if (A.vid[i][a] == A.vid[j][b]) return true;
-    return false;
-  };
   // Vertices used by each coplanar cluster (all lie on that cluster's plane):
   // an edge touching a folded plane at one of ITS OWN cluster vertices is a
   // riser vertex, not a transversal vertex-on-face SoS tie.
@@ -1318,26 +1312,37 @@ BuildArrangement RecordSeams(const Manifold::Impl& in,
       // pierce (r==1) is a seam, else a filter-uncertain touch (r==-1) is a
       // boundary-touch pair.  nullptr (production) skips this entirely, so the
       // recorded arrangement is unchanged.
-      if (seamCountOut && boundaryTouchOut && !sharesVert(i, j)) {
-        const auto& Ti = A.tri[i];
-        const auto& Tj = A.tri[j];
-        bool genuine = false, boundary = false;
-        for (int e = 0; e < 3 && !genuine; ++e) {
-          const int r =
-              EdgePiercesTri(Ti[e], Ti[(e + 1) % 3], Tj[0], Tj[1], Tj[2]);
-          if (r == 1) genuine = true;
-          if (r == -1) boundary = true;
+      if (seamCountOut && boundaryTouchOut) {
+        // Index-keyed shares-vertex skip, PROBE-ONLY (inlined at its one use so
+        // it does not read as a shared production helper).  The production
+        // recovery and skip below key on POSITION coincidence; the probe's
+        // welded synthetic meshes carry no unwelded duplicates, so index
+        // equality is the right adjacency test here.
+        bool sharesVertIdx = false;
+        for (int a = 0; a < 3 && !sharesVertIdx; ++a)
+          for (int b = 0; b < 3; ++b)
+            if (A.vid[i][a] == A.vid[j][b]) sharesVertIdx = true;
+        if (!sharesVertIdx) {
+          const auto& Ti = A.tri[i];
+          const auto& Tj = A.tri[j];
+          bool genuine = false, boundary = false;
+          for (int e = 0; e < 3 && !genuine; ++e) {
+            const int r =
+                EdgePiercesTri(Ti[e], Ti[(e + 1) % 3], Tj[0], Tj[1], Tj[2]);
+            if (r == 1) genuine = true;
+            if (r == -1) boundary = true;
+          }
+          for (int e = 0; e < 3 && !genuine; ++e) {
+            const int r =
+                EdgePiercesTri(Tj[e], Tj[(e + 1) % 3], Ti[0], Ti[1], Ti[2]);
+            if (r == 1) genuine = true;
+            if (r == -1) boundary = true;
+          }
+          if (genuine)
+            ++*seamCountOut;
+          else if (boundary)
+            ++*boundaryTouchOut;
         }
-        for (int e = 0; e < 3 && !genuine; ++e) {
-          const int r =
-              EdgePiercesTri(Tj[e], Tj[(e + 1) % 3], Ti[0], Ti[1], Ti[2]);
-          if (r == 1) genuine = true;
-          if (r == -1) boundary = true;
-        }
-        if (genuine)
-          ++*seamCountOut;
-        else if (boundary)
-          ++*boundaryTouchOut;
       }
       // SHARES-VERTEX GENUINE-CROSSING RECOVERY (reg3d-wjump
       // decision-completion 1), keyed on POSITION coincidence (reg3d-oscad
