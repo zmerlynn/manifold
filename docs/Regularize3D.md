@@ -525,16 +525,18 @@ notebook owns the numbers).  Every entry below is either queued behind a closure
 crucible or carries a proof-shaped adjudication; "research-grade" is never a bare
 terminal state.
 
-Census (each fatal-string SITE in overlap3.cpp -> its axis; F-ids are the
-notebook's).  The sites, by kind, are: two EMISSION strings (BuildImpl: "unresolvable
-sheet contact" from SplitTouchingSheets, "emitted triangulation not 2-manifold");
-one COPLANAR-FOLD decline; the SEAM-SUBFACE "not exactly resolvable"; the
-non-2-endpoint-seam "degenerate incidence"; the clean-face "filter-uncertain"
-graze; two NEAR-COPLANAR planarize refusals (global-planarity guard /
-inconsistent snap); the non-coplanar exact-zero SoS tie; the "epsilon not
-computable" input guard; the "input not 2-manifold" reachable defensive guard
-(fires only on the direct-Impl path); and the "resolver output failed the
-re-gate" R1/R2 backstop.
+Census (each fatal-string SITE in overlap3.cpp -> its axis).  The sites, by
+kind, are: two EMISSION strings (BuildImpl: "unresolvable sheet contact" from
+SplitTouchingSheets, "emitted triangulation not 2-manifold"); one COPLANAR-FOLD
+decline; the SEAM-SUBFACE "not exactly resolvable"; the non-2-endpoint-seam
+"degenerate incidence"; the clean-face "filter-uncertain" graze; two
+NEAR-COPLANAR planarize refusals (global-planarity guard / inconsistent snap);
+the "epsilon not computable" input guard; the "input not 2-manifold" reachable
+defensive guard (fires only on the direct-Impl path); and the "resolver output
+failed the re-gate" R1/R2 backstop.  (There is no "SoS refused" fatal slot: the
+single-global SoS is TOTAL by construction - it decides every non-coplanar
+transversal exact-zero tie - so a residue surfaces instead as the non-2-endpoint
+seam or downstream at emission.)
 
 Live fail-closed carriers (measured at HEAD, ZZZ_CENSUS instrumented then
 reverted):
@@ -548,412 +550,164 @@ reverted):
   NearCoplanarChain| 4 PLANARIZE-GUARD  | global-planarity guard        | constructed
   BridgedCaps      | (RESOLVES)         | -                             | resolves
 
-  reg3d-wjump LANDED (the winding-jump / degenerate-incidence EMISSION
-  completion): the SHARES-VERTEX GENUINE-CROSSING RECOVERY (RecordSeams) closes
-  the Cluster-1 emission wall for its self-intersecting carriers.  The shared-
-  vertex broadphase skip was UNSOUND for self-intersecting soups (two faces
-  sharing a corner that fold back and cross OFF the corner had their seam dropped,
-  leaving an incomplete arrangement whose emission opened - the unbalanced-fan
-  "8-edge hole").  Recovering those crossings (only genuine off-vertex transversal
-  pierces, SoS-decided; the seam is [V, offVertexP], V the shared corner) COMPLETES
-  the arrangement so the existing per-face witness rule emits the everted
-  double-sheet correctly (decision-completion 2 is SUBSUMED: no new emission rule -
-  s7b was right that the +1-only rule is already general on a COMPLETE
-  arrangement).  RESOLVES (oracle-graded, zero-oracle-wrong): PokedCube (vol=0.25
-  == GWN MC oracle, tol-invariant, non-self-int); GT7081 both dirty shells
-  (volume-preserved, tol-invariant); GT7863's SELF-INTERSECTING component (the
-  8-edge hole, vol 855, tol-invariant).  All resolving fixtures preserved
-  (siA/siB stay in the MC volume band; the retention rule is byte-untouched).
-  Mutation-verified (disable the recovery -> the resolves revert to "unresolvable
-  sheet contact").  NO new predicate FORM (EdgePiercesTriSoS is the existing
-  blessed SoS caller); no kernel escalation - REFUTING the prior lanes'
-  "research-grade / plane-based-rep / kernel-tripwire" conclusion for these
-  carriers.
+The census BY KIND (current state).  The lane reports own the history and the
+numbers - .claude/lane-reports/reg3d-*, f4-*, attack22-*, census2-* - so this
+ledger states, per gap: what forces it, the counterexample it refutes, and (for
+the one terminal wall) the spec and price to cross it.  No history-narration
+here; the notebooks carry the landings.
 
-  RECLASSIFICATION (reg3d-c2b -> reg3d-c2bx, measured): GT7081's original F4
-  string read "seam sub-face arrangement not exactly resolvable"; reg3d-c2b's
-  anatomy REFUTED the Cluster-2 reading (the 2D seam sub-face arrangement resolves
-  EXACTLY - zero triple points) and re-scoped it to the WINDING-PROBE
-  filter-precision residue (both dirty shells fail at the winding CLASSIFY probe
-  grazing a near-coplanar shallow-dihedral face the FILTER cannot decide but the
-  exact kernel decides NONZERO).  reg3d-c2bx then CLOSED that residue with the
-  winding-probe escalation (WindingAt filter-0 -> Orient3DExactSign): both shells
-  now decide the classify exactly (measured zero genuine ties) and fail at the
-  DEEPER pre-existing wall - "unresolvable sheet contact" (SplitTouchingSheets ->
-  NonManifoldEmission), the CLUSTER-1 emission representability wall IDENTICAL to
-  GT7863's near-coplanar sliver (GT7081's 0.002deg near-tangent geometry reduces
-  the {w>=1} boundary to touching sheets with no representable double-manifold).
-  So GT7081 RECLASSIFIES AGAIN to Cluster 1a and folds into the C-1a crucible with
-  GT7863.  Its winding-probe residue is closed; its terminal wall is emission.
+REACHABLY-TRIPPED ARMS (a live carrier forces each):
 
-  reg3d-f4-b1 LANDED (the ONCE-ONLY 3-face triple-point construction): oscad-f4
-  measured that openscad's F4 "seam sub-face not exactly resolvable" wall is
-  ENTIRELY the 3-face TRIPLE-POINT case (the winding probe fires ZERO times -
-  REFUTING the "winding-probe / GT7081-class" reading logged for openscad in
-  Cluster 2a/3 above).  Its large dirty component is triple-point dense, and the
-  per-face resolver builds each triple point three times (once per incident
-  face's frame), so the pos2in input-preimage map refuses the constructed
-  crossings.  EnumerateTriplePoints now enumerates each triple ONCE, constructs
-  ONE canonical double point keyed by the sorted plane triple (Intersect3Planes,
-  a construction sibling of SegPlanePoint, NOT a decision), and threads it into
-  all three incident faces by PRE-SPLITTING the seams at the exact on-seam
-  crossing keyed to the shared point - so the arrangement completes at the
-  0-cells and the triple-point refusal is DISSOLVED.  Tripwire-free: no exact
-  arithmetic on constructed points, the crossing test and the winding classify
-  stay the existing level-0 predicates, and the retention rule is BYTE-UNCHANGED.
-  Bitwise no-op off openscad (zero triple points on every other corpus carrier).
-  openscad then fails one wall DEEPER at the EMISSION wall ("unresolvable sheet
-  contact", SplitTouchingSheets -> NonManifoldEmission), joining GT7081/GT7863 in
-  Cluster 1.  MEASURED (f4-b1 census): the once-only welding is LOAD-BEARING (the
-  per-face-reconstruct MUTATION reopens the triple-incident open edges) but
-  INSUFFICIENT - it closes only the triple-incident holes.  The DOMINANT
-  open-boundary residue is the DROPPED-BOUNDARY class AWAY from the triple points
-  (the everted / high-cover strata; most open edges are single dangling
-  halfedges with neither endpoint at a triple), plus a few EXACT-coincident
-  radial-tangent ties (gap exactly zero = genuine tangent sheets, not double-
-  rounding) and material overlaps.  This CONFIRMS design-a's radial-arrangement
-  residue and design-c's stated FALSIFIER (open edges PERSIST on a once-only-
-  consistent arrangement with the emission rule unchanged), and REFUTES design-b's
-  "once-only closes the near-triple majority" prediction (its near/far split was
-  confounded, as its own notebook warned) AND design-a's winding-jump re-emission
-  rule (measured to move the count the WRONG way).  Closing the residue is the
-  exact-radial substrate (the tripwire), RECORDED not built.  (An earlier aside
-  here claimed the pre-B1 wall was MANIFOLD_PAR-dependent; the verification lane
-  could not reproduce that - pre-B1 is F4 under both settings in from-scratch
-  builds.  With B1 the terminal is the emission wall under both settings.)
+- E1 EMISSION - "unresolvable sheet contact" (SplitTouchingSheets open
+  boundary).  openscad's large dirty component (corpus), the sole
+  PRODUCTION-reachable completeness terminal.  COUNTEREXAMPLE: the resolver
+  cannot emit a representable double-precision {w_S>=1} boundary for it.  Its
+  arrangement COMPLETES (once-only triple points + both-sides retention + the
+  global junction registry carry it past the seam sub-face winding classify and
+  the T-junction completion), but the emitted boundary reduces to an
+  open-boundary fan whose missing sub-faces are bounded by NEAR-TANGENT seam
+  crossings - clusters of genuinely-distinct triple points spread from ~1e-4 down
+  to ~2*eps that RemoveOverlaps2D's eps-merge collapses to one cell spanning two
+  winding regions.  A finer per-sub-triangle read is measured WORSE (it unpairs
+  real neighbours).  Zero-oracle-wrong holds: no geometry is emitted, and every
+  probed winding-only completion face was winding-validated and rejected, so the
+  residue is a representability wall, not a solvable pairing.  Refuted closure
+  families, each with evidence: stage-5 near-coplanar widening (no admissible
+  sub-eps target), thinness-aware weld (no face-collapsing merge), winding-only
+  boundary completion (over-fills non-uniform regions the winding rejects),
+  branch-node radial order as the blocker (the order is level-0 FREE from
+  input-plane normals + the emitted fwd bit), and the exact axis-drop projection
+  (relocates the fan imbalance, does not resolve).
+  SPEC (the only path across the wall): an EXACT per-face near-tangent 2D
+  arrangement over CONSTRUCTED intersection points.  The single tripwire crossing
+  is orient2d on a constructed near-tangent point (not on input coords).
+  PRICE, two owner-gated options behind the kernel tripwire: carry each crossing
+  SYMBOLICALLY as its plane-triple {f,g,h} and evaluate orient2d via
+  degree-bounded coefficients on the existing Orient3DExactSign accumulator (ONE
+  new predicate FORM, zero vendored code), or vendor Shewchuk predicates.c
+  (strictly more code, the fallback if a second FORM is ever needed).  The radial
+  order and the winding half are FREE - the wall is purely the constructed-
+  crossing exact 2D arrangement.
+  (GT7863, GT7081, and PokedCube reached this wall historically but now RESOLVE
+  oracle-graded: their residue was ARRANGEMENT-INCOMPLETENESS from an unsound
+  shares-vertex broadphase skip, not an emission-representability wall.  openscad
+  is the sole surviving corpus carrier at E1.)
 
-  reg3d-f4-junction LANDED (the emission residue NARROWED in-form, byte-for-byte
-  no-op off openscad).  (1) BOTH-SIDES RETENTION: EmitSeamedFace now probes w_S
-  on BOTH sides of each sub-cell and retains iff exactly one is inside {w_S>=1}
-  (the coplanar fold's general rule, the m==1 case of which is byte-identical to
-  the former w_above==0 rule), closing the radial ties + material overlaps - a
-  one-sided-rule artifact where the seam sub-cell's true jump != 1.  (2) GLOBAL
-  JUNCTION REGISTRY: the per-face arrangement wove PROPER seam crossings (B1) but
-  not the NON-proper-crossing junctions - a seam endpoint (or a triple that
-  TERMINATES a seam on the third face) landing strictly interior to a neighbour /
-  partner / third face's emitted edge without a shared split, which opens the
-  fan.  BuildJunctionRegistry dedups every once-only arrangement vertex (seam
-  endpoints + triples) to a canonical 3D point, and every emit path (seamed,
-  clean, fold) pre-splits its edges at each registry vertex strictly interior to
-  it - the split DECISION a pure 3D on-segment test on the SHARED endpoints (so
-  both incident faces decide identically; a per-frame 2D test disagreed near
-  endpoints and manufactured fresh T-junctions), the 2D foot only the on-line
-  addAt position (no RemoveOverlaps2D fold-back).  No new predicate FORM, no
-  exact-on-constructed-point (level-0 3D on-segment on existing once-only
-  constructions), so the design lanes' "exact-radial substrate needed for the
-  T-junction residue" reading is REFUTED for the dominant class: the registry
-  closes ~two thirds of the open edges in-form, mutation-verified load-bearing
-  (registry off reopens them), FNV-identical on all resolving carriers.  The
-  SURVIVING residue is near-degenerate and stays fail-closed: near-tangent
-  >2-SHEET RADIAL junctions (the unbuilt radial branch), genuinely-distinct
-  near-coincident vertices from near-PARALLEL planes, a coplanar/transversal
-  ENTANGLEMENT line (the fold's cap-cap crossing and a seamed wall's endpoint
-  differ by more than eps), and collinear clean-clean overlaps - the
-  plane-based-representation escalation the campaign gates behind the kernel
-  tripwire.  openscad stays at the emission wall, now much narrower.
+- A1 SEAM - "non-2-endpoint seam / degenerate incidence" (RecordSeams).
+  CapSeamingEntanglement's cap-interior pierce (constructed).  A wall piercing a
+  cap face SEAMS the cap - the coplanar/transversal entanglement the fold
+  declines by design.  COUNTEREXAMPLE-PAIR: the same fixture with the plug
+  RESTING on the cap (no pierce) RESOLVES; piercing it fails closed.  Closing the
+  constructed pierce is the same coordinated-emission wall as E1, not a bounded
+  completion.  Decision-correct.
 
-  reg3d-f4-r5 LANDED (the emission residue NARROWED again in-form, byte-for-byte
-  no-op off openscad).  (1) BOTH-SIDES CLEAN RETENTION: the both-sides rule is
-  ported from the seamed/fold paths to EmitCleanFaces - probe w_S on each side of
-  a clean face and retain iff exactly one is inside {w_S>=1}, the mult-1 case
-  byte-identical to the former w_above==0 rule - dropping a clean tile that is
-  coplanar-coincident with an unclustered seamed face (exterior on both sides),
-  the one-sided-rule over-emission the whole-face read could not see (F4R_ONESIDE
-  reverts).  (2) EXACT INPUT-VERTEX-ON-EDGE T-JUNCTIONS: the seam/triple registry
-  omitted plain input vertices, but a self-overlap can land an input vertex
-  strictly interior to a foreign triangle's edge (that face emits the edge
-  unsplit, opening the fan).  BuildJunctionRegistry now registers those vertices
-  behind an EXACT level-0 test - collinear via the three axis-projected 2D orients
-  (each the padded orient3d through the ONE blessed exact predicate, filter-first)
-  plus a strict between-ness compare and an adjacency skip - so only genuine
-  T-junctions register; the eps-tolerant all-vertex version splits near-touching
-  corners and is measured rail-breaking, which the exact predicate avoids
-  (F4R_NOVJUNC reverts).  Both mutation-verified load-bearing, FNV-identical on
-  every resolving carrier, kernel exact-predicate surface untouched.  The
-  SURVIVING residue is the NEAR-TANGENT THIN-CELL representability axis (stage 7):
-  a cluster of genuinely-distinct triple points (spread down to ~2*eps) that
-  RemoveOverlaps2D's eps-merge leaves as ONE cell spanning two winding regions, so
-  its single largest-sub-tri classification emits sub-eps sliver artifacts whose
-  edges do not pair; plus a few seam-endpoint fans whose missing partner sub-face
-  is dropped by the same near-tangent classify.  MEASURED (f4-r5): a finer
-  per-sub-triangle winding read makes it WORSE (dropping the uniform-region
-  slivers unpairs the real neighbour faces) and regresses clean carriers to
-  fail-closed - the exact confirmation that this is REPRESENTATION at
-  double-rounding, not a finer-classify or sliver-drop repair (dropping sub-eps
-  slivers is banned; here measured provably wrong).  Closing it needs the exact
-  sub-eps arrangement (a rational split at the near-tangent crossing + rational
-  retention) or an input-side near-parallel-wall snap (a stage-5 sibling for
-  walls) - the plane-based-representation completion the campaign gates.  openscad
-  stays at the emission wall, narrower again; the anatomy is in
-  .claude/lane-reports/f4-r5-*.md.
+- S3 PLANARIZE - "global-planarity guard, curved chain"
+  (SnapNearCoplanarClusters).  NearCoplanarChain (constructed).  A curved
+  near-band is genuinely not one plane; the guard fails closed rather than fold
+  to a wrong plane.  A CORRECT, decision-complete refusal, not an unbuilt axis.
+  Not corpus-forced (the corpus's real near-coplanar geometry is cross-component
+  pass-through).
 
-MEASURED CORRECTIONS to earlier anatomy (were logged at a pre-entanglement,
-pre-stage-6 HEAD): (1) PokedCube AND GT7863 fail at the SplitTouchingSheets
-"unresolvable sheet contact" EMISSION string, which fires BEFORE the 2-manifold
-gate - not at "not 2-manifold" as reg3d-arr's open-halfedge dump implied.  (2)
-BridgedCaps RESOLVES (stage-6 SoS closed it); its in-test comment predates that
-landing and is stale.
+- D1 INPUT - "epsilon not computable" (RemoveOverlaps3D).  Zero-scale input (a
+  cube collapsed to a point -> bbox scale 0 -> eps 0).  Fires before decompose.
+  A degenerate-input contract edge.
 
-Cluster map (root mechanism, not which string fires):
+OFF-CORPUS / DEFENSIVE BACKSTOPS (no corpus or constructed carrier forces them;
+each fails CLOSED on its trigger - correctness by code-read, never a wrong
+resolve):
 
-- CLUSTER 1 - EMISSION REPRESENTABILITY (stage-7 thin-cell / touching sheet).
-  The resolved {w_S>=1} boundary reduces to sub-eps / touching sheets with no
-  representable double-manifold; BuildImpl declines.  UNIFIED ANATOMY (reg3d-c1a):
-  every carrier fails SplitTouchingSheets at an UNBALANCED fan = an OPEN BOUNDARY
-  (dropped faces), NOT a touching/doubled sheet - measured zero surviving weld
-  twins and zero non-manifold edges on all of them; the wall needs MORE emitted
-  faces, so C-5's twin-identity unification is a measured no-op here (see closure
-  plan 5).  Two sub-shapes:
-  1a EXACT-INCIDENT / everted-emission (GT7863 AND GT7081 post-reg3d-c2bx;
-  root label CORRECTED by the bake-off, reg3d-1a/1b: NOT a near-coplanar input
-  sliver - the "887-2259 ULP sliver" is CROSS-mesh pass-through; the dirty-component
-  wall is exact-incident edge-on-edge seam endpoints <1 ULP + a double-sheet /
-  everted-region winding drop, the reg3d-wjump completion; options a/b both refuted
-  with empty patches).  CLOSED for its named carriers: reg3d-wjump resolved
-  GT7863's 8-edge hole + GT7081 + PokedCube; reg3d-7863c1 resolved GT7863's
-  coplanar comp#1 - both were ARRANGEMENT-INCOMPLETENESS from an unsound
-  shares-vertex skip, not an emission-representability wall.  1b negative-winding
-  double sheet
-  (PokedCube: an everted corner makes a genuine w_S=-1 region, so the w=-1|w=1
-  junction is a double sheet the mult-1 per-face emission opens - s7b refuted the
-  simple orientation flip).  Production-reachable.
-- CLUSTER 2 - SEAM SUB-FACE EXACT RESOLVABILITY.  RecordSeams / EmitSeamedFace
-  cannot build a face's 2D arrangement exactly at a degenerate incidence.  2a
-  openscad's residue was RECLASSIFIED OUT of this cluster (reg3d-oscad REOPEN, LANDED): the
-  earlier per-pair reading (reg3d-c2a) treated its nPts==1 truncations as a cap-seaming
-  entanglement / degenerate-endpoint wall, but exact rational reconstruction of every truncated
-  seam's true second endpoint showed the dominant residue is MEASURE-ZERO contacts
-  (coincident-position DUPLICATE vertices, vertex-on-edge / vertex-on-face T-junctions,
-  collinear edge-on-edge overlaps) - a POINT or boundary-segment intersection with NO
-  transversal crossing, a PHANTOM seam the filter/SoS manufactured (proven exactly: none has a
-  clean off-plane edge piercing the other's strict interior).  Three RecordSeams
-  decision-completions - the shares-vertex skip/recovery keyed on POSITION coincidence, a
-  phantom-seam guard, a sub-eps collapse - close the F11 seam-truncation wall; openscad then
-  fails at the WINDING CLASSIFY probe (F4), moving to the winding-probe axis (Cluster 3) below,
-  the SAME near-tangent phenomenon as GT7081.  2b
-  GT7081's shells were RECLASSIFIED OUT of this cluster (reg3d-c2b): the anatomy
-  shows their 2D seam sub-face arrangement resolves EXACTLY (preimage-strict
-  reconstruct, zero triple points); the fatal is the WINDING CLASSIFY probe
-  grazing a near-coplanar face on the filter, so they move to the WINDING-PROBE
-  axis (Cluster 3 / O4 seed policy) below.  Production-reachable.
-- CLUSTER 3 - SoS / EXACT-TIE RESIDUE + the unbuilt >2-sheet radial branch.  The
-  >2-sheet radial branch is not corpus-forced (reg3d-radial: zero book-of-pages
-  lines; every corpus nPts!=2 is a 2-sheet truncation, not a triple point); its
-  reduction is proven sound but fires zero times.  The WINDING-PROBE
-  FILTER-PRECISION residue (reg3d-c2b, GT7081) that once lived here is CLOSED
-  (reg3d-c2bx): the winding CLASSIFY probe (WindingAt, both the seamed per-cell and
-  clean-face paths) previously decided ray crossings on the FILTER only
-  (Orient3DFilterSign) and failed closed on a filter-0; it now ESCALATES each
-  filter-0 term to Orient3DExactSign (the blessed winding-probe caller, filter-first).
-  GT7081's near-tangent 0.002deg geometry put the constructed probe (cell centroid
-  + eps*n) within the filter's uncertainty band of a face whose exact sign is
-  NONZERO (decidably off-plane); the escalation decides it exactly (measured zero
-  genuine ties).  The O4 component-local seed reprobe was MEASURED insufficient
-  (reg3d-c2b: it cleared multi-triangle seamed cells but not a single-triangle
-  clean face near-coplanar over its whole extent) AND is now redundant (the
-  escalation clears the graze exactly, so it was adjudicated OUT, reg3d-c2bx).
-  Closing the winding-probe residue did NOT resolve GT7081 end-to-end: it revealed
-  the pre-existing Cluster-1a emission wall underneath (both shells now fail at
-  "unresolvable sheet contact"), so GT7081 moved to Cluster 1a.  The
-  coupled-integer-flood re-architecture of the WIND phase (which would remove the
-  ray-cast winding altogether) remains a named research axis, no longer needed for
-  this residue.  openscad's large component moved PAST this axis: reg3d-f4-b1
-  (once-only triple points) then reg3d-f4-junction (both-sides retention + the
-  global junction registry) carried it through the seam sub-face winding classify
-  and the T-junction arrangement completion to the EMISSION wall (Cluster 1a),
-  where its near-degenerate residue - near-tangent >2-sheet radial junctions plus
-  the coplanar/transversal entanglement - joins GT7081/GT7863 behind the
-  plane-based-representation tripwire.  Fail-closed, no wrong resolve.
-- CLUSTER 4 - NEAR-COPLANAR PLANARIZE GUARD / SNAP refusals.  A curved near-band
-  is genuinely not one plane; the guard fails closed rather than fold to a wrong
-  plane.  These are CORRECT, decision-complete refusals (the exact procedure DOES
-  cover them), not unbuilt axes.  Not corpus-forced (the corpus's real
-  near-coplanar geometry is cross-component pass-through).
-- CLUSTER 5 - WELD / GATE BLIND SPOTS (R1 / R2 / the zero-area artifact).  The
-  uniform emission weld can merge two genuinely-distinct arrangement points within
-  eps (a fold the shares-vertex-skip gate is blind to) or leave a 1-ULP-distinct
-  vertex unmerged (the disclosed zero-area triangle).  No corpus carrier
-  demonstrated; live on the synthetic rotated pin.  reg3d-c1a REFUTED the
-  hypothesis that the once-only fold-vertex identity (C-5) could double as the
-  emission-wall fix (measured no-op; the emission fans carry no surviving twins)
-  AND showed C-5 "proper" is not a bounded DC but the plane-based-rep escalation
-  (the reentrant-corner point has three distinct cross-phase constructions;
-  unifying them by construction needs one canonical symbolic vertex).
-- CLUSTER 6 - DEGENERATE-INPUT / DEFENSIVE GUARDS ("epsilon not computable",
-  "input not 2-manifold").  Terminal-correct contract edges, not gaps.
+- R1 coplanar-fold decline - fires only if RecordSeams passes but
+  FoldCoplanarClusters declines (degenerate projection / filter-uncertain
+  in-plane classify / coplanar-transversal entanglement).  The one entanglement
+  carrier trips A1 first, masking R1.
+- R2 seam sub-face not exactly resolvable - the historical openscad F4,
+  dissolved by the once-only triple-point construction.  Remaining trigger = an
+  UNBUILT >2-sheet radial junction; a co-axial 3-sheet carrier is the named
+  synthetic.  The reduction is proven sound but fires zero times on the corpus.
+- R3 clean-face winding probe filter-uncertain (SoS) - fires only on a genuine
+  exact-zero seed-position graze over a clean face's whole extent (the
+  component-local seed-policy open).  No corpus carrier: the winding probe now
+  escalates filter-0 to Orient3DExactSign, so corpus grazes decide exactly.
+- S4 vertex in two near-coplanar clusters (inconsistent snap) - reachable in
+  principle (the shares-vertex skip lets two near clusters share a vertex), but
+  needs a closed soup with two near-coplanar internal overlaps meeting at a
+  shared vertex, not cheaply realized.
+- E2 emitted triangulation not 2-manifold - BuildImpl's second emission backstop
+  after SplitTouchingSheets passes.  Every corpus emission failure is E1 (open
+  boundary), never E2.
+- D3 resolver output failed the re-gate - a resolve that passes BuildImpl's
+  manifold gate but is self-intersecting (a weld-manufactured fold).  Verified
+  unreached on constructible general-position fixtures; a RELEASE fail-closed,
+  deliberately not a DEBUG_ASSERT.
 
-Closure plan (ordered by production-reachability x carriers-unlocked x closure
-shape; DC = decision-completion, PROOF = proof-shaped terminal adjudication,
-RESEARCH = memo with a required proof sketch, TRIPWIRE = kernel-vendor decision):
+DEAD-BY-CONSTRUCTION (the two near-coplanar refusals DELETED in the simp4 fold):
+the "degenerate face" and "degenerate normal" branches in
+SnapNearCoplanarClusters were unreachable - a degenerate face has pairGap ==
++inf and never unites, so a size>=2 cluster's first face is always
+non-degenerate and the sign-aligned member-normal sum is always nonzero.  See
+the in-code invariant comments.
 
-1. CRUCIBLE C-2a (RESEARCH - reclassified from DC; reg3d-c2a).  The census scoped
-   this as a bounded cap-INTERIOR pierce injection; the per-pair measurement + a
-   constructed minimal fixture REFUTE that.  A cap-interior seam endpoint arises
-   ONLY from a wall piercing a cap face, which SEAMS the cap = the coplanar/
-   transversal entanglement the fold declines by design; the F11 seam truncation is
-   only a symptom, with the F3 fold-decline underneath (proven: the same fixture
-   with the plug RESTING on the cap - no pierce - resolves; piercing it fails
-   closed; openscad's failing component was once read as likewise cap-seam-entangled -
-   SUPERSEDED, see TERMINAL below).  Closing THIS constructed fixture needs the fold to
-   arrange around the transversal seam and classify each split sub-cell by the real 3D
-   coupled winding = the Cluster-1 coordinated-emission wall, not a bounded completion.
-   openscad's F11 wall, by contrast, WAS closed by a RecordSeams-only fix (reg3d-oscad
-   REOPEN, TERMINAL below): its truncations were not this fixture's cap-seam-entanglement
-   but measure-zero phantom contacts.  Fail-closed, pinned
-   (Regularize_CapSeamingEntanglement_CapInteriorPierce_FailClosed).  The
-   cap-seaming-entanglement PROOF-PAIR (this constructed fixture: plug PIERCING a
-   cap fails closed, plug RESTING on the cap resolves) stands as the class exemplar.
-   TERMINAL SUPERSEDED (reg3d-oscad REOPEN, LANDED): the earlier
-   "plane-based-representation PROOF wall / ZERO shares-vertex / no fold-owned
-   completion" reading was a MEASUREMENT GAP - it searched only for a dropped interior
-   pierce and measured shares-vertex by INDEX, but the unwelded-DUPLICATE family IS the
-   shares-vertex family keyed on POSITION.  Exact rational reconstruction of every
-   truncated seam's true second endpoint showed the dominant residue is MEASURE-ZERO
-   contacts (coincident-position duplicate vertices, vertex-on-edge / vertex-on-face
-   T-junctions, collinear edge-on-edge overlaps) - a POINT or boundary-segment
-   intersection, a phantom seam with no transversal crossing (proven exactly: none has a
-   clean off-plane edge piercing the other's strict interior).  Three RecordSeams
-   decision-completions close the F11 wall (no new predicate FORM): position-keyed
-   shares-vertex skip/recovery, phantom-seam guard, sub-eps collapse.  openscad then fails
-   one wall DEEPER at F4, the seam sub-face WINDING CLASSIFY probe = the near-tangent
-   winding-probe class, the SAME exact-kernel-load phenomenon as GT7081 (Cluster 3).
-   Still fail-closed.  (The capvert recovery WIDENING remains separately refuted - a
-   benign wall-corner-on-cap-plane touch is not a seam endpoint, so recording touches
-   over-recovers; the ent proper-cross gate stays load-bearing for soundness.)
-2. CRUCIBLE C-2b (LANDED escalation; residue -> C-1a; reg3d-c2b -> reg3d-c2bx).
-   reg3d-c2b's anatomy REFUTED the Cluster-2 reading (GT7081's 2D seam sub-face
-   arrangement resolves EXACTLY; both shells fail at the WINDING CLASSIFY probe
-   grazing a near-coplanar face on the filter, exact-decidable NONZERO).  The owner
-   RELAXED the tripwire to ONE PREDICATE, ONE IMPLEMENTATION (same
-   Orient3DExactSign, additional CALLERS blessed, zero new arithmetic), so
-   reg3d-c2bx LANDED closure (a): WindingAt's filter-0 terms ESCALATE to
-   Orient3DExactSign (the winding-probe caller, filter-first).  MEASURED: both dirty shells
-   clear the winding classify exactly (zero genuine ties, so no wrong resolve), but
-   the escalation reveals a DEEPER pre-existing wall - both fail at emission
-   ("unresolvable sheet contact"), the Cluster-1a near-coplanar-sliver wall
-   IDENTICAL to GT7863.  So GT7081 does NOT resolve end-to-end; it RECLASSIFIES to
-   Cluster 1a and its terminal closure is C-1a (below).  The pin flips
-   FatalReason DirtyComponentUnresolved -> NonManifoldEmission (narrower, mutation-
-   verified: disabling the escalation reverts it).  The O4 seed-policy reprobe was
-   ADJUDICATED OUT (the escalation makes it redundant; measured, reg3d-c2bx).  The
-   coupled-integer-flood WIND re-architecture (b) is no longer needed for this
-   residue.  SURFACED earlier (owner triage, out of scope): the capvert
-   recovery-WIDENING recovers openscad's fold-owned vertex-on-plane touches but F3
-   is UNAFFECTED, so it does NOT unlock openscad alone - an emission-side follow-up.
-   (openscad is UNCHANGED by the escalation: it fails UPSTREAM at RecordSeams
-   "degenerate incidence"; the winding probe fires zero times, reg3d-c2bx.)
-3. CRUCIBLE C-1a (PROOF; reg3d-c1a UNIFIED EMISSION ANATOMY).  The consolidated
-   emission wall ("unresolvable sheet contact", SplitTouchingSheets ->
-   NonManifoldEmission) was instrumented on ALL its carriers (PokedCube, GT7863,
-   GT7081 both shells; cap-seaming fixture).  MEASURED (ZZZ_C1A, reverted
-   byte-clean): every emission carrier fails at the SAME branch - an UNBALANCED
-   fan (fwd/bwd count mismatch) = an OPEN BOUNDARY / hole, with ZERO surviving
-   near-duplicate vertices in any band (eps..16*eps) near the failing edge or
-   anywhere in the emitted vert set, and zero non-manifold edges (no doubled
-   sheets).  PokedCube's 8-triangle emission reconstructs into three closed
-   boundary loops (a 7-gon through the everted spike + two ISOLATED islands whose
-   connecting neighbors were dropped).  GT7863 = an 8-edge hole in a near-coplanar
-   x-sliver (x span ~0.76 at x~-31165); GT7081 = the SAME wall at a 0.002deg
-   shallower dihedral (112 + 6 open edges across two shells, winding classify now
-   exact per reg3d-c2bx, so only the near-tangent sliver emission remains).
-   PROOF (genuinely unpairable from the information present): each fan is an open
-   boundary because faces on d{w>=1} were DROPPED by the per-face emission at a
-   degenerate corner (PokedCube's w=-1|w=1 double-sheet everted spike) or a
-   near-coplanar / near-tangent site (GT7863/GT7081 slivers) - the dropped faces
-   are unrecoverable from the rounded-vec3 per-face arrangement + winding.  The
-   coordinated fixes converge: PokedCube needs the winding-jump-of-2 double-sheet
-   re-emission + an EXACT arrangement at the degenerate corner (triple points);
-   GT7863/GT7081 need a stage-5 near-coplanar fold WIDENING above eps under a
-   per-sub-face thinness bound (which risks the global-planarity-guard /
-   curved-chain oracle-wrongness).  Both fix shapes are the PLANE-BASED
-   REPRESENTATION escalation (exact symbolic vertices -> exact triple points +
-   at-rounding thin-cell/sliver decisions), which crosses the exact-kernel tripwire
-   (vendor Shewchuk).  RECORDED (build nothing on it).  The cap-seaming fixture is
-   NOT on this wall - its failing component dies UPSTREAM at RecordSeams F11/F3
-   (its non-piercing control emits clean); the C-2a research adjudication stands.
-   BAKE-OFF CORRECTION (reg3d-1a / reg3d-1b-optB, both REFUTED-WITH-EVIDENCE, empty
-   patches): the "1a near-coplanar sliver" ROOT LABEL is corrected by
-   dirty-component measurement.  Option (a) [stage-5 near-coplanar WIDENING] has NO
-   admissible target - zero near-coplanar 2D-AREA overlap below eps (or 100*eps) in
-   EITHER carrier's dirty components; a 1000x widen mutation still leaves GT7863
-   fail-closed.  Option (b) [thinness-aware WELD] has NO target - ZERO
-   face-collapsing weld merges corpus-wide; the defect is ~500-1000x the weld radius.
-   The documented "887-2259 ULP near-coplanar sliver" (planerep probe) is CROSS-MESH
-   (LxR): the resolver decomposes L/R into separate components (dirty comps carry
-   ~0-1 self-crossings, not the ~266 LxR interpenetration), so that wall is
-   CROSS-COMPONENT PASS-THROUGH under the standing non-fusion contract - it never
-   reaches per-component emission (folding it = breaking non-fusion, out of scope).
-   The ACTUAL dirty-component wall is: (i) EXACT-INCIDENT edge-on-edge seam endpoints
-   (<1 ULP = genuine form-independent ties, SoS jurisdiction) + winding classify;
-   (ii) a DOUBLE-SHEET / everted-region emission (GT7863: 2 faces dropped at
-   w_above=-1, GWN-confirmed everted; GT7081: 18 dropped faces) whose closure needs
-   the winding-jump / degenerate-incidence EMISSION completion (this crucible,
-   reg3d-wjump), NOT input-snap (a) and NOT weld (b).
-   CLOSED (reg3d-wjump LANDED).  The root was NOT a near-coplanar sliver at all: it
-   was ARRANGEMENT INCOMPLETENESS from the SHARES-VERTEX broadphase skip.  The
-   "8-edge hole" fans opened because seams between faces sharing a corner that
-   ALSO cross transversally off the corner (the everted-spike / near-triple-point
-   geometry) were DROPPED by `sharesVert => continue` - unsound for a
-   self-intersecting soup.  Recovering only the genuine OFF-VERTEX transversal
-   crossings (SoS-decided pierce; seam [V, offVertexP], V the shared corner
-   supplied as the second endpoint when the seam assembly yields nPts=1) COMPLETES
-   the arrangement, and the EXISTING per-face witness rule then emits the everted
-   double sheet correctly (the everted w=-1 region drops, the {w>=1} boundary is
-   kept - decision-completion 2 is SUBSUMED, no new emission rule).  RESOLVES
-   oracle-graded: PokedCube (vol=0.25 == GWN oracle), GT7081 (both shells,
-   volume-preserved), GT7863's self-intersecting component (vol 855).  No new
-   predicate FORM, no kernel escalation - so the earlier plane-based-rep /
-   Shewchuk-tripwire conclusion is REFUTED for these carriers.
-   GT7863 comp#1 CLOSED (reg3d-7863c1).  The prior "honest wall" reading was
-   WRONG about the mechanism (the fold-escalation was the wrong lever - it was
-   BANKED and stays UNBUILT, never landed).  comp#1 is NOT a clean doubled sheet:
-   it is the twin composition's FLAT FACE triangulated with overlapping tiles
-   (including a near-collinear sliver).  DetectCoplanarClusters was SKIPPING
-   shares-vertex pairs, so the flat face's tiles that touch the overlap AT A
-   CORNER were left OUT of the fold cluster.  The partial cluster's in-plane
-   cover then disagreed with the 3D winding (the self-check fired, m=2 vs jump=1)
-   and forcing emission T-junctioned against the un-clustered coplanar neighbours
-   (an OPEN-BOUNDARY emission fail - the Cluster-1a anatomy).  FIX (decision-
-   completion, arrangement-completeness - the exact shape reg3d-wjump used on the
-   RecordSeams shares-vertex skip): a two-pass cluster detect - SEED from
-   distinct-patch overlaps (share no vertex), then EXTEND a seeded cluster
-   through shared-corner overlaps, but do NOT seed a cluster from a
-   shared-corner-only overlap (that is a local FOLD-BACK, e.g. an everted-spike
-   face pair, which the per-face winding rule owns - PokedCube stays bitwise).
-   Completing the cluster makes the in-plane cover match the winding (m=1==jump),
-   the self-check PASSES with NO escalation, and the existing mult+winding rule
-   emits one sheet.  comp#1 RESOLVES oracle-true (vol ~2830 == signed volume ==
-   GWN, tol-invariant, non-self-int); both GT7863 dirty components now resolve so
-   the whole compose regularizes.  Mutation-verified (revert the skip narrowing
-   -> comp#1 reverts to the coplanar-fold decline).
-4. CRUCIBLE C-1b (CLOSED by reg3d-wjump; was folded into C-1a).  PokedCube's
-   everted corner IS a w=-1|w=1 double-sheet AND a degenerate near-triple-point -
-   but the near-triple-point was the shares-vertex-skipped crossings, not a
-   >2-sheet exact triple point: recovering them completes the arrangement and the
-   witness rule emits it (vol=0.25, GWN-oracle-confirmed).  s7b's clean-patch
-   per-face fix (already landed) + this recovery together close it.
-5. CRUCIBLE C-5 (REFUTED as the emission-wall key; residual = the plane-based-rep
-   escalation).  reg3d-c1a MEASURED C-5's predicted effect on every emission fan
-   and found it NULL: C-5 unifies within-eps twin identities, but it only changes
-   the SplitTouchingSheets input where a twin SURVIVES the BuildImpl eps-weld
-   (>eps apart) - and there are ZERO such twins on any carrier (the fans need MORE
-   faces, not merged twins).  So the census hypothesis that construction-keyed
-   identity could make the fans pairable is refuted.  A SOURCE read (RecordSeams
-   recovery + dedup) further shows C-5 "proper"
-   (bit-identical BY CONSTRUCTION rather than the current positional dedup) is NOT
-   the bounded DC the census assumed: the symmetric double-pierce is two different
-   SegPlanePoint constructions of one reentrant corner, and the fold overlay builds
-   it a third way - unifying them requires ONE canonical construction shared across
-   phases (RecordSeams runs BEFORE FoldCoplanarClusters), i.e. the plane-based
-   representation.  The A4 zero-area artifact (synthetic rotated pin, inert, no
-   corpus carrier) is the only thing C-5 would cure, and it too routes to the same
-   escalation.  The honest R1 residual (two genuinely-distinct points rounding
-   within eps) stays open.
-6. ADJUDICATION - Cluster 3 (TRIPWIRE).  The >2-sheet radial rule is proven sound
-   and fires zero times on the corpus; building it adds a second exact call site,
-   so it stays unbuilt behind the vendor-Shewchuk decision (owner's).  Fail-closed
-   posture stands.
+LATENT LIABILITIES (measured-dangerous, oracle-masked today; census2):
 
-Terminal-correct, no crucible (PROOF): Cluster 4 (a curved chain is not a single
-planar fold - snapping it is the oracle-wrong outcome the guard prevents), Cluster
-6 (degenerate-input guards), and Cluster 3's fail-closed posture until vendored.
+- L1 PLANEFRAME PROJECTION.  PlaneFrame::proj is the sole 2D projection on the
+  seamed/overlay path; its e1/e2 basis carries dot-product rounding.  On
+  openscad's large dirty component the rounded projection makes crossing
+  decisions and a few eps-merges that DIFFER from an exact axis-drop.  WHAT
+  PROTECTS CORRECTNESS TODAY: on the resolving carriers the emitted vertices are
+  canon3 (projection-independent) and retention is by exact 3D winding, so a
+  projection-rounded crossing only RE-TRIANGULATES within a seamed face - it does
+  not move the retained {w>=1} boundary.  WHAT WOULD DEFEAT IT: a dirty component
+  that resolves but whose retained sub-cell topology depends on a
+  projection-rounded crossing - a silent wrong resolve.  Not demonstrated on any
+  carrier; the guard is "canon3 verts + exact 3D winding", NOT "the projection is
+  right".
+  TRADEOFF for the exact axis-drop swap (owner decision, NOT taken - it is a
+  liability-removal, not a simplification): PRO - removes a convicted liability
+  layer and makes the seamed-path input predicates exact.  CON - it is NOT
+  byte-clean (measured ORACLE-EQUIVALENT but BYTE-DIFFERENT on several resolving
+  carriers: same triangle count, different tessellation), so the campaign's byte
+  baselines would have to be re-blessed; it is net LINES-ADDED unless the e1/e2
+  basis is fully retired (a larger project: FoldCoplanarClusters still
+  reconstructs in-plane positions as a0 + q.x*e1 + q.y*e2, so full retirement
+  trades that for a per-plane dropped-coordinate solve - new machinery, not a
+  clean deletion); and it does not resolve openscad (nets one open edge).
+- L2 WELD-FOLD BLIND SPOT (the R1/R2 root).  The uniform emission weld can merge
+  two genuinely-distinct arrangement points that round within eps (a self-fold
+  IsSelfIntersecting's shares-vertex skip is blind to) or leave a 1-ULP-distinct
+  vertex unmerged (the disclosed inert zero-area triangle on rotated/irrational
+  junctions).  The once-only construction rule avoids two rounded IMAGES of one
+  point; D3 is the release backstop for a weld-manufactured NON-manifold outcome
+  (it does not catch a manifold self-fold).  No corpus carrier; live on the
+  synthetic rotated pin.
+- L3 GATE CLEAN-BIAS.  IsSelfIntersecting's 2*eps shares-vertex relaxation can
+  suppress a near-miss crossing in a thin band just outside the eps weld, so a
+  near-degenerate self-overlap could pass the gate as clean (worse than
+  fail-closed).  No corpus carrier; the gate is deliberately clean-biased.
+
+Cluster map (root mechanism, by kind):
+
+- CLUSTER 1 - EMISSION REPRESENTABILITY (the E1 wall above).  The resolved
+  {w_S>=1} boundary reduces to an open-boundary fan of near-tangent extent that
+  no double-precision per-face arrangement + winding recovers; BuildImpl
+  declines.  Production-reachable (openscad); the terminal behind the kernel
+  tripwire.
+- CLUSTER 2 - SEAM SUB-FACE EXACT RESOLVABILITY (A1 / R2).  RecordSeams /
+  EmitSeamedFace at a degenerate incidence (the coplanar/transversal
+  entanglement) or an unbuilt >2-sheet radial junction.
+- CLUSTER 3 - SoS / EXACT-TIE + the unbuilt >2-sheet radial branch (R2 / R3).
+  The winding-probe filter-precision residue is CLOSED (the classify escalates
+  each filter-0 term to Orient3DExactSign); the radial branch is proven sound and
+  fires zero times, gated behind the vendor decision.
+- CLUSTER 4 - NEAR-COPLANAR PLANARIZE GUARD / SNAP (S3 / S4).  Curved-chain and
+  inconsistent-snap refusals - correct, decision-complete, not unbuilt axes.
+- CLUSTER 5 - WELD / GATE BLIND SPOTS (L2 / L3, R1).  The weld-fold and
+  clean-bias blind spots above; no corpus carrier, live on the synthetic pin.
+- CLUSTER 6 - DEGENERATE-INPUT / DEFENSIVE GUARDS (D1 / D2 / E2 / D3).
+  Terminal-correct contract edges, not gaps.
+
+Closure = the plane-based-representation escalation (exact symbolic vertices ->
+the exact constructed-crossing 2D arrangement of E1's spec), owner-gated behind
+the kernel tripwire (vendor Shewchuk, or the one {f,g,h} predicate FORM above).
+Everything not on that wall is decision-correct (Cluster 4), a defensive
+contract edge (Cluster 6), or an off-corpus backstop.  No silent wrong resolve
+at any arm.
