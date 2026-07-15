@@ -256,7 +256,11 @@ rounded geometry, and never a lossy fallback. The queued completions:
   fail-closed, flipping its direction stays oracle-true).  The former SoS-gate refusals
   NARROW to three precisely-named residues, each still a hard fail-closed with no output:
   (i) coplanar-DOMINATED soups (GT7863, PokedCube) pass the tie gate and fail at EMISSION
-  (touching-sheet / sub-eps slivers - the stage-7 thin-cell axis); (ii) COPLANAR/TRANSVERSAL
+  (touching-sheet / sub-eps slivers - the stage-7 thin-cell axis) [SUPERSEDED: GT7863 and
+  PokedCube now RESOLVE oracle-true - the emission "wall" was ARRANGEMENT INCOMPLETENESS
+  from unsound shares-vertex skips, closed by reg3d-wjump (RecordSeams off-vertex-pierce
+  recovery) + reg3d-7863c1 (DetectCoplanarClusters two-pass); see Gap ledger closure plan
+  pt 3]; (ii) COPLANAR/TRANSVERSAL
   ENTANGLEMENT - a transversal wall-wall seam whose endpoint lands ON a coplanar cap cluster
   plane was truncated (nPts==1) by the cap-cluster suppression and failed closed; this was
   RE-DIAGNOSED as NOT a >2-sheet triple point (entangled bars has zero book-of-pages lines,
@@ -270,9 +274,14 @@ rounded geometry, and never a lossy fallback. The queued completions:
   weld on irrational junctions) - GWN membership + one solid + tol-invariance; mutation-
   verified (disabling the recovery OR the dedup reverts to the truncation fail-closed).  No
   new predicate / no radial rule.  openscad NARROWS strictly (RecordSeams truncations 496 ->
-  344) but stays fail-closed - its residue is the near-coplanar-sliver (GT7863-class) and the
-  cap-INTERIOR endpoint (a seam piercing a cap face interior, which would need the pierce
-  injected as new fold input), both separate axes; (iii) axis-aligned integer geometry can
+  344 with the recovery, narrowed further by reg3d-7863c1's re-clustering; magnitudes only)
+  but stays fail-closed [reg3d-oscad, measured at HEAD: its truncations are ZERO shares-vertex
+  (NOT a wjump/7863c1 family instance) and NOT cap-interior (0 measured); the residue is the
+  near-coplanar-sliver (GT7863-class) PLUS transversal wall pairs whose second seam endpoint
+  is a degenerate boundary / near-in-plane incidence with no fold-owned completion; the
+  "capvert" fold-owned endpoints arrive as vertex-TOUCHES and a vertex-touch WIDENING
+  OVER-recovers (refuted-unsound, the ent proper-cross gate is load-bearing)]; (iii)
+  axis-aligned integer geometry can
   graze every winding probe
   seed - NARROWED (reg3d-arr): the CLEAN-face classify now re-probes other interior
   points of the same uncrossed triangle (a constant winding cell above it), so BarsCrossZ
@@ -462,7 +471,7 @@ reverted):
   -----------------|--------------------|-------------------------------|--------
   PokedCube        | (RESOLVES wjump)   | - (vol 0.25, GWN-oracle)      | constructed
   GT7863 pair      | (RESOLVES 7863c1)  | - (both dirty comps, GWN)     | corpus
-  openscad soup    | 2 SEAM-SUBFACE(2a) | non-2-endpoint / degenerate   | corpus
+  openscad soup    | 1a+2 TERMINAL      | non-2-endpoint / degenerate   | corpus
   GT7081 pair      | (RESOLVES wjump)   | - (both shells, vol-preserved)| corpus
   NearCoplanarChain| 4 PLANARIZE-GUARD  | global-planarity guard        | constructed
   BridgedCaps      | (RESOLVES)         | -                             | resolves
@@ -607,11 +616,23 @@ RESEARCH = memo with a required proof sketch, TRIPWIRE = kernel-vendor decision)
    sub-cell by the real 3D coupled winding = the Cluster-1 coordinated-emission
    wall, not a bounded completion.  openscad is UNCHANGED (no RecordSeams-only fix
    resolves a cap-seam-entangled component).  Fail-closed, pinned
-   (Regularize_CapSeamingEntanglement_CapInteriorPierce_FailClosed).  SEPARATE
-   bounded-ish lever surfaced but out of scope: the capvert recovery WIDENING (the
-   entanglement recovery's proper-cross gate excludes fold-owned vertex-on-plane
-   touches) - it does NOT unlock openscad alone (F3 underneath), so it is an
-   emission-side follow-up, not this completion.
+   (Regularize_CapSeamingEntanglement_CapInteriorPierce_FailClosed).  The
+   cap-seaming-entanglement PROOF-PAIR (this constructed fixture: plug PIERCING a
+   cap fails closed, plug RESTING on the cap resolves) stands as the class exemplar.
+   TERMINAL (reg3d-oscad, measured at HEAD, supersedes the "F3 underneath" reading):
+   the capvert recovery WIDENING (the entanglement recovery's proper-cross gate
+   excludes fold-owned vertex-on-plane TOUCHES) was EMPIRICALLY REFUTED - a benign
+   wall-corner-on-cap-plane touch is not a seam endpoint, so a vertex-touch recovery
+   OVER-recovers (measured: it INCREASES the truncation count, never narrows).  The
+   ent proper-cross gate is load-bearing for soundness.  And openscad does NOT even
+   reach F3 at current HEAD: its truncations are ZERO shares-vertex (NOT a
+   wjump/7863c1 family instance) and its failing component has seamedCluster=0 (the
+   truncation fires first; the c2a "seamedCluster=2 F3 underneath" was pre-7863c1).
+   openscad's terminal residue is the near-coplanar-sliver (Cluster 1a) PLUS
+   transversal wall pairs with a degenerate second seam endpoint - the
+   plane-based-representation PROOF wall, kernel-tripwire-gated, no bounded
+   completion available.  Residue counted 496 -> ~340 -> narrowed by 7863c1
+   (magnitudes only; reg3d-oscad owns the count).
 2. CRUCIBLE C-2b (LANDED escalation; residue -> C-1a; reg3d-c2b -> reg3d-c2bx).
    reg3d-c2b's anatomy REFUTED the Cluster-2 reading (GT7081's 2D seam sub-face
    arrangement resolves EXACTLY; both shells fail at the WINDING CLASSIFY probe
