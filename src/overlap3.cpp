@@ -5565,9 +5565,14 @@ inline vec2 Drop2(const vec3& v, int axis) {
 }
 
 // Exact sign of the projected orientation (a,b,c) - the landed exact-on-
-// doubles orient2d (filter-first).
+// doubles orient2d (filter-first).  NEGATED: ExactOrient2DDrop's raw
+// determinant (orient3d against a +axis lift) is NEGATIVE for a CCW triple
+// in the dropped frame (its production callers are straddle-only,
+// sign-agnostic); the engine needs the standard CCW-positive convention
+// (verified: the un-negated form traced every group's OUTER contour as the
+// positive loop and failed every ear test).
 inline int O2(const vec3& a, const vec3& b, const vec3& c, int axis) {
-  return ExactOrient2DDrop(a, b, c, axis);
+  return -ExactOrient2DDrop(a, b, c, axis);
 }
 
 // v strictly interior to the open segment (a,b) in the projected frame:
@@ -5592,6 +5597,75 @@ inline bool ProperCross2(const vec3& p, const vec3& q, const vec3& a,
 // runs, pinch-repeated vertices, keyhole-duplicated bridges all allowed).
 // poly = vertex indices into pos3; emits index triples.  Returns false when no
 // valid diagonal exists (caller counts + fails closed via the census).
+inline bool DiagSplitFwd(const std::vector<int>& poly,
+                         const std::vector<vec3>& pos3, int axis,
+                         std::vector<ivec3>& out, int depth);
+
+// EARCLIP-first triangulation of a weakly-simple CCW polygon (the offline-
+// validated combination): clip strictly-convex ears whose closed triangle
+// contains no other polygon vertex (inclusive blocking - duplicates block
+// conservatively), fall back to the exact diagonal splitter on a stall.
+// The slit/lollipop walks (a chord traversed on both sides with structure at
+// its end) stall a pure diagonal search but always expose ears elsewhere.
+inline bool Triangulate(const std::vector<int>& loop,
+                        const std::vector<vec3>& pos3, int axis, double eps,
+                        std::vector<ivec3>& out) {
+  std::vector<int> idx = loop;  // ids into pos3; slots may repeat positions
+  while (idx.size() > 3) {
+    const int m = static_cast<int>(idx.size());
+    bool found = false;
+    for (int k = 0; k < m && !found; ++k) {
+      const int a = idx[(k + m - 1) % m], b = idx[k], c = idx[(k + 1) % m];
+      if (O2(pos3[a], pos3[b], pos3[c], axis) <= 0) continue;
+      bool ok = true;
+      for (int j = 0; j < m && ok; ++j) {
+        if (j == k || j == (k + m - 1) % m || j == (k + 1) % m) continue;
+        const vec3& v = pos3[idx[j]];
+        if (KeyOf(v) == KeyOf(pos3[a]) || KeyOf(v) == KeyOf(pos3[b]) ||
+            KeyOf(v) == KeyOf(pos3[c]))
+          continue;  // twin instance of a corner: not a blocker
+        const int d1 = O2(pos3[a], pos3[b], v, axis);
+        const int d2 = O2(pos3[b], pos3[c], v, axis);
+        const int d3 = O2(pos3[c], pos3[a], v, axis);
+        if (d1 >= 0 && d2 >= 0 && d3 >= 0) ok = false;
+      }
+      if (!ok) continue;
+      out.push_back({a, b, c});
+      idx.erase(idx.begin() + k);
+      found = true;
+    }
+    if (!found) {
+      // stalled remainder: exact diagonal split; if THAT stalls (an eps-scale
+      // bowtie from bent sub-chains - the rounded arrangement's residue),
+      // accept the partial covering iff the remainder is WELD-DUST (width
+      // below the weld radius: it welds away; the clipped macro ears stand).
+      std::vector<ivec3> rem;
+      if (DiagSplitFwd(idx, pos3, axis, rem, 0)) {
+        out.insert(out.end(), rem.begin(), rem.end());
+        return true;
+      }
+      double s = 0.0, ext = 0.0;
+      vec2 lo{1e300, 1e300}, hi{-1e300, -1e300};
+      const int mm = static_cast<int>(idx.size());
+      for (int k = 0; k < mm; ++k) {
+        const vec2 p1 = Drop2(pos3[idx[k]], axis);
+        const vec2 p2 = Drop2(pos3[idx[(k + 1) % mm]], axis);
+        s += p1.x * p2.y - p2.x * p1.y;
+        lo = la::min(lo, p1);
+        hi = la::max(hi, p1);
+      }
+      ext = std::max(hi.x - lo.x, hi.y - lo.y);
+      return ext <= 0.0 || std::abs(0.5 * s) / ext <= 2.0 * eps;
+    }
+  }
+  if (idx.size() == 3) {
+    if (O2(pos3[idx[0]], pos3[idx[1]], pos3[idx[2]], axis) > 0)
+      out.push_back({idx[0], idx[1], idx[2]});
+    return true;
+  }
+  return true;
+}
+
 inline bool DiagSplit(const std::vector<int>& poly,
                       const std::vector<vec3>& pos3, int axis,
                       std::vector<ivec3>& out, int depth = 0) {
@@ -5644,6 +5718,12 @@ inline bool DiagSplit(const std::vector<int>& poly,
     }
   }
   return false;
+}
+
+inline bool DiagSplitFwd(const std::vector<int>& poly,
+                         const std::vector<vec3>& pos3, int axis,
+                         std::vector<ivec3>& out, int depth) {
+  return DiagSplit(poly, pos3, axis, out, depth);
 }
 
 }  // namespace e1
@@ -5717,6 +5797,141 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundary(const Manifold::Impl& in,
     fbox[f] = b;
   }
 
+  // ---- 1b. ENGINE SEAMS: UNGATED exact tri-tri intersection segments ----
+  // RecordSeams' production seams are representability-GATED (F11 sub-eps
+  // collapse, phantom guard) - correct for the per-face path, but the
+  // coordinated engine needs the FULL crossing structure: the tiny-dihedral
+  // wedge chords the gates collapse are exactly the in-plane splits whose
+  // absence the completeness certificate caught (a plane 7e-15 away at the
+  // probe yet transversal at scale).  Enumerate exactly and ungated:
+  //  - vertex side vs a group plane: filter-first exact orient3d against the
+  //    group REP triangle (plane-consistent for every pair), cached per
+  //    (vertex id, group);
+  //  - a strictly-straddling edge contributes its pierce point, constructed
+  //    ONCE per (edge, plane) key via the landed P3 SegPlaneBigHPoint and
+  //    rounded once - byte-identical across all pairs and groups (the shared-
+  //    double identity that makes cross-group sub-edges weld);
+  //  - an exactly-on-plane vertex is itself a candidate (the measure-zero
+  //    contact families: seam-through-vertex, edge-in-plane);
+  //  - a candidate joins the seam iff INCLUSIVELY inside the OTHER triangle
+  //    (input-exact IXOrient2D signs); 2 survivors = the seam segment, >2
+  //    (degenerate contacts) = the extremes along the plane-pair direction.
+  struct ESeam {
+    vec3 p0, p1;
+    int other;
+  };
+  std::vector<std::vector<ESeam>> eSeams(nTri);
+  {
+    std::map<std::pair<int, int>, int> sideCache;  // (vert id, gid) -> sign
+    std::map<std::tuple<int, int, int>, vec3> pierceCache;
+    auto sideOf = [&](int f, int k, int q) -> int {
+      const auto key = std::make_pair(A.vid[f][k], q);
+      const auto it = sideCache.find(key);
+      if (it != sideCache.end()) return it->second;
+      const int r = rep[q];
+      int s = Orient3DFilterSign(A.tri[r][0], A.tri[r][1], A.tri[r][2],
+                                 A.tri[f][k]);
+      if (s == 0)
+        s = Orient3DExactSign(A.tri[r][0], A.tri[r][1], A.tri[r][2],
+                              A.tri[f][k]);
+      sideCache.emplace(key, s);
+      return s;
+    };
+    auto bigInTriIncl = [&](const sos::BigHPoint& X, int t) -> bool {
+      if (sos::BigSign(X.W) == 0) return false;
+      const int ax = DominantAxis(A.faceN[t]);
+      int pos = 0, neg = 0;
+      for (int e = 0; e < 3; ++e) {
+        const int o =
+            IXOrient2D(sos::TrivialBigHPoint(A.tri[t][e]),
+                       sos::TrivialBigHPoint(A.tri[t][(e + 1) % 3]), X, ax);
+        if (o > 0) ++pos;
+        if (o < 0) ++neg;
+      }
+      return !(pos && neg);
+    };
+    for (int f = 0; f < nTri; ++f) {
+      for (int f2 = f + 1; f2 < nTri; ++f2) {
+        if (gid[f2] == gid[f]) continue;
+        const Box &ba = fbox[f], &bb = fbox[f2];
+        if (ba.min.x > bb.max.x + eps || bb.min.x > ba.max.x + eps ||
+            ba.min.y > bb.max.y + eps || bb.min.y > ba.max.y + eps ||
+            ba.min.z > bb.max.z + eps || bb.min.z > ba.max.z + eps)
+          continue;
+        std::vector<vec3> cand;
+        auto addCand = [&](const vec3& p) {
+          for (const auto& c : cand)
+            if (KeyOf(c) == KeyOf(p)) return;
+          cand.push_back(p);
+        };
+        auto collect = [&](int fa, int fb) {  // fa's edges vs plane(gid[fb])
+          const int q = gid[fb];
+          for (int e = 0; e < 3; ++e) {
+            const int e2 = (e + 1) % 3;
+            const int s0 = sideOf(fa, e, q), s1 = sideOf(fa, e2, q);
+            if (s0 == 0 &&
+                bigInTriIncl(sos::TrivialBigHPoint(A.tri[fa][e]), fb))
+              addCand(A.tri[fa][e]);
+            if (s1 == 0 &&
+                bigInTriIncl(sos::TrivialBigHPoint(A.tri[fa][e2]), fb))
+              addCand(A.tri[fa][e2]);
+            if (s0 != 0 && s1 != 0 && s0 != s1) {
+              int v0 = A.vid[fa][e], v1 = A.vid[fa][e2];
+              vec3 u = A.tri[fa][e], w = A.tri[fa][e2];
+              if (v0 > v1) {
+                std::swap(v0, v1);
+                std::swap(u, w);
+              }
+              const auto key = std::make_tuple(v0, v1, q);
+              auto it = pierceCache.find(key);
+              if (it == pierceCache.end()) {
+                const sos::BigHPoint X =
+                    sos::SegPlaneBigHPoint(u, w, A.tri[rep[q]].data());
+                if (sos::BigSign(X.W) == 0) continue;  // parallel: no pierce
+                it = pierceCache.emplace(key, sos::BigHPointToPos(X)).first;
+              }
+              const vec3& P = it->second;
+              if (!(std::isfinite(P.x) && std::isfinite(P.y) &&
+                    std::isfinite(P.z)))
+                continue;
+              const sos::BigHPoint X =
+                  sos::SegPlaneBigHPoint(u, w, A.tri[rep[q]].data());
+              if (bigInTriIncl(X, fb)) addCand(P);
+            }
+          }
+        };
+        collect(f, f2);
+        collect(f2, f);
+        if (cand.size() < 2) continue;  // point contact / no crossing
+        vec3 p0 = cand[0], p1 = cand[1];
+        if (cand.size() > 2) {  // degenerate contact: extremes along the line
+          const vec3 dir =
+              la::cross(A.faceN[rep[gid[f]]], A.faceN[rep[gid[f2]]]);
+          double lo = la::dot(cand[0], dir), hi = lo;
+          for (const vec3& c : cand) {
+            const double t = la::dot(c, dir);
+            if (t < lo) {
+              lo = t;
+              p0 = c;
+            }
+            if (t > hi) {
+              hi = t;
+              p1 = c;
+            }
+          }
+          if (KeyOf(p0) == KeyOf(p1)) continue;
+        }
+        eSeams[f].push_back({p0, p1, f2});
+        eSeams[f2].push_back({p0, p1, f});
+      }
+    }
+    if (kDump) {
+      int nseam = 0;
+      for (const auto& v : eSeams) nseam += static_cast<int>(v.size());
+      std::fprintf(stderr, "E1 engine seams=%d (pair-records)\n", nseam);
+    }
+  }
+
   // canonical engine triple positions, once per sorted gid triple
   std::map<std::array<int, 3>, std::pair<bool, vec3>> tripleCache;
   auto triplePos = [&](int g0, int g1, int g2, vec3& pos) -> bool {
@@ -5748,6 +5963,7 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundary(const Manifold::Impl& in,
 
   std::vector<OutTri3D> out;
   int dustTri = 0, triFail = 0, spliceFail = 0;
+  int nCells = 0, nNeg = 0, nJump = 0, nBoundary = 0, nOwned = 0, nDustCell = 0;
   const double scale = in.bBox_.Scale();
 
   for (int g = 0; g < nG; ++g) {
@@ -5761,10 +5977,8 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundary(const Manifold::Impl& in,
     for (const int f : members[g]) {
       for (int e = 0; e < 3; ++e)
         segs.push_back({A.tri[f][e], A.tri[f][(e + 1) % 3], -1, f, -1});
-      for (const BuildSeam& s : A.faceSeams[f]) {
-        if (s.other < 0 || gid[s.other] == g) continue;
+      for (const ESeam& s : eSeams[f])
         segs.push_back({s.p0, s.p1, gid[s.other], f, s.other});
-      }
     }
     const vec3 Nrep = A.faceN[rep[g]];
     const int axis = DominantAxis(Nrep);
@@ -5847,21 +6061,74 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundary(const Manifold::Impl& in,
         addSplit(j, X);
       }
     }
-    // registry T-junction splits (shared canonical junction doubles): the
-    // same on-line-foot rule as the per-face path, consistent across groups
-    // because every group reads identical (junction, segment-endpoint) bits.
+    // T-junction splits (shared canonical doubles): the group's OWN segment
+    // endpoints (engine seam ends + member corners - the offline pool) plus
+    // the production registry; the same on-line rule everywhere, consistent
+    // across groups because every group reads identical (vertex, segment)
+    // bits.
+    std::vector<vec3> pool;
+    pool.reserve(2 * segs.size() + A.junctions.size());
+    for (const Seg& s : segs) {
+      pool.push_back(s.p0);
+      pool.push_back(s.p1);
+    }
+    pool.insert(pool.end(), A.junctions.begin(), A.junctions.end());
     for (int i = 0; i < nS; ++i) {
       const Seg& s = segs[i];
       const vec3 d3 = s.p1 - s.p0;
       const double len2 = la::dot(d3, d3);
       if (!(len2 > 0.0)) continue;
       const double len = std::sqrt(len2);
-      for (const vec3& V : A.junctions) {
+      for (const vec3& V : pool) {
         const vec3 w = V - s.p0;
         const double t = la::dot(w, d3) / len2;
         if (!(t > eps / len && t < 1.0 - eps / len)) continue;
         if (la::length(w - t * d3) > eps) continue;
         addSplit(i, V);
+      }
+    }
+
+    // PLANARITY COMPLETION (all remaining segment-pair crossings): the exact
+    // seam-x-seam enumeration and the endpoint pool cover the canonical
+    // crossings, but the drawn (rounded) graph must be PLANAR for the face
+    // walk - overlapping coplanar members (the fold structure) cross member
+    // edges and same-line seams in ways the passes above miss (measured:
+    // properly-crossing sub-edges -> bowtie walks -> untriangulable cells).
+    // Detect every remaining proper crossing exactly on the shared rounded
+    // endpoints and split both segments; the split point uses the canonical
+    // triple when both carriers are seams of distinct planes, else the
+    // in-segment interpolation (identity across groups holds within weld
+    // tolerance via the shared-endpoint constructions).
+    for (int i = 0; i < nS; ++i) {
+      const vec2 a0 = e1::Drop2(segs[i].p0, axis),
+                 a1 = e1::Drop2(segs[i].p1, axis);
+      for (int j = i + 1; j < nS; ++j) {
+        const vec2 b0 = e1::Drop2(segs[j].p0, axis),
+                   b1 = e1::Drop2(segs[j].p1, axis);
+        if (std::max(a0.x, a1.x) < std::min(b0.x, b1.x) - eps ||
+            std::max(b0.x, b1.x) < std::min(a0.x, a1.x) - eps ||
+            std::max(a0.y, a1.y) < std::min(b0.y, b1.y) - eps ||
+            std::max(b0.y, b1.y) < std::min(a0.y, a1.y) - eps)
+          continue;
+        if (!e1::ProperCross2(segs[i].p0, segs[i].p1, segs[j].p0, segs[j].p1,
+                              axis))
+          continue;
+        vec3 X;
+        bool have = false;
+        if (segs[i].planeQ >= 0 && segs[j].planeQ >= 0 &&
+            segs[i].planeQ != segs[j].planeQ)
+          have = triplePos(g, segs[i].planeQ, segs[j].planeQ, X);
+        if (!have) {
+          // in-plane 2D crossing, interpolated along segment i's 3D span
+          const double dax = a1.x - a0.x, day = a1.y - a0.y;
+          const double dbx = b1.x - b0.x, dby = b1.y - b0.y;
+          const double den = dax * dby - day * dbx;
+          if (den == 0.0) continue;
+          const double t = ((b0.x - a0.x) * dby - (b0.y - a0.y) * dbx) / den;
+          X = segs[i].p0 + t * (segs[i].p1 - segs[i].p0);
+        }
+        addSplit(i, X);
+        addSplit(j, X);
       }
     }
 
@@ -5939,32 +6206,69 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundary(const Manifold::Impl& in,
           if (guard == 4 * static_cast<int>(pos3.size()) + 15) ok = false;
         }
         if (!ok || loop.size() < 3) continue;
-        // excise spurs (out-and-back slit walks)
-        bool changed = true;
-        while (changed && loop.size() >= 3) {
-          changed = false;
-          const int m = static_cast<int>(loop.size());
-          for (int k = 0; k < m; ++k)
-            if (loop[(k + m - 1) % m] == loop[(k + 1) % m]) {
-              const int hi = std::max((k + 1) % m, k);
-              const int lo = std::min((k + 1) % m, k);
-              loop.erase(loop.begin() + hi);
-              loop.erase(loop.begin() + lo);
-              changed = true;
-              break;
+        // BRIDGE + SPUR EXCISION: an undirected edge the walk traverses in
+        // BOTH directions separates nothing (the dangling-chord family - a
+        // seam with the same face on both sides); the walk is then two lobes
+        // joined by a zero-width corridor, which no polygon triangulation can
+        // cover soundly (measured: bridge-spanning ears/diagonals emit
+        // geometry OUTSIDE the face).  Split the walk at every doubled edge
+        // into its lobes (dropping the bridge), then excise 2-step spur tips.
+        std::vector<std::vector<int>> work{loop};
+        while (!work.empty()) {
+          std::vector<int> L = std::move(work.back());
+          work.pop_back();
+          if (L.size() < 3) continue;
+          const int m = static_cast<int>(L.size());
+          int k1 = -1, k2 = -1;
+          std::map<std::pair<int, int>, int> firstAt;
+          for (int k = 0; k < m && k1 < 0; ++k) {
+            const int u = L[k], v = L[(k + 1) % m];
+            const auto it = firstAt.find({v, u});
+            if (it != firstAt.end()) {
+              k1 = it->second;
+              k2 = k;
+            } else {
+              firstAt.emplace(std::make_pair(u, v), k);
             }
+          }
+          if (k1 >= 0) {  // doubled edge e_k1=(u,v), e_k2=(v,u): split lobes
+            std::vector<int> l1, l2;
+            for (int k = k1 + 1; k < k2; ++k) l1.push_back(L[k]);
+            for (int k = (k2 + 1) % m; k != k1; k = (k + 1) % m) {
+              l2.push_back(L[k]);
+              if (static_cast<int>(l2.size()) > m) break;  // guard
+            }
+            work.push_back(std::move(l1));
+            work.push_back(std::move(l2));
+            continue;
+          }
+          // spur tips
+          bool changed = true;
+          while (changed && L.size() >= 3) {
+            changed = false;
+            const int mm = static_cast<int>(L.size());
+            for (int k = 0; k < mm; ++k)
+              if (L[(k + mm - 1) % mm] == L[(k + 1) % mm]) {
+                const int hi = std::max((k + 1) % mm, k);
+                const int lo = std::min((k + 1) % mm, k);
+                L.erase(L.begin() + hi);
+                L.erase(L.begin() + lo);
+                changed = true;
+                break;
+              }
+          }
+          if (L.size() < 3) continue;
+          double s = 0.0;
+          for (size_t k = 0; k < L.size(); ++k) {
+            const vec2 p1 = e1::Drop2(pos3[L[k]], axis);
+            const vec2 p2 = e1::Drop2(pos3[L[(k + 1) % L.size()]], axis);
+            s += p1.x * p2.y - p2.x * p1.y;
+          }
+          if (s > 0)
+            cells.push_back(std::move(L));
+          else if (s < 0)
+            negloops.push_back(std::move(L));
         }
-        if (loop.size() < 3) continue;
-        double s = 0.0;
-        for (size_t k = 0; k < loop.size(); ++k) {
-          const vec2 p1 = e1::Drop2(pos3[loop[k]], axis);
-          const vec2 p2 = e1::Drop2(pos3[loop[(k + 1) % loop.size()]], axis);
-          s += p1.x * p2.y - p2.x * p1.y;
-        }
-        if (s > 0)
-          cells.push_back(loop);
-        else if (s < 0)
-          negloops.push_back(loop);
       }
 
     // ---- 5. disconnected island hole-rings: containment + keyhole ----
@@ -6069,9 +6373,48 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundary(const Manifold::Impl& in,
     }
 
     // ---- 6. classify + emit ----
+    nCells += static_cast<int>(cells.size());
+    nNeg += static_cast<int>(negloops.size());
     for (const std::vector<int>& loop : cells) {
       std::vector<ivec3> tris;
-      if (!e1::DiagSplit(loop, pos3, axis, tris)) ++triFail;
+      if (!e1::Triangulate(loop, pos3, axis, eps, tris)) {
+        // ALL-OR-NOTHING: a partial covering emits unpaired interior edges
+        // (the offline lesson) - discard, then adjudicate by WIDTH: a loop
+        // whose area/extent is below the weld scale is a rounded-degenerate
+        // sliver (non-simple at double precision) that welds away; anything
+        // wider is an honest triangulation failure (fail-closed below).
+        tris.clear();
+        double s = 0.0, ext = 0.0;
+        vec2 lo{1e300, 1e300}, hi{-1e300, -1e300};
+        for (size_t k = 0; k < loop.size(); ++k) {
+          const vec2 p1 = e1::Drop2(pos3[loop[k]], axis);
+          const vec2 p2 = e1::Drop2(pos3[loop[(k + 1) % loop.size()]], axis);
+          s += p1.x * p2.y - p2.x * p1.y;
+          lo = la::min(lo, p1);
+          hi = la::max(hi, p1);
+        }
+        ext = std::max(hi.x - lo.x, hi.y - lo.y);
+        const double width = ext > 0.0 ? std::abs(0.5 * s) / ext : 0.0;
+        if (width <= 2.0 * eps) {
+          ++nDustCell;  // rounded-degenerate sliver cell: weld dust
+          continue;
+        }
+        ++triFail;
+        if (kDump && triFail <= 8) {
+          const vec2 c0 = e1::Drop2(pos3[loop[0]], axis);
+          std::fprintf(stderr,
+                       "E1 TRIFAIL g=%d n=%d width=%.3g ext=%.3g s=%.3g "
+                       "at2d=(%.9g,%.9g) p0=(%.9g,%.9g,%.9g)\n",
+                       g, static_cast<int>(loop.size()), width, ext, s, c0.x,
+                       c0.y, pos3[loop[0]].x, pos3[loop[0]].y, pos3[loop[0]].z);
+          if (triFail == 1)
+            for (size_t k = 0; k < loop.size(); ++k) {
+              const vec2 p = e1::Drop2(pos3[loop[k]], axis);
+              std::fprintf(stderr, "    v%zu id=%d (%.17g,%.17g)\n", k, loop[k],
+                           p.x, p.y);
+            }
+        }
+      }
       if (tris.empty()) continue;  // dust cell (collinear at double precision)
       // interior point: largest sub-triangle's centroid
       int best = 0;
@@ -6100,11 +6443,16 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundary(const Manifold::Impl& in,
           la::dot(Nrep, cen3 - A.tri[rep[g]][0]) / la::length(Nrep);
       const vec3 cenP = cen3 - d0 * nHat;
       // NET covering jump: members + covering STACK sheets (owner rule: the
-      // lowest covering gid emits the stack's net transition)
+      // lowest covering gid emits the stack's net transition).  Containment
+      // projects along the TESTED face's OWN dominant axis (a group-axis
+      // projection is meaningless for a transversal face whose plane merely
+      // passes near the probe - measured: a steep wall z-projected "covering"
+      // a cap probe its sheet never touches).
       auto covers = [&](int f) -> bool {
-        const int o0 = e1::O2(A.tri[f][0], A.tri[f][1], cenP, axis);
-        const int o1 = e1::O2(A.tri[f][1], A.tri[f][2], cenP, axis);
-        const int o2 = e1::O2(A.tri[f][2], A.tri[f][0], cenP, axis);
+        const int ax = DominantAxis(A.faceN[f]);
+        const int o0 = e1::O2(A.tri[f][0], A.tri[f][1], cenP, ax);
+        const int o1 = e1::O2(A.tri[f][1], A.tri[f][2], cenP, ax);
+        const int o2 = e1::O2(A.tri[f][2], A.tri[f][0], cenP, ax);
         const bool neg = o0 < 0 || o1 < 0 || o2 < 0;
         const bool pos = o0 > 0 || o1 > 0 || o2 > 0;
         return !(neg && pos);
@@ -6117,6 +6465,7 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundary(const Manifold::Impl& in,
           anyOwn = true;
         }
       if (!anyOwn) continue;  // no member sheet here (shadow-only region)
+      ++nJump;
       // PER-CELL STACK + probe offset by GAP-FINDING over the nearby foreign
       // plane distances: grow the stack threshold T until an 8x gap opens,
       // probe at 2T (above the whole stack, below a quarter of everything
@@ -6131,9 +6480,16 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundary(const Manifold::Impl& in,
             cenP.y < b.min.y - m || cenP.y > b.max.y + m ||
             cenP.z < b.min.z - m || cenP.z > b.max.z + m)
           continue;
+        // ALONG-nHat crossing distance: the probe segment runs along nHat,
+        // so the relevant quantity is where the segment meets the plane, not
+        // the perpendicular plane distance (a steep transversal wall has a
+        // tiny perpendicular distance near its seam line yet its crossing
+        // sits far outside the probe window - measured).  A plane parallel
+        // to the probe direction is never crossed: skip.
+        const double denom = std::abs(la::dot(A.faceN[f2], nHat));
+        if (!(denom > 0.0)) continue;
         const double dist =
-            std::abs(la::dot(A.faceN[f2], cenP - A.tri[f2][0])) /
-            la::length(A.faceN[f2]);
+            std::abs(la::dot(A.faceN[f2], cenP - A.tri[f2][0])) / denom;
         if (dist < eps * 1e5) nearD.push_back({dist, f2});
       }
       std::sort(nearD.begin(), nearD.end());
@@ -6156,7 +6512,10 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundary(const Manifold::Impl& in,
         }
         jump += la::dot(A.faceN[dn.second], nHat) >= 0.0 ? 1 : -1;
       }
-      if (owned) continue;      // a lower covering group owns this stack cell
+      if (owned) {
+        ++nOwned;
+        continue;  // a lower covering group owns this stack cell
+      }
       if (jump == 0) continue;  // net-cancelled: not a sheet
       const std::optional<int> wA = RobustWinding(in, cenP + off * nHat, seeds);
       const std::optional<int> wB = RobustWinding(in, cenP - off * nHat, seeds);
@@ -6170,30 +6529,46 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundary(const Manifold::Impl& in,
       const bool certified = (*wB - *wA == jump);
       // COMPLETENESS CERTIFICATE: probed delta == combinatorial covering jump
       if (!certified) {
-        // a DUST cell (below the weld scale) cannot be probed between
-        // sub-double-separated sheets and welds away regardless: drop it
-        double ext = 0.0;
-        for (size_t k = 0; k < loop.size(); ++k) {
-          const vec2 p1 = e1::Drop2(pos3[loop[k]], axis);
-          const vec2 p2 = e1::Drop2(pos3[loop[(k + 1) % loop.size()]], axis);
-          ext = std::max(
-              ext, std::max(std::abs(p2.x - p1.x), std::abs(p2.y - p1.y)));
+        // a DUST cell - WIDTH below the weld scale - cannot be probed (its
+        // interior hugs seam-line structure closer than the probe window, and
+        // containment of off-plane points is unreliable within that scale)
+        // and welds away regardless: its long sides are closer than eps, so
+        // the assembly weld collapses it and the neighbours carry the
+        // boundary.  Width = altitude of the largest sub-triangle.
+        double eMax = 0.0;
+        {
+          const vec2 q0 = e1::Drop2(pos3[tris[best].x], axis);
+          const vec2 q1 = e1::Drop2(pos3[tris[best].y], axis);
+          const vec2 q2 = e1::Drop2(pos3[tris[best].z], axis);
+          eMax = std::max(
+              {la::length(q1 - q0), la::length(q2 - q1), la::length(q0 - q2)});
         }
-        if (ext <= 2.0 * eps) continue;  // sub-weld dust: unrepresentable
+        const double ext = eMax > 0.0 ? bestA / eMax : 0.0;  // = width
+        if (ext <= 2.0 * eps) continue;  // sub-weld-width sliver: dust
         if (kDump) {
           std::fprintf(stderr,
                        "E1 FAIL cert g=%d jump=%d wA=%d wB=%d n=%d off=%.3g "
                        "ext=%.3g cen=(%.9g,%.9g,%.9g) d0=%.3g\n",
                        g, jump, *wA, *wB, static_cast<int>(loop.size()), off,
                        ext, cen3.x, cen3.y, cen3.z, d0);
-          for (int f2 = 0; f2 < nTri; ++f2) {
-            const double dist =
-                std::abs(la::dot(A.faceN[f2], cenP - A.tri[f2][0])) /
-                la::length(A.faceN[f2]);
-            if (dist < 40.0 * eps)
-              std::fprintf(stderr,
-                           "  E1 nearplane f=%d gid=%d dist=%.3g (%.1f eps)\n",
-                           f2, gid[f2], dist, dist / eps);
+          for (const auto& dn : nearD) {
+            if (dn.first > T) break;
+            const int f2 = dn.second;
+            std::fprintf(stderr,
+                         "  E1 stack f=%d gid=%d dist=%.3g covers=%d sgn=%d\n",
+                         f2, gid[f2], dn.first, covers(f2) ? 1 : 0,
+                         la::dot(A.faceN[f2], nHat) >= 0.0 ? 1 : -1);
+            std::fprintf(stderr,
+                         "    tri |N|=%.3g v0=(%.9g,%.9g,%.9g) "
+                         "v1=(%.9g,%.9g,%.9g) v2=(%.9g,%.9g,%.9g)\n",
+                         la::length(A.faceN[f2]), A.tri[f2][0].x,
+                         A.tri[f2][0].y, A.tri[f2][0].z, A.tri[f2][1].x,
+                         A.tri[f2][1].y, A.tri[f2][1].z, A.tri[f2][2].x,
+                         A.tri[f2][2].y, A.tri[f2][2].z);
+            const int oA0 = e1::O2(A.tri[f2][0], A.tri[f2][1], cenP, axis);
+            const int oA1 = e1::O2(A.tri[f2][1], A.tri[f2][2], cenP, axis);
+            const int oA2 = e1::O2(A.tri[f2][2], A.tri[f2][0], cenP, axis);
+            std::fprintf(stderr, "    o=%d,%d,%d\n", oA0, oA1, oA2);
           }
           for (const int f : members[g]) {
             const int o0 = e1::O2(A.tri[f][0], A.tri[f][1], cenP, axis);
@@ -6201,9 +6576,10 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundary(const Manifold::Impl& in,
             const int o2 = e1::O2(A.tri[f][2], A.tri[f][0], cenP, axis);
             const bool neg = o0 < 0 || o1 < 0 || o2 < 0;
             const bool pos = o0 > 0 || o1 > 0 || o2 > 0;
-            if (!(neg && pos))
-              std::fprintf(stderr, "  E1 cover member f=%d sgn=%d o=%d,%d,%d\n",
-                           f, fsgn[f], o0, o1, o2);
+            if (!(neg && pos) || (!neg == !pos))
+              std::fprintf(stderr,
+                           "  E1 member f=%d sgn=%d o=%d,%d,%d covers=%d\n", f,
+                           fsgn[f], o0, o1, o2, !(neg && pos) ? 1 : 0);
           }
           for (double mul = 1.0; mul <= 1000.0; mul *= 10.0) {
             const std::optional<int> wa =
@@ -6221,6 +6597,7 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundary(const Manifold::Impl& in,
       const bool aIn = *wA >= 1, bIn = *wB >= 1;
       if (aIn == bIn) continue;         // not a {w>=1} boundary here
       const int orient = bIn ? 1 : -1;  // +1: solid below, outward = +nHat
+      ++nBoundary;
       for (const ivec3& t : tris) {
         const vec3 nr = la::cross(pos3[t.y] - pos3[t.x], pos3[t.z] - pos3[t.x]);
         const double sd = la::dot(nr, Nrep);
@@ -6236,8 +6613,11 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundary(const Manifold::Impl& in,
     }
   }
   if (kDump)
-    std::fprintf(stderr, "E1 emitted=%d dust=%d triFail=%d spliceFail=%d\n",
-                 static_cast<int>(out.size()), dustTri, triFail, spliceFail);
+    std::fprintf(stderr,
+                 "E1 emitted=%d dust=%d triFail=%d spliceFail=%d cells=%d "
+                 "neg=%d jump=%d owned=%d boundary=%d dustCell=%d\n",
+                 static_cast<int>(out.size()), dustTri, triFail, spliceFail,
+                 nCells, nNeg, nJump, nOwned, nBoundary, nDustCell);
   if (triFail > 0 || spliceFail > 0)
     return fail("e1: cell triangulation/hole-splice incomplete - fail-closed");
   return BuildImpl(out, eps);
