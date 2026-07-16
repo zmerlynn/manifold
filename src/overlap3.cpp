@@ -6143,114 +6143,128 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
     // representatives sit up to eps off the exact lines, and inserting them
     // with an eps window BENDS the chains by eps - the bent sub-chains then
     // properly cross and fragment the walk (measured: a split cascade).
-    // T-junction pool pass, iterated to FIXPOINT with ALL SPLIT POINTS in
-    // the pool: near-collinear overlapping chains (the same line reached via
-    // different member pairs, ULP apart) must carry IDENTICAL subdivisions -
-    // endpoint-only exchange left one chain split where its twin spanned
-    // whole (measured: intra-group T-junctions with the on-vertex 9e-16 off
-    // the unsplit edge).  Split values are canonical (snap grid), so the
-    // exchange converges.
-    // 8*rho: the canonical snap grid moves split points up to rho off their
-    // segment lines, so on-line tests must budget the snap displacement
-    const double tolLine = 8.0 * rho;
-    for (int round = 0; round < 4; ++round) {
-      std::vector<vec3> pool;
-      pool.reserve(2 * segs.size());
-      for (const Seg& s : segs) {
-        pool.push_back(s.p0);
-        pool.push_back(s.p1);
-      }
-      for (int i = 0; i < nS; ++i)
-        for (const auto& pr : splits[i]) pool.push_back(pr.second);
-      bool added = false;
-      for (int i = 0; i < nS; ++i) {
-        const Seg& s = segs[i];
-        const vec3 d3 = s.p1 - s.p0;
-        const double len2 = la::dot(d3, d3);
-        if (!(len2 > 0.0)) continue;
-        const double len = std::sqrt(len2);
-        for (const vec3& V : pool) {
-          const vec3 w = V - s.p0;
-          const double t = la::dot(w, d3) / len2;
-          if (!(t > eps / len && t < 1.0 - eps / len)) continue;
-          if (la::length(w - t * d3) > tolLine) continue;
-          added |= addSplit(i, V);
+    // OUTER FIXPOINT: the exchange and the completion feed each other - a
+    // completion-added crossing (ill-conditioned on near-collinear pairs:
+    // the same line's overlapping segments each get their own noisy
+    // crossing position) must be EXCHANGED onto every collinear twin, and
+    // exchanged points can expose new crossings.  (Measured: identical-
+    // endpoint twin segments carrying different completion splits 2.4e-5
+    // apart - the T-junction/lens class.)
+    for (int outer = 0; outer < 4; ++outer) {
+      size_t nsplit0 = 0;
+      for (int i = 0; i < nS; ++i) nsplit0 += splits[i].size();
+      // T-junction pool pass, iterated to FIXPOINT with ALL SPLIT POINTS in
+      // the pool: near-collinear overlapping chains (the same line reached via
+      // different member pairs, ULP apart) must carry IDENTICAL subdivisions -
+      // endpoint-only exchange left one chain split where its twin spanned
+      // whole (measured: intra-group T-junctions with the on-vertex 9e-16 off
+      // the unsplit edge).  Split values are canonical (snap grid), so the
+      // exchange converges.
+      // 8*rho: the canonical snap grid moves split points up to rho off their
+      // segment lines, so on-line tests must budget the snap displacement
+      const double tolLine = 8.0 * rho;
+      for (int round = 0; round < 4; ++round) {
+        std::vector<vec3> pool;
+        pool.reserve(2 * segs.size());
+        for (const Seg& s : segs) {
+          pool.push_back(s.p0);
+          pool.push_back(s.p1);
         }
-      }
-      if (!added) break;
-    }
-    // RETRY SPLITS (second pass): the first pass's failing walks' observed
-    // self-crossing points, injected group-globally so every incident cell
-    // subdivides identically.
-    if (extraJ) {
-      int landed = 0;
-      for (int i = 0; i < nS; ++i) {
-        const Seg& s = segs[i];
-        const vec3 d3 = s.p1 - s.p0;
-        const double len2 = la::dot(d3, d3);
-        if (!(len2 > 0.0)) continue;
-        const double tolLine2 = 8.0 * rho;
-        for (const auto& gv : *extraJ) {
-          // group-scoped (loop-derived points splash); g==-1 = GLOBAL entries
-          // (canonical triple constructions: exact, safe everywhere)
-          if (gv.first != g && gv.first != -1) continue;
-          const vec3& V = gv.second;
-          const vec3 w = V - s.p0;
-          const double t = la::dot(w, d3) / len2;
-          if (!(t > 0.0 && t < 1.0)) continue;
-          if (la::length(w - t * d3) > tolLine2) continue;
-          if (addSplit(i, V)) ++landed;
+        for (int i = 0; i < nS; ++i)
+          for (const auto& pr : splits[i]) pool.push_back(pr.second);
+        bool added = false;
+        for (int i = 0; i < nS; ++i) {
+          const Seg& s = segs[i];
+          const vec3 d3 = s.p1 - s.p0;
+          const double len2 = la::dot(d3, d3);
+          if (!(len2 > 0.0)) continue;
+          const double len = std::sqrt(len2);
+          for (const vec3& V : pool) {
+            const vec3 w = V - s.p0;
+            const double t = la::dot(w, d3) / len2;
+            if (!(t > eps / len && t < 1.0 - eps / len)) continue;
+            if (la::length(w - t * d3) > tolLine) continue;
+            added |= addSplit(i, V);
+          }
         }
+        if (!added) break;
       }
-      if (kDump && landed)
-        std::fprintf(stderr, "E1 retry g=%d landed=%d/%d\n", g, landed,
-                     static_cast<int>(extraJ->size()));
-    }
+      // RETRY SPLITS (second pass): the first pass's failing walks' observed
+      // self-crossing points, injected group-globally so every incident cell
+      // subdivides identically.
+      if (extraJ) {
+        int landed = 0;
+        for (int i = 0; i < nS; ++i) {
+          const Seg& s = segs[i];
+          const vec3 d3 = s.p1 - s.p0;
+          const double len2 = la::dot(d3, d3);
+          if (!(len2 > 0.0)) continue;
+          const double tolLine2 = 8.0 * rho;
+          for (const auto& gv : *extraJ) {
+            // group-scoped (loop-derived points splash); g==-1 = GLOBAL entries
+            // (canonical triple constructions: exact, safe everywhere)
+            if (gv.first != g && gv.first != -1) continue;
+            const vec3& V = gv.second;
+            const vec3 w = V - s.p0;
+            const double t = la::dot(w, d3) / len2;
+            if (!(t > 0.0 && t < 1.0)) continue;
+            if (la::length(w - t * d3) > tolLine2) continue;
+            if (addSplit(i, V)) ++landed;
+          }
+        }
+        if (kDump && landed)
+          std::fprintf(stderr, "E1 retry g=%d landed=%d/%d\n", g, landed,
+                       static_cast<int>(extraJ->size()));
+      }
 
-    // PLANARITY COMPLETION (all remaining segment-pair crossings): the exact
-    // seam-x-seam enumeration and the endpoint pool cover the canonical
-    // crossings, but the drawn (rounded) graph must be PLANAR for the face
-    // walk - overlapping coplanar members (the fold structure) cross member
-    // edges and same-line seams in ways the passes above miss (measured:
-    // properly-crossing sub-edges -> bowtie walks -> untriangulable cells).
-    // Detect every remaining proper crossing exactly on the shared rounded
-    // endpoints and split both segments; the split point uses the canonical
-    // triple when both carriers are seams of distinct planes, else the
-    // in-segment interpolation (identity across groups holds within weld
-    // tolerance via the shared-endpoint constructions).
-    for (int i = 0; i < nS; ++i) {
-      const vec2 a0 = e1::Drop2(segs[i].p0, axis),
-                 a1 = e1::Drop2(segs[i].p1, axis);
-      for (int j = i + 1; j < nS; ++j) {
-        const vec2 b0 = e1::Drop2(segs[j].p0, axis),
-                   b1 = e1::Drop2(segs[j].p1, axis);
-        if (std::max(a0.x, a1.x) < std::min(b0.x, b1.x) - eps ||
-            std::max(b0.x, b1.x) < std::min(a0.x, a1.x) - eps ||
-            std::max(a0.y, a1.y) < std::min(b0.y, b1.y) - eps ||
-            std::max(b0.y, b1.y) < std::min(a0.y, a1.y) - eps)
-          continue;
-        if (!e1::ProperCross2(segs[i].p0, segs[i].p1, segs[j].p0, segs[j].p1,
-                              axis))
-          continue;
-        vec3 X;
-        bool have = false;
-        if (segs[i].planeQ >= 0 && segs[j].planeQ >= 0 &&
-            segs[i].planeQ != segs[j].planeQ)
-          have = triplePos(g, segs[i].planeQ, segs[j].planeQ, X);
-        if (!have) {
-          // in-plane 2D crossing, interpolated along segment i's 3D span
-          const double dax = a1.x - a0.x, day = a1.y - a0.y;
-          const double dbx = b1.x - b0.x, dby = b1.y - b0.y;
-          const double den = dax * dby - day * dbx;
-          if (den == 0.0) continue;
-          const double t = ((b0.x - a0.x) * dby - (b0.y - a0.y) * dbx) / den;
-          X = segs[i].p0 + t * (segs[i].p1 - segs[i].p0);
+      // PLANARITY COMPLETION (all remaining segment-pair crossings): the exact
+      // seam-x-seam enumeration and the endpoint pool cover the canonical
+      // crossings, but the drawn (rounded) graph must be PLANAR for the face
+      // walk - overlapping coplanar members (the fold structure) cross member
+      // edges and same-line seams in ways the passes above miss (measured:
+      // properly-crossing sub-edges -> bowtie walks -> untriangulable cells).
+      // Detect every remaining proper crossing exactly on the shared rounded
+      // endpoints and split both segments; the split point uses the canonical
+      // triple when both carriers are seams of distinct planes, else the
+      // in-segment interpolation (identity across groups holds within weld
+      // tolerance via the shared-endpoint constructions).
+      for (int i = 0; i < nS; ++i) {
+        const vec2 a0 = e1::Drop2(segs[i].p0, axis),
+                   a1 = e1::Drop2(segs[i].p1, axis);
+        for (int j = i + 1; j < nS; ++j) {
+          const vec2 b0 = e1::Drop2(segs[j].p0, axis),
+                     b1 = e1::Drop2(segs[j].p1, axis);
+          if (std::max(a0.x, a1.x) < std::min(b0.x, b1.x) - eps ||
+              std::max(b0.x, b1.x) < std::min(a0.x, a1.x) - eps ||
+              std::max(a0.y, a1.y) < std::min(b0.y, b1.y) - eps ||
+              std::max(b0.y, b1.y) < std::min(a0.y, a1.y) - eps)
+            continue;
+          if (!e1::ProperCross2(segs[i].p0, segs[i].p1, segs[j].p0, segs[j].p1,
+                                axis))
+            continue;
+          vec3 X;
+          bool have = false;
+          if (segs[i].planeQ >= 0 && segs[j].planeQ >= 0 &&
+              segs[i].planeQ != segs[j].planeQ)
+            have = triplePos(g, segs[i].planeQ, segs[j].planeQ, X);
+          if (!have) {
+            // in-plane 2D crossing, interpolated along segment i's 3D span
+            const double dax = a1.x - a0.x, day = a1.y - a0.y;
+            const double dbx = b1.x - b0.x, dby = b1.y - b0.y;
+            const double den = dax * dby - day * dbx;
+            if (den == 0.0) continue;
+            const double t = ((b0.x - a0.x) * dby - (b0.y - a0.y) * dbx) / den;
+            X = segs[i].p0 + t * (segs[i].p1 - segs[i].p0);
+          }
+          addSplit(i, X);
+          addSplit(j, X);
         }
-        addSplit(i, X);
-        addSplit(j, X);
       }
-    }
 
+      size_t nsplit1 = 0;
+      for (int i = 0; i < nS; ++i) nsplit1 += splits[i].size();
+      if (nsplit1 == nsplit0) break;
+    }
     // NOTE: no sub-edge-level completion pass is needed: with the exact
     // endpoint pool and the rounding-scale on-line tolerance, chain bends are
     // ~ULP, so residual sub-edge crossings are ULP-scale bowties the
@@ -6258,6 +6272,36 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
     // sub-edge crossing fixpoint was measured to CASCADE: each round's
     // interpolated splits create new bent sub-edges - and cost minutes).
 
+    if (const char* sd = std::getenv("E1_SEGDUMP")) {
+      int pg = -1;
+      double pu = 0, pv = 0, pr = 0;
+      if (std::sscanf(sd, "%d,%lf,%lf,%lf", &pg, &pu, &pv, &pr) == 4 &&
+          pg == g) {
+        const vec2 P{pu, pv};
+        const double pr2r = pr;
+        for (int i = 0; i < nS; ++i) {
+          const vec2 a = e1::Drop2(segs[i].p0, axis),
+                     b = e1::Drop2(segs[i].p1, axis);
+          // distance from P to segment ab
+          const vec2 d2 = b - a;
+          const double L2 = la::dot(d2, d2);
+          double t = L2 > 0 ? la::dot(P - a, d2) / L2 : 0.0;
+          t = std::max(0.0, std::min(1.0, t));
+          if (la::length(P - (a + t * d2)) > pr) continue;
+          std::fprintf(stderr,
+                       "E1 SEG g=%d i=%d planeQ=%d fOwn=%d fOther=%d "
+                       "a=(%.9g,%.9g) b=(%.9g,%.9g) splits=%d\n",
+                       g, i, segs[i].planeQ, segs[i].fOwn, segs[i].fOther, a.x,
+                       a.y, b.x, b.y, static_cast<int>(splits[i].size()));
+          for (const auto& pr : splits[i]) {
+            const vec2 q = e1::Drop2(pr.second, axis);
+            if (la::length(q - P) <= 8.0 * pr2r)
+              std::fprintf(stderr, "      split t=%.6f (%.12g,%.12g)\n",
+                           pr.first, q.x, q.y);
+          }
+        }
+      }
+    }
     // ---- 4. 2D graph (verts keyed by 3D bits) + exact rotation walk ----
     std::map<K3, int> vidOf;
     std::vector<vec3> pos3;
@@ -6663,13 +6707,21 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
         double pu = 0, pv = 0;
         if (std::sscanf(kProbeAt, "%d,%lf,%lf", &pg, &pu, &pv) == 3 &&
             pg == g) {
-          vec2 lo{1e300, 1e300}, hi{-1e300, -1e300};
-          for (const int i : loop) {
-            const vec2 p = e1::Drop2(pos3[i], axis);
-            lo = la::min(lo, p);
-            hi = la::max(hi, p);
+          // containment by crossing parity (bbox was too coarse)
+          int cnt = 0;
+          const int m = static_cast<int>(loop.size());
+          for (int k = 0; k < m; ++k) {
+            const vec2 A2 = e1::Drop2(pos3[loop[k]], axis);
+            const vec2 B2 = e1::Drop2(pos3[loop[(k + 1) % m]], axis);
+            const double dx = B2.x - A2.x, dy = B2.y - A2.y;
+            const double r = 1.0 / 7919.0;
+            const double det = dy - r * dx;
+            if (det == 0.0) continue;
+            const double uu = (-(r) * (pu - A2.x) + (pv - A2.y)) / det;
+            const double tt = (dx * (pv - A2.y) - dy * (pu - A2.x)) / det;
+            if (uu > 0 && uu < 1 && tt > 0) ++cnt;
           }
-          probeHit = pu >= lo.x && pu <= hi.x && pv >= lo.y && pv <= hi.y;
+          probeHit = (cnt % 2) == 1;
         }
       }
       int jump = 0;
