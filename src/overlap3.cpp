@@ -6242,6 +6242,32 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundary(const Manifold::Impl& in,
             work.push_back(std::move(l2));
             continue;
           }
+          // PINCH DECOMPOSITION: a vertex visited twice (no doubled edge)
+          // joins lobes at a point; split there.  Both-positive lobes are
+          // separate cells; a negative lobe is a hole ring and is ROUTED
+          // through containment + keyhole attachment below (the offline v3
+          // island lesson: never dropped).
+          {
+            std::map<int, int> seen;
+            int pi = -1, pk = -1;
+            for (int k = 0; k < m && pi < 0; ++k) {
+              const auto it = seen.find(L[k]);
+              if (it != seen.end()) {
+                pi = it->second;
+                pk = k;
+              } else {
+                seen.emplace(L[k], k);
+              }
+            }
+            if (pi >= 0) {
+              std::vector<int> l1(L.begin() + pi, L.begin() + pk);
+              std::vector<int> l2(L.begin(), L.begin() + pi);
+              l2.insert(l2.end(), L.begin() + pk, L.end());
+              work.push_back(std::move(l1));
+              work.push_back(std::move(l2));
+              continue;
+            }
+          }
           // spur tips
           bool changed = true;
           while (changed && L.size() >= 3) {
