@@ -377,8 +377,8 @@ order-freeness promises, now a standing rail.
   input-vertex-on-edge arm (exact collinearity/between-ness on input doubles), and
   the triple-point seam-crossing test (ExactSegProperCross - exact in-plane
   orient2d, drop the dominant normal axis, refuting the near-tangent phantom
-  crossings the rounded-PlaneFrame double crossing test it replaced over-detected
-  in EnumerateTriplePoints; byte-identical on the resolving corpus, removes only
+  crossings the former rounded-projection double crossing test it replaced
+  over-detected in EnumerateTriplePoints; byte-identical on the resolving corpus, removes only
   phantom triples on the near-tangent openscad residue) - the production callers (plus the test
   probe), each FILTER-FIRST (exact fires only behind a filter 0).  The tie cascade Orient3DSoS is NO LONGER
   among them (orient-land item 1): its SoS e^0 (K==0) monomial group IS the exact
@@ -647,30 +647,33 @@ SnapNearCoplanarClusters were unreachable - a degenerate face has pairGap ==
 non-degenerate and the sign-aligned member-normal sum is always nonzero.  See
 the in-code invariant comments.
 
-LATENT LIABILITIES (measured-dangerous, oracle-masked today; census2):
+LATENT LIABILITIES (measured-dangerous, oracle-masked today; census2).  L1 - the
+sharpest, the only one that had been influencing resolving-carrier output - is now
+RESOLVED (below); L2-L4 remain:
 
-- L1 PLANEFRAME PROJECTION.  PlaneFrame::proj is the sole 2D projection on the
-  seamed/overlay path; its e1/e2 basis carries dot-product rounding.  On
-  openscad's large dirty component the rounded projection makes crossing
-  decisions and a few eps-merges that DIFFER from an exact axis-drop.  WHAT
-  PROTECTS CORRECTNESS TODAY: on the resolving carriers the emitted vertices are
-  canon3 (projection-independent) and retention is by exact 3D winding, so a
-  projection-rounded crossing only RE-TRIANGULATES within a seamed face - it does
-  not move the retained {w>=1} boundary.  WHAT WOULD DEFEAT IT: a dirty component
-  that resolves but whose retained sub-cell topology depends on a
-  projection-rounded crossing - a silent wrong resolve.  Not demonstrated on any
-  carrier; the guard is "canon3 verts + exact 3D winding", NOT "the projection is
-  right".
-  TRADEOFF for the exact axis-drop swap (owner decision, NOT taken - it is a
-  liability-removal, not a simplification): PRO - removes a convicted liability
-  layer and makes the seamed-path input predicates exact.  CON - it is NOT
-  byte-clean (measured ORACLE-EQUIVALENT but BYTE-DIFFERENT on several resolving
-  carriers: same triangle count, different tessellation), so the campaign's byte
-  baselines would have to be re-blessed; it is net LINES-ADDED unless the e1/e2
-  basis is fully retired (a larger project: FoldCoplanarClusters still
-  reconstructs in-plane positions as a0 + q.x*e1 + q.y*e2, so full retirement
-  trades that for a per-plane dropped-coordinate solve - new machinery, not a
-  clean deletion); and it does not resolve openscad (nets one open edge).
+- L1 PLANEFRAME PROJECTION - RESOLVED (exact axis-drop face-flattening).  The
+  resolver formerly flattened each face to 2D through PlaneFrame's orthonormal
+  e1/e2 basis, whose dot-product projection carried rounding; on openscad's large
+  dirty component that rounding made crossing decisions and a few eps-merges that
+  DIFFERED from an exact axis-drop (the convicted overlay liability).  It now
+  flattens by EXACT axis-drop: the 2D projection SELECTS the two non-dominant
+  coordinates of the dominant-normal-axis drop (pure coordinate selection, no
+  arithmetic -> no rounding), with a parity swap so 2D-CCW still maps to +nHat
+  and a plane-solve LIFT (solve nHat.P = planeD for the dropped dominant
+  coordinate, |nHat[axis]| >= 1/sqrt(3) so never near-zero) for the only 2D-BORN
+  points - a fold new-crossing vertex and the fold interior classify point; every
+  other emitted vertex keeps its exact canonical 3D.  PlaneFrame is DELETED: the
+  whole resolver's overlay predicates now run on exact input/construction doubles
+  at level 0.
+  RE-BLESS (equivalence, not regression): oracle-graded per carrier against the
+  pre-swap output - identical outcome class, triangle/vertex counts, enclosed
+  volume, GWN membership, and re-gate.  The change re-triangulates INSIDE a face
+  (the shared canonical vertices are unchanged, so a projection-rounded crossing
+  only chose a different tessellation of the SAME enclosed solid), so several
+  resolving carriers are byte-DIFFERENT and others stay byte-identical while all
+  enclose the identical {w>=1} solid.  Bitwise-deterministic across thread counts.
+  openscad still fails closed - the swap makes the INPUT predicates exact but does
+  not resolve the projection-invariant near-tangent residue.
 - L2 WELD-FOLD BLIND SPOT (the R1/R2 root).  The uniform emission weld can merge
   two genuinely-distinct arrangement points that round within eps (a self-fold
   IsSelfIntersecting's shares-vertex skip is blind to) or leave a 1-ULP-distinct
