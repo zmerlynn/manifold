@@ -5553,6 +5553,10 @@ std::vector<vec3> WindingSeeds(const Box& bBox) {
 //      doubles make every coincident vertex byte-equal).
 namespace e1 {
 
+// weld radius for the dust adjudications inside the triangulators (set by
+// the engine before each run; single-threaded fallback path)
+inline double kDustEps = 0.0;
+
 using K3 = std::tuple<double, double, double>;
 inline K3 KeyOf(const vec3& p) { return {p.x, p.y, p.z}; }
 
@@ -5660,11 +5664,11 @@ inline bool Triangulate(const std::vector<int>& loop,
         hi = la::max(hi, p1);
       }
       ext = std::max(hi.x - lo.x, hi.y - lo.y);
-      return ext <= 0.0 || std::abs(0.5 * s) / ext <= 2.0 * eps;
+      return ext <= 0.0 || std::abs(0.5 * s) / ext <= 0.99 * eps;
     }
   }
   if (idx.size() == 3) {
-    if (O2(pos3[idx[0]], pos3[idx[1]], pos3[idx[2]], axis) > 0)
+    if (O2(pos3[idx[0]], pos3[idx[1]], pos3[idx[2]], axis) >= 0)
       out.push_back({idx[0], idx[1], idx[2]});
     return true;
   }
@@ -5677,10 +5681,28 @@ inline bool DiagSplit(const std::vector<int>& poly,
   const int n = static_cast<int>(poly.size());
   if (n < 3 || depth > 4 * n + 64) return n < 3;
   if (n == 3) {
-    if (O2(pos3[poly[0]], pos3[poly[1]], pos3[poly[2]], axis) > 0)
+    // emit COLLINEAR leaves too: a rounded-degenerate cap triangle carries
+    // REAL boundary sub-edges - (a,m),(m,b) stitch a subdivided neighbour to
+    // an unsubdivided one through the weld (dropping them opened the fans:
+    // the emitting cell classified boundary yet its edge had no partner).
+    // A NEGATIVE leaf is a rounded fold-back: when dust-THIN its sub-edges
+    // are equally real boundary (emit, loop order); a macro-negative leaf is
+    // a genuine triangulation error (fail).
+    const int s3 = O2(pos3[poly[0]], pos3[poly[1]], pos3[poly[2]], axis);
+    if (s3 >= 0) {
       out.push_back({poly[0], poly[1], poly[2]});
-    // exactly-collinear leaf: zero-area dust, nothing to emit (weld absorbs)
-    return true;
+      return true;
+    }
+    const vec2 q0 = Drop2(pos3[poly[0]], axis), q1 = Drop2(pos3[poly[1]], axis),
+               q2 = Drop2(pos3[poly[2]], axis);
+    const double a2 = std::abs(la::cross(q1 - q0, q2 - q0));
+    const double L = std::max(
+        {la::length(q1 - q0), la::length(q2 - q1), la::length(q0 - q2)});
+    if (L > 0.0 && a2 / L <= kDustEps) {
+      out.push_back({poly[0], poly[1], poly[2]});
+      return true;
+    }
+    return false;
   }
   for (int i = 0; i < n; ++i) {
     const vec3& a = pos3[poly[(i + n - 1) % n]];
@@ -5738,7 +5760,8 @@ inline bool DiagSplitFwd(const std::vector<int>& poly,
 StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
     const Manifold::Impl& in, const BuildArrangement& A, double eps,
     const std::vector<std::pair<int, vec3>>* extraJ,
-    std::vector<std::pair<int, vec3>>* collectX) {
+    std::vector<std::pair<int, vec3>>* collectX,
+    std::vector<vec3>* collectT = nullptr) {
   using e1::K3;
   using e1::KeyOf;
   const int nTri = static_cast<int>(A.tri.size());
@@ -5748,6 +5771,7 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
         FatalReason::DirtyComponentUnresolved, msg);
   };
   static const bool kDump = std::getenv("E1_DUMP") != nullptr;
+  e1::kDustEps = eps;
 
   // ---- 1. geometric plane groups (exact coplanarity union-find) ----
   std::vector<int> uf(nTri);
@@ -6027,7 +6051,39 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
 
     // ---- 3. splits: engine triples (input-exact, symmetric) + registry ----
     std::vector<std::vector<std::pair<double, vec3>>> splits(nS);
-    auto addSplit = [&](int si, const vec3& V) -> bool {
+    // CANONICAL VERTEX GRID (rounding-scale): every split point is snapped
+    // onto any existing vertex within ~64 ULP before entering the
+    // arrangement.  Derivation noise (retry interpolations, triple-vs-drawn
+    // constructions) otherwise accumulates ULP-VARIANT chains of the same
+    // geometric vertex with degenerate sliver cells between them; the weld
+    // drops those slivers and their pairing halfedges (measured: four
+    // 5e-16-apart variants of one vertex around an open edge).  The radius is
+    // far below representable structure - this collapses noise, not geometry.
+    const double rho =
+        64.0 * std::numeric_limits<double>::epsilon() * (1.0 + scale);
+    std::map<std::tuple<long long, long long, long long>, std::vector<vec3>>
+        canonGrid;
+    auto canonV = [&](const vec3& v) -> vec3 {
+      const long long cx = static_cast<long long>(std::floor(v.x / rho));
+      const long long cy = static_cast<long long>(std::floor(v.y / rho));
+      const long long cz = static_cast<long long>(std::floor(v.z / rho));
+      for (long long dx = -1; dx <= 1; ++dx)
+        for (long long dy = -1; dy <= 1; ++dy)
+          for (long long dz = -1; dz <= 1; ++dz) {
+            const auto it = canonGrid.find({cx + dx, cy + dy, cz + dz});
+            if (it == canonGrid.end()) continue;
+            for (const vec3& w : it->second)
+              if (la::length(w - v) <= rho) return w;
+          }
+      canonGrid[{cx, cy, cz}].push_back(v);
+      return v;
+    };
+    for (const Seg& s : segs) {  // seed: endpoints are the canonical anchors
+      canonV(s.p0);
+      canonV(s.p1);
+    }
+    auto addSplit = [&](int si, const vec3& Vraw) -> bool {
+      const vec3 V = canonV(Vraw);
       const Seg& s = segs[si];
       const vec3 d3 = s.p1 - s.p0;
       const double len2 = la::dot(d3, d3);
@@ -6087,31 +6143,41 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
     // representatives sit up to eps off the exact lines, and inserting them
     // with an eps window BENDS the chains by eps - the bent sub-chains then
     // properly cross and fragment the walk (measured: a split cascade).
-    std::vector<vec3> pool;
-    pool.reserve(2 * segs.size());
-    for (const Seg& s : segs) {
-      pool.push_back(s.p0);
-      pool.push_back(s.p1);
-    }
-    for (int i = 0; i < nS; ++i) {
-      const Seg& s = segs[i];
-      const vec3 d3 = s.p1 - s.p0;
-      const double len2 = la::dot(d3, d3);
-      if (!(len2 > 0.0)) continue;
-      const double len = std::sqrt(len2);
-      // on-line tolerance at ROUNDING scale, not eps: pool vertices are exact
-      // constructions (ULP-accurate), so a true incidence is within ~ULP of
-      // the line; an eps window would insert genuinely-off-line near-misses
-      // and bend the chain by eps (the crossing cascade).
-      const double tolLine =
-          64.0 * std::numeric_limits<double>::epsilon() * (1.0 + scale);
-      for (const vec3& V : pool) {
-        const vec3 w = V - s.p0;
-        const double t = la::dot(w, d3) / len2;
-        if (!(t > eps / len && t < 1.0 - eps / len)) continue;
-        if (la::length(w - t * d3) > tolLine) continue;
-        addSplit(i, V);
+    // T-junction pool pass, iterated to FIXPOINT with ALL SPLIT POINTS in
+    // the pool: near-collinear overlapping chains (the same line reached via
+    // different member pairs, ULP apart) must carry IDENTICAL subdivisions -
+    // endpoint-only exchange left one chain split where its twin spanned
+    // whole (measured: intra-group T-junctions with the on-vertex 9e-16 off
+    // the unsplit edge).  Split values are canonical (snap grid), so the
+    // exchange converges.
+    // 8*rho: the canonical snap grid moves split points up to rho off their
+    // segment lines, so on-line tests must budget the snap displacement
+    const double tolLine = 8.0 * rho;
+    for (int round = 0; round < 4; ++round) {
+      std::vector<vec3> pool;
+      pool.reserve(2 * segs.size());
+      for (const Seg& s : segs) {
+        pool.push_back(s.p0);
+        pool.push_back(s.p1);
       }
+      for (int i = 0; i < nS; ++i)
+        for (const auto& pr : splits[i]) pool.push_back(pr.second);
+      bool added = false;
+      for (int i = 0; i < nS; ++i) {
+        const Seg& s = segs[i];
+        const vec3 d3 = s.p1 - s.p0;
+        const double len2 = la::dot(d3, d3);
+        if (!(len2 > 0.0)) continue;
+        const double len = std::sqrt(len2);
+        for (const vec3& V : pool) {
+          const vec3 w = V - s.p0;
+          const double t = la::dot(w, d3) / len2;
+          if (!(t > eps / len && t < 1.0 - eps / len)) continue;
+          if (la::length(w - t * d3) > tolLine) continue;
+          added |= addSplit(i, V);
+        }
+      }
+      if (!added) break;
     }
     // RETRY SPLITS (second pass): the first pass's failing walks' observed
     // self-crossing points, injected group-globally so every incident cell
@@ -6123,10 +6189,11 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
         const vec3 d3 = s.p1 - s.p0;
         const double len2 = la::dot(d3, d3);
         if (!(len2 > 0.0)) continue;
-        const double tolLine2 =
-            64.0 * std::numeric_limits<double>::epsilon() * (1.0 + scale);
+        const double tolLine2 = 8.0 * rho;
         for (const auto& gv : *extraJ) {
-          if (gv.first != g) continue;  // group-scoped: no cross-group splash
+          // group-scoped (loop-derived points splash); g==-1 = GLOBAL entries
+          // (canonical triple constructions: exact, safe everywhere)
+          if (gv.first != g && gv.first != -1) continue;
           const vec3& V = gv.second;
           const vec3 w = V - s.p0;
           const double t = la::dot(w, d3) / len2;
@@ -6421,7 +6488,7 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
           ext = std::max(hi.x - lo.x, hi.y - lo.y);
           // extent below the weld radius is dust outright (dust-dot rings'
           // shoelace is rounding noise, the width ratio garbage)
-          if (ext <= 2.0 * eps || std::abs(0.5 * s) / ext <= 2.0 * eps)
+          if (ext <= 0.99 * eps || std::abs(0.5 * s) / ext <= 0.99 * eps)
             continue;
         }
         if (best >= 0) holeof[best].push_back(nl);
@@ -6503,7 +6570,7 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
         const double width = ext > 0.0 ? std::abs(0.5 * s) / ext : 0.0;
         // an extent below the weld radius is dust outright (the shoelace of
         // a dust-dot loop is rounding noise and the width ratio is garbage)
-        if (ext <= 2.0 * eps || width <= 2.0 * eps) {
+        if (ext <= 0.99 * eps || width <= 0.99 * eps) {
           ++nDustCell;  // rounded-degenerate sliver cell: weld dust
           continue;
         }
@@ -6588,6 +6655,23 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
         const bool pos = o0 > 0 || o1 > 0 || o2 > 0;
         return !(neg && pos);
       };
+      // targeted classify dump: E1_PROBEAT="g,u,v" (group + 2D point)
+      static const char* kProbeAt = std::getenv("E1_PROBEAT");
+      bool probeHit = false;
+      if (kProbeAt) {
+        int pg = -1;
+        double pu = 0, pv = 0;
+        if (std::sscanf(kProbeAt, "%d,%lf,%lf", &pg, &pu, &pv) == 3 &&
+            pg == g) {
+          vec2 lo{1e300, 1e300}, hi{-1e300, -1e300};
+          for (const int i : loop) {
+            const vec2 p = e1::Drop2(pos3[i], axis);
+            lo = la::min(lo, p);
+            hi = la::max(hi, p);
+          }
+          probeHit = pu >= lo.x && pu <= hi.x && pv >= lo.y && pv <= hi.y;
+        }
+      }
       int jump = 0;
       bool anyOwn = false;
       for (const int f : members[g])
@@ -6595,6 +6679,12 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
           jump += fsgn[f];
           anyOwn = true;
         }
+      if (probeHit)
+        std::fprintf(stderr,
+                     "E1 PROBEAT g=%d n=%d anyOwn=%d jump0=%d cen=(%.9g,%.9g,"
+                     "%.9g)\n",
+                     g, static_cast<int>(loop.size()), anyOwn ? 1 : 0, jump,
+                     cenP.x, cenP.y, cenP.z);
       if (!anyOwn) continue;  // no member sheet here (shadow-only region)
       ++nJump;
       // PER-CELL STACK + probe offset by GAP-FINDING over the nearby foreign
@@ -6632,7 +6722,7 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
         // chaining absorbed ladders of REPRESENTABLE distinct sheets into
         // one net emission (measured: systematic opens across dozens of
         // groups wherever the sheet-distance ladder had no 8x gap).
-        if (dn.first <= 8.0 * T && dn.first <= 2.0 * eps)
+        if (dn.first <= 8.0 * T && dn.first <= 0.99 * eps)
           T = dn.first;
         else
           break;
@@ -6680,7 +6770,7 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
               {la::length(q1 - q0), la::length(q2 - q1), la::length(q0 - q2)});
         }
         const double ext = eMax > 0.0 ? bestA / eMax : 0.0;  // = width
-        if (ext <= 2.0 * eps) continue;  // sub-weld-width sliver: dust
+        if (ext <= 0.99 * eps) continue;  // sub-weld-width sliver: dust
         if (kDump) {
           std::fprintf(stderr,
                        "E1 FAIL cert g=%d jump=%d wA=%d wB=%d n=%d off=%.3g "
@@ -6730,6 +6820,10 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
             "e1: coordinated-arrangement completeness certificate failed "
             "(winding delta != covering jump) - fail-closed");
       }
+      if (probeHit)
+        std::fprintf(stderr,
+                     "E1 PROBEAT g=%d jump=%d wA=%d wB=%d off=%.3g cert=%d\n",
+                     g, jump, *wA, *wB, off, certified ? 1 : 0);
       const bool aIn = *wA >= 1, bIn = *wB >= 1;
       if (aIn == bIn) continue;         // not a {w>=1} boundary here
       const int orient = bIn ? 1 : -1;  // +1: solid below, outward = +nHat
@@ -6737,11 +6831,9 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
       for (const ivec3& t : tris) {
         const vec3 nr = la::cross(pos3[t.y] - pos3[t.x], pos3[t.z] - pos3[t.x]);
         const double sd = la::dot(nr, Nrep);
-        if (sd == 0.0) {
-          ++dustTri;
-          continue;
-        }
-        if ((sd > 0.0) == (orient > 0))
+        // sd == 0 (rounded-degenerate): keep it - the cap triangle's edges
+        // are real boundary; loop order is the cell's CCW, so orient decides
+        if ((sd > 0.0 || (sd == 0.0 && orient > 0)) == (orient > 0))
           out.push_back({{pos3[t.x], pos3[t.y], pos3[t.z]}});
         else
           out.push_back({{pos3[t.x], pos3[t.z], pos3[t.y]}});
@@ -6755,6 +6847,9 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
                  "neg=%d jump=%d owned=%d boundary=%d dustCell=%d\n",
                  static_cast<int>(out.size()), dustTri, triFail, spliceFail,
                  nCells, nNeg, nJump, nOwned, nBoundary, nDustCell);
+  if (collectT)
+    for (const auto& kv : tripleCache)
+      if (kv.second.first) collectT->push_back(kv.second.second);
   if (triFail > 0 || spliceFail > 0)
     return fail("e1: cell triangulation/hole-splice incomplete - fail-closed");
   if (const char* sf = std::getenv("E1_SOUPFILE")) {  // offline diagnostics
@@ -6780,8 +6875,17 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundary(const Manifold::Impl& in,
                                                     const BuildArrangement& A,
                                                     double eps) {
   std::vector<std::pair<int, vec3>> crossX;
+  std::vector<vec3> triples;
   StageResult<Manifold::Impl> r =
-      EmitCoordinatedBoundaryImpl(in, A, eps, nullptr, &crossX);
+      EmitCoordinatedBoundaryImpl(in, A, eps, nullptr, &crossX, &triples);
+  if (!r.fatal) return r;
+  // GLOBAL TRIPLE INJECTION: a committed triple splits the two seams of the
+  // group that DISCOVERED it; the partner groups' copies of shared lines
+  // must split at the identical canonical position (the 4-tri existence test
+  // is member-pair-specific and legitimately asymmetric across groups).
+  // Triples are exact canonical constructions - global injection with the
+  // rounding-scale on-line tolerance cannot bend chains.
+  for (const vec3& t : triples) crossX.push_back({-1, t});
   for (int pass = 0; pass < 6 && r.fatal && !crossX.empty(); ++pass) {
     const size_t before = crossX.size();
     r = EmitCoordinatedBoundaryImpl(in, A, eps, &crossX, &crossX);
