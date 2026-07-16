@@ -372,7 +372,10 @@ order-freeness promises, now a standing rail.
   the Cramer intersection of a plane triple {F,g,h}; the SAME form at higher degree,
   filter-first via a degree-9 construction-aware static bound, on the widened
   accumulator - the naive final-determinant permanent is UNSOUND in the near-parallel
-  wedge regime and must be replaced by the all-abs companion Pdet).  ADDITIONAL
+  wedge regime and must be replaced by the all-abs companion Pdet).  Its production
+  caller is HPointStrictlyInTri (e1-plumb): X={f,g,h} strictly interior to a seam
+  triangle, three orient2d against the triangle edges - the exact seam-segment
+  extent clip in ExactSeamsCross.  ADDITIONAL
   CALLERS of either instantiation are within the blessed pattern (zero new arithmetic)
   as long as each stays FILTER-FIRST (exact fires only behind a filter 0).  FIRE CENSUS (orient-land
   necessity attack): the exact cascade earns its keep in two roles.  (i) STRUCTURAL-TIE
@@ -387,12 +390,12 @@ order-freeness promises, now a standing rail.
   (both the WindingAt winding-probe AND the RecordSeams phantom-seam guard ride it -
   cleanPierce is no longer a distinct exact-call site), the junction registry's
   input-vertex-on-edge arm (exact collinearity/between-ness on input doubles), and
-  the triple-point seam-crossing test (ExactSegProperCross - exact in-plane
-  orient2d, drop the dominant normal axis, refuting the near-tangent phantom
-  crossings the former rounded-projection double crossing test it replaced
-  over-detected in EnumerateTriplePoints; byte-identical on the resolving corpus, removes only
-  phantom triples on the near-tangent openscad residue) - the production callers (plus the test
-  probe), each FILTER-FIRST (exact fires only behind a filter 0).  The tie cascade Orient3DSoS is NO LONGER
+  the triple-point seam-crossing REPRESENTABILITY GATE (ExactSegProperCross - exact
+  in-plane orient2d on the rounded seam-endpoint doubles, drop the dominant normal
+  axis; in EnumerateTriplePoints it gates the enumeration to crossings the double-
+  precision downstream can place, then instantiation (2)'s exact extent refines
+  that set - e1-plumb) - the production callers (plus the test probe), each
+  FILTER-FIRST (exact fires only behind a filter 0).  The tie cascade Orient3DSoS is NO LONGER
   among them (orient-land item 1): its SoS e^0 (K==0) monomial group IS the exact
   orient3d - the same real terms over the same accumulator - so a pre-SoS ExactSign
   shortcut returned the identical sign and was provably redundant; it was dropped, a
@@ -597,29 +600,50 @@ REACHABLY-TRIPPED ARMS (a live carrier forces each):
   SPEC (the only path across the wall): an EXACT per-face near-tangent 2D
   arrangement over CONSTRUCTED intersection points.  The single tripwire crossing
   is orient2d on a constructed near-tangent point (not on input coords).
-  STATUS (homog-design): the exact predicate is now LANDED and VALIDATED - the
-  degree-9 constructed-point orient2d (sos::HomogOrient2DExact / the
+  STATUS (homog-design + e1-plumb): the exact predicate is LANDED and VALIDATED -
+  the degree-9 constructed-point orient2d (sos::HomogOrient2DExact / the
   construction-aware HomogOrient2DFilter, instantiation (2) of the ONE homogeneous
-  form, on the widened SumSignN<8> accumulator; validated ZERO disagreements vs an
-  exact-rational oracle over 1.3M random + near-parallel-wedge plane triples).  It
-  is wired at the seam-crossing enumeration (ExactTripleStrictlyInFace) to REFINE
-  the existence decision - the exact constructed crossing must be strictly
-  interior to the face - which refutes the rounded-straddle phantoms byte-cleanly
-  on the whole resolving corpus.  MEASURED (this landing): the exact predicate
-  alone does NOT close the openscad residue.  Replacing the rounded-endpoint
-  segment straddle OUTRIGHT with the constructed-crossing test OVER-detects (it
-  ignores the seam SEGMENT extent - the seam LINES cross inside the face at ~30x
-  the rate the finite overlap SEGMENTS do), manufacturing spurious triples that
-  break the resolving carriers.  So the residue's remaining net-new surface is NOT
-  the crossing predicate (landed) but the seam ENDPOINTS carried as SYMBOLIC
-  plane-triples {F, edge-face-a, edge-face-b} (their once-only exact extent), so
-  the straddle itself becomes exact - the ~600-1300 LOC exact-arrangement plumbing
-  f4-r6/nomerge priced separately.  The radial order and the winding half remain
-  FREE.
+  form, on the widened SumSignN<8> accumulator).  The seam-crossing enumeration now
+  carries each seam's extent SYMBOLICALLY (e1-plumb): a proper segment x segment
+  crossing is the constructed triple point X={f,g,h} STRICTLY INTERIOR TO ALL THREE
+  seam triangles f, g, h (ExactSeamsCross via HPointStrictlyInTri) - X within seam
+  tri(f)INTtri(g) iff X in both, so the tri(g)/tri(h) clip IS the exact segment
+  extent, deciding the straddle EXACTLY with ONLY the landed degree-9
+  instantiation (no new predicate FORM; the endpoints' plane-triple {f,g,neighbor}
+  generators are the triangle edges the orient2d tests against).  Validated ZERO
+  disagreements vs an exact-rational point-in-triangle oracle over 900k cases
+  (300k random + 300k near-parallel wedge + 300k near-boundary edge-straddle), plus
+  homog-design's 1.3M orient2d validation.  A sub-eps/aliasing guard declines a
+  crossing within the weld radius of a seam endpoint (level-0 incidence, nomerge:
+  the seams MEET at a shared junction, not cross interior).
+  MEASURED (e1-plumb, the DECISIVE finding): the exact extent does NOT close
+  openscad, and the PURE exact straddle (ungated, E1_PURE) is NOT byte-clean - it
+  BREAKS a RESOLVING carrier.  The pure exact segment set collapses the ~30x line-
+  crossing over-detection to the true crossing set (openscad: 5770 seam-line
+  crossings -> 536 true segment crossings; census REFINED not exploded), but wiring
+  it as the sole existence test admits genuine NEAR-TANGENT crossings the double-
+  precision downstream cannot represent: on GT7081's 0.002deg near-parallel twins
+  it finds 2 crossings ~1.4e-7 from a near-coincident corner (endpoints diverged
+  ABOVE eps ~4.5e-8 - the near-parallel-plane wall), which regress GT7081 to a
+  4-open-edge fail-closed; on openscad it splits the near-tangent thin cells the
+  rounded straddle left unsplit and RemoveOverlaps2D's seam sub-face fails at a
+  sub-eps >3-plane cluster (b3; opens 21 -> 35 / 12 b3 faces if forced past).  This
+  DECISIVELY confirms the terminal is the exact-rational 2D arrangement - it blocks
+  even a RESOLVING carrier, not just openscad - and REFUTES the premise that the
+  resolving carriers have no uncertain extents (GT7081 does).  So the DEFAULT keeps
+  the rounded straddle as a REPRESENTABILITY GATE (split only where the finite
+  rounded segments cross = where doubles can place it) and uses the exact extent to
+  REFINE (drop rounded phantoms whose exact X falls outside seam g's/h's triangle -
+  openscad 157 -> 156 triples, 21 opens unchanged, byte-clean on the whole
+  resolving corpus).  The net-new surface remaining is the ~600-1300 LOC exact-
+  rational 2D arrangement (f4-r6/nomerge, priced separately) that would REPLACE
+  RemoveOverlaps2D's double-precision eps-merge; the radial order and winding half
+  remain FREE.
   (GT7863, GT7081, and PokedCube reached this wall historically but now RESOLVE
   oracle-graded: their residue was ARRANGEMENT-INCOMPLETENESS from an unsound
   shares-vertex broadphase skip, not an emission-representability wall.  openscad
-  is the sole surviving corpus carrier at E1.)
+  is the sole surviving corpus carrier at E1; GT7081 re-enters it only under the
+  ungated pure exact straddle, the decisive negative above.)
 
 - A1 SEAM - "non-2-endpoint seam / degenerate incidence" (RecordSeams).
   CapSeamingEntanglement's cap-interior pierce (constructed).  A wall piercing a

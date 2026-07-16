@@ -1080,10 +1080,11 @@ inline int Orient3DFilterSign(const vec3& a, const vec3& b, const vec3& c,
 //      once-per-component seed-sign precompute, and the RecordSeams
 //      phantom-seam guard's strict-interior pierce test); the junction
 //      registry's input-vertex-on-edge arm (InputVertexStrictlyOnEdge, via
-//      ExactOrient2DDrop); the seam-crossing test (ExactSegProperCross/
-//      ExactOrient2DDrop, exact in-plane orient2d on the ROUNDED seam endpoint
-//      doubles, drop the dominant normal axis); the tie cascade Orient3DSoS
-//      (whose SoS K==0 group IS this exact sign); and the test probe.
+//      ExactOrient2DDrop); ExactSegProperCross/ExactOrient2DDrop (exact
+//      in-plane orient2d on the ROUNDED seam endpoint doubles, drop the
+//      dominant normal axis), now the E1_OFF/E1_MEASURE seam-crossing levers
+//      only; the tie cascade Orient3DSoS (whose SoS K==0 group IS this exact
+//      sign); and the test probe.
 //  (2) CONSTRUCTED-POINT ORIENT2D (degree 9): three in-face crossing points,
 //      each the Cramer intersection of a plane triple {F,g,h} (homogeneous
 //      X,Y,W are 3x3 determinants of the plane coefficients).  This is the SAME
@@ -1096,9 +1097,12 @@ inline int Orient3DFilterSign(const vec3& a, const vec3& b, const vec3& c,
 //      exact zero is a GENUINE coincidence (concurrent triple points / aliased
 //      crossing) routed to the level-0 incidence path (nomerge), never a
 //      perturbation - the new site needs no SoS (SoS stays input-point-scoped).
-//      Its production caller is ExactTripleStrictlyInFace, which refines the
-//      seam-crossing enumeration's existence decision (the exact constructed
-//      crossing must be strictly interior to the face).
+//      Its production caller is ExactSeamsCross (via HPointStrictlyInTri): the
+//      EXACT segment x segment straddle deciding the seam-crossing
+//      enumeration's existence decision - the constructed crossing X={f,g,h}
+//      strictly interior to all three seam triangles f, g, h (X within both
+//      seams' symbolic extent), which carries the seam SEGMENT extent, not just
+//      the line.
 // A THIRD instantiation of a NEW DEGREE (or any new constructed-point form) is
 // an OWNER DECISION - it widens the accumulator's proven totality bound and
 // needs a new per-degree filter constant; never add one silently.  Vendoring
@@ -2349,20 +2353,61 @@ inline bool ExactSegProperCross(const vec3& p0, const vec3& p1, const vec3& q0,
   return o1 != 0 && o2 != 0 && o3 != 0 && o4 != 0 && o1 != o2 && o3 != o4;
 }
 
-// E1 (homog-design): does the EXACT constructed crossing point of two seam
-// lines F/\g/\h lie strictly INTERIOR to seamed face f?  This is the general
-// degree-9 instantiation of the ONE homogeneous form: orient2d of the
-// CONSTRUCTED crossing (Cramer over the three plane coefficients) against each
-// input edge of face f, filter-first (sos::HomogOrient2DFilter, escalating to
-// the exact sos::HomogOrient2DExact only on a filter-0).  Unlike
-// ExactSegProperCross - a straddle test on the ROUNDED seam endpoint doubles -
-// this decides existence on the symbolic construction, so a near-tangent
-// crossing whose rounded endpoints no longer straddle is not lost.  Returns
-// false when the three planes are parallel (W==0, no crossing) or the crossing
-// lands on/outside f's boundary. The three planes are the canonical reps:
-// F=faceN[rF], g=faceN[rG], h=faceN[rH].
-bool ExactTripleStrictlyInFace(const BuildArrangement& A, int f, int rF, int rG,
-                               int rH, int axis) {
+// Is the constructed crossing point X (given as its filter EHPoint eT and, when
+// escalated, its exact HPoint via exactT()) strictly INTERIOR to triangle
+// (t0,t1,t2) whose normal's dominant axis is `axis`?  Three orient2d of X
+// against the directed edges (the general degree-9 instantiation of the ONE
+// homogeneous form, filter-first: sos::HomogOrient2DFilter escalating to the
+// exact sos::HomogOrient2DExact only on a filter-0).  Strictly interior iff the
+// three orientations share ONE nonzero sign (the common sign(prod W) flip
+// cancels across the three, so handedness is moot); a zero is ON an edge (not
+// strictly interior); all-zero is W==0 (X at infinity - parallel planes).
+template <class ExactT>
+inline bool HPointStrictlyInTri(const sos::EHPoint& eT, ExactT&& exactT,
+                                const vec3& t0, const vec3& t1, const vec3& t2,
+                                int axis) {
+  auto orient = [&](const vec3& a, const vec3& b) -> int {
+    const sos::EHPoint eA = sos::ETrivialHPoint(a), eB = sos::ETrivialHPoint(b);
+    const int fs = sos::HomogOrient2DFilter(eA, eB, eT, axis);
+    if (fs != 0) return fs;
+    const sos::HPoint hA = sos::TrivialHPoint(a), hB = sos::TrivialHPoint(b);
+    return sos::HomogOrient2DExact(hA, hB, exactT(), axis);
+  };
+  const int o0 = orient(t0, t1);
+  const int o1 = orient(t1, t2);
+  const int o2 = orient(t2, t0);
+  if (o0 == 0 || o1 == 0 || o2 == 0) return false;
+  return o0 == o1 && o1 == o2;
+}
+
+// E1 SYMBOLIC EXTENT (homog-design + e1-plumb): do the two seam SEGMENTS on
+// face f - seam_g = tri(f) INT tri(g) and seam_h = tri(f) INT tri(h), sharing
+// carrier plane f - cross in f's interior EXACTLY?  Their supporting lines
+// (f INT g and f INT h) meet at the constructed triple point X = {f,g,h}
+// (Cramer over the three plane coefficients).  Each seam's extent is carried
+// SYMBOLICALLY by its bounding triangles: X lies within seam_g iff X in tri(f)
+// AND tri(g), within seam_h iff X in tri(f) AND tri(h).  So the two SEGMENTS
+// cross iff X is strictly interior to ALL THREE triangles f, g, h - the exact
+// segment x segment question, decided by clipping X to each triangle via the
+// LANDED degree-9 instantiation (HomogOrient2D) against that triangle's edges.
+// This makes the straddle EXACT: unlike ExactSegProperCross on the ROUNDED
+// seam-endpoint doubles (which lost near-tangent crossings), and unlike a pure
+// line-crossing existence test on the constructed point (X in tri(f) only,
+// which IGNORES the segment extent and OVER-detects ~30x - the seam LINES cross
+// in f far more often than the finite overlap SEGMENTS do), the tri(g)/tri(h)
+// clip IS the exact extent. A boundary landing (an orient 0) is X coincident
+// with a seam ENDPOINT = an ALIAS with an existing junction, declined here and
+// owned by the junction registry (level-0 incidence, nomerge).  NO new
+// predicate FORM: only the two landed instantiations (input-point orient3d
+// inside the filter, degree-9 constructed-point orient2d).  rF/rG/rH are the
+// canonical coplanar reps for the PLANE bits (coplanar-consistent construction
+// of X); f/g/h are the ACTUAL seam triangles whose extents clip it.  `clip`
+// selects the extent: 3 (DEFAULT) = X in tri(f) AND tri(g) AND tri(h) = the
+// exact segment x segment straddle; 1 = X in tri(f) ALONE = the seam LINES
+// cross ignoring the segment extent (the ~30x over-detect - the E1_NOEXTENT
+// mutation and the E1_MEASURE census).
+bool ExactSeamsCross(const BuildArrangement& A, int f, int g, int h, int rF,
+                     int rG, int rH, int clip = 3) {
   const vec3 nF = A.faceN[rF];
   const double dF = la::dot(nF, A.tri[rF][0]);
   const vec3 nG = A.faceN[rG];
@@ -2370,24 +2415,26 @@ bool ExactTripleStrictlyInFace(const BuildArrangement& A, int f, int rF, int rG,
   const vec3 nH = A.faceN[rH];
   const double dH = la::dot(nH, A.tri[rH][0]);
   const sos::EHPoint eT = sos::ECramerHPoint(nF, dF, nG, dG, nH, dH);
-  // Exact crossing point, built once and shared by the three edge orients (only
-  // reached on a filter-0, so off the certified fast path).
-  const sos::HPoint hT = sos::CramerHPoint(nF, dF, nG, dG, nH, dH);
-  auto orient = [&](const vec3& a, const vec3& b) -> int {
-    const sos::EHPoint eA = sos::ETrivialHPoint(a), eB = sos::ETrivialHPoint(b);
-    const int fs = sos::HomogOrient2DFilter(eA, eB, eT, axis);
-    if (fs != 0) return fs;
-    const sos::HPoint hA = sos::TrivialHPoint(a), hB = sos::TrivialHPoint(b);
-    return sos::HomogOrient2DExact(hA, hB, hT, axis);
+  // The exact Cramer point (Poly) is built at most once per pair and only when
+  // a filter escalates (a filter-0), so the certified fast path never touches
+  // it.
+  bool haveExact = false;
+  sos::HPoint hT;
+  auto exactT = [&]() -> const sos::HPoint& {
+    if (!haveExact) {
+      hT = sos::CramerHPoint(nF, dF, nG, dG, nH, dH);
+      haveExact = true;
+    }
+    return hT;
   };
-  // Strictly interior iff the three edge orientations share one nonzero sign
-  // (the common sign(prod W) flip cancels across the three, so handedness is
-  // moot); a zero is on an edge (not strictly interior); all-zero is W==0.
-  const int o0 = orient(A.tri[f][0], A.tri[f][1]);
-  const int o1 = orient(A.tri[f][1], A.tri[f][2]);
-  const int o2 = orient(A.tri[f][2], A.tri[f][0]);
-  if (o0 == 0 || o1 == 0 || o2 == 0) return false;
-  return o0 == o1 && o1 == o2;
+  if (!HPointStrictlyInTri(eT, exactT, A.tri[f][0], A.tri[f][1], A.tri[f][2],
+                           DominantAxis(A.faceN[f])))
+    return false;
+  if (clip < 3) return true;  // tri(f) only (over-detect lever / census)
+  return HPointStrictlyInTri(eT, exactT, A.tri[g][0], A.tri[g][1], A.tri[g][2],
+                             DominantAxis(A.faceN[g])) &&
+         HPointStrictlyInTri(eT, exactT, A.tri[h][0], A.tri[h][1], A.tri[h][2],
+                             DominantAxis(A.faceN[h]));
 }
 
 // Enumerate the component's 3-face triple points ONCE and record, per seam, the
@@ -2396,7 +2443,7 @@ bool ExactTripleStrictlyInFace(const BuildArrangement& A, int f, int rF, int rG,
 // in a face interior (the whole corpus off openscad), so EmitSeamedFace stays
 // byte-identical there.
 void EnumerateTriplePoints(BuildArrangement& A,
-                           const std::vector<int>& face2cluster) {
+                           const std::vector<int>& face2cluster, double eps) {
   const int nTri = static_cast<int>(A.tri.size());
   A.seamTriples.assign(nTri, {});
   for (int f = 0; f < nTri; ++f)
@@ -2424,22 +2471,45 @@ void EnumerateTriplePoints(BuildArrangement& A,
   // keying is load-bearing; f4-design-b P4, f4-design-a baseline).
   const bool perFace = std::getenv("F4B_PERFACE") != nullptr;
 
-  // E1 (homog-design): the general degree-9 instantiation refines the seam-seam
-  // crossing EXISTENCE decision.  DEFAULT: a rounded-endpoint straddle is only
-  // kept when the EXACT constructed crossing (Cramer over the three plane
-  // coefficients) is strictly interior to face f - refuting the phantom
-  // crossings whose exact triple lands on/outside f's boundary.  Byte-clean on
-  // the whole resolving corpus (no seam pair straddles there).  Levers: E1_OFF
-  // reverts to the pure rounded straddle (mutation); E1_ENABLE registers the
-  // symbolic-only crossings too (a REFUTED lever - it over-detects because it
-  // ignores the seam SEGMENT extent, breaking the resolving carriers, the
-  // decisive proof that a sound existence SWAP needs the seam endpoints'
-  // symbolic extent, not just the predicate); E1_MEASURE censuses the four
-  // cells.
+  // E1 SYMBOLIC EXTENT (homog-design + e1-plumb): the seam-seam crossing
+  // EXISTENCE test is the EXACT segment x segment straddle - the constructed
+  // triple point X = {f,g,h} strictly interior to ALL THREE seam triangles f,
+  // g, h (ExactSeamsCross), each seam's extent carried symbolically by its
+  // bounding triangles.  This is decided on the symbolic construction, not the
+  // eps- truncated seam-endpoint doubles, and the tri(g)/tri(h) extent clip
+  // stops the ~30x line-crossing over-detection (the seam LINES cross in f far
+  // more often than the finite overlap SEGMENTS do).
+  //
+  // DECISIVE MEASUREMENT (e1-plumb): the PURE exact straddle (E1_PURE, X in all
+  // three triangles with NO rounded-straddle gate) collapses the over-detect to
+  // the true crossing set, but wiring it as the sole existence test is NOT
+  // byte-clean and BREAKS a resolving carrier: on GT7081's 0.002deg
+  // near-parallel twins it admits genuine near-tangent crossings ~1.4e-7 from a
+  // near-coincident corner (endpoints diverged ABOVE eps ~4.5e-8 - the
+  // near-parallel-plane wall), and on openscad it splits the near-tangent thin
+  // cells the rounded straddle left unsplit; the DOUBLE-PRECISION downstream
+  // (RemoveOverlaps2D seam sub-face / SplitTouchingSheets) cannot represent
+  // those sub-eps crossings, so GT7081 regresses to a 4-open-edge fail-closed
+  // and openscad worsens (21 -> 35 opens / b3 in 12 faces).  This DECISIVELY
+  // confirms the terminal is the exact-rational 2D arrangement (it blocks even
+  // a RESOLVING carrier, not just openscad), not the enumeration predicate.
+  //
+  // DEFAULT (representability-safe): keep the rounded straddle
+  // (ExactSegProperCross) as a REPRESENTABILITY GATE - split only where the
+  // finite rounded segments actually cross, i.e. where the double-precision
+  // arrangement can place the crossing - and REFINE that set with the exact
+  // extent (drop the rounded false positives whose exact X falls outside seam
+  // g's or h's triangle).  Byte-clean on the whole resolving corpus (no rounded
+  // seam pair crosses there - zero triple points, so ExactSeamsCross is never
+  // reached), and a strict refinement of the pre-plumb X-in-f default (can only
+  // drop, never add).  Mutation levers: E1_OFF reverts to the pre-plumb
+  // rounded-straddle-and-X-in-f default; E1_PURE is the ungated exact straddle
+  // (the decisive negative - breaks GT7081); E1_MEASURE censuses the crossing
+  // set.
   static const bool kE1Measure = std::getenv("E1_MEASURE") != nullptr;
-  static const bool kE1Enable = std::getenv("E1_ENABLE") != nullptr;
+  static const bool kE1Pure = std::getenv("E1_PURE") != nullptr;
   static const bool kE1Off = std::getenv("E1_OFF") != nullptr;
-  int e1BothCross = 0, e1StradOnly = 0, e1SymOnly = 0, e1NeitherInTri = 0;
+  int e1New = 0, e1Old = 0, e1NewOnly = 0, e1OldOnly = 0, e1InFOnly = 0;
 
   std::map<std::array<int, 3>, vec3> tripleTab;  // sorted plane triple -> pos
   for (int f = 0; f < nTri; ++f) {
@@ -2462,71 +2532,97 @@ void EnumerateTriplePoints(BuildArrangement& A,
       for (int k2 = k1 + 1; k2 < ns; ++k2) {
         const int ph = planeId[A.faceSeams[f][k2].other];
         if (ph == planeId[f] || ph == pg) continue;  // collinear / degenerate
-        // EXACT proper crossing on the shared 3D seam endpoints (the once-only
-        // input constructions), filter-first.  The crossing DECISION is taken
-        // on the 3D coords via ExactOrient2DDrop, never on the projected seg[];
-        // the on-seam split position below is a double SegLineIntersect2D on
-        // the exact axis-drop seg coords, but only orders the pre-split (the
-        // emitted vertex is keyed by the once-only 3D triple point, not this
-        // position).
-        // Rounded-endpoint straddle (the once-only shared 3D seam endpoints);
-        // the crossing DECISION is exact-on-rounded (ExactOrient2DDrop), the
-        // on-seam split position below only orders the pre-split.
-        const bool straddle = ExactSegProperCross(
-            A.faceSeams[f][k1].p0, A.faceSeams[f][k1].p1, A.faceSeams[f][k2].p0,
-            A.faceSeams[f][k2].p1, axis);
-        // The general instantiation's exact verdict: is the constructed
-        // crossing strictly interior to f?  Computed lazily (only when it can
-        // change the decision, or under measurement), filter-first, off the
-        // fast path.
-        auto exactInFace = [&]() -> bool {
-          return ExactTripleStrictlyInFace(A, f, rep[planeId[f]], rep[pg],
-                                           rep[ph], axis);
-        };
+        const int gFace = A.faceSeams[f][k1].other;
+        const int hFace = A.faceSeams[f][k2].other;
+        const int rF = rep[planeId[f]], rG = rep[pg], rH = rep[ph];
+        // The rounded-endpoint straddle = the REPRESENTABILITY GATE (the finite
+        // rounded segments actually cross, so the double-precision arrangement
+        // can place the crossing).  Exact-on-rounded via ExactOrient2DDrop,
+        // cheap.
+        const bool straddle =
+            kE1Pure ? true
+                    : ExactSegProperCross(
+                          A.faceSeams[f][k1].p0, A.faceSeams[f][k1].p1,
+                          A.faceSeams[f][k2].p0, A.faceSeams[f][k2].p1, axis);
         if (kE1Measure) {
-          const bool inTri = exactInFace();
-          if (straddle && inTri)
-            ++e1BothCross;
-          else if (straddle)
-            ++e1StradOnly;
-          else if (inTri)
-            ++e1SymOnly;
-          else
-            ++e1NeitherInTri;
+          // Census the exact-extent (segment) set, the pre-plumb X-in-f set,
+          // and the over-detect line-crossing set (X-in-f alone).  Lazy,
+          // measure-only.
+          const bool inFGH = ExactSeamsCross(A, f, gFace, hFace, rF, rG, rH);
+          const bool inF =
+              ExactSeamsCross(A, f, gFace, hFace, rF, rG, rH, /*clip=*/1);
+          const bool str = ExactSegProperCross(
+              A.faceSeams[f][k1].p0, A.faceSeams[f][k1].p1,
+              A.faceSeams[f][k2].p0, A.faceSeams[f][k2].p1, axis);
+          if (str && inFGH) ++e1New;  // the shipped default set
+          if (str && inF) ++e1Old;    // the pre-plumb default set
+          if (inFGH) ++e1NewOnly;     // the pure exact-segment set (ungated)
+          if (str && inF && !inFGH)
+            ++e1OldOnly;                   // rounded phantoms the clip drops
+          if (inF && !inFGH) ++e1InFOnly;  // extent-clip removals
         }
-        bool cross;
-        if (kE1Off)
-          cross = straddle;  // mutation lever: pure rounded straddle
-        else if (kE1Enable)
-          cross = straddle || exactInFace();  // refuted over-detect lever
-        else
-          cross = straddle && exactInFace();  // DEFAULT: exact interior refine
-        if (!cross) continue;
-        // The exact on-seam 2D crossing (strictly interior to both segments):
-        // the split position, so the pre-split chain never folds back.
+        // DEFAULT: representability-gated exact extent (rounded straddle AND
+        // the exact segment straddle).  E1_PURE drops the gate (straddle==true)
+        // for the decisive negative; the clip (X in tri(g)/tri(h)) is the exact
+        // extent.
+        const int clip = kE1Off ? 1 : 3;
+        if (!(straddle &&
+              ExactSeamsCross(A, f, gFace, hFace, rF, rG, rH, clip)))
+          continue;
+        // The on-seam split position: the 2D crossing of the two ROUNDED seam
+        // segments (SegLineIntersect2D), which lies ON both 2D seam lines so
+        // the pre-split chain has no kink (the split coordinate stays collinear
+        // with each seam's endpoints - projecting the exact 3D point instead
+        // kinks the rounded chain and RemoveOverlaps2D then re-crosses it).  It
+        // only orders the pre-split; the emitted vertex is keyed by the
+        // once-only 3D triple point pos, not this 2D position.  The
+        // exact-extent test guarantees the crossing is strictly interior to
+        // both segments, so x is interior (no extrapolation).
         const vec2 x =
             SegLineIntersect2D(seg[k1][0], seg[k1][1], seg[k2][0], seg[k2][1]);
         if (!(std::isfinite(x.x) && std::isfinite(x.y))) continue;
         vec3 pos;
+        bool cached = false;
+        std::array<int, 3> key = {planeId[f], pg, ph};
         if (perFace) {
           pos = pf.lift(x);  // this face's own image of the crossing
           if (!(std::isfinite(pos.x) && std::isfinite(pos.y) &&
                 std::isfinite(pos.z)))
             continue;
         } else {
-          std::array<int, 3> key = {planeId[f], pg, ph};
           std::sort(key.begin(), key.end());
           auto it = tripleTab.find(key);
           if (it != tripleTab.end()) {
             pos = it->second;
+            cached = true;
           } else {
             const int r0 = rep[key[0]], r1 = rep[key[1]], r2 = rep[key[2]];
             if (!Intersect3Planes(A.faceN[r0], A.tri[r0][0], A.faceN[r1],
                                   A.tri[r1][0], A.faceN[r2], A.tri[r2][0], pos))
               continue;  // degenerate triple: leave to the pos2in backstop
-            tripleTab.emplace(key, pos);
           }
         }
+        // ALIASING / SUB-EPS COLLAPSE (nomerge witness theorem): a proper
+        // crossing must be strictly interior to both SEGMENTS, whose extents
+        // end at the ROUNDED seam endpoints.  If X lands within the weld radius
+        // of a seam ENDPOINT (of k1 or k2 - both on the same seam line as X,
+        // sharing the {f,g}/{f,h} carrier), the two seams MEET at that shared
+        // junction within eps rather than crossing in the interior; registering
+        // a split there manufactures a sub-eps-degenerate seam the emission
+        // weld would collapse anyway (the same within-construction eps collapse
+        // RecordSeams does on its endpoints).  Decline: the endpoint is already
+        // carried as a junction. Under the shipped straddle-gated default this
+        // is a near-no-op (a rounded proper crossing is interior); it is
+        // load-bearing under E1_PURE, where it collapses the ungated
+        // near-endpoint crossings (e.g. SelfIntersectB's 4.5e-8-long seam whose
+        // exact X lands 2e-15 from an endpoint).  Checked before the tripleTab
+        // emplace so a declined pair registers no triple.
+        if (!kE1Off && (la::length(pos - A.faceSeams[f][k1].p0) <= eps ||
+                        la::length(pos - A.faceSeams[f][k1].p1) <= eps ||
+                        la::length(pos - A.faceSeams[f][k2].p0) <= eps ||
+                        la::length(pos - A.faceSeams[f][k2].p1) <= eps))
+          continue;
+        if (!perFace && !cached) tripleTab.emplace(key, pos);
         A.seamTriples[f][k1].push_back({x, pos});
         A.seamTriples[f][k2].push_back({x, pos});
         if (std::getenv("F4B_DUMP") != nullptr)
@@ -2542,11 +2638,11 @@ void EnumerateTriplePoints(BuildArrangement& A,
                  static_cast<int>(tripleTab.size()), inc, perFace ? 1 : 0);
   }
   if (kE1Measure)
-    std::fprintf(stderr,
-                 "E1_CENSUS bothCross=%d straddleOnly=%d symbolicOnly=%d "
-                 "neither=%d enable=%d\n",
-                 e1BothCross, e1StradOnly, e1SymOnly, e1NeitherInTri,
-                 kE1Enable ? 1 : 0);
+    std::fprintf(
+        stderr,
+        "E1_CENSUS default=%d prePlumb=%d pureExact=%d phantomsDropped=%d "
+        "extentClipRemovals=%d\n",
+        e1New, e1Old, e1NewOnly, e1OldOnly, e1InFOnly);
 }
 
 // ---------------------------------------------------------------------------
@@ -3702,7 +3798,7 @@ StageResult<Manifold::Impl> ResolveComponent(const Manifold::Impl& dirty,
   }
   // B1: enumerate the once-only 3-face triple points before per-face emission
   // (no-op off openscad; the whole point on the triple-point-dense soup).
-  EnumerateTriplePoints(A, face2cluster);
+  EnumerateTriplePoints(A, face2cluster, eps);
   // f4-junction: gather the once-only junction registry (seam endpoints +
   // triples) so every emit path splits its edges at the non-proper-crossing
   // junctions the triple enumeration misses (no-op off openscad).
