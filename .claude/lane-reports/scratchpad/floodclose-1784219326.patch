@@ -1,0 +1,306 @@
+diff --git a/src/overlap3.cpp b/src/overlap3.cpp
+index 5d1f1308..bf574a2e 100644
+--- a/src/overlap3.cpp
++++ b/src/overlap3.cpp
+@@ -74,6 +74,227 @@ struct OutTri3D {
+ // EnumerateTriplePoints under F4B_DUMP; empty in production.
+ static std::set<std::tuple<double, double, double>> gF4BTriplePts;
+ 
++// ===========================================================================
++// FLOOD CLASSIFY (floodclose lane): component-global cross-face-consistent
++// winding reconciliation.  The per-face retention probe (RobustWinding at
++// cen3 +/- eps*nHat, EmitSeamedFace/EmitCleanFaces) classifies a DIFFERENT 3D
++// point per face; in the crowded multiply-wound cluster two faces on a shared
++// edge land in different tiny cells and DISAGREE, dropping each other's mates
++// (fracture-1784218577: the absent-partner opens).  The cleanflood identity
++// (act3-cleanflood-1784172149) proves w_above is EQUAL across every clean mesh
++// edge (above->above, combinatorial, sign-free) and across intra-face non-seam
++// sub-edges (a mere subdivision, no winding change).  So cells joined by such
++// delta-0 links form an equality CLASS whose w_above must be constant; where
++// the per-face probe disagrees inside a class (a graze), reconcile to the
++// area-weighted consensus.  This needs NO seam sign and NO seed: it only
++// enforces the proven equalities, so it is a NO-OP wherever the probe is
++// already consistent (the whole resolving corpus, per cleanflood neq==0) and
++// fires only at the openscad disagreement.  Gated FLOOD_CLASSIFY (default OFF
++// -> byte-identical); a two-pass collect(record cells)->reconcile->emit(look up
++// the reconciled winding) drive in EmitComponentBoundary.
++struct FloodSubEdge {
++  std::array<int64_t, 6> key;  // canonical (min,max) quantized endpoint pair
++  int kind;                    // 0 mesh-edge (cross-face delta0), 1 seam
++                               // (no link), 2 interior non-seam (intra delta0)
++  int64_t meshId;              // canonical twin mesh-edge id (kind 0), else -1
++};
++struct FloodCell {
++  int face;
++  std::array<int64_t, 3> cenKey;  // quantized centroid (lookup key, bit-stable)
++  int wAbove, wBelow;
++  double area;  // reconcile weight (largest cell = most reliable probe)
++  std::vector<FloodSubEdge> edges;
++  int recWAbove, recWBelow;  // reconciled (filled by FloodReconcile)
++};
++struct FloodCtx {
++  bool active = false;   // FLOOD_CLASSIFY on
++  bool collect = false;  // pass 1 (record cells, suppress emit)
++  double h = 1.0;        // quantization grid = weld radius (eps)
++  std::vector<FloodCell> cells;
++  std::map<std::pair<int, std::array<int64_t, 3>>, int> byCen;  // -> cell idx
++};
++static FloodCtx gFlood;
++static const bool kFloodClassify = std::getenv("FLOOD_CLASSIFY") != nullptr;
++
++inline std::array<int64_t, 3> FloodQ(const vec3& p, double h) {
++  return {llround(static_cast<double>(p.x) / h),
++          llround(static_cast<double>(p.y) / h),
++          llround(static_cast<double>(p.z) / h)};
++}
++// Is q strictly on the segment [a,b] (collinear within tol, param in (tol,1-tol))?
++inline bool FloodOnSeg(const vec3& q, const vec3& a, const vec3& b, double eps) {
++  const vec3 d = b - a;
++  const double l2 = la::dot(d, d);
++  if (!(l2 > 0.0)) return false;
++  const double t = la::dot(q - a, d) / l2;
++  if (t < -1e-6 || t > 1.0 + 1e-6) return false;
++  const vec3 foot = a + t * d;
++  return la::length(q - foot) <= 4.0 * eps;
++}
++
++// Record one classified cell into the component-global flood buffer (pass 1).
++// tri3 = the source face's 3 corners; heBase = 3*face (mesh-edge twin lookup);
++// seamSegs = the face's seam segments (empty for clean faces); loop3 = the
++// cell's boundary 3D points in order.
++void FloodRecordCell(const Manifold::Impl& in, int face,
++                     const std::array<vec3, 3>& tri3,
++                     const std::vector<std::pair<vec3, vec3>>& seamSegs,
++                     const vec3& cen3, int wAbove, int wBelow, double area,
++                     const std::vector<vec3>& loop3, double eps) {
++  const double h = gFlood.h;
++  FloodCell fc;
++  fc.face = face;
++  fc.cenKey = FloodQ(cen3, h);
++  fc.wAbove = wAbove;
++  fc.wBelow = wBelow;
++  fc.area = area;
++  fc.recWAbove = wAbove;
++  fc.recWBelow = wBelow;
++  const int m = static_cast<int>(loop3.size());
++  for (int i = 0; i < m; ++i) {
++    const vec3& p = loop3[i];
++    const vec3& q = loop3[(i + 1) % m];
++    if (la::length(p - q) <= eps) continue;  // degenerate sub-edge
++    FloodSubEdge se;
++    const std::array<int64_t, 3> kp = FloodQ(p, h), kq = FloodQ(q, h);
++    // canonical (min,max) ordering of the endpoint pair
++    if (std::lexicographical_compare(kp.begin(), kp.end(), kq.begin(),
++                                     kq.end()))
++      se.key = {kp[0], kp[1], kp[2], kq[0], kq[1], kq[2]};
++    else
++      se.key = {kq[0], kq[1], kq[2], kp[0], kp[1], kp[2]};
++    // classify: on an original mesh edge (cross-face delta-0), a seam (no
++    // link), or interior non-seam (intra-face delta-0).
++    se.kind = 2;
++    se.meshId = -1;
++    bool isSeam = false;
++    for (const auto& s : seamSegs)
++      if (FloodOnSeg(p, s.first, s.second, eps) &&
++          FloodOnSeg(q, s.first, s.second, eps)) {
++        isSeam = true;
++        break;
++      }
++    if (isSeam) {
++      se.kind = 1;
++    } else {
++      for (int j = 0; j < 3; ++j)
++        if (FloodOnSeg(p, tri3[j], tri3[(j + 1) % 3], eps) &&
++            FloodOnSeg(q, tri3[j], tri3[(j + 1) % 3], eps)) {
++          const int he = 3 * face + j;
++          const int pr = in.halfedge_.Pair(he);
++          se.kind = 0;
++          se.meshId = pr >= 0 ? std::min(he, pr) : he;
++          // FLOOD_CLEANEDGE: restrict cross-face links to the FULL untouched
++          // mesh edge (endpoints == the two original corners, no interior
++          // junction split).  The above->above equality identity is proven only
++          // for CLEAN edges; a subdivided cluster edge carries coincident-sheet
++          // junctions where it breaks.  Diagnostic filter (default off).
++          if (std::getenv("FLOOD_CLEANEDGE") != nullptr) {
++            const vec3& e0 = tri3[j];
++            const vec3& e1 = tri3[(j + 1) % 3];
++            const bool full =
++                (la::length(p - e0) <= eps || la::length(p - e1) <= eps) &&
++                (la::length(q - e0) <= eps || la::length(q - e1) <= eps);
++            if (!full) {
++              se.kind = 3;  // subdivided (dirty) mesh edge: no link
++              se.meshId = -1;
++            }
++          }
++          break;
++        }
++    }
++    fc.edges.push_back(se);
++  }
++  const int idx = static_cast<int>(gFlood.cells.size());
++  gFlood.byCen[{face, fc.cenKey}] = idx;
++  gFlood.cells.push_back(std::move(fc));
++}
++
++// Reconcile the collected cells: union-find over delta-0 links (cross-face
++// twin mesh sub-edges + intra-face non-seam sub-edges), then set each class's
++// reconciled w_above to the area-weighted consensus.  A no-op on any class
++// already consistent (resolving corpus).
++void FloodReconcile() {
++  const int n = static_cast<int>(gFlood.cells.size());
++  std::vector<int> uf(n);
++  for (int i = 0; i < n; ++i) uf[i] = i;
++  auto find = [&](int x) {
++    while (uf[x] != x) x = uf[x] = uf[uf[x]];
++    return x;
++  };
++  auto unite = [&](int a, int b) { uf[find(a)] = find(b); };
++  // cross-face: group non-seam mesh sub-edges by (meshId, key).
++  std::map<std::array<int64_t, 7>, std::vector<int>> meshGroup;
++  // intra-face: group interior non-seam sub-edges by (face, key).
++  std::map<std::array<int64_t, 7>, std::vector<int>> intraGroup;
++  for (int i = 0; i < n; ++i)
++    for (const FloodSubEdge& e : gFlood.cells[i].edges) {
++      if (e.kind == 0) {
++        std::array<int64_t, 7> g = {e.meshId,  e.key[0], e.key[1], e.key[2],
++                                    e.key[3],   e.key[4], e.key[5]};
++        meshGroup[g].push_back(i);
++      } else if (e.kind == 2) {
++        std::array<int64_t, 7> g = {gFlood.cells[i].face, e.key[0], e.key[1],
++                                    e.key[2], e.key[3], e.key[4], e.key[5]};
++        intraGroup[g].push_back(i);
++      }
++    }
++  auto linkGroup = [&](const std::vector<int>& v) {
++    for (size_t k = 1; k < v.size(); ++k) unite(v[0], v[k]);
++  };
++  for (auto& kv : meshGroup) linkGroup(kv.second);
++  for (auto& kv : intraGroup) linkGroup(kv.second);
++  // per class: area-weighted vote on w_above; keep each cell's (wBelow-wAbove).
++  std::map<int, std::map<int, double>> classVote;
++  for (int i = 0; i < n; ++i)
++    classVote[find(i)][gFlood.cells[i].wAbove] += gFlood.cells[i].area;
++  std::map<int, int> classWA;
++  for (auto& kv : classVote) {
++    int best = 0;
++    double bw = -1.0;
++    for (auto& vv : kv.second)
++      if (vv.second > bw || (vv.second == bw && vv.first < best)) {
++        bw = vv.second;
++        best = vv.first;
++      }
++    classWA[kv.first] = best;
++  }
++  int nFlip = 0, nInconsistentClass = 0;
++  std::map<int, int> classCount, classInconsistent;
++  for (auto& kv : classVote)
++    if (kv.second.size() > 1) ++nInconsistentClass;
++  for (int i = 0; i < n; ++i) {
++    FloodCell& c = gFlood.cells[i];
++    const int wa = classWA[find(i)];
++    c.recWBelow = wa + (c.wBelow - c.wAbove);
++    c.recWAbove = wa;
++    if (c.recWAbove != c.wAbove) ++nFlip;
++  }
++  if (std::getenv("FLOOD_CENSUS") != nullptr) {
++    int meshLinks = 0, intraLinks = 0;
++    for (auto& kv : meshGroup)
++      if (kv.second.size() >= 2) meshLinks += static_cast<int>(kv.second.size());
++    for (auto& kv : intraGroup)
++      if (kv.second.size() >= 2)
++        intraLinks += static_cast<int>(kv.second.size());
++    std::fprintf(stderr,
++                 "FLOOD_CENSUS cells=%d classes=%d inconsistentClasses=%d "
++                 "flippedCells=%d meshLinkCells=%d intraLinkCells=%d\n",
++                 n, static_cast<int>(classVote.size()), nInconsistentClass,
++                 nFlip, meshLinks, intraLinks);
++  }
++}
++
++// Pass-2 lookup: reconciled (wAbove, wBelow) for the cell at (face, cen3), or
++// nullopt if it was not recorded (a defensive fall-back to the live probe).
++inline bool FloodLookup(int face, const vec3& cen3, int& wa, int& wb) {
++  const auto it = gFlood.byCen.find({face, FloodQ(cen3, gFlood.h)});
++  if (it == gFlood.byCen.end()) return false;
++  wa = gFlood.cells[it->second].recWAbove;
++  wb = gFlood.cells[it->second].recWBelow;
++  return true;
++}
++
+ bool SplitTouchingSheets(std::vector<vec3>& verts, Vec<ivec3>& tv) {
+   const int nTri = static_cast<int>(tv.size());
+   auto heFrom = [&](int h) { return tv[h / 3][h % 3]; };
+@@ -4981,6 +5202,11 @@ void EmitSeamedFace(std::vector<OutTri3D>& out, const BuildArrangement& A,
+     ok = false;
+     return;
+   }
++  // FLOOD CLASSIFY: this face's seam segments (delta-0 classifier input).
++  std::vector<std::pair<vec3, vec3>> floodSeamSegs;
++  if (gFlood.active)
++    for (const BuildSeam& s : A.faceSeams[f])
++      floodSeamSegs.push_back({s.p0, s.p1});
+   for (const std::vector<int>& cell : cells) {
+     if (cell.size() < 3) continue;
+     // Triangulate the cell; the largest triangle's centroid is a guaranteed
+@@ -5020,7 +5246,26 @@ void EmitSeamedFace(std::vector<OutTri3D>& out, const BuildArrangement& A,
+       ok = false;
+       return;
+     }
+-    const int keep = BothSidesRetain(*g, *gb);
++    int fwa = *g, fwb = *gb;
++    if (gFlood.active) {
++      if (gFlood.collect) {
++        double aC = 0.0;
++        for (size_t k = 0; k < cell.size(); ++k)
++          aC += la::cross(verts2[cell[k]], verts2[cell[(k + 1) % cell.size()]]);
++        std::vector<vec3> loop3;
++        loop3.reserve(cell.size());
++        for (int idx : cell) loop3.push_back(canon3[idx]);
++        FloodRecordCell(in, f, {a, b, c}, floodSeamSegs, cen3, *g, *gb,
++                        0.5 * std::abs(aC), loop3, eps);
++        continue;  // pass 1: record only, suppress emit
++      }
++      int rwa, rwb;
++      if (FloodLookup(f, cen3, rwa, rwb)) {
++        fwa = rwa;
++        fwb = rwb;
++      }
++    }
++    const int keep = BothSidesRetain(fwa, fwb);
+     if (wedge && std::getenv("EX2_CELLDUMP") != nullptr) {
+       double aC = 0.0;
+       for (size_t k = 0; k < cell.size(); ++k)
+@@ -5515,6 +5760,25 @@ StageResult<Manifold::Impl> EmitComponentBoundary(
+ 
+   std::vector<OutTri3D> emitted;
+   bool ok = true;
++  const int nTri = static_cast<int>(in.NumTri());
++  // FLOOD CLASSIFY pass 1 (collect): build every seamed face's cells + per-face
++  // probe winding + delta-0 sub-edge links into the component-global buffer,
++  // then reconcile each equality class to its area-weighted consensus.  The
++  // emit passes below look up the reconciled winding (EmitSeamedFace's
++  // FloodLookup).  Gated FLOOD_CLASSIFY (default OFF -> gFlood.active false ->
++  // every hook is skipped and emission is byte-identical).
++  gFlood = FloodCtx{};
++  if (kFloodClassify) {
++    gFlood.active = true;
++    gFlood.h = eps > 0.0 ? eps : 1e-9;
++    gFlood.collect = true;
++    std::vector<OutTri3D> scratch;
++    bool cok = true;
++    for (int f = 0; f < nTri; ++f)
++      if (A.seamed[f]) EmitSeamedFace(scratch, A, f, in, seeds, eps, cok);
++    FloodReconcile();
++    gFlood.collect = false;
++  }
+   // Exact-coplanar clusters first (transversal seams on their faces are the
+   // entanglement decline).
+   FoldCoplanarClusters(emitted, in, A, face2cluster, seeds, eps, ok);
+@@ -5524,7 +5788,6 @@ StageResult<Manifold::Impl> EmitComponentBoundary(
+         "resolver: exact-coplanar fold declined (coplanar/transversal "
+         "entanglement, degenerate projection, or filter-uncertain classify) - "
+         "fail-closed");
+-  const int nTri = static_cast<int>(in.NumTri());
+   static const bool kF4BDump = std::getenv("F4B_DUMP") != nullptr;
+   if (kF4BDump) {  // census: run EVERY seamed face, count the fail-closed
+                    // branch
