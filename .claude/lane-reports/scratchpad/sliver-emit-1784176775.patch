@@ -1,0 +1,160 @@
+diff --git a/src/overlap3.cpp b/src/overlap3.cpp
+index bc4bd04f..fa7e0ff6 100644
+--- a/src/overlap3.cpp
++++ b/src/overlap3.cpp
+@@ -282,6 +282,19 @@ StageResult<Manifold::Impl> BuildImpl(const std::vector<OutTri3D>& tris,
+             static_cast<int64_t>(std::floor(p.y / eps)),
+             static_cast<int64_t>(std::floor(p.z / eps))};
+   };
++  // SLIVER-EMIT lane instrumentation (env-gated, default byte-clean no-op):
++  //  SLV_WELDCENSUS - count welds that join a query onto a bit-DIFFERENT vertex
++  //    (the committed-positions census: how many intended-identical points arrive
++  //    with different bits = the eps-weld's remaining load).  Print-only.
++  //  SLV_EXACTWELD  - retire the eps predicate to EXACT numeric equality (stage 2:
++  //    genuinely-distinct sub-eps rims then survive to output as sliver faces).
++  static const bool kSlvCensus = std::getenv("SLV_WELDCENSUS") != nullptr;
++  static const bool kSlvExactWeld = std::getenv("SLV_EXACTWELD") != nullptr;
++  int weldTot = 0, weldNonBitEq = 0;
++  double weldMaxGap = 0.0;
++  auto bitEq = [](vec3 a, vec3 b) {
++    return a.x == b.x && a.y == b.y && a.z == b.z;
++  };
+   auto getVertIdx = [&](vec3 p) -> int {
+     const GridCell c = cellOf(p);
+     int best = -1;
+@@ -290,11 +303,26 @@ StageResult<Manifold::Impl> BuildImpl(const std::vector<OutTri3D>& tris,
+         for (const int64_t dz : {-1, 0, 1}) {
+           const auto it = grid.find({c.x + dx, c.y + dy, c.z + dz});
+           if (it == grid.end()) continue;
+-          for (const int i : it->second)
+-            if ((best < 0 || i < best) && la::length(verts[i] - p) <= eps)
+-              best = i;
++          for (const int i : it->second) {
++            const bool match = kSlvExactWeld ? bitEq(verts[i], p)
++                                             : la::length(verts[i] - p) <= eps;
++            if ((best < 0 || i < best) && match) best = i;
++          }
++        }
++    if (best >= 0) {
++      if (kSlvCensus) {
++        ++weldTot;
++        if (!bitEq(verts[best], p)) {
++          ++weldNonBitEq;
++          weldMaxGap = std::max(weldMaxGap, la::length(verts[best] - p));
++          if (std::getenv("SLV_WELDDUMP") != nullptr)
++            std::fprintf(stderr, "SLV_TWIN q=%.17g,%.17g,%.17g m=%.17g,%.17g,%.17g gap=%g\n",
++                         p.x, p.y, p.z, verts[best].x, verts[best].y,
++                         verts[best].z, la::length(verts[best] - p));
+         }
+-    if (best >= 0) return best;
++      }
++      return best;
++    }
+     const int id = static_cast<int>(verts.size());
+     verts.push_back(p);
+     grid[c].push_back(id);
+@@ -331,6 +359,10 @@ StageResult<Manifold::Impl> BuildImpl(const std::vector<OutTri3D>& tris,
+     tv.push_back({v0, v1, v2});
+   }
+ 
++  if (kSlvCensus)
++    std::fprintf(stderr, "SLV_WELD tot=%d nonBitEq=%d maxGap=%g exact=%d\n",
++                 weldTot, weldNonBitEq, weldMaxGap, kSlvExactWeld ? 1 : 0);
++
+   // Touching sheets separate BEFORE the topology is built (spec COPLANAR
+   // implementation close: touching contacts).
+   if (!SplitTouchingSheets(verts, tv)) {
+@@ -1998,12 +2030,18 @@ BuildArrangement RecordSeams(const Manifold::Impl& in,
+       // Genuine distinct seam endpoints are far more than eps apart, so an
+       // ordinary seam is untouched (bitwise).
+       const int nPtsPre = nPts;
+-      for (int a = 0; a + 1 < nPts; ++a)
+-        for (int b = nPts - 1; b > a; --b)
+-          if (la::length(pts[a] - pts[b]) <= eps) {
+-            pts[b] = pts[nPts - 1];
+-            --nPts;
+-          }
++      // SLIVER-EMIT stage 3 lever (SLV_KEEPF11): keep a sub-eps seam's two
++      // distinct endpoints instead of merging them, so the thin-cell crossing
++      // structure survives to emission (the F11 collapse audit).  Within-pair
++      // (provenance-consistent same-crossing) so default-on keeps the collapse.
++      const bool kSlvKeepF11 = std::getenv("SLV_KEEPF11") != nullptr;
++      if (!kSlvKeepF11)
++        for (int a = 0; a + 1 < nPts; ++a)
++          for (int b = nPts - 1; b > a; --b)
++            if (la::length(pts[a] - pts[b]) <= eps) {
++              pts[b] = pts[nPts - 1];
++              --nPts;
++            }
+       if (nPts == 0) continue;  // no genuine crossing
+       // Recovered shares-vertex crossing: two triangles sharing exactly one
+       // vertex V and crossing transversally intersect along [V, P], where P is
+@@ -2804,6 +2842,57 @@ void BuildJunctionRegistry(BuildArrangement& A, double eps) {
+   }
+ }
+ 
++// SLIVER-EMIT stage 1 (COMMITTED POSITIONS): rewrite every seam endpoint to its
++// registry-canonical position, so that a junction constructed via two different
++// pierce arithmetic paths (edge_i-pierces-tri_j vs edge_j-pierces-tri_i - the
++// same math point, ULP-apart bits: the EntangledBarsRotated twins) arrives at
++// EVERY incident face's emission with ONE committed double position, bit-equal.
++// The registry (A.junctions) already deduped the twin cluster to its sorted-
++// lowest representative; snapping both twins onto it makes them bit-equal by
++// construction, so the assembly equality-weld (stage 2) suffices without the
++// eps grid.  A.junctions is sorted by (x,y,z), so the candidate window starts at
++// the first vertex with x >= P.x - eps.  Env-gated (SLV_CANON) so the default
++// path stays byte-identical while the stack is measured.  On the resolving
++// corpus the only within-eps registry neighbour of a seam endpoint is its own
++// twin (nomerge aliasGap=0: no cross-provenance aliasing off openscad), so this
++// is exactly twin unification there - a re-triangulation only where twins exist.
++void CanonicalizeSeamEndpoints(BuildArrangement& A, double eps) {
++  if (std::getenv("SLV_CANON") == nullptr) return;
++  // Ground-truth positions in preference order: an exact INPUT VERTEX (position
++  // IS provenance) beats a rounded construction, so a seam endpoint that lands
++  // within eps of a triangle corner commits to that corner's exact bits (the
++  // INPUT-SEAM twin: a seam terminating at a cap corner, y=0.99999.. -> y=1).
++  // The registry's sorted-lowest representative is the fallback for SEAM-SEAM /
++  // SEAM-TRIPLE clusters with no input-vertex member.  A single sorted vector of
++  // {input-verts, then registry} lets one x-windowed scan honour the preference.
++  std::vector<vec3> inputV;
++  for (const auto& tri : A.tri)
++    for (const vec3& c : tri) inputV.push_back(c);
++  std::sort(inputV.begin(), inputV.end(), [](const vec3& p, const vec3& q) {
++    return std::tie(p.x, p.y, p.z) < std::tie(q.x, q.y, q.z);
++  });
++  auto snapTo = [&](const std::vector<vec3>& src, vec3& P) -> bool {
++    for (const vec3& J : src) {
++      if (J.x < P.x - eps) continue;
++      if (J.x > P.x + eps) break;
++      if (la::length(J - P) <= eps) {
++        P = J;
++        return true;
++      }
++    }
++    return false;
++  };
++  auto canon = [&](vec3& P) {
++    if (snapTo(inputV, P)) return;  // exact input vertex wins
++    snapTo(A.junctions, P);         // else the once-only registry rep
++  };
++  for (auto& seams : A.faceSeams)
++    for (auto& s : seams) {
++      canon(s.p0);
++      canon(s.p1);
++    }
++}
++
+ // The registry vertices strictly interior to segment [P0,P1] in frame pf, each
+ // returned as {on-line 2D foot, canonical 3D vertex} ordered along the segment.
+ // The 2D position is the perpendicular FOOT on the segment line (NOT proj(V),
+@@ -3803,6 +3892,10 @@ StageResult<Manifold::Impl> ResolveComponent(const Manifold::Impl& dirty,
+   // triples) so every emit path splits its edges at the non-proper-crossing
+   // junctions the triple enumeration misses (no-op off openscad).
+   BuildJunctionRegistry(A, eps);
++  // SLIVER-EMIT stage 1: commit each seam endpoint to its registry-canonical
++  // position (no-op unless SLV_CANON), so intended-identical points are bit-equal
++  // before the assembly weld.
++  CanonicalizeSeamEndpoints(A, eps);
+   return EmitComponentBoundary(in, A, face2cluster, eps);
+ }
+ 
