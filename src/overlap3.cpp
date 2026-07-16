@@ -6442,26 +6442,48 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
           // separate cells; a negative lobe is a hole ring and is ROUTED
           // through containment + keyhole attachment below (the offline v3
           // island lesson: never dropped).
+          // ... but only when both lobes have the SAME area sign (bowtie /
+          // interleaved-rotation artifacts).  An OPPOSITE-sign pinch is a
+          // hole ring touching its cell at a vertex: keep the walk WHOLE -
+          // it is already the keyhole form the triangulators handle, and
+          // decomposing forces containment + splice round-trips that create
+          // multi-keyholes with shared ring vertices (measured stall).
           {
-            std::map<int, int> seen;
-            int pi = -1, pk = -1;
-            for (int k = 0; k < m && pi < 0; ++k) {
-              const auto it = seen.find(L[k]);
-              if (it != seen.end()) {
-                pi = it->second;
-                pk = k;
-              } else {
-                seen.emplace(L[k], k);
+            auto lobeSign = [&](const std::vector<int>& lb) -> int {
+              double s = 0.0;
+              for (size_t k = 0; k < lb.size(); ++k) {
+                const vec2 p1 = e1::Drop2(pos3[lb[k]], axis);
+                const vec2 p2 = e1::Drop2(pos3[lb[(k + 1) % lb.size()]], axis);
+                s += p1.x * p2.y - p2.x * p1.y;
               }
-            }
-            if (pi >= 0) {
+              return s > 0 ? 1 : (s < 0 ? -1 : 0);
+            };
+            std::map<int, int> seen;
+            bool split = false;
+            for (int k = 0; k < m && !split; ++k) {
+              const auto it = seen.find(L[k]);
+              if (it == seen.end()) {
+                seen.emplace(L[k], k);
+                continue;
+              }
+              const int pi = it->second, pk = k;
               std::vector<int> l1(L.begin() + pi, L.begin() + pk);
               std::vector<int> l2(L.begin(), L.begin() + pi);
               l2.insert(l2.end(), L.begin() + pk, L.end());
-              work.push_back(std::move(l1));
-              work.push_back(std::move(l2));
-              continue;
+              if (l1.size() < 3 || l2.size() < 3) {
+                work.push_back(std::move(l1));
+                work.push_back(std::move(l2));
+                split = true;
+                break;
+              }
+              const int s1 = lobeSign(l1), s2 = lobeSign(l2);
+              if (s1 == s2 || s1 == 0 || s2 == 0) {
+                work.push_back(std::move(l1));
+                work.push_back(std::move(l2));
+                split = true;
+              }
             }
+            if (split) continue;
           }
           // spur tips
           bool changed = true;
@@ -6528,17 +6550,24 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
     if (!negloops.empty()) {
       std::map<int, std::vector<std::vector<int>>> holeof;
       for (const auto& nl : negloops) {
-        const vec2 p = e1::Drop2(pos3[nl[0]], axis);
+        // try several ring vertices: the parity test degenerates when the
+        // probe vertex sits ON the containing cell's boundary (the pinch
+        // vertex of a decomposed island ring) - a single-vertex test then
+        // orphans the ring and its edges vanish (measured: micro-corner
+        // island opens)
         int best = -1;
         double bestA = 0.0;
-        for (size_t ci = 0; ci < cells.size(); ++ci)
-          if (inLoop(p, cells[ci])) {
-            const double a = std::abs(loopArea(cells[ci]));
-            if (best < 0 || a < bestA) {
-              best = static_cast<int>(ci);
-              bestA = a;
+        for (size_t pv = 0; pv < nl.size() && pv < 4 && best < 0; ++pv) {
+          const vec2 p = e1::Drop2(pos3[nl[pv]], axis);
+          for (size_t ci = 0; ci < cells.size(); ++ci)
+            if (inLoop(p, cells[ci])) {
+              const double a = std::abs(loopArea(cells[ci]));
+              if (best < 0 || a < bestA) {
+                best = static_cast<int>(ci);
+                bestA = a;
+              }
             }
-          }
+        }
         // DUST HOLE RING: a ring whose width is below the weld radius is a
         // sub-representable near-duplicate zigzag (measured: macro-long,
         // ~1e-12-wide rings in the near-tangent fold overlap); splicing it
