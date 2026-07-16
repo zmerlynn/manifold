@@ -1,0 +1,79 @@
+=== CODEX MAXDEPTH RAW FINDINGS (triaged) - ts 1784203816 ===
+Codex 0.139.0; prompt=/tmp/codex-maxdepth/prompt.txt; full log=/tmp/codex-maxdepth/codex-log.txt
+Tree=/tmp/codex-maxdepth/tree (src+docs+9 lane reports, PDFs stripped).
+
+--- CODEX FINAL DERIVATION (verbatim) ---
+**Bottom Line**
+
+For the exact algebraic core, the construction grammar is closed at depth 1. The real arrangement objects are built directly from input vertices and face planes: seam endpoints, plane triples, and coplanar edge crossings. The skew “crossings of chords whose endpoints are already constructed” from the lane reports are not genuine grammar objects; they come from eps-injected / rounded phantom structure, especially the junction registry and foot projection paths.
+
+But for `overlap3.cpp` as shipped, there is no single pure “sign of a fixed polynomial in the original input coordinates” theorem for the whole pipeline. The code intentionally feeds rounded constructed doubles and eps decisions back into later steps: `SegPlanePoint`, `Intersect3Planes`, `SegLineIntersect2D`, `JunctionSplitsOnSegment`, `pf.lift`, centroid probes, and the final eps weld. Those are posture/representability decisions, not exact algebraic predicates over the original doubles.
+
+**Max-Degree Theorem**
+
+Using raw input coordinate variables as degree 1:
+
+- Max topological exact predicate in the closed grammar: degree 20.
+  This is the general homogeneous `orient2d` of three plane-triple points. Each face-plane triple point has homogeneous coordinates `X,Y,Z` degree 7 and `W` degree 6 after substituting face planes, so a 2D homogeneous determinant term has degree `7 + 7 + 6 = 20`.
+- Max shipped production exact topological predicate actually used by `ExactSeamsCross`: degree 8.
+  It tests one plane-triple point against triangle edges: two input vertices plus one constructed point, giving degree `max(1+1+6, 1+7) = 8`.
+- Max exactized eps-collapse threshold among depth-1 arrangement vertices: degree 26.
+  Distance between two plane-triple points has numerator degree `7+6 = 13`; squaring gives degree 26.
+
+The code/document “degree 9” is correct in the implementation’s plane-coefficient generator basis: Cramer coordinates are degree 3 in plane coefficients, and a 3x3 homogeneous `orient2d` is degree 9. In the raw input-coordinate basis requested here, that same primitive expands to degree 20.
+
+**Construction Grammar**
+
+| Object | Site | Depth | Homogeneous Degree In Raw Inputs |
+|---|---:|---:|---:|
+| Input vertex `(x,y,z,1)` | input | 0 | `X,Y,Z:1`, `W:0` |
+| Face plane `(n,d)` | [overlap3.cpp](/tmp/codex-maxdepth/tree/src/overlap3.cpp:1729) | 1 | `n:2`, `d:3` |
+| Seam line, two face planes | [overlap3.cpp](/tmp/codex-maxdepth/tree/src/overlap3.cpp:1635) | 1 | Plucker `dir:4`, `moment:5` |
+| Mesh edge, non-coplanar adjacent faces | implicit plane pair | 1 | same as seam line |
+| Mesh edge, coplanar adjacent faces | endpoint line | 0/1 | `dir:1`, `moment:2`; coplanarity lowers degree |
+| Seam endpoint: input edge vs face plane | [overlap3.cpp](/tmp/codex-maxdepth/tree/src/overlap3.cpp:1648) | 1 | `X,Y,Z:4`, `W:3` |
+| Plane triple `{f,g,h}` | [overlap3.cpp](/tmp/codex-maxdepth/tree/src/overlap3.cpp:2292) | 1 | `X,Y,Z:7`, `W:6` |
+| Coplanar 2D edge crossing | [overlap3.cpp](/tmp/codex-maxdepth/tree/src/overlap3.cpp:3239) | 1 | 2D `U,V,W:2`; lifted 3D max `X:5`, `W:4` |
+| Junction foot / projected split | [overlap3.cpp](/tmp/codex-maxdepth/tree/src/overlap3.cpp:2814) | eps-artifact | depth >1 if exactized; not a true grammar object |
+| Cell centroid / winding probe | [overlap3.cpp](/tmp/codex-maxdepth/tree/src/overlap3.cpp:3058) | rounded probe | not a raw-input polynomial in shipped code |
+
+**Predicate Degrees**
+
+| Predicate | Object Case | Degree |
+|---|---|---:|
+| `orient3d` | four input vertices | 3 |
+| Face coplanarity | six input vertex-vs-face tests | 3 each |
+| Edge pierces triangle | input edge vs input triangle | 3 per `orient3d`; see [overlap3.cpp](/tmp/codex-maxdepth/tree/src/overlap3.cpp:1144) |
+| Constructed point on face plane | seam endpoint `4/3` | 6 |
+| Constructed point on face plane | plane triple `7/6` | 9 |
+| In-triangle | plane triple against input triangle | 8 |
+| General in-face `orient2d` | three plane triples | 20 raw, 9 in plane-coeff basis |
+| Order along line | two seam endpoints | 7 |
+| Order along line | endpoint vs plane triple | 10 |
+| Order along line | two plane triples | 13 |
+| Winding `orient3d` | input probe | 3 |
+| Winding `orient3d` | symbolic plane-triple probe | 9 |
+| Winding at centroid of 3 triples | if exactized literally | 21, but shipped code uses rounded doubles |
+| Eps distance collapse | endpoint-endpoint | 14 |
+| Eps distance collapse | endpoint-triple | 20 |
+| Eps distance collapse | triple-triple | 26 |
+
+**True Depth >1?**
+
+No true exact arrangement decision in the landed grammar requires a point constructed from constructed points. The apparent nested sites are representational or eps-posture artifacts:
+
+- `SegLineIntersect2D` computes a rounded 2D split position from rounded seam endpoints, but the canonical 3D vertex is the once-only plane triple from `Intersect3Planes`: [overlap3.cpp](/tmp/codex-maxdepth/tree/src/overlap3.cpp:2581), [overlap3.cpp](/tmp/codex-maxdepth/tree/src/overlap3.cpp:2599).
+- `JunctionSplitsOnSegment` projects a registry vertex to an on-line foot and injects it if it is within eps: [overlap3.cpp](/tmp/codex-maxdepth/tree/src/overlap3.cpp:2834). That is exactly the kind of eps-snapped phantom structure reported by `symwalk`, `exjunct`, and `graze`.
+- `EmitSeamedFace` rejects unprepared new 2D crossings from `RemoveOverlaps2D` via the `pos2in` backstop, rather than accepting nested constructed vertices: [overlap3.cpp](/tmp/codex-maxdepth/tree/src/overlap3.cpp:3009).
+- Sub-eps collapse is explicitly an eps witness/decline, not a new exact construction: [overlap3.cpp](/tmp/codex-maxdepth/tree/src/overlap3.cpp:2605), [overlap3.cpp](/tmp/codex-maxdepth/tree/src/overlap3.cpp:2620).
+
+**Minimal Exact Predicate Inventory**
+
+1. `Orient3D(input,input,input,input)`: degree 3.
+2. `PlaneTripleInTriangle(X={f,g,h}, tri)`: degree 8 raw, implemented through homogeneous `orient2d`.
+3. `HomogOrient2D(plane-triple, plane-triple, plane-triple)`: degree 20 raw / 9 plane-coeff basis, needed for a fully exact symbolic 2D seam arrangement.
+4. `PointOnPlane(constructed point, face plane)`: degree 6 for seam endpoint, degree 9 for plane triple.
+5. `OrderOnLine(P,Q,axis or carrier)`: degree up to 13 for two plane triples.
+6. `SquaredDistanceLEps(P,Q)`: degree up to 26 for triple-triple collapse, if eps collapse is exactized.
+
+Verdict on the prior skew-line reports: they are artifacts, not true grammar requirements. The code’s real exact construction sites are plane/edge/plane-triple based; the skew projected crossings arise after eps junction injection or rounded 2D foot placement, not from a required exact point built from constructed points.

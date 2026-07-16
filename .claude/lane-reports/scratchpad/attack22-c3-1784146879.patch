@@ -1,0 +1,330 @@
+--- a/src/overlap3.cpp
++++ b/src/overlap3.cpp
+@@ -74,7 +74,17 @@
+ // EnumerateTriplePoints under F4B_DUMP; empty in production.
+ static std::set<std::tuple<double, double, double>> gF4BTriplePts;
+ 
+-bool SplitTouchingSheets(std::vector<vec3>& verts, Vec<ivec3>& tv) {
++// C3 LANE (attack22-c3, MEASUREMENT ONLY): per-emitted-triangle source input
++// face.  Populated by EmitComponentBoundary parallel to the `emitted` soup
++// (seamed = face index; -2 clean; -3 fold), consumed by BuildImpl ->
++// SplitTouchingSheets to dump each unbalanced fan (open edge) with per-halfedge
++// input-plane provenance.  Env-gated (C3_HEDUMP); empty / no-op in production.
++static const bool kC3Dump = std::getenv("C3_HEDUMP") != nullptr;
++static const bool kC3Complete = std::getenv("C3_COMPLETE") != nullptr;
++static std::vector<int> gC3EmitSrc;
++
++bool SplitTouchingSheets(std::vector<vec3>& verts, Vec<ivec3>& tv,
++                         const std::vector<int>* srcFace = nullptr) {
+   const int nTri = static_cast<int>(tv.size());
+   auto heFrom = [&](int h) { return tv[h / 3][h % 3]; };
+   auto heTo = [&](int h) { return tv[h / 3][(h % 3 + 1) % 3]; };
+@@ -108,6 +118,26 @@
+     if (fwd.size() != bwd.size()) {
+       if (!kF4BDump) return false;
+       ++cOpen;
++      if (kC3Dump && srcFace) {  // MEASUREMENT: dump the whole unbalanced fan
++        std::fprintf(
++            stderr,
++            "C3_EDGE efrom=%d eto=%d pfrom=%a,%a,%a pto=%a,%a,%a "
++            "nfwd=%zu nbwd=%zu fan=%zu\n",
++            edge.first, edge.second, verts[edge.first].x, verts[edge.first].y,
++            verts[edge.first].z, verts[edge.second].x, verts[edge.second].y,
++            verts[edge.second].z, fwd.size(), bwd.size(), hes.size());
++        for (const int h : hes) {
++          const int cc = tv[h / 3][(h % 3 + 2) % 3];
++          const int sf =
++              (h / 3 < static_cast<int>(srcFace->size())) ? (*srcFace)[h / 3]
++                                                          : -99;
++          std::fprintf(stderr,
++                       "C3_HE h=%d fwd=%d src=%d hfrom=%d hto=%d "
++                       "third=%a,%a,%a\n",
++                       h, heFrom(h) == edge.first ? 1 : 0, sf, heFrom(h),
++                       heTo(h), verts[cc].x, verts[cc].y, verts[cc].z);
++        }
++      }
+       const int nt =
+           (atTriple(edge.first) ? 1 : 0) + (atTriple(edge.second) ? 1 : 0);
+       if (nt == 2)
+@@ -309,8 +339,13 @@
+   // the 2-manifold topology.
+   Vec<ivec3> tv;
+   tv.reserve(tris.size());
++  // C3 MEASUREMENT: parallel source-face per KEPT triangle (drops mirror tv).
++  std::vector<int> tvSrc;
++  const bool c3 = kC3Dump && gC3EmitSrc.size() == tris.size();
+   std::set<std::tuple<int, int, int>> seenTris;
++  int c3TriIdx = -1;
+   for (const auto& tri : tris) {
++    ++c3TriIdx;
+     const int v0 = getVertIdx(tri.v[0]);
+     const int v1 = getVertIdx(tri.v[1]);
+     const int v2 = getVertIdx(tri.v[2]);
+@@ -329,11 +364,12 @@
+     }
+     if (!seenTris.insert({a, b, c}).second) continue;  // exact duplicate
+     tv.push_back({v0, v1, v2});
++    if (c3) tvSrc.push_back(gC3EmitSrc[c3TriIdx]);
+   }
+ 
+   // Touching sheets separate BEFORE the topology is built (spec COPLANAR
+   // implementation close: touching contacts).
+-  if (!SplitTouchingSheets(verts, tv)) {
++  if (!SplitTouchingSheets(verts, tv, c3 ? &tvSrc : nullptr)) {
+     return StageResult<Manifold::Impl>::Fatal(FatalReason::NonManifoldEmission,
+                                               "unresolvable sheet contact");
+   }
+@@ -2983,6 +3019,197 @@
+           c + L * vec3(2.39, -4.61, 3.07),  c + L * vec3(-1.51, 3.89, -4.43)};
+ }
+ 
++// C3 COMPLETION PROBE (attack22-c3, MEASUREMENT ONLY, env C3_COMPLETE).  Weld
++// the emitted soup, find the unbalanced-fan open edges, group the dangling
++// halfedges into connected components, and for each SIMPLE-CYCLE component that
++// lies in ONE input plane, form the candidate completion triangulation and
++// validate every triangle with the PRODUCTION winding (both-sides {w>=1} rule,
++// verbatim from EmitSeamedFace).  Prints how many of the open edges a
++// winding-only, single-plane completion would close, and which components need
++// multi-plane sheet synthesis (the gated arrangement).  Does NOT modify the
++// emitted soup - production BuildImpl is byte-unchanged.
++void C3CompletionProbe(const Manifold::Impl& in, const BuildArrangement& A,
++                       const std::vector<OutTri3D>& emitted,
++                       const std::vector<int>& emitSrc,
++                       const std::vector<vec3>& seeds, double eps) {
++  // --- weld (mirror BuildImpl exactly) ---
++  std::vector<vec3> verts;
++  std::unordered_map<GridCell, std::vector<int>, GridCellHash> grid;
++  auto cellOf = [&](vec3 p) -> GridCell {
++    return {static_cast<int64_t>(std::floor(p.x / eps)),
++            static_cast<int64_t>(std::floor(p.y / eps)),
++            static_cast<int64_t>(std::floor(p.z / eps))};
++  };
++  auto getV = [&](vec3 p) -> int {
++    const GridCell c = cellOf(p);
++    int best = -1;
++    for (const int64_t dx : {-1, 0, 1})
++      for (const int64_t dy : {-1, 0, 1})
++        for (const int64_t dz : {-1, 0, 1}) {
++          const auto it = grid.find({c.x + dx, c.y + dy, c.z + dz});
++          if (it == grid.end()) continue;
++          for (const int i : it->second)
++            if ((best < 0 || i < best) && la::length(verts[i] - p) <= eps)
++              best = i;
++        }
++    if (best >= 0) return best;
++    const int id = static_cast<int>(verts.size());
++    verts.push_back(p);
++    grid[c].push_back(id);
++    return id;
++  };
++  std::vector<ivec3> tv;
++  std::vector<int> src;
++  std::set<std::tuple<int, int, int>> seen;
++  for (size_t i = 0; i < emitted.size(); ++i) {
++    const int v0 = getV(emitted[i].v[0]), v1 = getV(emitted[i].v[1]),
++              v2 = getV(emitted[i].v[2]);
++    if (v0 == v1 || v1 == v2 || v0 == v2) continue;
++    int a = v0, b = v1, c = v2;
++    if (b < a && b < c) {
++      a = v1;
++      b = v2;
++      c = v0;
++    } else if (c < a && c < b) {
++      a = v2;
++      b = v0;
++      c = v1;
++    }
++    if (!seen.insert({a, b, c}).second) continue;
++    tv.push_back({v0, v1, v2});
++    src.push_back(i < emitSrc.size() ? emitSrc[i] : -99);
++  }
++  // --- find dangling halfedges (unbalanced fans) ---
++  const int nTri = static_cast<int>(tv.size());
++  auto heFrom = [&](int h) { return tv[h / 3][h % 3]; };
++  auto heTo = [&](int h) { return tv[h / 3][(h % 3 + 1) % 3]; };
++  std::map<std::pair<int, int>, std::vector<int>> edge2he;
++  for (int h = 0; h < 3 * nTri; ++h)
++    edge2he[{std::min(heFrom(h), heTo(h)), std::max(heFrom(h), heTo(h))}]
++        .push_back(h);
++  std::vector<int> dangHE;  // dangling directed halfedges
++  for (const auto& [e, hes] : edge2he) {
++    int fwd = 0, bwd = 0;
++    for (const int h : hes) (heFrom(h) == e.first ? fwd : bwd)++;
++    if (fwd == bwd) continue;
++    for (const int h : hes) dangHE.push_back(h);
++  }
++  const int openEdges =
++      static_cast<int>(std::count_if(edge2he.begin(), edge2he.end(),
++                                     [&](const auto& kv) {
++                                       int f = 0, b = 0;
++                                       for (int h : kv.second)
++                                         (heFrom(h) == kv.first.first ? f : b)++;
++                                       return f != b;
++                                     }));
++  // --- union-find components over dangling verts ---
++  std::map<int, int> vidx;
++  for (const int h : dangHE) {
++    vidx.emplace(heFrom(h), static_cast<int>(vidx.size()));
++    vidx.emplace(heTo(h), static_cast<int>(vidx.size()));
++  }
++  DisjointSets uf(static_cast<int>(vidx.size()));
++  for (const int h : dangHE)
++    uf.unite(vidx[heFrom(h)], vidx[heTo(h)]);
++  std::map<int, std::vector<int>> comp;  // root -> dangling HEs
++  for (const int h : dangHE) comp[uf.find(vidx[heFrom(h)])].push_back(h);
++  // --- per component ---
++  int closableEdges = 0, closableComps = 0, multiPlaneComps = 0, branchComps = 0;
++  for (auto& [root, hes] : comp) {
++    std::set<int> vs;
++    std::map<int, int> outd, ind;
++    for (const int h : hes) {
++      vs.insert(heFrom(h));
++      vs.insert(heTo(h));
++      outd[heFrom(h)]++;
++      ind[heTo(h)]++;
++    }
++    // count this component's open edges
++    std::set<std::pair<int, int>> ce;
++    for (const int h : hes)
++      ce.insert({std::min(heFrom(h), heTo(h)), std::max(heFrom(h), heTo(h))});
++    const int cEdges = static_cast<int>(ce.size());
++    // single input plane containing ALL verts?
++    int plane = -1;
++    for (int f = 0; f < static_cast<int>(in.NumTri()); ++f) {
++      const vec3 n = A.faceN[f];
++      const double nl = la::length(n);
++      if (!(nl > 0.0)) continue;
++      bool all = true;
++      for (const int v : vs)
++        if (std::abs(la::dot(n, verts[v] - A.tri[f][0])) / nl > eps) {
++          all = false;
++          break;
++        }
++      if (all) {
++        plane = f;
++        break;
++      }
++    }
++    // simple cycle iff every vertex has in==out==1
++    bool simple = true;
++    for (const int v : vs)
++      if (outd[v] != 1 || ind[v] != 1) simple = false;
++    if (plane < 0) {
++      ++multiPlaneComps;
++      std::fprintf(stderr,
++                   "C3C_COMP verts=%zu edges=%d plane=NONE simple=%d -> "
++                   "MULTI-PLANE (needs gated sheet synthesis)\n",
++                   vs.size(), cEdges, simple ? 1 : 0);
++      continue;
++    }
++    // SINGLE-PLANE completion (simple OR branch): fan every dangling halfedge
++    // (a->b) to an in-plane Steiner centroid C, emitting triangle (C,b,a) whose
++    // b->a pairs the dangling a->b and whose spokes pair among themselves - so
++    // the whole component's fans close.  C is in the input plane, so no face
++    // leaves an input plane (boundary SET unperturbed).  Validate EACH triangle
++    // with the PRODUCTION both-sides {w>=1} winding rule (verbatim
++    // EmitSeamedFace) - a completion face the winding rejects means the region
++    // is not all-boundary, so the component does NOT cleanly close.
++    const vec3 nHat = A.faceN[plane] / la::length(A.faceN[plane]);
++    vec3 csum(0.0, 0.0, 0.0);
++    for (const int v : vs) csum += verts[v];
++    vec3 cen0 = csum / static_cast<double>(vs.size());
++    cen0 -= la::dot(nHat, cen0 - A.tri[plane][0]) * nHat;  // project into plane
++    int retained = 0, dropped = 0, filterFail = 0;
++    for (const int h : hes) {
++      const vec3 pa = verts[heTo(h)], pb = verts[heFrom(h)];  // (C, b, a)
++      const vec3 cen = (cen0 + pa + pb) / 3.0;
++      const std::optional<int> g = RobustWinding(in, cen + eps * nHat, seeds);
++      const std::optional<int> gb = RobustWinding(in, cen - eps * nHat, seeds);
++      if (!g || !gb) {
++        ++filterFail;
++        continue;
++      }
++      if ((*g >= 1) == (*gb >= 1))
++        ++dropped;
++      else
++        ++retained;
++    }
++    const bool closes =
++        (dropped == 0 && filterFail == 0 && retained == static_cast<int>(hes.size()));
++    if (closes) {
++      ++closableComps;
++      closableEdges += cEdges;
++    } else {
++      ++branchComps;  // reuse counter: single-plane but not cleanly closed
++    }
++    std::fprintf(stderr,
++                 "C3C_COMP verts=%zu edges=%d plane=%d simple=%d fanTris=%zu "
++                 "retained=%d dropped=%d filterFail=%d -> %s\n",
++                 vs.size(), cEdges, plane, simple ? 1 : 0, hes.size(), retained,
++                 dropped, filterFail,
++                 closes ? "CLOSES(winding-valid)" : "NOT-CLOSED(winding rejects)");
++  }
++  std::fprintf(stderr,
++               "C3C_SUMMARY openEdges=%d comps=%zu closableComps=%d "
++               "closableEdges=%d multiPlaneComps=%d branchComps=%d "
++               "trajectory=%d->%d\n",
++               openEdges, comp.size(), closableComps, closableEdges,
++               multiPlaneComps, branchComps, openEdges,
++               openEdges - closableEdges);
++}
++
+ // THE BUILD driver: fold exactly-coplanar clusters in-plane, emit seamed
+ // sub-faces + clean faces, assemble + weld.  Returns the regularized Impl, or a
+ // fatal.
+@@ -2991,11 +3218,25 @@
+     const std::vector<int>& face2cluster, double eps) {
+   const std::vector<vec3> seeds = WindingSeeds(in.bBox_);
+ 
++  const bool c3rec = kC3Dump || kC3Complete;
++  if (c3rec) gC3EmitSrc.clear();
++  if (kC3Dump) {  // MEASUREMENT: input plane provenance table (once per comp)
++    for (int f = 0; f < static_cast<int>(in.NumTri()); ++f)
++      std::fprintf(stderr,
++                   "C3_PLANE f=%d n=%a,%a,%a p0=%a,%a,%a p1=%a,%a,%a "
++                   "p2=%a,%a,%a seamed=%d\n",
++                   f, A.faceN[f].x, A.faceN[f].y, A.faceN[f].z, A.tri[f][0].x,
++                   A.tri[f][0].y, A.tri[f][0].z, A.tri[f][1].x, A.tri[f][1].y,
++                   A.tri[f][1].z, A.tri[f][2].x, A.tri[f][2].y, A.tri[f][2].z,
++                   static_cast<int>(A.seamed[f]));
++  }
++
+   std::vector<OutTri3D> emitted;
+   bool ok = true;
+   // Exact-coplanar clusters first (transversal seams on their faces are the
+   // entanglement decline).
+   FoldCoplanarClusters(emitted, in, A, face2cluster, seeds, eps, ok);
++  if (c3rec) gC3EmitSrc.resize(emitted.size(), -3);  // fold block
+   if (!ok)
+     return StageResult<Manifold::Impl>::Fatal(
+         FatalReason::DirtyComponentUnresolved,
+@@ -3012,6 +3253,7 @@
+       if (!A.seamed[f]) continue;
+       bool fok = true;
+       EmitSeamedFace(emitted, A, f, in, seeds, eps, fok);
++      if (c3rec) gC3EmitSrc.resize(emitted.size(), f);  // this face's tris
+       if (!fok) anyFail = true;
+     }
+     std::fprintf(stderr,
+@@ -3022,7 +3264,10 @@
+     ok = !anyFail;
+   } else {
+     for (int f = 0; f < nTri && ok; ++f)
+-      if (A.seamed[f]) EmitSeamedFace(emitted, A, f, in, seeds, eps, ok);
++      if (A.seamed[f]) {
++        EmitSeamedFace(emitted, A, f, in, seeds, eps, ok);
++        if (c3rec) gC3EmitSrc.resize(emitted.size(), f);
++      }
+   }
+   if (!ok)
+     // The resolver declined to build this face's arrangement exactly: a
+@@ -3040,6 +3285,9 @@
+         FatalReason::DirtyComponentUnresolved,
+         "resolver: clean-face winding probe was filter-uncertain (SoS) - "
+         "fail-closed");
++  if (c3rec) gC3EmitSrc.resize(emitted.size(), -2);  // clean block
++  if (kC3Complete)  // MEASUREMENT: what would a winding-only completion close?
++    C3CompletionProbe(in, A, emitted, gC3EmitSrc, seeds, eps);
+   return BuildImpl(emitted, eps);
+ }
+ 

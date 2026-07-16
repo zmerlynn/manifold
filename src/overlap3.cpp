@@ -5505,6 +5505,744 @@ std::vector<vec3> WindingSeeds(const Box& bBox) {
           c + L * vec3(2.39, -4.61, 3.07),  c + L * vec3(-1.51, 3.89, -4.43)};
 }
 
+// ========================= E1 COORDINATED ENGINE ===========================
+// (e1engine notebook.)  Fallback resolver for the component class the per-face
+// emission FAILS CLOSED on (openscad's near-tangent multiply-wound cluster).
+// It is reached ONLY after EmitComponentBoundary returns a fatal, so it is
+// byte-clean on the whole resolving corpus BY CONSTRUCTION (never executed),
+// and it cannot weaken fail-closed (on its own failure the ORIGINAL fatal is
+// returned unchanged; its success passes the same BuildImpl gate + component
+// re-gate as any resolve).
+//
+// The recipe (validated offline in exact rationals, e1engine notebook: the
+// coordinated emission closes the openscad component at 0 open edges,
+// GWN-checked against the exact winding oracle):
+//   1. PER-PLANE (not per-face) exact 2D arrangements: faces grouped by exact
+//      GEOMETRIC coplanarity (anti-oriented coplanar faces share a group with
+//      sign -1), so coincident sheets are classified ONCE with a net covering
+//      jump - the per-face two-sided-consistency gap dissolves structurally.
+//   2. Segments per group: member triangle edges + the recorded seams
+//      (A.faceSeams).  Cross-plane subdivision T-consistency is BY SHARED
+//      DOUBLES: seam endpoints are stored once per pair (RecordSeams), triple
+//      crossings once per sorted plane triple (CanonTriplePos, input-exact),
+//      junction splits from the shared registry (A.junctions) - every group
+//      derives the identical split point bits, so coincident sub-edges weld.
+//   3. Crossing EXISTENCE is INPUT-EXACT and symmetric (IXOrient2D strict
+//      point-in-triangle of the triple against all four bounding triangles),
+//      so any two groups agree on every split by construction.  No filter in
+//      front (a rounded-basis certificate can disagree with input-exact truth
+//      - inexact-basis); the engine runs once, on one failing component.
+//   4. Cells by rotation-system trace with an EXACT angular comparator
+//      (ExactOrient2DDrop on the shared doubles - no atan2, the exact2d
+//      fold-back lesson).  Pinched loops are kept WHOLE (a cell's islands ring
+//      it as pinch-connected holes; splitting them off and dropping the
+//      negative lobes drops the island boundary = the offline v3 bug);
+//      disconnected negative loops are island hole-rings, attached to their
+//      containing cell by parity + keyhole bridge.
+//   5. Per-cell classify: covering jump (member orientation signs at an
+//      interior point) + winding probes at an ADAPTIVE normal offset (below
+//      half the distance to every nearby foreign plane - the sound
+//      "infinitesimal"; the fixed eps*nHat probe overshoots near-tangent
+//      sheets).  COMPLETENESS CERTIFICATE: the probed winding delta must equal
+//      the combinatorial jump, else fail closed (zero-oracle-wrong).
+//   6. Boundary cells ({w>=1} transition) triangulated as polygons-WITH-HOLES
+//      (exact diagonal-split; earclip is not hole-safe), oriented per-triangle
+//      toward the exterior; assembled by the ordinary BuildImpl eps-weld (the
+//      offline run proved the once-rounded coordinated soup position-welds
+//      CLOSED - identity plumbing through the weld is not needed: shared
+//      doubles make every coincident vertex byte-equal).
+namespace e1 {
+
+using K3 = std::tuple<double, double, double>;
+inline K3 KeyOf(const vec3& p) { return {p.x, p.y, p.z}; }
+
+// 2D projection by dominant-axis DROP - pure coordinate selection (exact),
+// matching ExactOrient2DDrop's convention.
+inline vec2 Drop2(const vec3& v, int axis) {
+  if (axis == 0) return {v.y, v.z};
+  if (axis == 1) return {v.x, v.z};
+  return {v.x, v.y};
+}
+
+// Exact sign of the projected orientation (a,b,c) - the landed exact-on-
+// doubles orient2d (filter-first).
+inline int O2(const vec3& a, const vec3& b, const vec3& c, int axis) {
+  return ExactOrient2DDrop(a, b, c, axis);
+}
+
+// v strictly interior to the open segment (a,b) in the projected frame:
+// exactly collinear and strictly between in the wider coordinate.
+inline bool OnOpenSeg2(const vec3& a, const vec3& b, const vec3& v, int axis) {
+  if (O2(a, b, v, axis) != 0) return false;
+  const vec2 a2 = Drop2(a, axis), b2 = Drop2(b, axis), v2 = Drop2(v, axis);
+  if (std::abs(b2.x - a2.x) >= std::abs(b2.y - a2.y))
+    return (a2.x < v2.x) != (b2.x < v2.x);
+  return (a2.y < v2.y) != (b2.y < v2.y);
+}
+
+// Proper crossing of open segments (p,q) x (a,b) in the projected frame.
+inline bool ProperCross2(const vec3& p, const vec3& q, const vec3& a,
+                         const vec3& b, int axis) {
+  const int d1 = O2(p, q, a, axis), d2 = O2(p, q, b, axis);
+  const int d3 = O2(a, b, p, axis), d4 = O2(a, b, q, axis);
+  return d1 != 0 && d2 != 0 && d3 != 0 && d4 != 0 && d1 != d2 && d3 != d4;
+}
+
+// Exact diagonal-split triangulation of a weakly-simple CCW polygon (collinear
+// runs, pinch-repeated vertices, keyhole-duplicated bridges all allowed).
+// poly = vertex indices into pos3; emits index triples.  Returns false when no
+// valid diagonal exists (caller counts + fails closed via the census).
+inline bool DiagSplit(const std::vector<int>& poly,
+                      const std::vector<vec3>& pos3, int axis,
+                      std::vector<ivec3>& out, int depth = 0) {
+  const int n = static_cast<int>(poly.size());
+  if (n < 3 || depth > 4 * n + 64) return n < 3;
+  if (n == 3) {
+    if (O2(pos3[poly[0]], pos3[poly[1]], pos3[poly[2]], axis) > 0)
+      out.push_back({poly[0], poly[1], poly[2]});
+    // exactly-collinear leaf: zero-area dust, nothing to emit (weld absorbs)
+    return true;
+  }
+  for (int i = 0; i < n; ++i) {
+    const vec3& a = pos3[poly[(i + n - 1) % n]];
+    const vec3& b = pos3[poly[i]];
+    const vec3& c = pos3[poly[(i + 1) % n]];
+    for (int jo = 2; jo <= n - 2; ++jo) {
+      const int j = (i + jo) % n;
+      const vec3& d = pos3[poly[j]];
+      if (KeyOf(d) == KeyOf(b)) continue;  // duplicate position (bridge twin)
+      // in-cone at i (collinear prev/next treated as convex half-plane)
+      if (O2(a, b, c, axis) >= 0) {
+        if (!(O2(b, c, d, axis) > 0 && O2(b, d, a, axis) > 0)) continue;
+      } else {
+        if (O2(b, c, d, axis) <= 0 && O2(b, d, a, axis) <= 0) continue;
+      }
+      bool ok = true;
+      for (int k = 0; k < n && ok; ++k) {
+        const int k2 = (k + 1) % n;
+        if (k == i || k2 == i || k == j || k2 == j) continue;
+        if (ProperCross2(b, d, pos3[poly[k]], pos3[poly[k2]], axis)) ok = false;
+      }
+      for (int k = 0; k < n && ok; ++k) {
+        if (k == i || k == j) continue;
+        const vec3& v = pos3[poly[k]];
+        if (KeyOf(v) == KeyOf(b) || KeyOf(v) == KeyOf(d)) continue;
+        if (OnOpenSeg2(b, d, v, axis)) ok = false;
+      }
+      if (!ok) continue;
+      std::vector<int> p1, p2;
+      for (int k = i;; k = (k + 1) % n) {
+        p1.push_back(poly[k]);
+        if (k == j) break;
+      }
+      for (int k = j;; k = (k + 1) % n) {
+        p2.push_back(poly[k]);
+        if (k == i) break;
+      }
+      return DiagSplit(p1, pos3, axis, out, depth + 1) &&
+             DiagSplit(p2, pos3, axis, out, depth + 1);
+    }
+  }
+  return false;
+}
+
+}  // namespace e1
+
+StageResult<Manifold::Impl> EmitCoordinatedBoundary(const Manifold::Impl& in,
+                                                    const BuildArrangement& A,
+                                                    double eps) {
+  using e1::K3;
+  using e1::KeyOf;
+  const int nTri = static_cast<int>(A.tri.size());
+  const std::vector<vec3> seeds = WindingSeeds(in.bBox_);
+  auto fail = [](const char* msg) {
+    return StageResult<Manifold::Impl>::Fatal(
+        FatalReason::DirtyComponentUnresolved, msg);
+  };
+  static const bool kDump = std::getenv("E1_DUMP") != nullptr;
+
+  // ---- 1. geometric plane groups (exact coplanarity union-find) ----
+  std::vector<int> uf(nTri);
+  for (int f = 0; f < nTri; ++f) uf[f] = f;
+  std::function<int(int)> find = [&](int x) {
+    while (uf[x] != x) x = uf[x] = uf[uf[x]];
+    return x;
+  };
+  auto coplanarExact = [&](int i, int j) -> bool {
+    for (int k = 0; k < 3; ++k) {
+      const vec3& p = A.tri[j][k];
+      // filter-first; a filter 0 (uncertain or true zero) escalates exact
+      int s = Orient3DFilterSign(A.tri[i][0], A.tri[i][1], A.tri[i][2], p);
+      if (s == 0)
+        s = Orient3DExactSign(A.tri[i][0], A.tri[i][1], A.tri[i][2], p);
+      if (s != 0) return false;
+    }
+    return true;
+  };
+  for (int i = 0; i < nTri; ++i)
+    for (int j = i + 1; j < nTri; ++j) {
+      if (find(i) == find(j)) continue;
+      const vec3 cr = la::cross(A.faceN[i], A.faceN[j]);
+      const double nn = la::length(A.faceN[i]) * la::length(A.faceN[j]);
+      if (la::length(cr) > 1e-9 * nn) continue;  // clearly non-parallel
+      if (coplanarExact(i, j)) uf[find(i)] = find(j);
+    }
+  std::map<int, int> root2g;
+  std::vector<int> gid(nTri, -1), rep;
+  for (int f = 0; f < nTri; ++f) {
+    const int r = find(f);
+    auto it = root2g.find(r);
+    if (it == root2g.end()) {
+      it = root2g.emplace(r, static_cast<int>(rep.size())).first;
+      rep.push_back(f);  // lowest face index = canonical rep
+    }
+    gid[f] = it->second;
+  }
+  const int nG = static_cast<int>(rep.size());
+  std::vector<std::vector<int>> members(nG);
+  std::vector<int> fsgn(nTri, 1);
+  for (int f = 0; f < nTri; ++f) {
+    members[gid[f]].push_back(f);
+    fsgn[f] = la::dot(A.faceN[f], A.faceN[rep[gid[f]]]) >= 0.0 ? 1 : -1;
+  }
+  if (kDump)
+    std::fprintf(stderr, "E1 groups=%d faces=%d junctions=%d\n", nG, nTri,
+                 static_cast<int>(A.junctions.size()));
+
+  // per-face float bboxes (probe-offset scan + crossing pre-filter)
+  std::vector<Box> fbox(nTri);
+  for (int f = 0; f < nTri; ++f) {
+    Box b;
+    for (int k = 0; k < 3; ++k) b.Union(A.tri[f][k]);
+    fbox[f] = b;
+  }
+
+  // canonical engine triple positions, once per sorted gid triple
+  std::map<std::array<int, 3>, std::pair<bool, vec3>> tripleCache;
+  auto triplePos = [&](int g0, int g1, int g2, vec3& pos) -> bool {
+    std::array<int, 3> key = {g0, g1, g2};
+    std::sort(key.begin(), key.end());
+    auto it = tripleCache.find(key);
+    if (it == tripleCache.end()) {
+      vec3 p;
+      const bool ok =
+          CanonTriplePos(A, rep[key[0]], rep[key[1]], rep[key[2]], p);
+      it = tripleCache.emplace(key, std::make_pair(ok, p)).first;
+    }
+    pos = it->second.second;
+    return it->second.first;
+  };
+  // input-exact strict interior of triple {g0,g1,g2} in triangle t
+  auto tripleInTri = [&](int g0, int g1, int g2, int t) -> bool {
+    const sos::BigHPoint X = IXTripleHPoint(A, rep[g0], rep[g1], rep[g2]);
+    if (sos::BigSign(X.W) == 0) return false;
+    const int axis = DominantAxis(A.faceN[t]);
+    int o[3];
+    for (int e = 0; e < 3; ++e) {
+      o[e] = IXOrient2D(sos::TrivialBigHPoint(A.tri[t][e]),
+                        sos::TrivialBigHPoint(A.tri[t][(e + 1) % 3]), X, axis);
+      if (o[e] == 0) return false;
+    }
+    return o[0] == o[1] && o[1] == o[2];
+  };
+
+  std::vector<OutTri3D> out;
+  int dustTri = 0, triFail = 0, spliceFail = 0;
+  const double scale = in.bBox_.Scale();
+
+  for (int g = 0; g < nG; ++g) {
+    // ---- 2. the group's segment set (3D endpoint pairs, shared doubles) ----
+    struct Seg {
+      vec3 p0, p1;
+      int planeQ;  // partner group (-1 = member triangle edge)
+      int fOwn, fOther;
+    };
+    std::vector<Seg> segs;
+    for (const int f : members[g]) {
+      for (int e = 0; e < 3; ++e)
+        segs.push_back({A.tri[f][e], A.tri[f][(e + 1) % 3], -1, f, -1});
+      for (const BuildSeam& s : A.faceSeams[f]) {
+        if (s.other < 0 || gid[s.other] == g) continue;
+        segs.push_back({s.p0, s.p1, gid[s.other], f, s.other});
+      }
+    }
+    const vec3 Nrep = A.faceN[rep[g]];
+    const int axis = DominantAxis(Nrep);
+    const vec3 nHat = Nrep / la::length(Nrep);
+    // STACK (sub-double-resolution near-coincident sheets): a foreign face
+    // whose plane sits closer than any double probe can separate is treated
+    // as part of ONE effective sheet with this group: its EDGES join the
+    // arrangement (as shadow segments - the same input-vert doubles on both
+    // groups, so the cross-group boundary welds), its covering sign joins the
+    // NET jump, and only the LOWEST gid of the covering stack emits.  (The
+    // exact-rational offline engine probed between such sheets; doubles
+    // cannot - the certificate measured planes 1.7e-14 apart, below ULP.)
+    const double stackWin =
+        std::max(eps / 100.0, 128.0 * std::numeric_limits<double>::epsilon() *
+                                  (1.0 + scale));
+    Box gbox;
+    for (const int f : members[g]) gbox.Union(fbox[f]);
+    std::vector<int> stackFaces;
+    for (int f2 = 0; f2 < nTri; ++f2) {
+      if (gid[f2] == g) continue;
+      const Box& b = fbox[f2];
+      if (b.min.x > gbox.max.x + eps || b.max.x < gbox.min.x - eps ||
+          b.min.y > gbox.max.y + eps || b.max.y < gbox.min.y - eps ||
+          b.min.z > gbox.max.z + eps || b.max.z < gbox.min.z - eps)
+        continue;
+      bool near = true;
+      for (int k = 0; k < 3 && near; ++k)
+        near = std::abs(la::dot(Nrep, A.tri[f2][k] - A.tri[rep[g]][0])) /
+                   la::length(Nrep) <=
+               stackWin;
+      if (!near) continue;
+      stackFaces.push_back(f2);
+      for (int e = 0; e < 3; ++e)
+        segs.push_back({A.tri[f2][e], A.tri[f2][(e + 1) % 3], -1, f2, -1});
+    }
+    const int nS = static_cast<int>(segs.size());
+
+    // ---- 3. splits: engine triples (input-exact, symmetric) + registry ----
+    std::vector<std::vector<std::pair<double, vec3>>> splits(nS);
+    auto addSplit = [&](int si, const vec3& V) {
+      const Seg& s = segs[si];
+      const vec3 d3 = s.p1 - s.p0;
+      const double len2 = la::dot(d3, d3);
+      if (!(len2 > 0.0)) return;
+      const double t = la::dot(V - s.p0, d3) / len2;
+      const double tlo = eps / std::sqrt(len2);
+      if (!(t > tlo && t < 1.0 - tlo)) return;  // strictly interior in param
+      for (const auto& pr : splits[si])
+        if (KeyOf(pr.second) == KeyOf(V)) return;
+      splits[si].push_back({t, V});
+    };
+    for (int i = 0; i < nS; ++i) {
+      if (segs[i].planeQ < 0) continue;
+      for (int j = i + 1; j < nS; ++j) {
+        if (segs[j].planeQ < 0 || segs[j].planeQ == segs[i].planeQ) continue;
+        // quick reject: 2D bboxes of the two seams disjoint
+        const vec2 a0 = e1::Drop2(segs[i].p0, axis),
+                   a1 = e1::Drop2(segs[i].p1, axis),
+                   b0 = e1::Drop2(segs[j].p0, axis),
+                   b1 = e1::Drop2(segs[j].p1, axis);
+        if (std::max(a0.x, a1.x) < std::min(b0.x, b1.x) - eps ||
+            std::max(b0.x, b1.x) < std::min(a0.x, a1.x) - eps ||
+            std::max(a0.y, a1.y) < std::min(b0.y, b1.y) - eps ||
+            std::max(b0.y, b1.y) < std::min(a0.y, a1.y) - eps)
+          continue;
+        // exact symmetric existence: X = {g, Qi, Qj} strictly interior to all
+        // four bounding triangles (both seams' extents)
+        if (!tripleInTri(g, segs[i].planeQ, segs[j].planeQ, segs[i].fOwn))
+          continue;
+        if (!tripleInTri(g, segs[i].planeQ, segs[j].planeQ, segs[i].fOther))
+          continue;
+        if (segs[j].fOwn != segs[i].fOwn &&
+            !tripleInTri(g, segs[i].planeQ, segs[j].planeQ, segs[j].fOwn))
+          continue;
+        if (!tripleInTri(g, segs[i].planeQ, segs[j].planeQ, segs[j].fOther))
+          continue;
+        vec3 X;
+        if (!triplePos(g, segs[i].planeQ, segs[j].planeQ, X)) continue;
+        addSplit(i, X);
+        addSplit(j, X);
+      }
+    }
+    // registry T-junction splits (shared canonical junction doubles): the
+    // same on-line-foot rule as the per-face path, consistent across groups
+    // because every group reads identical (junction, segment-endpoint) bits.
+    for (int i = 0; i < nS; ++i) {
+      const Seg& s = segs[i];
+      const vec3 d3 = s.p1 - s.p0;
+      const double len2 = la::dot(d3, d3);
+      if (!(len2 > 0.0)) continue;
+      const double len = std::sqrt(len2);
+      for (const vec3& V : A.junctions) {
+        const vec3 w = V - s.p0;
+        const double t = la::dot(w, d3) / len2;
+        if (!(t > eps / len && t < 1.0 - eps / len)) continue;
+        if (la::length(w - t * d3) > eps) continue;
+        addSplit(i, V);
+      }
+    }
+
+    // ---- 4. 2D graph (verts keyed by 3D bits) + exact rotation walk ----
+    std::map<K3, int> vidOf;
+    std::vector<vec3> pos3;
+    auto vid = [&](const vec3& p) -> int {
+      auto it = vidOf.find(KeyOf(p));
+      if (it == vidOf.end()) {
+        it = vidOf.emplace(KeyOf(p), static_cast<int>(pos3.size())).first;
+        pos3.push_back(p);
+      }
+      return it->second;
+    };
+    std::vector<std::set<int>> adj;
+    auto link = [&](int a, int b) {
+      if (a == b) return;
+      const int mx = std::max(a, b);
+      if (static_cast<int>(adj.size()) <= mx) adj.resize(mx + 1);
+      adj[a].insert(b);
+      adj[b].insert(a);
+    };
+    for (int i = 0; i < nS; ++i) {
+      std::sort(splits[i].begin(), splits[i].end(),
+                [](const auto& x, const auto& y) { return x.first < y.first; });
+      int prev = vid(segs[i].p0);
+      for (const auto& pr : splits[i]) {
+        const int v = vid(pr.second);
+        link(prev, v);
+        prev = v;
+      }
+      link(prev, vid(segs[i].p1));
+    }
+    adj.resize(pos3.size());
+    // exact CCW angular order around each vertex (half-plane + orient sign)
+    auto angLess = [&](int v, int a, int b) -> bool {
+      const vec2 pv = e1::Drop2(pos3[v], axis);
+      const vec2 pa = e1::Drop2(pos3[a], axis), pb = e1::Drop2(pos3[b], axis);
+      const double ax = pa.x - pv.x, ay = pa.y - pv.y;
+      const double bx = pb.x - pv.x, by = pb.y - pv.y;
+      const int ha = (ay > 0 || (ay == 0 && ax > 0)) ? 0 : 1;
+      const int hb = (by > 0 || (by == 0 && bx > 0)) ? 0 : 1;
+      if (ha != hb) return ha < hb;
+      return e1::O2(pos3[v], pos3[a], pos3[b], axis) > 0;
+    };
+    std::vector<std::map<int, int>> cwprev(pos3.size());
+    for (size_t v = 0; v < pos3.size(); ++v) {
+      std::vector<int> nb(adj[v].begin(), adj[v].end());
+      std::sort(nb.begin(), nb.end(), [&](int a, int b) {
+        return angLess(static_cast<int>(v), a, b);
+      });
+      for (size_t k = 0; k < nb.size(); ++k)
+        cwprev[v][nb[k]] = nb[(k + nb.size() - 1) % nb.size()];
+    }
+    std::set<std::pair<int, int>> used;
+    std::vector<std::vector<int>> cells, negloops;
+    for (size_t a0 = 0; a0 < pos3.size(); ++a0)
+      for (const int b0 : adj[a0]) {
+        if (used.count({static_cast<int>(a0), b0})) continue;
+        std::vector<int> loop;
+        int ca = static_cast<int>(a0), cb = b0;
+        bool ok = true;
+        for (int guard = 0; guard < 4 * static_cast<int>(pos3.size()) + 16;
+             ++guard) {
+          used.insert({ca, cb});
+          loop.push_back(ca);
+          const auto it = cwprev[cb].find(ca);
+          if (it == cwprev[cb].end()) {
+            ok = false;
+            break;
+          }
+          ca = cb;
+          cb = it->second;
+          if (ca == static_cast<int>(a0) && cb == b0) break;
+          if (guard == 4 * static_cast<int>(pos3.size()) + 15) ok = false;
+        }
+        if (!ok || loop.size() < 3) continue;
+        // excise spurs (out-and-back slit walks)
+        bool changed = true;
+        while (changed && loop.size() >= 3) {
+          changed = false;
+          const int m = static_cast<int>(loop.size());
+          for (int k = 0; k < m; ++k)
+            if (loop[(k + m - 1) % m] == loop[(k + 1) % m]) {
+              const int hi = std::max((k + 1) % m, k);
+              const int lo = std::min((k + 1) % m, k);
+              loop.erase(loop.begin() + hi);
+              loop.erase(loop.begin() + lo);
+              changed = true;
+              break;
+            }
+        }
+        if (loop.size() < 3) continue;
+        double s = 0.0;
+        for (size_t k = 0; k < loop.size(); ++k) {
+          const vec2 p1 = e1::Drop2(pos3[loop[k]], axis);
+          const vec2 p2 = e1::Drop2(pos3[loop[(k + 1) % loop.size()]], axis);
+          s += p1.x * p2.y - p2.x * p1.y;
+        }
+        if (s > 0)
+          cells.push_back(loop);
+        else if (s < 0)
+          negloops.push_back(loop);
+      }
+
+    // ---- 5. disconnected island hole-rings: containment + keyhole ----
+    auto loopArea = [&](const std::vector<int>& loop) -> double {
+      double s = 0.0;
+      for (size_t k = 0; k < loop.size(); ++k) {
+        const vec2 p1 = e1::Drop2(pos3[loop[k]], axis);
+        const vec2 p2 = e1::Drop2(pos3[loop[(k + 1) % loop.size()]], axis);
+        s += p1.x * p2.y - p2.x * p1.y;
+      }
+      return s;
+    };
+    auto inLoop = [&](const vec2& p, const std::vector<int>& loop) -> bool {
+      static const double kSlope[] = {1.0 / 7919.0, 3.0 / 104729.0,
+                                      -5.0 / 1299709.0, 7.0 / 15485863.0};
+      for (const double r : kSlope) {
+        int cnt = 0;
+        bool ok = true;
+        for (size_t k = 0; k < loop.size() && ok; ++k) {
+          const vec2 A2 = e1::Drop2(pos3[loop[k]], axis);
+          const vec2 B2 = e1::Drop2(pos3[loop[(k + 1) % loop.size()]], axis);
+          const double dx = B2.x - A2.x, dy = B2.y - A2.y;
+          const double det = dy - r * dx;
+          if (det == 0.0) continue;
+          const double u = (-(r) * (p.x - A2.x) + (p.y - A2.y)) / det;
+          const double t = (dx * (p.y - A2.y) - dy * (p.x - A2.x)) / det;
+          if (u == 0.0 || u == 1.0 || t == 0.0)
+            ok = false;
+          else if (u > 0 && u < 1 && t > 0)
+            ++cnt;
+        }
+        if (ok) return (cnt % 2) == 1;
+      }
+      return false;
+    };
+    if (!negloops.empty()) {
+      std::map<int, std::vector<std::vector<int>>> holeof;
+      for (const auto& nl : negloops) {
+        const vec2 p = e1::Drop2(pos3[nl[0]], axis);
+        int best = -1;
+        double bestA = 0.0;
+        for (size_t ci = 0; ci < cells.size(); ++ci)
+          if (inLoop(p, cells[ci])) {
+            const double a = std::abs(loopArea(cells[ci]));
+            if (best < 0 || a < bestA) {
+              best = static_cast<int>(ci);
+              bestA = a;
+            }
+          }
+        if (best >= 0) holeof[best].push_back(nl);
+        // best<0: the component's outer contour - contained in nothing.
+      }
+      for (auto& kv : holeof) {
+        std::vector<int>& merged = cells[kv.first];
+        std::vector<std::vector<int>>& pend = kv.second;
+        while (!pend.empty()) {
+          bool spliced = false;
+          for (size_t hi = 0; hi < pend.size() && !spliced; ++hi) {
+            const std::vector<int>& hole = pend[hi];
+            for (size_t i = 0; i < merged.size() && !spliced; ++i) {
+              const vec3& b = pos3[merged[i]];
+              for (size_t j = 0; j < hole.size() && !spliced; ++j) {
+                const vec3& d = pos3[hole[j]];
+                if (KeyOf(b) == KeyOf(d)) continue;
+                bool ok = true;
+                auto checkRing = [&](const std::vector<int>& ring) {
+                  const size_t m = ring.size();
+                  for (size_t k = 0; k < m && ok; ++k) {
+                    const vec3& P = pos3[ring[k]];
+                    const vec3& Q = pos3[ring[(k + 1) % m]];
+                    if (KeyOf(P) == KeyOf(b) || KeyOf(P) == KeyOf(d) ||
+                        KeyOf(Q) == KeyOf(b) || KeyOf(Q) == KeyOf(d))
+                      continue;
+                    if (e1::ProperCross2(b, d, P, Q, axis)) ok = false;
+                  }
+                  for (size_t k = 0; k < m && ok; ++k) {
+                    const vec3& v = pos3[ring[k]];
+                    if (KeyOf(v) == KeyOf(b) || KeyOf(v) == KeyOf(d)) continue;
+                    if (e1::OnOpenSeg2(b, d, v, axis)) ok = false;
+                  }
+                };
+                checkRing(merged);
+                for (const auto& h2 : pend)
+                  if (ok) checkRing(h2);
+                if (!ok) continue;
+                std::vector<int> nm(merged.begin(), merged.begin() + i + 1);
+                for (size_t k = 0; k <= hole.size(); ++k)
+                  nm.push_back(hole[(j + k) % hole.size()]);
+                nm.insert(nm.end(), merged.begin() + i, merged.end());
+                merged = nm;
+                pend.erase(pend.begin() + hi);
+                spliced = true;
+              }
+            }
+          }
+          if (!spliced) {
+            ++spliceFail;
+            break;
+          }
+        }
+      }
+    }
+
+    // ---- 6. classify + emit ----
+    for (const std::vector<int>& loop : cells) {
+      std::vector<ivec3> tris;
+      if (!e1::DiagSplit(loop, pos3, axis, tris)) ++triFail;
+      if (tris.empty()) continue;  // dust cell (collinear at double precision)
+      // interior point: largest sub-triangle's centroid
+      int best = 0;
+      double bestA = -1.0;
+      for (size_t k = 0; k < tris.size(); ++k) {
+        const vec2 p0 = e1::Drop2(pos3[tris[k].x], axis),
+                   p1 = e1::Drop2(pos3[tris[k].y], axis),
+                   p2 = e1::Drop2(pos3[tris[k].z], axis);
+        const double a2 = std::abs(la::cross(p1 - p0, p2 - p0));
+        if (a2 > bestA) {
+          bestA = a2;
+          best = static_cast<int>(k);
+        }
+      }
+      const vec3 cen3 =
+          (pos3[tris[best].x] + pos3[tris[best].y] + pos3[tris[best].z]) / 3.0;
+      // PROJECT the probe center onto the group plane FIRST: junction-split
+      // vertices sit up to eps OFF it (the eps-snapped T-junction family), so
+      // the raw sub-tri centroid can be further from the member sheet than
+      // the probe offset - both probes landing one-sided (measured).  The
+      // projection also moves the LATERAL position (nHat has in-plane
+      // components), so coverage MUST be evaluated at the SAME cenP the
+      // probes use (measured: an edge-adjacent cell classified covering at
+      // cen3 while the probe ran just outside the member at cenP).
+      const double d0 =
+          la::dot(Nrep, cen3 - A.tri[rep[g]][0]) / la::length(Nrep);
+      const vec3 cenP = cen3 - d0 * nHat;
+      // NET covering jump: members + covering STACK sheets (owner rule: the
+      // lowest covering gid emits the stack's net transition)
+      auto covers = [&](int f) -> bool {
+        const int o0 = e1::O2(A.tri[f][0], A.tri[f][1], cenP, axis);
+        const int o1 = e1::O2(A.tri[f][1], A.tri[f][2], cenP, axis);
+        const int o2 = e1::O2(A.tri[f][2], A.tri[f][0], cenP, axis);
+        const bool neg = o0 < 0 || o1 < 0 || o2 < 0;
+        const bool pos = o0 > 0 || o1 > 0 || o2 > 0;
+        return !(neg && pos);
+      };
+      int jump = 0;
+      bool anyOwn = false;
+      for (const int f : members[g])
+        if (covers(f)) {
+          jump += fsgn[f];
+          anyOwn = true;
+        }
+      if (!anyOwn) continue;  // no member sheet here (shadow-only region)
+      // PER-CELL STACK + probe offset by GAP-FINDING over the nearby foreign
+      // plane distances: grow the stack threshold T until an 8x gap opens,
+      // probe at 2T (above the whole stack, below a quarter of everything
+      // else).  Stack sheets covering the point join the NET jump; the lowest
+      // covering gid owns the cell.
+      std::vector<std::pair<double, int>> nearD;
+      for (int f2 = 0; f2 < nTri; ++f2) {
+        if (gid[f2] == g) continue;
+        const Box& b = fbox[f2];
+        const double m = 1e-6 * (1.0 + scale);
+        if (cenP.x < b.min.x - m || cenP.x > b.max.x + m ||
+            cenP.y < b.min.y - m || cenP.y > b.max.y + m ||
+            cenP.z < b.min.z - m || cenP.z > b.max.z + m)
+          continue;
+        const double dist =
+            std::abs(la::dot(A.faceN[f2], cenP - A.tri[f2][0])) /
+            la::length(A.faceN[f2]);
+        if (dist < eps * 1e5) nearD.push_back({dist, f2});
+      }
+      std::sort(nearD.begin(), nearD.end());
+      double T = stackWin;
+      for (const auto& dn : nearD) {
+        if (dn.first <= T) continue;
+        if (dn.first <= 8.0 * T)
+          T = dn.first;
+        else
+          break;
+      }
+      const double off = 2.0 * T;
+      bool owned = false;
+      for (const auto& dn : nearD) {
+        if (dn.first > T) break;
+        if (!covers(dn.second)) continue;
+        if (gid[dn.second] < g) {
+          owned = true;
+          break;
+        }
+        jump += la::dot(A.faceN[dn.second], nHat) >= 0.0 ? 1 : -1;
+      }
+      if (owned) continue;      // a lower covering group owns this stack cell
+      if (jump == 0) continue;  // net-cancelled: not a sheet
+      const std::optional<int> wA = RobustWinding(in, cenP + off * nHat, seeds);
+      const std::optional<int> wB = RobustWinding(in, cenP - off * nHat, seeds);
+      if (!wA || !wB) {
+        if (kDump)
+          std::fprintf(stderr,
+                       "E1 FAIL probe g=%d cen=(%.9g,%.9g,%.9g) off=%.3g\n", g,
+                       cen3.x, cen3.y, cen3.z, off);
+        return fail("e1: winding probe filter-uncertain - fail-closed");
+      }
+      const bool certified = (*wB - *wA == jump);
+      // COMPLETENESS CERTIFICATE: probed delta == combinatorial covering jump
+      if (!certified) {
+        // a DUST cell (below the weld scale) cannot be probed between
+        // sub-double-separated sheets and welds away regardless: drop it
+        double ext = 0.0;
+        for (size_t k = 0; k < loop.size(); ++k) {
+          const vec2 p1 = e1::Drop2(pos3[loop[k]], axis);
+          const vec2 p2 = e1::Drop2(pos3[loop[(k + 1) % loop.size()]], axis);
+          ext = std::max(
+              ext, std::max(std::abs(p2.x - p1.x), std::abs(p2.y - p1.y)));
+        }
+        if (ext <= 2.0 * eps) continue;  // sub-weld dust: unrepresentable
+        if (kDump) {
+          std::fprintf(stderr,
+                       "E1 FAIL cert g=%d jump=%d wA=%d wB=%d n=%d off=%.3g "
+                       "ext=%.3g cen=(%.9g,%.9g,%.9g) d0=%.3g\n",
+                       g, jump, *wA, *wB, static_cast<int>(loop.size()), off,
+                       ext, cen3.x, cen3.y, cen3.z, d0);
+          for (int f2 = 0; f2 < nTri; ++f2) {
+            const double dist =
+                std::abs(la::dot(A.faceN[f2], cenP - A.tri[f2][0])) /
+                la::length(A.faceN[f2]);
+            if (dist < 40.0 * eps)
+              std::fprintf(stderr,
+                           "  E1 nearplane f=%d gid=%d dist=%.3g (%.1f eps)\n",
+                           f2, gid[f2], dist, dist / eps);
+          }
+          for (const int f : members[g]) {
+            const int o0 = e1::O2(A.tri[f][0], A.tri[f][1], cenP, axis);
+            const int o1 = e1::O2(A.tri[f][1], A.tri[f][2], cenP, axis);
+            const int o2 = e1::O2(A.tri[f][2], A.tri[f][0], cenP, axis);
+            const bool neg = o0 < 0 || o1 < 0 || o2 < 0;
+            const bool pos = o0 > 0 || o1 > 0 || o2 > 0;
+            if (!(neg && pos))
+              std::fprintf(stderr, "  E1 cover member f=%d sgn=%d o=%d,%d,%d\n",
+                           f, fsgn[f], o0, o1, o2);
+          }
+          for (double mul = 1.0; mul <= 1000.0; mul *= 10.0) {
+            const std::optional<int> wa =
+                RobustWinding(in, cenP + mul * off * nHat, seeds);
+            const std::optional<int> wb =
+                RobustWinding(in, cenP - mul * off * nHat, seeds);
+            std::fprintf(stderr, "  E1 ladder off=%.3g wA=%d wB=%d\n",
+                         mul * off, wa ? *wa : -99, wb ? *wb : -99);
+          }
+        }
+        return fail(
+            "e1: coordinated-arrangement completeness certificate failed "
+            "(winding delta != covering jump) - fail-closed");
+      }
+      const bool aIn = *wA >= 1, bIn = *wB >= 1;
+      if (aIn == bIn) continue;         // not a {w>=1} boundary here
+      const int orient = bIn ? 1 : -1;  // +1: solid below, outward = +nHat
+      for (const ivec3& t : tris) {
+        const vec3 nr = la::cross(pos3[t.y] - pos3[t.x], pos3[t.z] - pos3[t.x]);
+        const double sd = la::dot(nr, Nrep);
+        if (sd == 0.0) {
+          ++dustTri;
+          continue;
+        }
+        if ((sd > 0.0) == (orient > 0))
+          out.push_back({{pos3[t.x], pos3[t.y], pos3[t.z]}});
+        else
+          out.push_back({{pos3[t.x], pos3[t.z], pos3[t.y]}});
+      }
+    }
+  }
+  if (kDump)
+    std::fprintf(stderr, "E1 emitted=%d dust=%d triFail=%d spliceFail=%d\n",
+                 static_cast<int>(out.size()), dustTri, triFail, spliceFail);
+  if (triFail > 0 || spliceFail > 0)
+    return fail("e1: cell triangulation/hole-splice incomplete - fail-closed");
+  return BuildImpl(out, eps);
+}
+
 // THE BUILD driver: fold exactly-coplanar clusters in-plane, emit seamed
 // sub-faces + clean faces, assemble + weld.  Returns the regularized Impl, or a
 // fatal.
@@ -5782,7 +6520,18 @@ StageResult<Manifold::Impl> ResolveComponent(const Manifold::Impl& dirty,
   // triples) so every emit path splits its edges at the non-proper-crossing
   // junctions the triple enumeration misses (no-op off openscad).
   BuildJunctionRegistry(A, eps);
-  return EmitComponentBoundary(in, A, face2cluster, eps);
+  StageResult<Manifold::Impl> r =
+      EmitComponentBoundary(in, A, face2cluster, eps);
+  // E1 COORDINATED ENGINE (e1engine): the fallback resolver for the component
+  // class the per-face emission fails closed on.  Reached ONLY on a fatal, so
+  // byte-clean on every resolving carrier by construction; on its own failure
+  // the ORIGINAL fatal is preserved (fail-closed never weakened).  Dev-gated:
+  // E1_ENGINE=1 enables (default OFF until the openscad closure flips the pin).
+  if (r.fatal && std::getenv("E1_ENGINE") != nullptr) {
+    StageResult<Manifold::Impl> e1r = EmitCoordinatedBoundary(in, A, eps);
+    if (!e1r.fatal) return e1r;
+  }
+  return r;
 }
 
 // Compose the surviving components back into one Impl by CONCATENATION - no

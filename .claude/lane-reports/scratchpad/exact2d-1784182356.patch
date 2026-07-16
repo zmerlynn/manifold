@@ -1,0 +1,426 @@
+diff --git a/src/overlap3.cpp b/src/overlap3.cpp
+index bc4bd04f..2c2634db 100644
+--- a/src/overlap3.cpp
++++ b/src/overlap3.cpp
+@@ -1680,6 +1680,15 @@ struct BuildArrangement {
+   // whose seams never terminate interior to another edge (the whole corpus off
+   // openscad), so all three paths stay byte-identical there.
+   std::vector<vec3> junctions;
++  // EX2 exact-overlay flag (exact2d lane): faces carrying a GAP-FREE wedge chain
++  // (a diverging near-parallel wedge whose exact interior crossing is > the
++  // coordinated-collapse envelope from every seam endpoint - the openscad
++  // residue the double-precision RemoveOverlaps2D eps-merge cannot emit).  A
++  // flagged face's per-face arrangement is built by the EXACT PSLG overlay
++  // (EmitSeamedFace) instead of RemoveOverlaps2D.  Empty / all-zero on every
++  // resolving carrier (zero gap-free chains - measured), so the overlay is a
++  // byte-clean no-op off openscad.
++  std::vector<char> wedgeFace;
+   bool ok = true;  // false = a structural anomaly (fail closed)
+ };
+ 
+@@ -2510,6 +2519,12 @@ void EnumerateTriplePoints(BuildArrangement& A,
+   static const bool kE1Pure = std::getenv("E1_PURE") != nullptr;
+   static const bool kE1Off = std::getenv("E1_OFF") != nullptr;
+   int e1New = 0, e1Old = 0, e1NewOnly = 0, e1OldOnly = 0, e1InFOnly = 0;
++  // EX2 CENSUS (exact-2d overlay lane, measurement only): per seamed face, the
++  // gap-free wedge crossings = the exact segment straddle (ExactSeamsCross
++  // clip=3) that the DEFAULT rounded-straddle gate DECLINES, at dEnd > 14 eps
++  // from every seam endpoint (gap-free, not a gap-bounded near-corner / alias).
++  static const bool kEx2Census = std::getenv("EX2_CENSUS") != nullptr;
++  std::map<int, std::vector<double>> ex2GapFree;  // face -> dEnd(eps) list
+ 
+   std::map<std::array<int, 3>, vec3> tripleTab;  // sorted plane triple -> pos
+   for (int f = 0; f < nTri; ++f) {
+@@ -2561,6 +2576,25 @@ void EnumerateTriplePoints(BuildArrangement& A,
+             ++e1OldOnly;                   // rounded phantoms the clip drops
+           if (inF && !inFGH) ++e1InFOnly;  // extent-clip removals
+         }
++        if (kEx2Census && !straddle &&
++            ExactSeamsCross(A, f, gFace, hFace, rF, rG, rH)) {
++          // A DECLINED exact segment crossing (rounded straddle false): the
++          // candidate gap-free wedge population.  Measure dEnd to the 4 seam
++          // endpoints on the once-only 3D triple point.
++          std::array<int, 3> ck = {planeId[f], pg, ph};
++          std::sort(ck.begin(), ck.end());
++          vec3 cpos;
++          if (Intersect3Planes(A.faceN[rep[ck[0]]], A.tri[rep[ck[0]]][0],
++                               A.faceN[rep[ck[1]]], A.tri[rep[ck[1]]][0],
++                               A.faceN[rep[ck[2]]], A.tri[rep[ck[2]]][0], cpos)) {
++            const double dEnd =
++                std::min(std::min(la::length(cpos - A.faceSeams[f][k1].p0),
++                                  la::length(cpos - A.faceSeams[f][k1].p1)),
++                         std::min(la::length(cpos - A.faceSeams[f][k2].p0),
++                                  la::length(cpos - A.faceSeams[f][k2].p1)));
++            ex2GapFree[f].push_back(dEnd / eps);
++          }
++        }
+         // DEFAULT: representability-gated exact extent (rounded straddle AND
+         // the exact segment straddle).  E1_PURE drops the gate (straddle==true)
+         // for the decisive negative; the clip (X in tri(g)/tri(h)) is the exact
+@@ -2643,6 +2677,163 @@ void EnumerateTriplePoints(BuildArrangement& A,
+         "E1_CENSUS default=%d prePlumb=%d pureExact=%d phantomsDropped=%d "
+         "extentClipRemovals=%d\n",
+         e1New, e1Old, e1NewOnly, e1OldOnly, e1InFOnly);
++  if (kEx2Census) {
++    int nGapFreeFaces = 0, nGapFreeCross = 0, nBoundedDeclined = 0;
++    for (const auto& fv : ex2GapFree) {
++      int gf = 0;
++      for (double d : fv.second)
++        if (d > 14.0)
++          ++gf;
++        else
++          ++nBoundedDeclined;
++      if (gf > 0) {
++        ++nGapFreeFaces;
++        nGapFreeCross += gf;
++        std::fprintf(stderr, "EX2_FACE f=%d gapFreeCross=%d dEnds(eps)=", fv.first,
++                     gf);
++        for (double d : fv.second) std::fprintf(stderr, "%.1f ", d);
++        std::fprintf(stderr, "\n");
++      }
++    }
++    std::fprintf(stderr,
++                 "EX2_CENSUS gapFreeFaces=%d gapFreeCross=%d boundedDeclined=%d\n",
++                 nGapFreeFaces, nGapFreeCross, nBoundedDeclined);
++  }
++}
++
++// ---------------------------------------------------------------------------
++// EX2 WEDGE SPLITS (exact2d overlay lane): the coordinated per-triple pass that
++// registers the GAP-FREE wedge crossings the DEFAULT rounded-straddle gate
++// declines, and FLAGS the incident faces for the exact PSLG overlay.
++//
++// EnumerateTriplePoints (default) registers only crossings whose ROUNDED seam
++// segments straddle - the crossings the double-precision RemoveOverlaps2D can
++// place.  openscad's diverging near-parallel wedges cross EXACTLY (ExactSeamsCross
++// clip=3) at an interior point the rounded segments do NOT straddle (the wedge is
++// sub-eps thin there), so the default declines them and RemoveOverlaps2D's
++// eps-merge / sweep mangles the wide part (the 21-open-edge residue).  This pass
++// finds every exact interior crossing (ungated ExactSeamsCross), keys it by the
++// sorted plane triple, and CLASSIFIES it ONCE (coordinated, not per-face) by the
++// MIN distance from its once-only 3D triple point (Intersect3Planes, the same
++// bits the default constructs) to any incident seam endpoint:
++//   dEnd  >  kWedgeEnv eps  => GAP-FREE (a diverging wedge; pivot's scale-free
++//     spectrum): register the split on ALL incident faces + flag them.
++//   dEnd  <= kWedgeEnv eps  => GAP-BOUNDED (a near-coincident corner / alias -
++//     GT7081's near-corner E1_PURE crossings, the 330 cross-provenance welds):
++//     DECLINE - collapse to the existing endpoint junction (the coordinated
++//     collapse; no split, no flag).  This is what keeps the RESOLVING carriers
++//     byte-clean: GT7081's crossings are all <= kWedgeEnv eps -> zero flagged
++//     faces (canary); the whole corpus off openscad has zero gap-free crossings.
++// The envelope sits in the measured spectral GAP (pivot/hybrid): GT7081's bounded
++// crossings <= 14 eps, openscad's wedges >= 26.8 eps.
++// ---------------------------------------------------------------------------
++constexpr double kWedgeEnv = 14.0;  // coordinated-collapse envelope, eps units
++void EnumerateWedgeSplits(BuildArrangement& A,
++                          const std::vector<int>& face2cluster, double eps) {
++  const int nTri = static_cast<int>(A.tri.size());
++  A.wedgeFace.assign(nTri, 0);
++  if (std::getenv("EX2_OFF") != nullptr) return;  // mutation lever: overlay off
++  std::vector<int> planeId(nTri);
++  for (int f = 0; f < nTri; ++f)
++    planeId[f] = face2cluster[f] >= 0 ? nTri + face2cluster[f] : f;
++  std::map<int, int> rep;
++  for (int f = 0; f < nTri; ++f) rep.emplace(planeId[f], f);  // lowest-index rep
++  struct Cand {
++    vec3 pos;
++    double minDEnd = std::numeric_limits<double>::max();
++    bool havePos = false;
++    std::vector<std::array<int, 3>> inc;  // (face, seam k1, seam k2)
++    std::vector<vec2> x2d;                // matching on-seam 2D crossing per inc
++  };
++  std::map<std::array<int, 3>, Cand> tab;
++  for (int f = 0; f < nTri; ++f) {
++    if (!A.seamed[f]) continue;
++    const int ns = static_cast<int>(A.faceSeams[f].size());
++    if (ns < 2) continue;
++    AxisDropFrame pf;
++    if (!BuildAxisDropFrame(A.faceN[f], A.tri[f][0], pf)) continue;
++    for (int k1 = 0; k1 < ns; ++k1) {
++      const int pg = planeId[A.faceSeams[f][k1].other];
++      if (pg == planeId[f]) continue;
++      for (int k2 = k1 + 1; k2 < ns; ++k2) {
++        const int ph = planeId[A.faceSeams[f][k2].other];
++        if (ph == planeId[f] || ph == pg) continue;
++        const int gFace = A.faceSeams[f][k1].other;
++        const int hFace = A.faceSeams[f][k2].other;
++        const int rF = rep[planeId[f]], rG = rep[pg], rH = rep[ph];
++        if (!ExactSeamsCross(A, f, gFace, hFace, rF, rG, rH)) continue;
++        std::array<int, 3> key = {planeId[f], pg, ph};
++        std::sort(key.begin(), key.end());
++        Cand& c = tab[key];
++        if (!c.havePos) {
++          const int r0 = rep[key[0]], r1 = rep[key[1]], r2 = rep[key[2]];
++          if (!Intersect3Planes(A.faceN[r0], A.tri[r0][0], A.faceN[r1],
++                                A.tri[r1][0], A.faceN[r2], A.tri[r2][0], c.pos))
++            continue;  // degenerate triple: leave to the default backstop
++          c.havePos = true;
++        }
++        const double dEnd =
++            std::min(std::min(la::length(c.pos - A.faceSeams[f][k1].p0),
++                              la::length(c.pos - A.faceSeams[f][k1].p1)),
++                     std::min(la::length(c.pos - A.faceSeams[f][k2].p0),
++                              la::length(c.pos - A.faceSeams[f][k2].p1)));
++        c.minDEnd = std::min(c.minDEnd, dEnd);
++        // The wedge crossing's 2D position for the pre-split = the rounded seam-
++        // line intersection.  NOTE (the sharpened terminal): the DECLINED gap-free
++        // crossings have the rounded segments NOT straddling, so NO 2D position is
++        // interior to BOTH rounded segments - this line intersection extrapolates
++        // beyond a rounded endpoint (SegLineIntersect2D) and pf.proj(pos) lands
++        // just off-segment too.  Either way the exact overlay's ExtractCells
++        // (which walks the ROUNDED verts2) folds back, even though the exact PSLG
++        // completeness check (on the exact canon3 triple point) passes.  The
++        // crossing is genuine and the arrangement is combinatorially complete; the
++        // double-precision cell walk cannot realize it.  Only symbolic (exact)
++        // seam endpoints in the cell walk close it (the priced completion).
++        const vec2 x = SegLineIntersect2D(
++            pf.proj(A.faceSeams[f][k1].p0), pf.proj(A.faceSeams[f][k1].p1),
++            pf.proj(A.faceSeams[f][k2].p0), pf.proj(A.faceSeams[f][k2].p1));
++        if (!(std::isfinite(x.x) && std::isfinite(x.y))) continue;
++        c.inc.push_back({f, k1, k2});
++        c.x2d.push_back(x);
++      }
++    }
++  }
++  int nFlagFaces = 0, nSplitsAdded = 0;
++  std::set<int> flagged;
++  for (auto& kv : tab) {
++    Cand& c = kv.second;
++    if (!c.havePos || c.inc.empty()) continue;
++    if (c.minDEnd <= kWedgeEnv * eps) continue;  // gap-bounded: coordinated collapse
++    for (size_t i = 0; i < c.inc.size(); ++i) {
++      const int f = c.inc[i][0], k1 = c.inc[i][1], k2 = c.inc[i][2];
++      auto addSplit = [&](int k) -> bool {
++        for (const auto& xp : A.seamTriples[f][k])
++          if (la::length(xp.second - c.pos) <= eps) return false;  // already
++        A.seamTriples[f][k].push_back({c.x2d[i], c.pos});
++        ++nSplitsAdded;
++        return true;
++      };
++      // A face routes through the exact overlay ONLY if it gets a genuinely NEW
++      // split - i.e. it carries a DECLINED gap-free crossing RemoveOverlaps2D
++      // cannot place.  An incident face whose view of the same triple was already
++      // default-registered (rounded straddle true) keeps RemoveOverlaps2D (which
++      // handles that wide crossing) and still splits at the SAME once-only 3D
++      // point, so the shared seam welds across the mixed routing.
++      const bool a1 = addSplit(k1);
++      const bool a2 = addSplit(k2);
++      if (a1 || a2) {
++        A.wedgeFace[f] = 1;
++        flagged.insert(f);
++      }
++    }
++  }
++  if (std::getenv("EX2_ALL") != nullptr)  // diagnostic: overlay on ALL seamed
++    for (int f = 0; f < nTri; ++f)
++      if (A.seamed[f]) A.wedgeFace[f] = 1;
++  nFlagFaces = static_cast<int>(flagged.size());
++  if (std::getenv("EX2_CENSUS") != nullptr)
++    std::fprintf(stderr, "EX2_WEDGE flaggedFaces=%d splitsAdded=%d triples=%d\n",
++                 nFlagFaces, nSplitsAdded, static_cast<int>(tab.size()));
+ }
+ 
+ // ---------------------------------------------------------------------------
+@@ -2940,18 +3131,25 @@ void EmitSeamedFace(std::vector<OutTri3D>& out, const BuildArrangement& A,
+   // seam) that open the fan get the SAME shared split on every incident face.
+   // With no triple and no interior junction this is byte-identical to the plain
+   // single-edge push (the whole corpus off openscad).
+-  // The face's own seam endpoints: those are split into its edges by its own
+-  // RemoveOverlaps2D, so the registry must NOT re-inject them (no-op rail).
++  // The face's own seam endpoints: on the DEFAULT path those are split into the
++  // triangle edges by the face's own RemoveOverlaps2D (eps-incidence), so the
++  // registry must NOT re-inject them (no-op rail).  On the EXACT-OVERLAY path
++  // (wedge) there is no RemoveOverlaps2D, so the registry MUST split every edge
++  // at every own seam endpoint interior to it (skipNear = nullptr) - otherwise a
++  // seam endpoint landing on a triangle edge stays unsplit and the two segments
++  // "cross" at it (the residual-crossing fail-closed).
++  const bool wedge = f < static_cast<int>(A.wedgeFace.size()) && A.wedgeFace[f];
+   std::vector<vec3> ownEnds;
+   for (const auto& s : A.faceSeams[f]) {
+     ownEnds.push_back(s.p0);
+     ownEnds.push_back(s.p1);
+   }
++  const std::vector<vec3>* skipEnds = wedge ? nullptr : &ownEnds;
+   auto pushChain = [&](int vFrom, int vTo, const vec3& P0, const vec3& P1,
+                        const std::vector<std::pair<vec2, vec3>>& pre) {
+     std::vector<std::pair<vec2, vec3>> splits = pre;
+     for (const auto& js : JunctionSplitsOnSegment(
+-             pf.proj(P0), pf.proj(P1), P0, P1, A.junctions, eps, &ownEnds)) {
++             pf.proj(P0), pf.proj(P1), P0, P1, A.junctions, eps, skipEnds)) {
+       bool dup = false;
+       for (const auto& s : splits)
+         if (la::length(s.second - js.second) <= eps) {
+@@ -2995,43 +3193,112 @@ void EmitSeamedFace(std::vector<OutTri3D>& out, const BuildArrangement& A,
+     pushChain(v0, v1, s.p0, s.p1, pre);
+   }
+ 
+-  // ARRANGEMENT via RemoveOverlaps2D: edgeSubdiv gives the exact per-input-edge
+-  // subdivision (triangle edges split at the on-edge seam endpoints; seams
+-  // split at any crossing).  The winding rule is irrelevant here (we take only
+-  // the subdivision), so any pred works.  eps is the component weld radius; the
+-  // canonical seam points are exact-shared, so no extra construction headroom
+-  // is needed and a tight eps avoids merging genuinely-distinct sub-eps
+-  // features.
+-  std::vector<std::vector<vec2>> sub;
+-  RemoveOverlaps2D(verts2, edges, eps, /*debug=*/false, WindRule::Add,
+-                   /*trace=*/nullptr, /*edgesNeg=*/nullptr, &sub);
+-
+-  // Reconstruct the planar subdivision, mapping each arrangement position back
+-  // to its input vertex bit-exactly.  A position with no input preimage is a
+-  // NEW crossing vertex (a >2-sheet triple point, unbuilt) -> fail closed.
+-  std::map<std::tuple<double, double>, int> pos2in;
+-  for (int k = 0; k < static_cast<int>(verts2.size()); ++k)
+-    pos2in.emplace(std::tuple<double, double>{verts2[k].x, verts2[k].y}, k);
+   static const bool kF4BDump = std::getenv("F4B_DUMP") != nullptr;
+   std::vector<std::pair<int, int>> uedges;
+-  for (const auto& poly : sub) {
+-    for (size_t k = 0; k + 1 < poly.size(); ++k) {
+-      const auto i0 = pos2in.find({poly[k].x, poly[k].y});
+-      const auto i1 = pos2in.find({poly[k + 1].x, poly[k + 1].y});
+-      if (i0 == pos2in.end() || i1 == pos2in.end()) {
+-        if (kF4BDump) {  // census: count every residual constructed vertex
+-          std::set<std::tuple<double, double>> miss;
+-          for (const auto& p : sub)
+-            for (const vec2& q : p)
+-              if (pos2in.find({q.x, q.y}) == pos2in.end())
+-                miss.insert({q.x, q.y});
+-          ++gF4BSeam.b3faces;
+-          gF4BSeam.b3verts += static_cast<int>(miss.size());
++  if (wedge) {
++    // EXACT PSLG OVERLAY (exact2d, the gap-free wedge closure): the pre-split
++    // `edges` ARE the arrangement 1-skeleton - every interior crossing is
++    // pre-split at a once-only triple point (default + the EX2 wedge splits) and
++    // every vertex-on-edge incidence at a registry junction, so no two
++    // non-adjacent sub-edges properly cross in the face interior.  Build uedges
++    // DIRECTLY, SKIPPING RemoveOverlaps2D's MergeVerts eps-merge (which collapses
++    // the sub-eps wedge split vertex into the seam endpoint, DROPPING the split -
++    // the 21-open-edge residue) and its sweep (which re-crosses the rounded
++    // sub-segments -> the face-467 no-preimage phantom).  VERIFY completeness
++    // EXACTLY first (the landed exact orient2d on the canonical 3D points, drop
++    // the face axis): any residual proper crossing means the enumeration missed
++    // a triple point -> fail closed (never emit unverified geometry).
++    // WELD near-coincident vertices (the cross-provenance ALIASES: seam
++    // endpoints built by different pierce paths that round to bit-different but
++    // geometrically identical points - the 330 the default RemoveOverlaps2D
++    // MergeVerts collapses; nomerge/sliver-emit).  Union-find within eps to the
++    // lowest-index rep; the gap-free wedge splits are > kWedgeEnv eps from
++    // everything, so the weld never merges a genuine split.  This is the
++    // coordinated collapse of the GAP-BOUNDED alias population, the exact-overlay
++    // analogue of MergeVerts WITHOUT the sweep that re-crosses the sub-segments.
++    const int nv = static_cast<int>(verts2.size());
++    std::vector<int> rep(nv);
++    for (int k = 0; k < nv; ++k) rep[k] = k;
++    auto find = [&](int x) {
++      while (rep[x] != x) x = rep[x] = rep[rep[x]];
++      return x;
++    };
++    for (int i = 0; i < nv; ++i)
++      for (int j = i + 1; j < nv; ++j)
++        if (la::length(verts2[i] - verts2[j]) <= eps) {
++          const int ri = find(i), rj = find(j);
++          if (ri != rj) rep[std::max(ri, rj)] = std::min(ri, rj);
+         }
+-        ok = false;
+-        return;
++    const int ne = static_cast<int>(edges.size());
++    for (int i = 0; i < ne; ++i)
++      for (int j = i + 1; j < ne; ++j) {
++        const int a0 = find(edges[i].v0), a1 = find(edges[i].v1);
++        const int b0 = find(edges[j].v0), b1 = find(edges[j].v1);
++        if (a0 == b0 || a0 == b1 || a1 == b0 || a1 == b1) continue;  // adjacent
++        if (a0 == a1 || b0 == b1) continue;  // degenerate (welded to a point)
++        if (ExactSegProperCross(canon3[a0], canon3[a1], canon3[b0], canon3[b1],
++                                pf.axis)) {
++          if (std::getenv("EX2_DIAG") != nullptr) {
++            const vec2 xc = SegLineIntersect2D(verts2[a0], verts2[a1],
++                                               verts2[b0], verts2[b1]);
++            double dmin = 1e300;
++            for (const vec2& q : verts2)
++              dmin = std::min(dmin, la::length(q - xc));
++            std::fprintf(
++                stderr,
++                "EX2_DIAG f=%d residualCross dNearestVert=%.3feps e0=(%d,%d) "
++                "e1=(%d,%d)\n",
++                f, dmin / eps, a0, a1, b0, b1);
++          }
++          if (kF4BDump) ++gF4BSeam.b3faces;
++          // Measurement lever: emit nothing but do NOT fail the component, so the
++          // open-edge count of the RESOLVED faces past this one is measurable.
++          if (std::getenv("EX2_SKIPB3") != nullptr) return;
++          ok = false;
++          return;
++        }
++      }
++    for (const EdgeM& e : edges) {
++      const int a = find(e.v0), b = find(e.v1);
++      if (a != b) uedges.push_back({a, b});
++    }
++  } else {
++    // DEFAULT (RemoveOverlaps2D): edgeSubdiv gives the exact per-input-edge
++    // subdivision (triangle edges split at the on-edge seam endpoints; seams
++    // split at any crossing).  The winding rule is irrelevant here (we take only
++    // the subdivision), so any pred works.  eps is the component weld radius; the
++    // canonical seam points are exact-shared, so no extra construction headroom
++    // is needed and a tight eps avoids merging genuinely-distinct sub-eps
++    // features.
++    std::vector<std::vector<vec2>> sub;
++    RemoveOverlaps2D(verts2, edges, eps, /*debug=*/false, WindRule::Add,
++                     /*trace=*/nullptr, /*edgesNeg=*/nullptr, &sub);
++
++    // Reconstruct the planar subdivision, mapping each arrangement position back
++    // to its input vertex bit-exactly.  A position with no input preimage is a
++    // NEW crossing vertex (a >2-sheet triple point, unbuilt) -> fail closed.
++    std::map<std::tuple<double, double>, int> pos2in;
++    for (int k = 0; k < static_cast<int>(verts2.size()); ++k)
++      pos2in.emplace(std::tuple<double, double>{verts2[k].x, verts2[k].y}, k);
++    for (const auto& poly : sub) {
++      for (size_t k = 0; k + 1 < poly.size(); ++k) {
++        const auto i0 = pos2in.find({poly[k].x, poly[k].y});
++        const auto i1 = pos2in.find({poly[k + 1].x, poly[k + 1].y});
++        if (i0 == pos2in.end() || i1 == pos2in.end()) {
++          if (kF4BDump) {  // census: count every residual constructed vertex
++            std::set<std::tuple<double, double>> miss;
++            for (const auto& p : sub)
++              for (const vec2& q : p)
++                if (pos2in.find({q.x, q.y}) == pos2in.end())
++                  miss.insert({q.x, q.y});
++            ++gF4BSeam.b3faces;
++            gF4BSeam.b3verts += static_cast<int>(miss.size());
++          }
++          ok = false;
++          return;
++        }
++        uedges.push_back({i0->second, i1->second});
+       }
+-      uedges.push_back({i0->second, i1->second});
+     }
+   }
+ 
+@@ -3081,6 +3348,14 @@ void EmitSeamedFace(std::vector<OutTri3D>& out, const BuildArrangement& A,
+       return;
+     }
+     const int keep = BothSidesRetain(*g, *gb);
++    if (wedge && std::getenv("EX2_CELLDUMP") != nullptr) {
++      double aC = 0.0;
++      for (size_t k = 0; k < cell.size(); ++k)
++        aC += la::cross(verts2[cell[k]], verts2[cell[(k + 1) % cell.size()]]);
++      std::fprintf(stderr, "EX2_CELL f=%d n=%d area=%.3geps2 w+=%d w-=%d keep=%d\n",
++                   f, static_cast<int>(cell.size()), 0.5 * aC / (eps * eps), *g,
++                   *gb, keep);
++    }
+     if (keep == 0) continue;  // both sides same class: not a boundary
+     // Retained: keep==1 (solid on the -nHat side) keeps the CCW 2D winding
+     // (+nHat = original orientation); keep==2 (solid on +nHat) reverses.
+@@ -3799,6 +4074,12 @@ StageResult<Manifold::Impl> ResolveComponent(const Manifold::Impl& dirty,
+   // B1: enumerate the once-only 3-face triple points before per-face emission
+   // (no-op off openscad; the whole point on the triple-point-dense soup).
+   EnumerateTriplePoints(A, face2cluster, eps);
++  // EX2 (exact2d): register the GAP-FREE wedge crossings the default gate
++  // declines and flag their incident faces for the exact PSLG overlay.  Runs
++  // AFTER the default enumeration (adds to A.seamTriples) and BEFORE the registry
++  // (so the registry picks up the wedge split points).  No-op off openscad (zero
++  // gap-free crossings on every resolving carrier).
++  EnumerateWedgeSplits(A, face2cluster, eps);
+   // f4-junction: gather the once-only junction registry (seam endpoints +
+   // triples) so every emit path splits its edges at the non-proper-crossing
+   // junctions the triple enumeration misses (no-op off openscad).
