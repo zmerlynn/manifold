@@ -5761,7 +5761,9 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
     const Manifold::Impl& in, const BuildArrangement& A, double eps,
     const std::vector<std::pair<int, vec3>>* extraJ,
     std::vector<std::pair<int, vec3>>* collectX,
-    std::vector<vec3>* collectT = nullptr) {
+    std::vector<vec3>* collectT = nullptr,
+    std::map<std::pair<int, int>, std::vector<vec3>>* seamX = nullptr,
+    bool seamXInject = false) {
   using e1::K3;
   using e1::KeyOf;
   const int nTri = static_cast<int>(A.tri.size());
@@ -6143,6 +6145,21 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
     // representatives sit up to eps off the exact lines, and inserting them
     // with an eps window BENDS the chains by eps - the bent sub-chains then
     // properly cross and fragment the walk (measured: a split cascade).
+    // CROSS-GROUP SEAM SPLIT UNION (pass 2+): a seam (f1,f2) is ONE geometric
+    // segment present in BOTH incident groups, but each group unifies splits
+    // only internally (the 4-tri crossing tests legitimately differ across
+    // groups), so the shared chain diverges - the cross-plane turn opens.
+    // Inject the union collected in the previous pass, keyed by the seam's
+    // face-pair identity.
+    if (seamX && seamXInject) {
+      for (int i = 0; i < nS; ++i) {
+        if (segs[i].planeQ < 0) continue;
+        const auto key = std::minmax(segs[i].fOwn, segs[i].fOther);
+        const auto it = seamX->find({key.first, key.second});
+        if (it == seamX->end()) continue;
+        for (const vec3& V : it->second) addSplit(i, V);
+      }
+    }
     // OUTER FIXPOINT: the exchange and the completion feed each other - a
     // completion-added crossing (ill-conditioned on near-collinear pairs:
     // the same line's overlapping segments each get their own noisy
@@ -6264,6 +6281,14 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
       size_t nsplit1 = 0;
       for (int i = 0; i < nS; ++i) nsplit1 += splits[i].size();
       if (nsplit1 == nsplit0) break;
+    }
+    if (seamX) {
+      for (int i = 0; i < nS; ++i) {
+        if (segs[i].planeQ < 0) continue;
+        const auto key = std::minmax(segs[i].fOwn, segs[i].fOther);
+        auto& lst = (*seamX)[{key.first, key.second}];
+        for (const auto& pr : splits[i]) lst.push_back(pr.second);
+      }
     }
     // NOTE: no sub-edge-level completion pass is needed: with the exact
     // endpoint pool and the rounding-scale on-line tolerance, chain bends are
@@ -6928,20 +6953,20 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundary(const Manifold::Impl& in,
                                                     double eps) {
   std::vector<std::pair<int, vec3>> crossX;
   std::vector<vec3> triples;
-  StageResult<Manifold::Impl> r =
-      EmitCoordinatedBoundaryImpl(in, A, eps, nullptr, &crossX, &triples);
+  std::map<std::pair<int, int>, std::vector<vec3>> seamX;
+  StageResult<Manifold::Impl> r = EmitCoordinatedBoundaryImpl(
+      in, A, eps, nullptr, &crossX, &triples, &seamX, false);
   if (!r.fatal) return r;
-  // GLOBAL TRIPLE INJECTION: a committed triple splits the two seams of the
-  // group that DISCOVERED it; the partner groups' copies of shared lines
-  // must split at the identical canonical position (the 4-tri existence test
-  // is member-pair-specific and legitimately asymmetric across groups).
-  // Triples are exact canonical constructions - global injection with the
-  // rounding-scale on-line tolerance cannot bend chains.
   for (const vec3& t : triples) crossX.push_back({-1, t});
-  for (int pass = 0; pass < 6 && r.fatal && !crossX.empty(); ++pass) {
-    const size_t before = crossX.size();
-    r = EmitCoordinatedBoundaryImpl(in, A, eps, &crossX, &crossX);
-    if (crossX.size() == before) break;  // no new crossings: converged/stuck
+  for (int pass = 0; pass < 6 && r.fatal; ++pass) {
+    const size_t b1 = crossX.size();
+    size_t b2 = 0;
+    for (const auto& kv : seamX) b2 += kv.second.size();
+    r = EmitCoordinatedBoundaryImpl(in, A, eps, &crossX, &crossX, nullptr,
+                                    &seamX, true);
+    size_t a2 = 0;
+    for (const auto& kv : seamX) a2 += kv.second.size();
+    if (crossX.size() == b1 && a2 == b2) break;  // converged/stuck
   }
   return r;
 }
