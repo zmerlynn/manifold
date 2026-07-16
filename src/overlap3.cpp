@@ -5127,14 +5127,9 @@ void FoldCoplanarClusters(std::vector<OutTri3D>& out, const Manifold::Impl& in,
       const int s = (la::dot(A.faceN[f], nHat) > 0.0) ? 1 : -1;
       ftris.push_back({verts2[i0], verts2[i1], verts2[i2], s});
     }
-    // Boundary segments (net!=0): the fold's own RemoveOverlaps2D already
-    // splits these at their mutual crossings / T-junctions / shared corners, so
-    // a registry junction lying on TWO of them is produced by the fold itself
-    // and must NOT be re-injected (a spurious re-tessellation - the no-op rail;
-    // e.g. EntangledBars' coincident caps, whose wall seam endpoints coincide
-    // with cap-cap crossings).  Only a junction on EXACTLY ONE boundary (a
-    // seamed wall's endpoint entangled with the fold) is foreign and threaded
-    // in.
+    // Boundary segments (net!=0), used ONLY by the retired FOLD_MEMBER_GUARD
+    // mutation lever below (the member-member-crossing skip that is UNSOUND at
+    // a near-degenerate cluster; see the canonical-per-line comment below).
     std::vector<std::pair<vec3, vec3>> bsegs;
     for (const auto& [e, net] : dir)
       if (net != 0) bsegs.push_back({canon3[e.first], canon3[e.second]});
@@ -5148,24 +5143,41 @@ void FoldCoplanarClusters(std::vector<OutTri3D>& out, const Manifold::Impl& in,
       return la::length((V - S0) - t * d) <= eps;
     };
     std::vector<EdgeM> segEdges;
+    // CANONICAL PER-LINE SUBDIVISION (perline): split this fold-boundary edge
+    // at EVERY registry junction strictly interior to it, so the fold's caps
+    // and the incident walls subdivide the shared boundary line at the
+    // IDENTICAL once-only registry vertex and their emission fans pair.
+    //
+    // The prior f4-junction guard skipped a junction lying on >=2 member
+    // boundary segments ("a member-member crossing RemoveOverlaps2D owns it").
+    // That is UNSOUND at a near-degenerate coplanar cluster: RO2D re-derives
+    // the member-member crossing per-face in ROUNDED doubles, landing it
+    // sub-eps off the CANONICAL registry junction the incident wall split at,
+    // so the cap sub-face spanned the shared line unsplit and its fan opened
+    // against the wall's (openscad's cap-wall T-junction opens).  Splitting at
+    // the canonical junction unconditionally is once-only-correct: the registry
+    // vertex is the shared 3D construction both the cap and the wall reference,
+    // so presplitting there never disagrees with a neighbour.  A cap-cap
+    // crossing RO2D would also split at is now pre-split at the SAME canonical
+    // point instead of RO2D's rounded recomputation (an equivalence-preserving
+    // re-triangulation on the rotated/irrational-junction fold carriers,
+    // byte-identical on the axis-aligned ones).  FOLD_MEMBER_GUARD restores the
+    // old skip (mutation lever: the openscad cap-wall opens reappear).
+    static const bool kMemberGuard =
+        std::getenv("FOLD_MEMBER_GUARD") != nullptr;
     for (const auto& [e, net] : dir) {
       if (net == 0) continue;  // interior (cancelled) diagonal: not a boundary
-      // f4-junction: split this fold-boundary edge at every FOREIGN registry
-      // junction strictly interior to it (a seamed wall's endpoint lands ON the
-      // fold's boundary - the coplanar/transversal junction), so the fold
-      // arranges AROUND it (threaded through this RemoveOverlaps2D input, not
-      // around it) and the fold cell + the seamed wall weld shut at the
-      // reentrant corner.  No foreign junction -> the plain boundary edge,
-      // byte-identical.
       const std::vector<std::pair<vec2, vec3>> splits = JunctionSplitsOnSegment(
           pf.proj(canon3[e.first]), pf.proj(canon3[e.second]), canon3[e.first],
           canon3[e.second], A.junctions, eps);
       int prev = e.first;
       for (const auto& sp : splits) {
-        int onCount = 0;
-        for (const auto& bs : bsegs)
-          if (onBoundarySeg(sp.second, bs.first, bs.second)) ++onCount;
-        if (onCount >= 2) continue;  // a member-member crossing: RO2D owns it
+        if (kMemberGuard) {
+          int onCount = 0;
+          for (const auto& bs : bsegs)
+            if (onBoundarySeg(sp.second, bs.first, bs.second)) ++onCount;
+          if (onCount >= 2) continue;  // member-member crossing: RO2D owns it
+        }
         const int v = pf.addAt(sp.first, sp.second);
         if (v != prev) segEdges.push_back({prev, v, 1});
         prev = v;
