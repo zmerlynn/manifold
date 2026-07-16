@@ -5970,6 +5970,7 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
   };
 
   std::vector<OutTri3D> out;
+  std::vector<int> outG;  // per-tri emitting group (diagnostics)
   int dustTri = 0, triFail = 0, spliceFail = 0;
   int nCells = 0, nNeg = 0, nJump = 0, nBoundary = 0, nOwned = 0, nDustCell = 0;
   const double scale = in.bBox_.Scale();
@@ -6626,7 +6627,12 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
       double T = stackWin;
       for (const auto& dn : nearD) {
         if (dn.first <= T) continue;
-        if (dn.first <= 8.0 * T)
+        // HARD CAP at the weld radius: a stack may only absorb sheets that
+        // weld together anyway (unrepresentably close).  Un-capped 8x
+        // chaining absorbed ladders of REPRESENTABLE distinct sheets into
+        // one net emission (measured: systematic opens across dozens of
+        // groups wherever the sheet-distance ladder had no 8x gap).
+        if (dn.first <= 8.0 * T && dn.first <= 2.0 * eps)
           T = dn.first;
         else
           break;
@@ -6739,6 +6745,7 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
           out.push_back({{pos3[t.x], pos3[t.y], pos3[t.z]}});
         else
           out.push_back({{pos3[t.x], pos3[t.z], pos3[t.y]}});
+        outG.push_back(g);
       }
     }
   }
@@ -6752,10 +6759,12 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
     return fail("e1: cell triangulation/hole-splice incomplete - fail-closed");
   if (const char* sf = std::getenv("E1_SOUPFILE")) {  // offline diagnostics
     if (FILE* fp = std::fopen(sf, "w")) {
-      for (const OutTri3D& t : out)
-        std::fprintf(fp, "%la %la %la %la %la %la %la %la %la\n", t.v[0].x,
-                     t.v[0].y, t.v[0].z, t.v[1].x, t.v[1].y, t.v[1].z, t.v[2].x,
-                     t.v[2].y, t.v[2].z);
+      for (size_t k = 0; k < out.size(); ++k) {
+        const OutTri3D& t = out[k];
+        std::fprintf(fp, "%d %la %la %la %la %la %la %la %la %la\n", outG[k],
+                     t.v[0].x, t.v[0].y, t.v[0].z, t.v[1].x, t.v[1].y, t.v[1].z,
+                     t.v[2].x, t.v[2].y, t.v[2].z);
+      }
       std::fclose(fp);
     }
   }
