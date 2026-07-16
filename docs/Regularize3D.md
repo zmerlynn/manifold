@@ -359,10 +359,22 @@ order-freeness promises, now a standing rail.
   Whether the arrangement can be structured to avoid needing an exact orient3d kernel
   at all is still open; the current integer Orient3DExactSign / SoS cascade is the
   reluctantly-accepted answer, not a settled one.  TRIPWIRE, RELAXED by the owner to
-  ONE PREDICATE, ONE IMPLEMENTATION (reg3d-c2bx): the integer path is legitimate as
-  ONE exact predicate FORM (this ~100-line adaptive-integer orient3d), and ADDITIONAL
-  CALLERS are within the blessed pattern (zero new arithmetic) as long as each stays
-  FILTER-FIRST (exact fires only behind a filter 0).  FIRE CENSUS (orient-land
+  ONE PREDICATE FORM, ONE IMPLEMENTATION (reg3d-c2bx; generalized in homog-design):
+  the integer path is legitimate as ONE exact predicate FORM - the sign of a
+  homogeneous orientation determinant corrected by sign(prod W_i), summed on the ONE
+  adaptive-width integer accumulator (sos::SumSignN).  It has exactly TWO
+  instantiations: (1) INPUT-POINT orient3d (degree 3, W==1: an input double point is
+  the intersection of its three trivial axis planes, denominator 1, so the W column
+  is the literal ones column and the weight-product sign is +1 - the loop is
+  BIT-IDENTICAL to the historical adaptive-integer orient3d, every existing caller
+  unchanged; differential harness 0 diff over >1e7 inputs incl forced ties), and
+  (2) CONSTRUCTED-POINT orient2d (degree 9: three in-face seam crossing points, each
+  the Cramer intersection of a plane triple {F,g,h}; the SAME form at higher degree,
+  filter-first via a degree-9 construction-aware static bound, on the widened
+  accumulator - the naive final-determinant permanent is UNSOUND in the near-parallel
+  wedge regime and must be replaced by the all-abs companion Pdet).  ADDITIONAL
+  CALLERS of either instantiation are within the blessed pattern (zero new arithmetic)
+  as long as each stays FILTER-FIRST (exact fires only behind a filter 0).  FIRE CENSUS (orient-land
   necessity attack): the exact cascade earns its keep in two roles.  (i) STRUCTURAL-TIE
   DETECTION - the bulk of the tie-cascade fallback: genuine exact-zeros, overwhelmingly
   STRUCTURAL (two boxes sharing an axis coordinate, or a repeated point), where the e^0
@@ -415,9 +427,13 @@ order-freeness promises, now a standing rail.
   only genuine route to zero is a coupled-integer WIND re-architecture that removes
   ray-casting entirely, or accepting the loss of GT7081's oracle-true resolve - a research
   axis, not a tweak.
-  What stays tripwired is a SECOND predicate FORM: if one is ever needed, VENDOR
-  Shewchuk's public-domain predicates.c instead of growing this - do NOT rebuild
-  expansion arithmetic piecemeal.
+  What stays tripwired is a THIRD instantiation of a NEW DEGREE (or any new
+  constructed-point form beyond the two above): an OWNER DECISION - it widens the
+  accumulator's proven totality bound (kAccumLimbs, now 320 to keep the degree-9 form
+  total by construction) and needs a new per-degree filter constant; never add one
+  silently.  And if an exact primitive OUTSIDE this one homogeneous form is ever
+  needed, VENDOR Shewchuk's public-domain predicates.c instead of growing this - do
+  NOT rebuild expansion arithmetic piecemeal.
 - NEGATIVE WINDING / subtraction, untested. openscad's soup winding reaches -1; the
   {w_S>=1} threshold read should absorb it, but no subtraction carrier has exercised
   it.

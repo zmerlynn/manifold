@@ -159,11 +159,12 @@ CleanFaceProbe ClassifyCleanFaces_Probe(const Manifold::Impl& soup);
 RegularizeResult ResolveComponentDirect(const Manifold::Impl& soup, double eps);
 
 // Test hook: the micro exact tie-test behind the stage-6 SoS - the EXACT
-// orient3d sign (0 iff the four points are exactly coplanar).  ONE integer path
-// (sos::ExactOrient3D), adaptive-width two's-complement accumulator, TOTAL for
-// every finite-double input (no window-fail, no expansion fallback).  Exposed
-// so the property pin can grade it directly (filter agreement, antisymmetry,
-// constructed exact zeros, scaling invariance).
+// orient3d sign (0 iff the four points are exactly coplanar).  The w==1
+// instantiation of the ONE homogeneous predicate form
+// (sos::HomogOrient3DSign<true>), adaptive-width two's-complement accumulator,
+// TOTAL for every finite-double input (no window-fail, no expansion fallback).
+// Exposed so the property pin can grade it directly (filter agreement,
+// antisymmetry, constructed exact zeros, scaling invariance).
 int Orient3DExactSignProbe(const vec3& a, const vec3& b, const vec3& c,
                            const vec3& d);
 

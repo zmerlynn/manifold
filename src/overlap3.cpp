@@ -529,55 +529,94 @@ inline int Parity(const int s[4]) {
       if (s[i] > s[j]) p = -p;
   return p;
 }
-// A determinant term: sign * |product of <= 3 mantissas| * 2^e.  |product| <
-// 2^159 (three 53-bit mantissas) fits in three 64-bit limbs.
-struct Term {
-  uint64_t mag[3];
+// A determinant term: sign * |product of <= NMag*(64/53) mantissas| * 2^e.  The
+// magnitude limb width NMag is a compile-time parameter of the ONE homogeneous
+// form (homog-design): NMag==3 holds a <=3-factor product (2^159, the
+// historical orient3d) and NMag==8 holds a <=9-factor product (2^477, the
+// degree-9 constructed-point orient2d).  The degree-3 instantiation is
+// bit-for-bit the historical width-3 term.
+template <int NMag>
+struct TermN {
+  uint64_t mag[NMag];
   long e;
   int sign;
 };
+using Term = TermN<3>;  // the historical width-3 term (orient3d / SoS)
 // Adaptive two's-complement accumulator width.  Each coord is m*2^E with |m| <
 // 2^53 and E = ex - 53, ex the frexp exponent in [-1073, 1024], so E in
-// [-1126, 971] and a three-factor exponent esum in [-3378, 2913]: the term
-// spread is <= 6291 bits, the accumulator <= 159 + 6291 + carry bits, so 112
-// limbs is a PROVABLE upper bound (never approached on same-scale mesh data,
-// where the spread is a handful of bits).  The active limb count is computed
-// per call from the actual spread; the fixed storage just guarantees totality.
-constexpr int kAccumLimbs = 112;
-// |product of the cnt (nonzero) mantissas| -> mag[3]; returns the product sign.
-inline int MulMag(const int64_t* pm, int cnt, uint64_t mag[3]) {
-  mag[0] = 1;
-  mag[1] = 0;
-  mag[2] = 0;
-  int sg = 1;
-  uint64_t a[3];
-  for (int i = 0; i < cnt; ++i) {
-    a[i] = (uint64_t)(pm[i] < 0 ? -pm[i] : pm[i]);
-    if (pm[i] < 0) sg = -sg;
+// [-1126, 971].  For the degree-3 form a three-factor esum in [-3378, 2913]
+// gives a <= 6291-bit spread and 112 limbs was a provable bound.  The degree-9
+// constructed-point orient2d (homog-design) needs more: 9*53 = 477 magnitude
+// bits and a worst-case exponent spread 9*(971-(-1126)) = 18873 bits, so
+// (477 + 18873)/64 + 3 ~= 305 limbs -> 320 keeps the "total by construction,
+// never window-fail" guarantee for BOTH forms.  Measured active width on
+// mesh-scale data (incl. the near-parallel wedge family): 12 limbs.  The active
+// limb count is computed per call from the actual spread; the fixed storage
+// just guarantees totality (a ~2.5KB stack array; zero runtime change on mesh
+// data).
+constexpr int kAccumLimbs = 320;
+// |product of the cnt (nonzero) mantissas| -> mag[NMag]; returns the product
+// sign.  NMag==3 is the historical <=3-factor orient3d specialization
+// (unchanged, bit-for-bit); NMag>3 is the general schoolbook multiply used by
+// the degree-9 constructed-point orient2d (<= 9 factors -> 8 limbs).
+template <int NMag>
+inline int MulMagN(const int64_t* pm, int cnt, uint64_t mag[NMag]) {
+  if constexpr (NMag == 3) {
+    mag[0] = 1;
+    mag[1] = 0;
+    mag[2] = 0;
+    int sg = 1;
+    uint64_t a[3];
+    for (int i = 0; i < cnt; ++i) {
+      a[i] = (uint64_t)(pm[i] < 0 ? -pm[i] : pm[i]);
+      if (pm[i] < 0) sg = -sg;
+    }
+    if (cnt == 1) {
+      mag[0] = a[0];
+    } else if (cnt == 2) {
+      const unsigned __int128 p = (unsigned __int128)a[0] * a[1];
+      mag[0] = (uint64_t)p;
+      mag[1] = (uint64_t)(p >> 64);
+    } else if (cnt == 3) {
+      const unsigned __int128 p12 = (unsigned __int128)a[0] * a[1];
+      const uint64_t lo = (uint64_t)p12, hi = (uint64_t)(p12 >> 64);
+      const unsigned __int128 pLo = (unsigned __int128)lo * a[2];
+      const unsigned __int128 pHi = (unsigned __int128)hi * a[2] + (pLo >> 64);
+      mag[0] = (uint64_t)pLo;
+      mag[1] = (uint64_t)pHi;
+      mag[2] = (uint64_t)(pHi >> 64);
+    }
+    return sg;
+  } else {
+    for (int L = 0; L < NMag; ++L) mag[L] = 0;
+    mag[0] = 1;
+    int sg = 1;
+    for (int i = 0; i < cnt; ++i) {
+      const uint64_t f = (uint64_t)(pm[i] < 0 ? -pm[i] : pm[i]);
+      if (pm[i] < 0) sg = -sg;
+      unsigned __int128 carry = 0;
+      for (int L = 0; L < NMag; ++L) {
+        const unsigned __int128 p = (unsigned __int128)mag[L] * f + carry;
+        mag[L] = (uint64_t)p;
+        carry = p >> 64;
+      }
+    }
+    return sg;
   }
-  if (cnt == 1) {
-    mag[0] = a[0];
-  } else if (cnt == 2) {
-    const unsigned __int128 p = (unsigned __int128)a[0] * a[1];
-    mag[0] = (uint64_t)p;
-    mag[1] = (uint64_t)(p >> 64);
-  } else if (cnt == 3) {
-    const unsigned __int128 p12 = (unsigned __int128)a[0] * a[1];
-    const uint64_t lo = (uint64_t)p12, hi = (uint64_t)(p12 >> 64);
-    const unsigned __int128 pLo = (unsigned __int128)lo * a[2];
-    const unsigned __int128 pHi = (unsigned __int128)hi * a[2] + (pLo >> 64);
-    mag[0] = (uint64_t)pLo;
-    mag[1] = (uint64_t)pHi;
-    mag[2] = (uint64_t)(pHi >> 64);
-  }
-  return sg;
 }
-// acc[0..nLimbs) += sign * (mag << shift), two's complement.
-inline void AddShiftedMag(uint64_t* acc, int nLimbs, const uint64_t mag[3],
-                          int shift, int sign) {
+// Historical name kept for the width-3 callers (orient3d / SoS): a forward to
+// the specialization above (instruction-identical after inlining).
+inline int MulMag(const int64_t* pm, int cnt, uint64_t mag[3]) {
+  return MulMagN<3>(pm, cnt, mag);
+}
+// acc[0..nLimbs) += sign * (mag << shift), two's complement.  NMag = term
+// magnitude width (3 = orient3d, 8 = degree-9 orient2d).
+template <int NMag>
+inline void AddShiftedMagN(uint64_t* acc, int nLimbs, const uint64_t mag[NMag],
+                           int shift, int sign) {
   const int limbShift = shift / 64, bitShift = shift % 64;
   uint64_t tmp[kAccumLimbs] = {0};
-  for (int i = 0; i < 3; ++i) {
+  for (int i = 0; i < NMag; ++i) {
     const int dst = i + limbShift;
     if (dst >= 0 && dst < nLimbs) {
       tmp[dst] |= mag[i] << bitShift;
@@ -601,24 +640,30 @@ inline void AddShiftedMag(uint64_t* acc, int nLimbs, const uint64_t mag[3],
   }
 }
 // Sign of the exact integer sum of the terms.  Adaptive width, total (no
-// refusal): the true sum fits the two's-complement window by construction.
-inline int SumSign(const Term* t, int nT) {
+// refusal): the true sum fits the two's-complement window by construction. NMag
+// = term magnitude width; the magnitude-bit budget is NMag*64 (192 for the
+// historical width-3 form, 512 for the degree-9 form).
+template <int NMag>
+inline int SumSignN(const TermN<NMag>* t, int nT) {
   if (nT == 0) return 0;
   long emin = t[0].e, emax = t[0].e;
   for (int i = 1; i < nT; ++i) {
     emin = std::min(emin, t[i].e);
     emax = std::max(emax, t[i].e);
   }
-  int nLimbs = (int)((192 + (emax - emin)) / 64) + 3;
+  int nLimbs = (int)((NMag * 64 + (emax - emin)) / 64) + 3;
   if (nLimbs > kAccumLimbs) nLimbs = kAccumLimbs;  // never hit (proven bound)
   uint64_t acc[kAccumLimbs] = {0};
   for (int i = 0; i < nT; ++i)
-    AddShiftedMag(acc, nLimbs, t[i].mag, (int)(t[i].e - emin), t[i].sign);
+    AddShiftedMagN<NMag>(acc, nLimbs, t[i].mag, (int)(t[i].e - emin),
+                         t[i].sign);
   if (acc[nLimbs - 1] >> 63) return -1;
   for (int i = 0; i < nLimbs; ++i)
     if (acc[i]) return 1;
   return 0;
 }
+// Historical name kept for the width-3 callers (orient3d / SoS).
+inline int SumSign(const Term* t, int nT) { return SumSignN<3>(t, nT); }
 inline void Decompose(const double pts[4][3], int64_t M[4][3], int E[4][3]) {
   for (int r = 0; r < 4; ++r)
     for (int c = 0; c < 3; ++c) {
@@ -634,22 +679,54 @@ inline void Decompose(const double pts[4][3], int64_t M[4][3], int E[4][3]) {
       E[r][c] = ex - 53;
     }
 }
-// Exact orient3d sign (the e^0 coefficient), 0 iff the four points are exactly
-// coplanar.  TOTAL: no window-fail; the 0 is a genuine geometric tie.
-inline int ExactOrient3D(const double pts[4][3]) {
-  int64_t M[4][3];
-  int E[4][3];
-  Decompose(pts, M, E);
-  Term t[24];
+// Homogeneous companion of Decompose: split each of the 4x4 homogeneous
+// coordinates d into (mantissa M, exponent E) with d == M*2^E, |M| < 2^53.
+inline void DecomposeH(const double pts[4][4], int64_t M[4][4], int E[4][4]) {
+  for (int r = 0; r < 4; ++r)
+    for (int c = 0; c < 4; ++c) {
+      const double d = pts[r][c];
+      if (d == 0.0) {
+        M[r][c] = 0;
+        E[r][c] = 0;
+        continue;
+      }
+      int ex;
+      const double f = std::frexp(d, &ex);
+      M[r][c] = (int64_t)std::ldexp(f, 53);
+      E[r][c] = ex - 53;
+    }
+}
+// The ONE blessed exact predicate FORM (homog-design): the sign of the
+// homogeneous orientation determinant of four points (X,Y,Z,W), corrected by
+// sign(prod W_i) - see the TRIPWIRE at Orient3DExactSign.  TrivialW=true is the
+// INPUT-POINT orient3d instantiation: each point has W==1 (an input double
+// point is the intersection of its three trivial axis planes, denominator 1),
+// so the W column is the literal ones column (skipped exactly as the historical
+// ExactOrient3D) and sign(prod W)=+1 - the loop is then BIT-FOR-BIT the
+// historical orient3d (24 permutations, <=3-factor width-3 accumulation, the 0
+// iff the four points are exactly coplanar).  TrivialW=false keeps the W column
+// (4-factor terms) and multiplies in the weight-product sign; it is not
+// instantiated in production (the two production instantiations are this
+// TrivialW=true orient3d and the degree-9 HomogOrient2DSign).  TOTAL: no
+// window-fail; an exact 0 is a genuine geometric tie.
+template <bool TrivialW>
+inline int HomogOrient3DSign(const double pts[4][4]) {
+  int64_t M[4][4];
+  int E[4][4];
+  DecomposeH(pts, M, E);
+  constexpr int NMag = TrivialW ? 3 : 4;
+  TermN<NMag> t[24];
   int nT = 0;
   for (const auto& s : kPerm) {
-    int64_t pm[3];
+    int64_t pm[4];
     long pe = 0;
     int cnt = 0;
     bool zero = false;
     for (int r = 0; r < 4; ++r) {
       const int c = s[r];
-      if (c == 3) continue;  // the ones column
+      if constexpr (TrivialW) {
+        if (c == 3) continue;  // the W column is the literal ones column
+      }
       if (M[r][c] == 0) {
         zero = true;
         break;
@@ -658,11 +735,19 @@ inline int ExactOrient3D(const double pts[4][3]) {
       pe += E[r][c];
     }
     if (zero) continue;
-    t[nT].sign = Parity(s) * MulMag(pm, cnt, t[nT].mag);
+    t[nT].sign = Parity(s) * MulMagN<NMag>(pm, cnt, t[nT].mag);
     t[nT].e = pe;
     ++nT;
   }
-  return SumSign(t, nT);
+  const int detSign = SumSignN<NMag>(t, nT);
+  if constexpr (TrivialW) {
+    return detSign;  // prod W_i == 1, sign +1
+  } else {
+    int w = 1;
+    for (int r = 0; r < 4; ++r)
+      if (pts[r][3] < 0.0) w = -w;
+    return detSign * w;
+  }
 }
 // Symbolically-perturbed orient3d sign (never 0 for distinct idx).  Enumerates
 // all 24*8 monomials, groups by the e-exponent K, and returns the sign of the
@@ -764,33 +849,54 @@ inline int Orient3DFilterSign(const vec3& a, const vec3& b, const vec3& c,
 }
 
 // The micro exact tie-test: the EXACT orient3d sign, 0 iff the four points are
-// exactly coplanar.  ONE integer path (sos::ExactOrient3D), TOTAL for every
-// finite-double input.
+// exactly coplanar.  TOTAL for every finite-double input.
 // TRIPWIRE (owner contract, docs/Regularize3D.md open list): this is the ONE
-// blessed exact predicate FORM.  Additional CALLERS are fine as long as each
-// stays FILTER-FIRST (exact fires only behind a filter 0, zero new arithmetic)
-// - current callers: the EdgePiercesTriSoS edge-in-plane guard and the
-// winding-crossing escalation (WindCrossTri, shared by the O(nTri) walk, the
-// winding broadphase, the once-per-component seed-sign precompute, and the
-// RecordSeams phantom-seam guard's strict-interior pierce test - cleanPierce is
-// not a distinct caller, it rides this chain), the junction registry's
-// input-vertex-on-edge arm (InputVertexStrictlyOnEdge - exact collinearity/
-// between-ness on input doubles, via ExactOrient2DDrop), and the triple-point
-// seam-crossing test (ExactSegProperCross/ExactOrient2DDrop - exact in-plane
-// orient2d, drop the dominant normal axis, refuting the near-tangent phantom
-// crossings the rounded-projection double crossing test over-detected in
-// EnumerateTriplePoints) (plus the test probe).  The tie
-// cascade Orient3DSoS no
-// longer calls it: its SoS K==0 group already IS this exact sign, so a pre-SoS
-// shortcut was provably redundant and was dropped.  A SECOND predicate FORM
-// stays tripwired: if one is ever needed, VENDOR Shewchuk's public-domain
-// predicates.c - do NOT rebuild expansion arithmetic piecemeal.  The certified
-// fast path never touches it.
+// blessed exact predicate FORM - the sign of a homogeneous orientation
+// determinant corrected by sign(prod W_i), summed on the ONE adaptive-width
+// integer accumulator (sos::SumSignN).  It has exactly TWO instantiations:
+//  (1) INPUT-POINT ORIENT3D (degree 3): four points with W==1 (an input double
+//      point == the intersection of its three trivial axis planes, denominator
+//      1).  The W column is the literal ones column and the weight-product sign
+//      is +1, so this instantiation (sos::HomogOrient3DSign<true>) is
+//      BIT-IDENTICAL to the historical orient3d (same 24-permutation,
+//      <=3-factor width-3 accumulation) - every existing caller unchanged: the
+//      EdgePiercesTriSoS edge-in-plane guard; the winding-crossing escalation
+//      (WindCrossTri, shared by the O(nTri) walk, the winding broadphase, the
+//      once-per-component seed-sign precompute, and the RecordSeams
+//      phantom-seam guard's strict-interior pierce test); the junction
+//      registry's input-vertex-on-edge arm (InputVertexStrictlyOnEdge, via
+//      ExactOrient2DDrop); the seam-crossing test (ExactSegProperCross/
+//      ExactOrient2DDrop, exact in-plane orient2d on the ROUNDED seam endpoint
+//      doubles, drop the dominant normal axis); the tie cascade Orient3DSoS
+//      (whose SoS K==0 group IS this exact sign); and the test probe.
+//  (2) CONSTRUCTED-POINT ORIENT2D (degree 9): three in-face crossing points,
+//      each the Cramer intersection of a plane triple {F,g,h} (homogeneous
+//      X,Y,W are 3x3 determinants of the plane coefficients).  This is the SAME
+//      form at degree 9 (sos::HomogOrient2DSign): filter-first via the degree-9
+//      construction-aware static bound (C*u*Pdet, the all-abs companion Pdet -
+//      the naive final-determinant permanent is UNSOUND, it collapses in the
+//      near-parallel wedge regime); on a filter-0 the exact homogeneous sign
+//      fires on sos::SumSignN; an exact zero is a GENUINE coincidence
+//      (concurrent triple points / aliased crossing) routed to the level-0
+//      incidence path (nomerge), never a perturbation - the new site needs no
+//      SoS (SoS stays input-point-scoped).
+// A THIRD instantiation of a NEW DEGREE (or any new constructed-point form) is
+// an OWNER DECISION - it widens the accumulator's proven totality bound and
+// needs a new per-degree filter constant; never add one silently.  Vendoring
+// rule intact: if an exact primitive OUTSIDE this one form is ever needed,
+// VENDOR Shewchuk's public-domain predicates.c - do NOT rebuild expansion
+// arithmetic piecemeal.  The certified fast path never touches the exact
+// kernel.
 inline int Orient3DExactSign(const vec3& a, const vec3& b, const vec3& c,
                              const vec3& d) {
-  const double pts[4][3] = {
-      {a.x, a.y, a.z}, {b.x, b.y, b.z}, {c.x, c.y, c.z}, {d.x, d.y, d.z}};
-  return sos::ExactOrient3D(pts);
+  // The w==1 instantiation of the ONE form: an input point is the intersection
+  // of its three trivial axis planes (denominator 1), so W==1 and this is
+  // bit-identical to the historical orient3d (harness h1/h1b: 0 diff / 1.5e7).
+  const double pts[4][4] = {{a.x, a.y, a.z, 1.0},
+                            {b.x, b.y, b.z, 1.0},
+                            {c.x, c.y, c.z, 1.0},
+                            {d.x, d.y, d.z, 1.0}};
+  return sos::HomogOrient3DSign<true>(pts);
 }
 
 // The complete orient3d decision (docs/Regularize3D.md stage 6): the certified
