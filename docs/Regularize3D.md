@@ -597,13 +597,25 @@ REACHABLY-TRIPPED ARMS (a live carrier forces each):
   SPEC (the only path across the wall): an EXACT per-face near-tangent 2D
   arrangement over CONSTRUCTED intersection points.  The single tripwire crossing
   is orient2d on a constructed near-tangent point (not on input coords).
-  PRICE, two owner-gated options behind the kernel tripwire: carry each crossing
-  SYMBOLICALLY as its plane-triple {f,g,h} and evaluate orient2d via
-  degree-bounded coefficients on the existing Orient3DExactSign accumulator (ONE
-  new predicate FORM, zero vendored code), or vendor Shewchuk predicates.c
-  (strictly more code, the fallback if a second FORM is ever needed).  The radial
-  order and the winding half are FREE - the wall is purely the constructed-
-  crossing exact 2D arrangement.
+  STATUS (homog-design): the exact predicate is now LANDED and VALIDATED - the
+  degree-9 constructed-point orient2d (sos::HomogOrient2DExact / the
+  construction-aware HomogOrient2DFilter, instantiation (2) of the ONE homogeneous
+  form, on the widened SumSignN<8> accumulator; validated ZERO disagreements vs an
+  exact-rational oracle over 1.3M random + near-parallel-wedge plane triples).  It
+  is wired at the seam-crossing enumeration (ExactTripleStrictlyInFace) to REFINE
+  the existence decision - the exact constructed crossing must be strictly
+  interior to the face - which refutes the rounded-straddle phantoms byte-cleanly
+  on the whole resolving corpus.  MEASURED (this landing): the exact predicate
+  alone does NOT close the openscad residue.  Replacing the rounded-endpoint
+  segment straddle OUTRIGHT with the constructed-crossing test OVER-detects (it
+  ignores the seam SEGMENT extent - the seam LINES cross inside the face at ~30x
+  the rate the finite overlap SEGMENTS do), manufacturing spurious triples that
+  break the resolving carriers.  So the residue's remaining net-new surface is NOT
+  the crossing predicate (landed) but the seam ENDPOINTS carried as SYMBOLIC
+  plane-triples {F, edge-face-a, edge-face-b} (their once-only exact extent), so
+  the straddle itself becomes exact - the ~600-1300 LOC exact-arrangement plumbing
+  f4-r6/nomerge priced separately.  The radial order and the winding half remain
+  FREE.
   (GT7863, GT7081, and PokedCube reached this wall historically but now RESOLVE
   oracle-graded: their residue was ARRANGEMENT-INCOMPLETENESS from an unsound
   shares-vertex broadphase skip, not an emission-representability wall.  openscad
