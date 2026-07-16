@@ -1936,53 +1936,6 @@ bool BuildAxisDropFrame(const vec3& faceN, const vec3& planePt,
   return true;
 }
 
-// LEGACY orthonormal frame (e1 along origin->edgeTip, e2 = nHat x e1). Retained
-// only for the not-yet-migrated FoldCoplanarClusters + clean-face junction
-// split (they still reconstruct in-plane crossings via a0 + x*e1 + y*e2);
-// deleted once those paths move to AxisDropFrame::lift.
-struct PlaneFrame {
-  vec3 origin, e1, e2, nHat;
-  std::vector<vec2> verts2;
-  std::vector<vec3> canon3;
-  std::map<std::tuple<double, double, double>, int> vidx;
-  vec2 proj(const vec3& P) const {
-    return vec2(la::dot(P - origin, e1), la::dot(P - origin, e2));
-  }
-  int add(const vec3& P) {
-    const std::tuple<double, double, double> key{P.x, P.y, P.z};
-    auto it = vidx.find(key);
-    if (it != vidx.end()) return it->second;
-    const int id = static_cast<int>(verts2.size());
-    verts2.push_back(proj(P));
-    canon3.push_back(P);
-    vidx.emplace(key, id);
-    return id;
-  }
-  int addAt(const vec2& p2, const vec3& canon) {
-    const std::tuple<double, double, double> key{canon.x, canon.y, canon.z};
-    auto it = vidx.find(key);
-    if (it != vidx.end()) return it->second;
-    const int id = static_cast<int>(verts2.size());
-    verts2.push_back(p2);
-    canon3.push_back(canon);
-    vidx.emplace(key, id);
-    return id;
-  }
-};
-bool BuildPlaneFrame(const vec3& faceN, const vec3& origin, const vec3& edgeTip,
-                     PlaneFrame& pf) {
-  const double nLen = la::length(faceN);
-  if (!(nLen > 0.0)) return false;
-  const vec3 e1raw = edgeTip - origin;
-  const double e1Len = la::length(e1raw);
-  if (!(e1Len > 0.0)) return false;
-  pf.nHat = faceN / nLen;
-  pf.origin = origin;
-  pf.e1 = e1raw / e1Len;
-  pf.e2 = la::cross(pf.nHat, pf.e1);
-  return true;
-}
-
 // ---------------------------------------------------------------------------
 // B1: ONCE-ONLY 3-FACE TRIPLE POINTS (arrangement-vertex-first, f4-design-b/c).
 //
@@ -2057,11 +2010,11 @@ inline int ExactOrient2DDrop(const vec3& p, const vec3& q, const vec3& r,
 // on a face whose normal's dominant axis is `axis`: each segment's endpoints
 // strictly straddle the other's supporting line (four ExactOrient2DDrop signs),
 // excluding collinear / endpoint-touching contacts.  Replaced the double
-// SegProperCross2D (level-0 la::cross on the ROUNDED per-face PlaneFrame
-// projection) in the triple-point enumeration, which OVER-detected near-tangent
-// phantom crossings (dbl=1/ex=0) the exact sign refutes - byte-identical on
-// every resolving carrier (double and exact agree there), removing only phantom
-// triples on the near-tangent openscad residue.
+// SegProperCross2D (level-0 la::cross on the former rounded orthonormal
+// per-face projection) in the triple-point enumeration, which OVER-detected
+// near-tangent phantom crossings (dbl=1/ex=0) the exact sign refutes -
+// byte-identical on every resolving carrier (double and exact agree there),
+// removing only phantom triples on the near-tangent openscad residue.
 inline bool ExactSegProperCross(const vec3& p0, const vec3& p1, const vec3& q0,
                                 const vec3& q1, int axis) {
   const int o1 = ExactOrient2DDrop(p0, p1, q0, axis);
@@ -2127,11 +2080,12 @@ void EnumerateTriplePoints(BuildArrangement& A,
         const int ph = planeId[A.faceSeams[f][k2].other];
         if (ph == planeId[f] || ph == pg) continue;  // collinear / degenerate
         // EXACT proper crossing on the shared 3D seam endpoints (the once-only
-        // input constructions), filter-first.  The double crossing test on the
-        // ROUNDED per-face pf.proj coords OVER-detected near-tangent phantom
-        // crossings the exact sign refutes; the on-seam split position below
-        // stays double (keyed by the once-only 3D triple point, not a
-        // decision).
+        // input constructions), filter-first.  The crossing DECISION is taken
+        // on the 3D coords via ExactOrient2DDrop, never on the projected seg[];
+        // the on-seam split position below is a double SegLineIntersect2D on
+        // the exact axis-drop seg coords, but only orders the pre-split (the
+        // emitted vertex is keyed by the once-only 3D triple point, not this
+        // position).
         if (!ExactSegProperCross(A.faceSeams[f][k1].p0, A.faceSeams[f][k1].p1,
                                  A.faceSeams[f][k2].p0, A.faceSeams[f][k2].p1,
                                  axis))
@@ -2676,12 +2630,14 @@ void FoldCoplanarClusters(std::vector<OutTri3D>& out, const Manifold::Impl& in,
       }
     const int f0 = faces[0];
     const vec3 a0 = A.tri[f0][0];
-    PlaneFrame pf;
-    if (!BuildPlaneFrame(A.faceN[f0], a0, A.tri[f0][1], pf)) {
+    // The cluster plane -> the dominant axis of the fitted (f0) normal; a0
+    // fixes the plane offset for lift.
+    AxisDropFrame pf;
+    if (!BuildAxisDropFrame(A.faceN[f0], a0, pf)) {
       ok = false;
       return;
     }
-    const vec3 &nHat = pf.nHat, &e1 = pf.e1, &e2 = pf.e2;
+    const vec3& nHat = pf.nHat;
     // Input verts (dedup by canonical 3D bit pattern) + triangle-boundary
     // edges; each member triangle carries its signed orientation vs nHat.
     std::vector<vec2>& verts2 = pf.verts2;
@@ -2763,9 +2719,9 @@ void FoldCoplanarClusters(std::vector<OutTri3D>& out, const Manifold::Impl& in,
     // splitting the edge that ends on it - RO2DProbe, reg3d-s4-verify Audit
     // 2a). The winding rule is irrelevant here (we consume only the
     // subdivision). Every arrangement vertex lies in this exact plane, so a NEW
-    // crossing position's 3D image is a0 + x*e1 + y*e2 (an input vert keeps its
-    // canonical 3D via getP; the eps-box match folds a merged endpoint back
-    // onto its input vert).
+    // crossing position's 3D image is the axis-drop lift of its 2D coords (an
+    // input vert keeps its canonical 3D via getP; the eps-box match folds a
+    // merged endpoint back onto its input vert).
     std::vector<vec2> pts = verts2;
     std::vector<vec3> pts3 = canon3;
     auto getP = [&](const vec2& q) {
@@ -2774,7 +2730,7 @@ void FoldCoplanarClusters(std::vector<OutTri3D>& out, const Manifold::Impl& in,
           return k;
       const int id = static_cast<int>(pts.size());
       pts.push_back(q);
-      pts3.push_back(a0 + q.x * e1 + q.y * e2);
+      pts3.push_back(pf.lift(q));
       return id;
     };
     std::vector<std::vector<vec2>> edgeSubdiv;
@@ -2869,7 +2825,10 @@ void FoldCoplanarClusters(std::vector<OutTri3D>& out, const Manifold::Impl& in,
                              : (va + vb + vc) / 3.0;
       const double inrad = lsum > 0.0 ? bestArea / lsum : 0.0;  // 2*area/perim
       cen2 += 0.25 * inrad * la::normalize(vec2(0.4359, 0.9000));
-      const vec3 cen3 = a0 + cen2.x * e1 + cen2.y * e2;
+      // cen2 is a 2D-born interior point (no 3D preimage): lift it onto the
+      // cluster plane.  Still strictly interior to the sub-triangle (the drop
+      // is an affine image), so a valid winding probe.
+      const vec3 cen3 = pf.lift(cen2);
       int m = 0;
       for (const FaceTri& ft : ftris)
         if (PointInTri2D(cen2, ft.p0, ft.p1, ft.p2)) m += ft.s;
@@ -3011,9 +2970,9 @@ bool EmitCleanFaces(std::vector<OutTri3D>& out, const Manifold::Impl& in,
     // (uniform coverage), so every sub-triangle carries its OWN retained
     // orientation (2D-CCW -> +nHat = original).  No interior junction -> the
     // single-triangle emit, byte-identical (the whole corpus off openscad).
-    PlaneFrame pf;
+    AxisDropFrame pf;
     if (A.junctions.empty() ||
-        !BuildPlaneFrame(A.faceN[t], A.tri[t][0], A.tri[t][1], pf)) {
+        !BuildAxisDropFrame(A.faceN[t], A.tri[t][0], pf)) {
       if (rev)
         out.push_back({A.tri[t][0], A.tri[t][2], A.tri[t][1]});
       else
