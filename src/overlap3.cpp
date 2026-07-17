@@ -74,7 +74,29 @@ struct OutTri3D {
 // EnumerateTriplePoints under F4B_DUMP; empty in production.
 static std::set<std::tuple<double, double, double>> gF4BTriplePts;
 
-bool SplitTouchingSheets(std::vector<vec3>& verts, Vec<ivec3>& tv) {
+// `sheetN` (OPTIONAL, per-triangle, parallel to tv): pre-weld ORIENTED sheet
+// normals - the plane-group provenance of each emitted triangle (the group's
+// representative normal, signed by the emitted winding).  When present, the
+// NEAR-TANGENT RADIAL BRANCH is enabled:
+//   1. fan ring angles come from the provenance ray cross(n, heDir) instead
+//      of the third-vertex chord (the eps-weld bends sub-eps-thin triangles,
+//      so their chord reads up to radians wrong - measured 2.4 rad at a
+//      micro corner - while sheets 0.004 rad apart must order correctly);
+//   2. doubled directed edges surviving the vertex split (a true X-contact
+//      whose two material wedges legitimately reconnect around BOTH
+//      endpoints) are repaired by SUBDIVIDING one copy's triangle pair at a
+//      point on the edge - a pointwise-identical surface in representable
+//      form.
+// Identity/provenance-over-distance: the pairing decisions use pre-weld
+// information the weld destroys, never wider tolerances.  A same-group
+// forward/backward pair does NOT imply a continuing sheet (oracle-refuted:
+// a crease pairing each side with a transversal wall also presents as
+// 1fwd+1bwd of one group), so no identity-based pre-pairing exists - the
+// ring alternation on honest angles is the pairing rule.  When `sheetN` is
+// absent (the per-face production path), behavior is BYTE-IDENTICAL to the
+// chord-angle form.
+bool SplitTouchingSheets(std::vector<vec3>& verts, Vec<ivec3>& tv,
+                         const std::vector<vec3>* sheetN = nullptr) {
   const int nTri = static_cast<int>(tv.size());
   auto heFrom = [&](int h) { return tv[h / 3][h % 3]; };
   auto heTo = [&](int h) { return tv[h / 3][(h % 3 + 1) % 3]; };
@@ -153,6 +175,16 @@ bool SplitTouchingSheets(std::vector<vec3>& verts, Vec<ivec3>& tv) {
     ring.reserve(hes.size());
     vec3 u(0.0), v(0.0);
     for (const int h : hes) {
+      // Ring direction: the third-vertex CHORD, in BOTH modes.  A
+      // provenance-ray variant (cross(sheetN, heDir)) was built and
+      // MEASURED-REFUTED: at the micro X-contact the fan structure is
+      // RADIUS-DEPENDENT (the near-tangent wedge sheets pass within
+      // ~1e-11 of the edge, not through it, so their crossing order at
+      // r=1e-8 is the REVERSE of their r->0 ray order) - no single per-
+      // sheet angle exists and the ray ordering broke alternation on a fan
+      // the chord ordering pairs oracle-TRUE.  The chord pairing was
+      // verified against exact sector windings on every multi-sheet fan of
+      // the carrier corpus.
       const int c = tv[h / 3][(h % 3 + 2) % 3];
       vec3 d = verts[c] - pa;
       d -= la::dot(d, ax) * ax;
@@ -197,6 +229,18 @@ bool SplitTouchingSheets(std::vector<vec3>& verts, Vec<ivec3>& tv) {
       if (cur.fwd == nxt.fwd) {  // material overlap
         if (!kF4BDump) return false;
         ++cOverlap;
+        std::fprintf(
+            stderr, "F4B_OVERLAP at (%.9g,%.9g,%.9g)->(%.9g,%.9g,%.9g) ring:",
+            verts[edge.first].x, verts[edge.first].y, verts[edge.first].z,
+            verts[edge.second].x, verts[edge.second].y, verts[edge.second].z);
+        for (const RingEntry& r : ring) {
+          std::fprintf(stderr, " %.6f%s", r.angle, r.fwd ? "f" : "b");
+          if (sheetN != nullptr) {
+            const vec3& n = (*sheetN)[r.he / 3];
+            std::fprintf(stderr, "[n=%.3g,%.3g,%.3g]", n.x, n.y, n.z);
+          }
+        }
+        std::fprintf(stderr, "\n");
         badFan = true;
         break;
       }
@@ -252,6 +296,60 @@ bool SplitTouchingSheets(std::vector<vec3>& verts, Vec<ivec3>& tv) {
     }
     tv[t][k] = it->second;
   }
+  // DOUBLED-EDGE SUBDIVISION (radial branch only): a true X-contact edge
+  // whose two material wedges legitimately RECONNECT around both endpoints
+  // survives the vertex split as two undirected copies of one vertex pair -
+  // a surface the halfedge representation cannot carry (Is2Manifold forbids
+  // duplicate directed edges).  Subdivide every copy beyond the first at a
+  // distinct interior point of the (shared) segment: the surface is
+  // pointwise unchanged, the topology becomes representable, and the
+  // pairing already proved each copy a coherent two-triangle sheet pair.
+  // Identity-free callers skip this byte-identically (their fatal stands).
+  if (sheetN != nullptr) {
+    std::map<std::pair<int, int>, std::vector<int>> und;  // undirected -> hes
+    for (int h = 0; h < 3 * nTri; ++h) {
+      const int a = tv[h / 3][h % 3], b = tv[h / 3][(h % 3 + 1) % 3];
+      und[{std::min(a, b), std::max(a, b)}].push_back(h);
+    }
+    for (const auto& kv : und) {
+      if (kv.second.size() <= 2) continue;
+      // group the halfedges into their paired two-triangle sheets; keep the
+      // first pair on the original edge, subdivide each further pair at a
+      // distinct parameter (1/2, 1/3, ...).
+      std::set<int> seen;
+      int extra = 0;
+      for (const int h : kv.second) {
+        if (seen.count(h)) continue;
+        const int p = pairedHe[h];
+        seen.insert(h);
+        seen.insert(p);
+        // a triangle already subdivided under another doubled edge no longer
+        // carries this halfedge's original corners - leave it (the manifold
+        // gate stays the fail-closed backstop for the unhandled residue)
+        auto still = [&](int hh) {
+          const int a = tv[hh / 3][hh % 3], b = tv[hh / 3][(hh % 3 + 1) % 3];
+          return std::minmax(a, b) ==
+                 std::minmax(kv.first.first, kv.first.second);
+        };
+        if (!still(h) || !still(p)) continue;
+        if (extra++ == 0) continue;  // first copy keeps the edge
+        const double tSplit = 1.0 / static_cast<double>(extra);
+        const int u = kv.first.first, w = kv.first.second;
+        const int m = static_cast<int>(verts.size());
+        verts.push_back(verts[u] + tSplit * (verts[w] - verts[u]));
+        for (const int hh : {h, p}) {
+          const int t = hh / 3, k = hh % 3;
+          const ivec3 tri = tv[t];
+          // replace edge (tri[k], tri[k+1]) by (tri[k], m) in place and
+          // append the (m, tri[k+1]) half
+          ivec3 t2 = tri;
+          t2[k] = m;
+          tv[t][(k + 1) % 3] = m;
+          tv.push_back(t2);
+        }
+      }
+    }
+  }
   return true;
 }
 
@@ -272,8 +370,13 @@ struct GridCellHash {
   }
 };
 
-StageResult<Manifold::Impl> BuildImpl(const std::vector<OutTri3D>& tris,
-                                      double eps) {
+// `sheetN` (OPTIONAL, parallel to `tris`): pre-weld ORIENTED sheet normals,
+// carried through the weld/filter into SplitTouchingSheets' fan pairing (the
+// near-tangent radial branch).  Absent = byte-identical to the identity-free
+// pipeline.
+StageResult<Manifold::Impl> BuildImpl(
+    const std::vector<OutTri3D>& tris, double eps,
+    const std::vector<vec3>* sheetN = nullptr) {
   if (tris.empty()) return StageResult<Manifold::Impl>::Ok(Manifold::Impl{});
 
   // Collect verts with an eps-weld.  A uniform hash grid (cell = eps) over the
@@ -316,8 +419,10 @@ StageResult<Manifold::Impl> BuildImpl(const std::vector<OutTri3D>& tris,
   // the 2-manifold topology.
   Vec<ivec3> tv;
   tv.reserve(tris.size());
+  std::vector<vec3> tvN;  // sheet normal per KEPT triangle (when supplied)
   std::set<std::tuple<int, int, int>> seenTris;
-  for (const auto& tri : tris) {
+  for (size_t i = 0; i < tris.size(); ++i) {
+    const OutTri3D& tri = tris[i];
     const int v0 = getVertIdx(tri.v[0]);
     const int v1 = getVertIdx(tri.v[1]);
     const int v2 = getVertIdx(tri.v[2]);
@@ -336,11 +441,12 @@ StageResult<Manifold::Impl> BuildImpl(const std::vector<OutTri3D>& tris,
     }
     if (!seenTris.insert({a, b, c}).second) continue;  // exact duplicate
     tv.push_back({v0, v1, v2});
+    if (sheetN != nullptr) tvN.push_back((*sheetN)[i]);
   }
 
   // Touching sheets separate BEFORE the topology is built (spec COPLANAR
   // implementation close: touching contacts).
-  if (!SplitTouchingSheets(verts, tv)) {
+  if (!SplitTouchingSheets(verts, tv, sheetN != nullptr ? &tvN : nullptr)) {
     return StageResult<Manifold::Impl>::Fatal(FatalReason::NonManifoldEmission,
                                               "unresolvable sheet contact");
   }
@@ -6060,8 +6166,9 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
   };
 
   std::vector<OutTri3D> out;
-  std::vector<int> outG;  // per-tri emitting group (diagnostics)
-  int suspectTotal = 0;   // snap-grid identity audit (owner invariant 2)
+  std::vector<int> outG;   // per-tri emitting group (diagnostics)
+  std::vector<vec3> outN;  // per-tri ORIENTED sheet normal (radial branch)
+  int suspectTotal = 0;    // snap-grid identity audit (owner invariant 2)
   // MEMOIZED CONSTRUCTION (owner directive; the campaign's memoize-values
   // principle = the stage-2 shape): every constructed point is committed
   // ONCE under its canonical identity; every later path LOOKS IT UP -
@@ -7276,6 +7383,9 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
         else
           out.push_back({{pos3[t.x], pos3[t.z], pos3[t.y]}});
         outG.push_back(g);
+        // oriented sheet provenance: the group's exact representative plane
+        // normal, signed by the emitted winding (the radial-branch payload)
+        outN.push_back(static_cast<double>(orient) * Nrep);
       }
     }
     suspectTotal += suspectSnaps;
@@ -7319,7 +7429,9 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
       std::fclose(fp);
     }
   }
-  return BuildImpl(out, eps);
+  // Sheet provenance rides through the weld: the radial branch's fan pairing
+  // is provenance-driven where the chord angle is weld-bent noise.
+  return BuildImpl(out, eps, &outN);
 }
 
 // Two-pass driver: pass 1 collects the failing walks' observed self-crossing
@@ -7763,6 +7875,25 @@ RegularizeResult RemoveOverlaps3D(const Manifold::Impl& in, double eps) {
                  // a DEBUG_ASSERT: it must fail closed in RELEASE, not compile
                  // out and admit wrong geometry.
                  if (GateComponent(bImpl) != GateVerdict::Clean) {
+                   if (std::getenv("E1_DUMP") != nullptr)
+                     std::fprintf(
+                         stderr, "E1 REGATE manifold=%d selfx=%d coplanar=%d\n",
+                         (bImpl.IsManifold() && bImpl.Is2Manifold()) ? 1 : 0,
+                         bImpl.IsSelfIntersecting() ? 1 : 0,
+                         HasCoplanarOverlap(bImpl) ? 1 : 0);
+                   if (const char* rf = std::getenv("E1_REGATEDUMP")) {
+                     if (FILE* fp = std::fopen(rf, "w")) {
+                       for (size_t t = 0; t < bImpl.halfedge_.size() / 3; ++t) {
+                         for (int k = 0; k < 3; ++k) {
+                           const vec3& p =
+                               bImpl.vertPos_[bImpl.halfedge_.Start(3 * t + k)];
+                           std::fprintf(fp, "%la %la %la ", p.x, p.y, p.z);
+                         }
+                         std::fprintf(fp, "\n");
+                       }
+                       std::fclose(fp);
+                     }
+                   }
                    co[i].fatal = FatalReason::NonManifoldEmission;
                    co[i].detail = "resolver output failed the re-gate";
                    return;
@@ -7797,6 +7928,24 @@ RegularizeResult RemoveOverlaps3D(const Manifold::Impl& in, double eps) {
 
   // 6. COMPOSE BACK by concatenation (no fusion).
   result.impl = ComposeComponents(outComponents);
+  if (const char* of = std::getenv("E1_OUTFILE")) {  // offline oracle grading
+    if (FILE* fp = std::fopen(of, "w")) {
+      const Manifold::Impl& m = *result.impl;
+      for (size_t t = 0; t < m.halfedge_.size() / 3; ++t) {
+        std::fprintf(fp, "%la %la %la %la %la %la %la %la %la\n",
+                     m.vertPos_[m.halfedge_.Start(3 * t)].x,
+                     m.vertPos_[m.halfedge_.Start(3 * t)].y,
+                     m.vertPos_[m.halfedge_.Start(3 * t)].z,
+                     m.vertPos_[m.halfedge_.Start(3 * t + 1)].x,
+                     m.vertPos_[m.halfedge_.Start(3 * t + 1)].y,
+                     m.vertPos_[m.halfedge_.Start(3 * t + 1)].z,
+                     m.vertPos_[m.halfedge_.Start(3 * t + 2)].x,
+                     m.vertPos_[m.halfedge_.Start(3 * t + 2)].y,
+                     m.vertPos_[m.halfedge_.Start(3 * t + 2)].z);
+      }
+      std::fclose(fp);
+    }
+  }
   return result;
 }
 
