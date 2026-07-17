@@ -6029,6 +6029,9 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
     return a < b ? SegKey{a, b} : SegKey{b, a};
   };
   std::map<std::pair<e1::K3, SegKey>, vec3> footMemo;
+  // registry provenance (E1_DUMP diagnostics): position bits -> producer tag
+  std::map<e1::K3, const char*> regProv;
+  const char* curProducer = "?";
   int dustTri = 0, triFail = 0, spliceFail = 0;
   int nCells = 0, nNeg = 0, nJump = 0, nBoundary = 0, nOwned = 0, nDustCell = 0;
   const double scale = in.bBox_.Scale();
@@ -6193,6 +6196,7 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
         if (KeyOf(pr.second) == KeyOf(V)) return false;
       splits[si].push_back({t, V});
       if (buildPhase) lineReg[lineKeyOf(si)].emplace(KeyOf(V), V);
+      if (buildPhase && kDump) regProv.emplace(KeyOf(V), curProducer);
       return true;
     };
     // PER-LINE REGISTRY READ (both phases): every line's accumulated split
@@ -6211,7 +6215,7 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
         const vec3& V = kv.second;
         const double t = la::dot(V - s.p0, d3) / len2;
         if (!(t > 0.0 && t < 1.0)) continue;
-        if (la::length(V - s.p0 - t * d3) > 8.0 * rho) continue;
+        if (la::length(V - s.p0 - t * d3) > 2.0 * rho) continue;
         addSplit(i, V);
       }
     }
@@ -6276,7 +6280,7 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
         // (snap grid), so the exchange converges. 8*rho: the canonical snap
         // grid moves split points up to rho off their segment lines, so on-line
         // tests must budget the snap displacement
-        const double tolLine = 8.0 * rho;
+        const double tolLine = 2.0 * rho;
         for (int round = 0; round < 4; ++round) {
           std::vector<vec3> pool;
           pool.reserve(2 * segs.size());
@@ -6304,64 +6308,6 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
           if (!added) break;
         }
 
-        // COLLINEAR-BUNDLE FOOT EXCHANGE: an input-vert mesh edge and the
-        // constructed seam of the same corner line differ by ~eps (the input's
-        // own placement noise) - two parallel chains AT the weld margin whose
-        // independent subdivisions leave unmergeable stubs (measured: 1-eps-
-        // separated corner chains, sub-edges 1e-8..1e-5).  For segment pairs
-        // near-collinear within the weld scale over their overlap, insert the
-        // ON-SEGMENT FOOT of each other's splits/endpoints: the chain stays
-        // exactly straight (no bend) and each foot welds with its sibling.
-        for (int i = 0; i < nS; ++i) {
-          const vec2 a0 = e1::Drop2(segs[i].p0, axis),
-                     a1 = e1::Drop2(segs[i].p1, axis);
-          const vec2 di = a1 - a0;
-          const double li = la::length(di);
-          if (!(li > 0.0)) continue;
-          for (int j = i + 1; j < nS; ++j) {
-            const vec2 b0 = e1::Drop2(segs[j].p0, axis),
-                       b1 = e1::Drop2(segs[j].p1, axis);
-            if (std::max(a0.x, a1.x) < std::min(b0.x, b1.x) - 2.0 * eps ||
-                std::max(b0.x, b1.x) < std::min(a0.x, a1.x) - 2.0 * eps ||
-                std::max(a0.y, a1.y) < std::min(b0.y, b1.y) - 2.0 * eps ||
-                std::max(b0.y, b1.y) < std::min(a0.y, a1.y) - 2.0 * eps)
-              continue;
-            const vec2 dj = b1 - b0;
-            const double lj = la::length(dj);
-            if (!(lj > 0.0)) continue;
-            if (std::abs(la::cross(di, b0 - a0)) / li > 2.0 * eps ||
-                std::abs(la::cross(di, b1 - a0)) / li > 2.0 * eps ||
-                std::abs(la::cross(dj, a0 - b0)) / lj > 2.0 * eps ||
-                std::abs(la::cross(dj, a1 - b0)) / lj > 2.0 * eps)
-              continue;  // not a near-collinear bundle at weld scale
-            auto footEx = [&](int si, int sj) {
-              const Seg& s = segs[si];
-              const vec3 d3 = s.p1 - s.p0;
-              const double len2 = la::dot(d3, d3);
-              if (!(len2 > 0.0)) return;
-              const SegKey sk = segKeyOf(s.p0, s.p1);
-              auto tryV = [&](const vec3& V) {
-                const double t = la::dot(V - s.p0, d3) / len2;
-                if (!(t > 0.0 && t < 1.0)) return;
-                const std::pair<e1::K3, SegKey> fk{e1::KeyOf(V), sk};
-                const auto itf = footMemo.find(fk);
-                vec3 F;
-                if (itf != footMemo.end()) {
-                  F = itf->second;
-                } else {
-                  F = s.p0 + t * d3;
-                  footMemo.emplace(fk, F);
-                }
-                addSplit(si, F);
-              };
-              tryV(segs[sj].p0);
-              tryV(segs[sj].p1);
-              for (const auto& pr : splits[sj]) tryV(pr.second);
-            };
-            footEx(i, j);
-            footEx(j, i);
-          }
-        }
         // PLANARITY COMPLETION (all remaining segment-pair crossings): the
         // exact seam-x-seam enumeration and the endpoint pool cover the
         // canonical crossings, but the drawn (rounded) graph must be PLANAR for
@@ -7094,6 +7040,21 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
                  static_cast<int>(out.size()), dustTri, triFail, spliceFail,
                  nCells, nNeg, nJump, nOwned, nBoundary, nDustCell,
                  suspectTotal);
+  if (buildPhase && kDump && std::getenv("E1_REGDUMP")) {
+    for (const auto& kv : lineReg)
+      for (const auto& e2 : kv.second) {
+        const vec3& P = e2.second;
+        if (std::abs(P.x + 18.0) < 1e-9 && std::abs(P.y - 2.36572) < 5e-5 &&
+            P.z > -204.4 && P.z < -203.9) {
+          const auto ip = regProv.find(e2.first);
+          std::fprintf(stderr,
+                       "E1 REG line=(%d,%d,%d) p=(%.10g,%.10g,%.10g) %s\n",
+                       std::get<0>(kv.first), std::get<1>(kv.first),
+                       std::get<2>(kv.first), P.x, P.y, P.z,
+                       ip != regProv.end() ? ip->second : "?");
+        }
+      }
+  }
   if (buildPhase)
     return StageResult<Manifold::Impl>::Fatal(
         FatalReason::DirtyComponentUnresolved, "e1: build phase");
