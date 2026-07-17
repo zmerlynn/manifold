@@ -5976,6 +5976,15 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
         eSeams[f2].push_back({p0, p1, f});
       }
     }
+    if (const char* ef = std::getenv("E1_ESEAMS")) {
+      const int ff = std::atoi(ef);
+      for (const ESeam& s : eSeams[ff])
+        std::fprintf(stderr,
+                     "E1 ESEAM f=%d other=%d gid=%d p0=(%.10g,%.10g,%.10g) "
+                     "p1=(%.10g,%.10g,%.10g)\n",
+                     ff, s.other, gid[s.other], s.p0.x, s.p0.y, s.p0.z, s.p1.x,
+                     s.p1.y, s.p1.z);
+    }
     if (kDump) {
       int nseam = 0;
       for (const auto& v : eSeams) nseam += static_cast<int>(v.size());
