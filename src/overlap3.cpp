@@ -42,9 +42,7 @@ namespace manifold {
 
 namespace {
 
-struct OutTri3D {
-  vec3 v[3];
-};
+using OutTri3D = std::array<vec3, 3>;
 
 // ---------------------------------------------------------------------------
 // Assembly: weld verts, drop exact-duplicate triangles, build Impl.
@@ -299,9 +297,9 @@ StageResult<Manifold::Impl> BuildImpl(const std::vector<OutTri3D>& tris,
   std::set<std::tuple<int, int, int>> seenTris;
   for (size_t i = 0; i < tris.size(); ++i) {
     const OutTri3D& tri = tris[i];
-    const int v0 = getVertIdx(tri.v[0]);
-    const int v1 = getVertIdx(tri.v[1]);
-    const int v2 = getVertIdx(tri.v[2]);
+    const int v0 = getVertIdx(tri[0]);
+    const int v1 = getVertIdx(tri[1]);
+    const int v2 = getVertIdx(tri[2]);
     if (v0 == v1 || v1 == v2 || v0 == v2) continue;
     // Canonical key: rotate so smallest vertex is first, preserving
     // orientation.
@@ -406,19 +404,16 @@ std::vector<Manifold::Impl> DecomposeComponents(const Manifold::Impl& in,
   }
 
   const int numTri = static_cast<int>(in.NumTri());
-  for (int c = 0; c < numComponents; ++c) {
-    // Compact this component's verts; vertNew2Old feeds ReindexVerts.
-    Vec<int> vertNew2Old;
-    for (int v = 0; v < numVert; ++v)
-      if (vertLabel[v] == c) vertNew2Old.push_back(v);
-    if (vertNew2Old.empty()) continue;
+  std::vector<Vec<int>> componentVerts(numComponents),
+      componentFaces(numComponents);
+  for (int v = 0; v < numVert; ++v) componentVerts[vertLabel[v]].push_back(v);
+  for (int f = 0; f < numTri; ++f)
+    componentFaces[vertLabel[in.halfedge_.Start(3 * f)]].push_back(f);
 
-    // Faces whose first vert carries this label; halfedge connectivity
-    // guarantees all three verts of a face share it.
-    Vec<int> faceNew2Old;
-    for (int f = 0; f < numTri; ++f)
-      if (vertLabel[in.halfedge_.Start(3 * f)] == c) faceNew2Old.push_back(f);
-    if (faceNew2Old.empty()) continue;
+  for (int c = 0; c < numComponents; ++c) {
+    const Vec<int>& vertNew2Old = componentVerts[c];
+    const Vec<int>& faceNew2Old = componentFaces[c];
+    if (vertNew2Old.empty() || faceNew2Old.empty()) continue;
 
     Manifold::Impl comp;
     comp.vertPos_.resize(vertNew2Old.size());
@@ -1831,8 +1826,7 @@ struct BuildArrangement {
   std::vector<std::array<int, 3>> vid;
   std::vector<vec3> faceN;  // la::cross(b-a,c-a), unnormalized outward
   // planeId[f] = face2cluster[f]>=0 ? nTri+cluster : f - the plane a face lies
-  // on, coplanar clusters collapsed to one id. Populated once in
-  // ResolveComponent and consumed by the coordinated engine.
+  // on, coplanar clusters collapsed to one id.
   std::vector<int> planeId;
   bool ok = true;  // false = a structural anomaly (fail closed)
 };
@@ -1897,6 +1891,7 @@ BuildArrangement RecordSeams(const Manifold::Impl& in,
   A.tri.resize(nTri);
   A.vid.resize(nTri);
   A.faceN.resize(nTri);
+  A.planeId.resize(nTri);
   std::vector<Box> box(nTri);
   for (int t = 0; t < nTri; ++t) {
     for (int k = 0; k < 3; ++k) {
@@ -1905,6 +1900,7 @@ BuildArrangement RecordSeams(const Manifold::Impl& in,
     }
     A.faceN[t] =
         la::cross(A.tri[t][1] - A.tri[t][0], A.tri[t][2] - A.tri[t][0]);
+    A.planeId[t] = face2cluster[t] >= 0 ? nTri + face2cluster[t] : t;
     box[t].min = la::min(la::min(A.tri[t][0], A.tri[t][1]), A.tri[t][2]);
     box[t].max = la::max(la::max(A.tri[t][0], A.tri[t][1]), A.tri[t][2]);
   }
@@ -1926,7 +1922,6 @@ BuildArrangement RecordSeams(const Manifold::Impl& in,
     cache.emplace(key, p);
     return p;
   };
-  auto bboxOverlap = [&](int i, int j) { return box[i].DoesOverlap(box[j]); };
   // Vertices used by each coplanar cluster (all lie on that cluster's plane):
   // an edge touching a folded plane at one of ITS OWN cluster vertices is a
   // riser vertex, not a transversal vertex-on-face SoS tie.
@@ -1939,7 +1934,7 @@ BuildArrangement RecordSeams(const Manifold::Impl& in,
         clusterVerts[face2cluster[f]].insert(A.vid[f][k]);
   for (int i = 0; i < nTri; ++i) {
     for (int j = i + 1; j < nTri; ++j) {
-      if (!bboxOverlap(i, j)) continue;
+      if (!box[i].DoesOverlap(box[j])) continue;
       // Probe counters (test hook): the level-0 self-crossing classification
       // EnumerateComponent_Probe reports, folded onto THIS scan so no separate
       // enumeration pass is needed.  Non-adjacent (shares-vertex skipped, S4a)
@@ -2461,15 +2456,13 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
   // union the engine emitted each cluster face as its own group and the
   // mutual footprints rang unpaired (measured: the near-coplanar folds'
   // 4+3 fan1 opens at SplitTouchingSheets).
-  if (!A.planeId.empty()) {
-    std::map<int, int> firstOfPlane;
-    for (int f = 0; f < nTri; ++f) {
-      const auto it = firstOfPlane.find(A.planeId[f]);
-      if (it == firstOfPlane.end())
-        firstOfPlane.emplace(A.planeId[f], f);
-      else
-        uf[find(f)] = find(it->second);
-    }
+  std::map<int, int> firstOfPlane;
+  for (int f = 0; f < nTri; ++f) {
+    const auto it = firstOfPlane.find(A.planeId[f]);
+    if (it == firstOfPlane.end())
+      firstOfPlane.emplace(A.planeId[f], f);
+    else
+      uf[find(f)] = find(it->second);
   }
   for (int i = 0; i < nTri; ++i)
     for (int j = i + 1; j < nTri; ++j) {
@@ -2518,10 +2511,6 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
   for (int f = 0; f < nTri; ++f) flTriArr[f] = A.tri[f];
   const TriWindBVH flBvh = BuildTriWindBVH(flTriArr, in.bBox_);
   std::vector<int> flCands;
-  auto flBoxQuery = [&](const vec3& lo, const vec3& hi) {
-    WindCandidates(flBvh, lo, hi, flCands);
-    std::sort(flCands.begin(), flCands.end());
-  };
 
   // ---- 1b. ENGINE SEAMS: UNGATED exact tri-tri intersection segments ----
   // The validation pass is representability-gated (F11 sub-eps collapse,
@@ -2797,7 +2786,6 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
   // remains as (a) the one absolute anchor for every non-outer subgraph and
   // (b) the E1_FLOODDIFF shadow validator.
   struct FlNode {
-    int g = -1;
     int jump = 0, ownJump = 0;
     int sPosMid = 0;       // covering sheets with stackWin < tPos < 2T at cenP
     int sZero = 0;         // covering foreign sheets with tPos == 0 at cenP
@@ -3681,7 +3669,8 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
       // covering gid owns the cell.
       std::vector<std::pair<double, int>> nearD;
       const double m = 1e-6 * (1.0 + scale);
-      flBoxQuery(cenP - vec3(m), cenP + vec3(m));
+      WindCandidates(flBvh, cenP - vec3(m), cenP + vec3(m), flCands);
+      std::sort(flCands.begin(), flCands.end());
       for (const int f2 : flCands) {
         if (gid[f2] == g) continue;
         // ALONG-nHat crossing distance: the probe segment runs along nHat,
@@ -3790,7 +3779,6 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
         FlNode fn;
         fn.nearSign = std::move(nearSign);
         fn.hasBand = hasBand;
-        fn.g = g;
         fn.jump = jump;
         fn.ownJump = ownJump;
         fn.sPosMid = sPosMid;
@@ -4774,14 +4762,6 @@ StageResult<Manifold::Impl> ResolveComponent(const Manifold::Impl& dirty,
         FatalReason::DirtyComponentUnresolved,
         "resolver: a self-crossing pair had a non-2-endpoint seam "
         "(degenerate incidence) - fail-closed");
-  }
-  // Hoist planeId (coplanar clusters collapsed to one id) for the coordinated
-  // engine instead of recomputing it locally.
-  {
-    const int nTri = static_cast<int>(A.tri.size());
-    A.planeId.assign(nTri, 0);
-    for (int f = 0; f < nTri; ++f)
-      A.planeId[f] = face2cluster[f] >= 0 ? nTri + face2cluster[f] : f;
   }
   // The coordinated engine is the only emission path. Its certificates and
   // the re-gate preserve fail-closed behavior; there is no fallback path.
