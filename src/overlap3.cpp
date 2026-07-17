@@ -355,6 +355,23 @@ StageResult<Manifold::Impl> BuildImpl(const std::vector<OutTri3D>& tris,
   // touching contact welds into a genuinely non-manifold union - the honest
   // outcome is this named fatal, not a downstream assertion.
   if (!impl.IsManifold() || !impl.Is2Manifold()) {
+    if (std::getenv("E1_DUMP") != nullptr) {
+      std::fprintf(stderr, "E1 GATE IsManifold=%d Is2Manifold=%d\n",
+                   impl.IsManifold() ? 1 : 0, impl.Is2Manifold() ? 1 : 0);
+      std::map<std::pair<int, int>, int> dcnt;
+      for (const ivec3& t : tv)
+        for (int k = 0; k < 3; ++k) ++dcnt[{t[k], t[(k + 1) % 3]}];
+      for (const auto& kv : dcnt)
+        if (kv.second > 1) {
+          const vec3& p = verts[kv.first.first];
+          const vec3& q = verts[kv.first.second];
+          std::fprintf(stderr,
+                       "E1 DUPEDGE x%d v%d(%.9g,%.9g,%.9g) -> "
+                       "v%d(%.9g,%.9g,%.9g)\n",
+                       kv.second, kv.first.first, p.x, p.y, p.z,
+                       kv.first.second, q.x, q.y, q.z);
+        }
+    }
     return StageResult<Manifold::Impl>::Fatal(
         FatalReason::NonManifoldEmission,
         "emitted triangulation not 2-manifold");
@@ -6064,6 +6081,7 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
   const char* curProducer = "?";
   int dustTri = 0, triFail = 0, spliceFail = 0;
   int nCells = 0, nNeg = 0, nJump = 0, nBoundary = 0, nOwned = 0, nDustCell = 0;
+  int nPancake = 0;
   const double scale = in.bBox_.Scale();
 
   for (int g = 0; g < nG; ++g) {
@@ -7061,21 +7079,74 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
           break;
       }
       const double off = 2.0 * T;
+      const int ownJump = jump;  // own-group net, before the stack merge
       bool owned = false;
+      bool stackMerged = false;
+      int ownerFace = -1;
+      // merged stack sheets as (signed along-nHat position, crossing sign):
+      // the LAYER structure between the sheets decides whether a
+      // net-cancelled stack is a material slab or a void one (sheet order is
+      // constant across a cell - cells are split at the mutual seams).
+      std::vector<std::pair<double, int>> stackSheets;
       for (const auto& dn : nearD) {
         if (dn.first > T) break;
         if (!covers(dn.second)) continue;
         if (gid[dn.second] < g) {
           owned = true;
+          ownerFace = dn.second;
           break;
         }
-        jump += la::dot(A.faceN[dn.second], nHat) >= 0.0 ? 1 : -1;
+        const int s = la::dot(A.faceN[dn.second], nHat) >= 0.0 ? 1 : -1;
+        const double tPos =
+            -la::dot(A.faceN[dn.second], cenP - A.tri[dn.second][0]) /
+            la::dot(A.faceN[dn.second], nHat);
+        jump += s;
+        stackSheets.push_back({tPos, s});
+        stackMerged = true;
       }
       if (owned) {
+        if (probeHit)
+          std::fprintf(stderr, "E1 PROBEAT g=%d OWNED by f=%d gid=%d\n", g,
+                       ownerFace, gid[ownerFace]);
         ++nOwned;
         continue;  // a lower covering group owns this stack cell
       }
-      if (jump == 0) continue;  // net-cancelled: not a sheet
+      // PANCAKE ARM: a net-cancelled STACK (own sheet + sub-weld-close
+      // foreign sheets summing to zero) over a cell of REPRESENTABLE width
+      // is a material/void slab thinner than the weld radius but wider than
+      // it: its bounding sheets collapse to one membrane at assembly, yet
+      // its SIDE CHAINS (up to a few eps apart) do not weld - dropping the
+      // cell leaves the neighbours' sheets ringing an unpairable hole
+      // (measured: the two near-tangent corner strips, oracle transects
+      // 0|1|0 across a 2.5e-11 slab).  The stack OWNER emits the collapsed
+      // membrane ONCE, oriented as its OWN sheet so it continues the
+      // own-plane neighbours; the certificate for an invisible slab is
+      // probe agreement (wA == wB).  A same-plane cancellation
+      // (ownJump == 0, no stack) stays dropped: exactly-coplanar sheets
+      // cancel pointwise and the neighbouring fans pair without a cap.
+      // A sub-weld-WIDE pancake also stays dropped: its side chains weld
+      // together and the hole closes in the assembly.
+      const bool pancake = (jump == 0 && stackMerged && ownJump != 0);
+      if (jump == 0 && !pancake) continue;  // net-cancelled: not a sheet
+      if (pancake) {
+        // Dust rule for pancakes is EXTENT-outright (the dust-dot rule),
+        // NOT altitude: a strip 0.96 eps wide does NOT weld closed when its
+        // side-chain vertices are staggered along the strip (measured: the
+        // corner strip, chains 0.96 eps apart laterally, nearest vertices
+        // 3.4 eps apart) - the vertex weld never pairs the chains and only
+        // the cap can.  Only a cell welding to a single POINT is skippable.
+        vec2 lo{1e300, 1e300}, hi{-1e300, -1e300};
+        for (const int lv : loop) {
+          const vec2 p = e1::Drop2(pos3[lv], axis);
+          lo = la::min(lo, p);
+          hi = la::max(hi, p);
+        }
+        if (std::max(hi.x - lo.x, hi.y - lo.y) <= 0.99 * eps) {
+          ++nDustCell;
+          continue;  // dust dot: welds to a point
+        }
+        ++nPancake;
+      }
       const std::optional<int> wA = RobustWinding(in, cenP + off * nHat, seeds);
       const std::optional<int> wB = RobustWinding(in, cenP - off * nHat, seeds);
       if (!wA || !wB) {
@@ -7085,7 +7156,7 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
                        cen3.x, cen3.y, cen3.z, off);
         return fail("e1: winding probe filter-uncertain - fail-closed");
       }
-      const bool certified = (*wB - *wA == jump);
+      const bool certified = pancake ? (*wA == *wB) : (*wB - *wA == jump);
       // COMPLETENESS CERTIFICATE: probed delta == combinatorial covering jump
       if (!certified) {
         // a DUST cell - WIDTH below the weld scale - cannot be probed (its
@@ -7158,8 +7229,42 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
                      "E1 PROBEAT g=%d jump=%d wA=%d wB=%d off=%.3g cert=%d\n",
                      g, jump, *wA, *wB, off, certified ? 1 : 0);
       const bool aIn = *wA >= 1, bIn = *wB >= 1;
-      if (aIn == bIn) continue;         // not a {w>=1} boundary here
-      const int orient = bIn ? 1 : -1;  // +1: solid below, outward = +nHat
+      if (!pancake && aIn == bIn) continue;  // not a {w>=1} boundary here
+      if (pancake) {
+        // LAYER CERTIFICATE for the slab: walking down from the wA probe,
+        // accumulate w across the sheets in SIGNED along-nHat order; the
+        // slab is MATERIAL only if some inter-sheet layer is {w>=1} while
+        // the outside is not (measured: the corner-C slab walks 0|1|0 =
+        // material, cap; a corner-D anti-above-own patch walks 0|-1|0 =
+        // void, where a cap is an oracle-false EXTRA sheet).  Sheets at
+        // exactly equal positions merge first: a zero-thickness layer holds
+        // no material.  An outside-material pancake (wA>=1, a sub-weld
+        // crack) regularizes FILLED: no membrane.
+        if (aIn) continue;
+        std::vector<std::pair<double, int>> layers = stackSheets;
+        layers.push_back({0.0, ownJump});
+        std::sort(
+            layers.begin(), layers.end(),
+            [](const std::pair<double, int>& x,
+               const std::pair<double, int>& y) { return x.first > y.first; });
+        int w = *wA;
+        bool material = false;
+        for (size_t k = 0; k < layers.size();) {
+          size_t j = k;
+          int dsum = 0;
+          while (j < layers.size() && layers[j].first == layers[k].first) {
+            dsum += layers[j].second;
+            ++j;
+          }
+          w += dsum;
+          if (j < layers.size() && w >= 1) material = true;
+          k = j;
+        }
+        if (!material) continue;  // void slab: nothing to cap
+      }
+      // +1: solid below, outward = +nHat; a pancake membrane continues the
+      // OWN sheet's orientation (the probes agree, so bIn is uninformative)
+      const int orient = pancake ? (ownJump > 0 ? 1 : -1) : (bIn ? 1 : -1);
       ++nBoundary;
       for (const ivec3& t : tris) {
         const vec3 nr = la::cross(pos3[t.y] - pos3[t.x], pos3[t.z] - pos3[t.x]);
@@ -7179,9 +7284,9 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
     std::fprintf(stderr,
                  "E1 emitted=%d dust=%d triFail=%d spliceFail=%d cells=%d "
                  "neg=%d jump=%d owned=%d boundary=%d dustCell=%d "
-                 "suspectSnaps=%d\n",
+                 "pancake=%d suspectSnaps=%d\n",
                  static_cast<int>(out.size()), dustTri, triFail, spliceFail,
-                 nCells, nNeg, nJump, nOwned, nBoundary, nDustCell,
+                 nCells, nNeg, nJump, nOwned, nBoundary, nDustCell, nPancake,
                  suspectTotal);
   if (buildPhase && kDump && std::getenv("E1_REGDUMP")) {
     for (const auto& kv : lineReg)
@@ -7524,6 +7629,10 @@ StageResult<Manifold::Impl> ResolveComponent(const Manifold::Impl& dirty,
   // E1_ENGINE=1 enables (default OFF until the openscad closure flips the pin).
   if (r.fatal && std::getenv("E1_ENGINE") != nullptr) {
     StageResult<Manifold::Impl> e1r = EmitCoordinatedBoundary(in, A, eps);
+    if (std::getenv("E1_DUMP") != nullptr)
+      std::fprintf(stderr, "E1 HOOK production-fatal=%s engine-fatal=%s\n",
+                   r.detail.c_str(),
+                   e1r.fatal ? e1r.detail.c_str() : "(resolved)");
     if (!e1r.fatal) return e1r;
   }
   return r;
