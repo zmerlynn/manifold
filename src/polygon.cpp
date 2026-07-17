@@ -1007,4 +1007,185 @@ std::vector<ivec3> Triangulate(const Polygons& polygons, double epsilon,
   return TriangulateIdx(polygonsIndexed, epsilon, allowConvex);
 }
 
+// ---------------------------------------------------------------------------
+// EXACT (opt-in) triangulation mode - exacttri.
+//
+// WHY THIS EXISTS beside the tolerance EarClip above (measured on the
+// Regularize3D openscad carrier, s2-tri lane): the resolver triangulates
+// arrangement cells whose signed area can sit at or below the WELD SCALE
+// (2x area down to ~1e-13 at coordinate magnitude ~200).  Its emission
+// orients each triangle by the sign of dot(triangleNormal, groupPlaneNormal),
+// and at that scale the sign is numerical NOISE - as is the cell's own
+// shoelace sign.  Adjacent dust cells nonetheless pair their shared boundary
+// edges because this triangulator is EXACT and DETERMINISTIC: the two cells'
+// diagonalizations produce near-mirror triangles across the shared edge, so
+// the two noise-signs stay ANTI-correlated and the emission's orientation
+// flip emits the edge anti-parallel on the two sides.  A tolerance
+// triangulation of the same loops (the EarClip above - identical undirected
+// boundary, identical covered area, zero failures) decorrelates the two
+// sides: the shared edge comes out parallel, the assembly's edge pairing
+// opens, and the resolver's re-gate refuses (measured: 45 open edges at
+// multi-sheet T-junctions, unchanged with allowConvex off; skipping the dust
+// cells instead makes it worse - they are load-bearing).  Exactness here is
+// a boundary-PAIRING contract, not a triangle-quality preference.
+//
+// The tolerance path above is byte-for-byte unaffected: this mode is a
+// separate opt-in entry point (exacttri::Triangulate, declared in
+// polygon_internal.h beside the shared drop-frame helpers), and every
+// orientation decision goes through the one blessed exact drop-frame
+// orient2d (ExactOrient2DDrop, defined beside the exact kernel in
+// overlap3.cpp - one predicate, one implementation).
+// ---------------------------------------------------------------------------
+
+namespace exacttri {
+
+// Exact diagonal-split triangulation of a weakly-simple CCW polygon (collinear
+// runs, pinch-repeated vertices, keyhole-duplicated bridges all allowed).
+// poly = vertex indices into pos3; emits index triples.  eps is the weld
+// radius for the dust-leaf adjudication.  Returns false when no valid
+// diagonal exists (the caller adjudicates dust vs macro failure).
+static bool DiagSplit(const std::vector<int>& poly,
+                      const std::vector<vec3>& pos3, int axis, double eps,
+                      std::vector<ivec3>& out, int depth = 0) {
+  const int n = static_cast<int>(poly.size());
+  if (n < 3 || depth > 4 * n + 64) return n < 3;
+  if (n == 3) {
+    // emit COLLINEAR leaves too: a rounded-degenerate cap triangle carries
+    // REAL boundary sub-edges - (a,m),(m,b) stitch a subdivided neighbour to
+    // an unsubdivided one through the weld (dropping them opened the fans:
+    // the emitting cell classified boundary yet its edge had no partner).
+    // A NEGATIVE leaf is a rounded fold-back: when dust-THIN its sub-edges
+    // are equally real boundary (emit, loop order); a macro-negative leaf is
+    // a genuine triangulation error (fail).
+    const int s3 = O2(pos3[poly[0]], pos3[poly[1]], pos3[poly[2]], axis);
+    if (s3 >= 0) {
+      out.push_back({poly[0], poly[1], poly[2]});
+      return true;
+    }
+    const vec2 q0 = Drop2(pos3[poly[0]], axis), q1 = Drop2(pos3[poly[1]], axis),
+               q2 = Drop2(pos3[poly[2]], axis);
+    const double a2 = std::abs(la::cross(q1 - q0, q2 - q0));
+    const double L = std::max(
+        {la::length(q1 - q0), la::length(q2 - q1), la::length(q0 - q2)});
+    if (L > 0.0 && a2 / L <= eps) {
+      out.push_back({poly[0], poly[1], poly[2]});
+      return true;
+    }
+    return false;
+  }
+  for (int i = 0; i < n; ++i) {
+    const vec3& a = pos3[poly[(i + n - 1) % n]];
+    const vec3& b = pos3[poly[i]];
+    const vec3& c = pos3[poly[(i + 1) % n]];
+    for (int jo = 2; jo <= n - 2; ++jo) {
+      const int j = (i + jo) % n;
+      const vec3& d = pos3[poly[j]];
+      if (Drop2(d, axis) == Drop2(b, axis)) continue;  // 2D twin (bridge)
+      // in-cone at i (collinear prev/next treated as convex half-plane)
+      if (O2(a, b, c, axis) >= 0) {
+        if (!(O2(b, c, d, axis) > 0 && O2(b, d, a, axis) > 0)) continue;
+      } else {
+        if (O2(b, c, d, axis) <= 0 && O2(b, d, a, axis) <= 0) continue;
+      }
+      bool ok = true;
+      for (int k = 0; k < n && ok; ++k) {
+        const int k2 = (k + 1) % n;
+        if (k == i || k2 == i || k == j || k2 == j) continue;
+        if (ProperCross2(b, d, pos3[poly[k]], pos3[poly[k2]], axis)) ok = false;
+      }
+      for (int k = 0; k < n && ok; ++k) {
+        if (k == i || k == j) continue;
+        const vec3& v = pos3[poly[k]];
+        if (Drop2(v, axis) == Drop2(b, axis) ||
+            Drop2(v, axis) == Drop2(d, axis))
+          continue;
+        if (OnOpenSeg2(b, d, v, axis)) ok = false;
+      }
+      if (!ok) continue;
+      std::vector<int> p1, p2;
+      for (int k = i;; k = (k + 1) % n) {
+        p1.push_back(poly[k]);
+        if (k == j) break;
+      }
+      for (int k = j;; k = (k + 1) % n) {
+        p2.push_back(poly[k]);
+        if (k == i) break;
+      }
+      return DiagSplit(p1, pos3, axis, eps, out, depth + 1) &&
+             DiagSplit(p2, pos3, axis, eps, out, depth + 1);
+    }
+  }
+  return false;
+}
+
+// EARCLIP-first triangulation of a weakly-simple CCW polygon (the offline-
+// validated combination): clip strictly-convex ears whose closed triangle
+// contains no other polygon vertex (inclusive blocking - duplicates block
+// conservatively), fall back to the exact diagonal splitter on a stall.
+// The slit/lollipop walks (a chord traversed on both sides with structure at
+// its end) stall a pure diagonal search but always expose ears elsewhere.
+bool Triangulate(const std::vector<int>& loop, const std::vector<vec3>& pos3,
+                 int axis, double eps, std::vector<ivec3>& out) {
+  std::vector<int> idx = loop;  // ids into pos3; slots may repeat positions
+  while (idx.size() > 3) {
+    const int m = static_cast<int>(idx.size());
+    bool found = false;
+    for (int k = 0; k < m && !found; ++k) {
+      const int a = idx[(k + m - 1) % m], b = idx[k], c = idx[(k + 1) % m];
+      if (O2(pos3[a], pos3[b], pos3[c], axis) <= 0) continue;
+      bool ok = true;
+      for (int j = 0; j < m && ok; ++j) {
+        if (j == k || j == (k + m - 1) % m || j == (k + 1) % m) continue;
+        const vec3& v = pos3[idx[j]];
+        // twin instance of a corner is not a blocker - compare in the DRAWN
+        // (2D) frame: distinct 3D identities can project to the identical 2D
+        // point (they differ only along the dropped axis - measured: such a
+        // co-projected pair blocked every adjacent ear)
+        const vec2 v2 = Drop2(v, axis);
+        if (v2 == Drop2(pos3[a], axis) || v2 == Drop2(pos3[b], axis) ||
+            v2 == Drop2(pos3[c], axis))
+          continue;
+        const int d1 = O2(pos3[a], pos3[b], v, axis);
+        const int d2 = O2(pos3[b], pos3[c], v, axis);
+        const int d3 = O2(pos3[c], pos3[a], v, axis);
+        if (d1 >= 0 && d2 >= 0 && d3 >= 0) ok = false;
+      }
+      if (!ok) continue;
+      out.push_back({a, b, c});
+      idx.erase(idx.begin() + k);
+      found = true;
+    }
+    if (!found) {
+      // stalled remainder: exact diagonal split; if THAT stalls (an eps-scale
+      // bowtie from bent sub-chains - the rounded arrangement's residue),
+      // accept the partial covering iff the remainder is WELD-DUST (width
+      // below the weld radius: it welds away; the clipped macro ears stand).
+      std::vector<ivec3> rem;
+      if (DiagSplit(idx, pos3, axis, eps, rem)) {
+        out.insert(out.end(), rem.begin(), rem.end());
+        return true;
+      }
+      const double s = LoopShoelace(idx, pos3, axis);
+      double ext = 0.0;
+      vec2 lo{1e300, 1e300}, hi{-1e300, -1e300};
+      const int mm = static_cast<int>(idx.size());
+      for (int k = 0; k < mm; ++k) {
+        const vec2 p1 = Drop2(pos3[idx[k]], axis);
+        lo = la::min(lo, p1);
+        hi = la::max(hi, p1);
+      }
+      ext = std::max(hi.x - lo.x, hi.y - lo.y);
+      return ext <= 0.0 || std::abs(0.5 * s) / ext <= 0.99 * eps;
+    }
+  }
+  if (idx.size() == 3) {
+    if (O2(pos3[idx[0]], pos3[idx[1]], pos3[idx[2]], axis) >= 0)
+      out.push_back({idx[0], idx[1], idx[2]});
+    return true;
+  }
+  return true;
+}
+
+}  // namespace exacttri
+
 }  // namespace manifold

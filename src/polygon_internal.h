@@ -14,6 +14,7 @@
 
 #pragma once
 
+#include <cmath>
 #include <cstdint>
 #include <unordered_map>
 #include <vector>
@@ -114,5 +115,93 @@ struct HalfedgeTriangulation {
 HalfedgeTriangulation TriangulateIdxHalfedges(const PolygonsIdx& polys,
                                               double epsilon = -1,
                                               bool allowConvex = true);
+
+// ---------------------------------------------------------------------------
+// EXACT (opt-in) triangulation mode - manifold::exacttri (polygon.cpp).
+//
+// The exact counterpart of the tolerance triangulator above.  Operates on 3D
+// positions projected by DOMINANT-AXIS DROP (pure coordinate selection -
+// exact), with every orientation decision made through the one blessed exact
+// drop-frame orient2d form below.  Opt-in via a separate entry point: the
+// default tolerance path (TriangulateIdx / EarClip) is byte-for-byte
+// unaffected.  See the module comment in polygon.cpp for WHY the exact mode
+// exists (it is a boundary-pairing contract, not a triangle-quality knob).
+// ---------------------------------------------------------------------------
+
+// The one blessed exact drop-frame orient2d FORM (filter-first, exact
+// escalation) - defined in overlap3.cpp beside the exact kernel (one
+// predicate, one implementation).
+int ExactOrient2DDrop(const vec3& p, const vec3& q, const vec3& r, int axis);
+
+namespace exacttri {
+
+// 2D projection by dominant-axis DROP - pure coordinate selection (exact),
+// matching ExactOrient2DDrop's convention.
+inline vec2 Drop2(const vec3& v, int axis) {
+  if (axis == 0) return {v.y, v.z};
+  if (axis == 1) return {v.x, v.z};
+  return {v.x, v.y};
+}
+
+// Exact sign of the projected orientation (a,b,c) - the landed exact-on-
+// doubles orient2d (filter-first).  NEGATED: ExactOrient2DDrop's raw
+// determinant (orient3d against a +axis lift) is NEGATIVE for a CCW triple
+// in the dropped frame (its production callers are straddle-only,
+// sign-agnostic); this module needs the standard CCW-positive convention
+// (verified: the un-negated form traced every group's OUTER contour as the
+// positive loop and failed every ear test).
+inline int O2(const vec3& a, const vec3& b, const vec3& c, int axis) {
+  return -ExactOrient2DDrop(a, b, c, axis);
+}
+
+// v strictly interior to the open segment (a,b) in the projected frame:
+// exactly collinear and strictly between in the wider coordinate.
+inline bool OnOpenSeg2(const vec3& a, const vec3& b, const vec3& v, int axis) {
+  if (O2(a, b, v, axis) != 0) return false;
+  const vec2 a2 = Drop2(a, axis), b2 = Drop2(b, axis), v2 = Drop2(v, axis);
+  if (std::abs(b2.x - a2.x) >= std::abs(b2.y - a2.y))
+    return (a2.x < v2.x) != (b2.x < v2.x);
+  return (a2.y < v2.y) != (b2.y < v2.y);
+}
+
+// Proper crossing of open segments (p,q) x (a,b) in the projected frame.
+inline bool ProperCross2(const vec3& p, const vec3& q, const vec3& a,
+                         const vec3& b, int axis) {
+  const int d1 = O2(p, q, a, axis), d2 = O2(p, q, b, axis);
+  const int d3 = O2(a, b, p, axis), d4 = O2(a, b, q, axis);
+  return d1 != 0 && d2 != 0 && d3 != 0 && d4 != 0 && d1 != d2 && d3 != d4;
+}
+
+// Signed shoelace sum (2x area) of a projected loop, accumulated about the
+// loop's OWN first vertex.  The shoelace is translation-invariant in exact
+// arithmetic; translating collapses the roundoff floor from ulp(|coord|^2)
+// (raw terms ~coord^2 cancel catastrophically) to ~ulp(span^2).  On raw
+// coordinates a micro cell far from the origin has |true s| at or below the
+// term noise and its SIGN is garbage - a real CCW cell then misroutes into
+// the hole-ring/dust arms and its half-edges vanish unpaired (measured: the
+// openscad double-vertex-fan tip triangle, |s|=5.4e-14 against term ulp
+// 5.7e-14, silently dropped -> the corner stub family).
+inline double LoopShoelace(const std::vector<int>& L,
+                           const std::vector<vec3>& pos3, int axis) {
+  if (L.empty()) return 0.0;
+  const vec2 o = Drop2(pos3[L[0]], axis);
+  double s = 0.0;
+  for (size_t k = 0; k < L.size(); ++k) {
+    const vec2 p1 = Drop2(pos3[L[k]], axis) - o;
+    const vec2 p2 = Drop2(pos3[L[(k + 1) % L.size()]], axis) - o;
+    s += p1.x * p2.y - p2.x * p1.y;
+  }
+  return s;
+}
+
+// EARCLIP-first exact triangulation of a weakly-simple CCW polygon (collinear
+// runs, pinch-repeated vertices, keyhole-duplicated bridges all allowed).
+// loop = vertex indices into pos3; emits index triples into out.  eps is the
+// weld radius (dust adjudications).  Returns false when the loop cannot be
+// covered (the caller adjudicates dust vs macro failure).
+bool Triangulate(const std::vector<int>& loop, const std::vector<vec3>& pos3,
+                 int axis, double eps, std::vector<ivec3>& out);
+
+}  // namespace exacttri
 
 }  // namespace manifold

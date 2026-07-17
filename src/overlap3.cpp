@@ -2984,8 +2984,13 @@ vec2 SegLineIntersect2D(const vec2& a, const vec2& b, const vec2& c,
 // test.  Dropping the dominant normal axis keeps the projection non-degenerate.
 // NO new predicate FORM, NO exact-on-constructed (dyadic input coords only).
 // The crossing test below compares only relative signs, so handedness is moot.
-inline int ExactOrient2DDrop(const vec3& p, const vec3& q, const vec3& r,
-                             int axis) {
+// EXPORTED (declared in polygon_internal.h, hence the namespace close/reopen):
+// the shared exact triangulation module (manifold::exacttri, polygon.cpp)
+// makes every orientation decision through this same predicate form - one
+// predicate, one implementation.
+}  // namespace
+
+int ExactOrient2DDrop(const vec3& p, const vec3& q, const vec3& r, int axis) {
   auto proj = [&](const vec3& v) -> vec3 {
     if (axis == 0) return {v.y, v.z, 0.0};
     if (axis == 1) return {v.x, v.z, 0.0};
@@ -2996,6 +3001,8 @@ inline int ExactOrient2DDrop(const vec3& p, const vec3& q, const vec3& r,
   const int s = Orient3DFilterSign(pp, qp, rp, lift);
   return s != 0 ? s : Orient3DExactSign(pp, qp, rp, lift);
 }
+
+namespace {
 
 // EXACT strict proper crossing of two coplanar 3D segments [p0,p1] and [q0,q1]
 // on a face whose normal's dominant axis is `axis`: each segment's endpoints
@@ -5669,235 +5676,30 @@ std::vector<vec3> WindingSeeds(const Box& bBox) {
 //      sheets).  COMPLETENESS CERTIFICATE: the probed winding delta must equal
 //      the combinatorial jump, else fail closed (zero-oracle-wrong).
 //   6. Boundary cells ({w>=1} transition) triangulated as polygons-WITH-HOLES
-//      (exact diagonal-split; earclip is not hole-safe), oriented per-triangle
+//      by the shared EXACT triangulator (manifold::exacttri, polygon.cpp;
+//      exact diagonal-split - earclip is not hole-safe), oriented per-triangle
 //      toward the exterior; assembled by the ordinary BuildImpl eps-weld (the
 //      offline run proved the once-rounded coordinated soup position-welds
 //      CLOSED - identity plumbing through the weld is not needed: shared
 //      doubles make every coincident vertex byte-equal).
 namespace e1 {
 
-// weld radius for the dust adjudications inside the triangulators (set by
-// the engine before each run; single-threaded fallback path)
-inline double kDustEps = 0.0;
+// The exact drop-frame helpers + the exact earclip/diagonal-split triangulator
+// RELOCATED to the shared triangulation module (manifold::exacttri,
+// polygon.cpp + polygon_internal.h) - the s2-tri unification.  The resolver's
+// e1:: spelling stays valid at every call site via these using-declarations;
+// the module comment in polygon.cpp records why the engine's cell
+// triangulation must be the EXACT mode (dust-cell orientation is noise at the
+// weld scale; only the exact deterministic diagonalization keeps shared-edge
+// emission anti-correlated across adjacent cells).
+using exacttri::Drop2;
+using exacttri::LoopShoelace;
+using exacttri::O2;
+using exacttri::OnOpenSeg2;
+using exacttri::ProperCross2;
 
 using K3 = std::tuple<double, double, double>;
 inline K3 KeyOf(const vec3& p) { return {p.x, p.y, p.z}; }
-
-// 2D projection by dominant-axis DROP - pure coordinate selection (exact),
-// matching ExactOrient2DDrop's convention.
-inline vec2 Drop2(const vec3& v, int axis) {
-  if (axis == 0) return {v.y, v.z};
-  if (axis == 1) return {v.x, v.z};
-  return {v.x, v.y};
-}
-
-// Exact sign of the projected orientation (a,b,c) - the landed exact-on-
-// doubles orient2d (filter-first).  NEGATED: ExactOrient2DDrop's raw
-// determinant (orient3d against a +axis lift) is NEGATIVE for a CCW triple
-// in the dropped frame (its production callers are straddle-only,
-// sign-agnostic); the engine needs the standard CCW-positive convention
-// (verified: the un-negated form traced every group's OUTER contour as the
-// positive loop and failed every ear test).
-inline int O2(const vec3& a, const vec3& b, const vec3& c, int axis) {
-  return -ExactOrient2DDrop(a, b, c, axis);
-}
-
-// v strictly interior to the open segment (a,b) in the projected frame:
-// exactly collinear and strictly between in the wider coordinate.
-inline bool OnOpenSeg2(const vec3& a, const vec3& b, const vec3& v, int axis) {
-  if (O2(a, b, v, axis) != 0) return false;
-  const vec2 a2 = Drop2(a, axis), b2 = Drop2(b, axis), v2 = Drop2(v, axis);
-  if (std::abs(b2.x - a2.x) >= std::abs(b2.y - a2.y))
-    return (a2.x < v2.x) != (b2.x < v2.x);
-  return (a2.y < v2.y) != (b2.y < v2.y);
-}
-
-// Proper crossing of open segments (p,q) x (a,b) in the projected frame.
-inline bool ProperCross2(const vec3& p, const vec3& q, const vec3& a,
-                         const vec3& b, int axis) {
-  const int d1 = O2(p, q, a, axis), d2 = O2(p, q, b, axis);
-  const int d3 = O2(a, b, p, axis), d4 = O2(a, b, q, axis);
-  return d1 != 0 && d2 != 0 && d3 != 0 && d4 != 0 && d1 != d2 && d3 != d4;
-}
-
-// Signed shoelace sum (2x area) of a projected loop, accumulated about the
-// loop's OWN first vertex.  The shoelace is translation-invariant in exact
-// arithmetic; translating collapses the roundoff floor from ulp(|coord|^2)
-// (raw terms ~coord^2 cancel catastrophically) to ~ulp(span^2).  On raw
-// coordinates a micro cell far from the origin has |true s| at or below the
-// term noise and its SIGN is garbage - a real CCW cell then misroutes into
-// the hole-ring/dust arms and its half-edges vanish unpaired (measured: the
-// openscad double-vertex-fan tip triangle, |s|=5.4e-14 against term ulp
-// 5.7e-14, silently dropped -> the corner stub family).
-inline double LoopShoelace(const std::vector<int>& L,
-                           const std::vector<vec3>& pos3, int axis) {
-  if (L.empty()) return 0.0;
-  const vec2 o = Drop2(pos3[L[0]], axis);
-  double s = 0.0;
-  for (size_t k = 0; k < L.size(); ++k) {
-    const vec2 p1 = Drop2(pos3[L[k]], axis) - o;
-    const vec2 p2 = Drop2(pos3[L[(k + 1) % L.size()]], axis) - o;
-    s += p1.x * p2.y - p2.x * p1.y;
-  }
-  return s;
-}
-
-// Exact diagonal-split triangulation of a weakly-simple CCW polygon (collinear
-// runs, pinch-repeated vertices, keyhole-duplicated bridges all allowed).
-// poly = vertex indices into pos3; emits index triples.  Returns false when no
-// valid diagonal exists (caller counts + fails closed via the census).
-inline bool DiagSplitFwd(const std::vector<int>& poly,
-                         const std::vector<vec3>& pos3, int axis,
-                         std::vector<ivec3>& out, int depth);
-
-// EARCLIP-first triangulation of a weakly-simple CCW polygon (the offline-
-// validated combination): clip strictly-convex ears whose closed triangle
-// contains no other polygon vertex (inclusive blocking - duplicates block
-// conservatively), fall back to the exact diagonal splitter on a stall.
-// The slit/lollipop walks (a chord traversed on both sides with structure at
-// its end) stall a pure diagonal search but always expose ears elsewhere.
-inline bool Triangulate(const std::vector<int>& loop,
-                        const std::vector<vec3>& pos3, int axis, double eps,
-                        std::vector<ivec3>& out) {
-  std::vector<int> idx = loop;  // ids into pos3; slots may repeat positions
-  while (idx.size() > 3) {
-    const int m = static_cast<int>(idx.size());
-    bool found = false;
-    for (int k = 0; k < m && !found; ++k) {
-      const int a = idx[(k + m - 1) % m], b = idx[k], c = idx[(k + 1) % m];
-      if (O2(pos3[a], pos3[b], pos3[c], axis) <= 0) continue;
-      bool ok = true;
-      for (int j = 0; j < m && ok; ++j) {
-        if (j == k || j == (k + m - 1) % m || j == (k + 1) % m) continue;
-        const vec3& v = pos3[idx[j]];
-        // twin instance of a corner is not a blocker - compare in the DRAWN
-        // (2D) frame: distinct 3D identities can project to the identical 2D
-        // point (they differ only along the dropped axis - measured: such a
-        // co-projected pair blocked every adjacent ear)
-        const vec2 v2 = Drop2(v, axis);
-        if (v2 == Drop2(pos3[a], axis) || v2 == Drop2(pos3[b], axis) ||
-            v2 == Drop2(pos3[c], axis))
-          continue;
-        const int d1 = O2(pos3[a], pos3[b], v, axis);
-        const int d2 = O2(pos3[b], pos3[c], v, axis);
-        const int d3 = O2(pos3[c], pos3[a], v, axis);
-        if (d1 >= 0 && d2 >= 0 && d3 >= 0) ok = false;
-      }
-      if (!ok) continue;
-      out.push_back({a, b, c});
-      idx.erase(idx.begin() + k);
-      found = true;
-    }
-    if (!found) {
-      // stalled remainder: exact diagonal split; if THAT stalls (an eps-scale
-      // bowtie from bent sub-chains - the rounded arrangement's residue),
-      // accept the partial covering iff the remainder is WELD-DUST (width
-      // below the weld radius: it welds away; the clipped macro ears stand).
-      std::vector<ivec3> rem;
-      if (DiagSplitFwd(idx, pos3, axis, rem, 0)) {
-        out.insert(out.end(), rem.begin(), rem.end());
-        return true;
-      }
-      const double s = LoopShoelace(idx, pos3, axis);
-      double ext = 0.0;
-      vec2 lo{1e300, 1e300}, hi{-1e300, -1e300};
-      const int mm = static_cast<int>(idx.size());
-      for (int k = 0; k < mm; ++k) {
-        const vec2 p1 = Drop2(pos3[idx[k]], axis);
-        lo = la::min(lo, p1);
-        hi = la::max(hi, p1);
-      }
-      ext = std::max(hi.x - lo.x, hi.y - lo.y);
-      return ext <= 0.0 || std::abs(0.5 * s) / ext <= 0.99 * eps;
-    }
-  }
-  if (idx.size() == 3) {
-    if (O2(pos3[idx[0]], pos3[idx[1]], pos3[idx[2]], axis) >= 0)
-      out.push_back({idx[0], idx[1], idx[2]});
-    return true;
-  }
-  return true;
-}
-
-inline bool DiagSplit(const std::vector<int>& poly,
-                      const std::vector<vec3>& pos3, int axis,
-                      std::vector<ivec3>& out, int depth = 0) {
-  const int n = static_cast<int>(poly.size());
-  if (n < 3 || depth > 4 * n + 64) return n < 3;
-  if (n == 3) {
-    // emit COLLINEAR leaves too: a rounded-degenerate cap triangle carries
-    // REAL boundary sub-edges - (a,m),(m,b) stitch a subdivided neighbour to
-    // an unsubdivided one through the weld (dropping them opened the fans:
-    // the emitting cell classified boundary yet its edge had no partner).
-    // A NEGATIVE leaf is a rounded fold-back: when dust-THIN its sub-edges
-    // are equally real boundary (emit, loop order); a macro-negative leaf is
-    // a genuine triangulation error (fail).
-    const int s3 = O2(pos3[poly[0]], pos3[poly[1]], pos3[poly[2]], axis);
-    if (s3 >= 0) {
-      out.push_back({poly[0], poly[1], poly[2]});
-      return true;
-    }
-    const vec2 q0 = Drop2(pos3[poly[0]], axis), q1 = Drop2(pos3[poly[1]], axis),
-               q2 = Drop2(pos3[poly[2]], axis);
-    const double a2 = std::abs(la::cross(q1 - q0, q2 - q0));
-    const double L = std::max(
-        {la::length(q1 - q0), la::length(q2 - q1), la::length(q0 - q2)});
-    if (L > 0.0 && a2 / L <= kDustEps) {
-      out.push_back({poly[0], poly[1], poly[2]});
-      return true;
-    }
-    return false;
-  }
-  for (int i = 0; i < n; ++i) {
-    const vec3& a = pos3[poly[(i + n - 1) % n]];
-    const vec3& b = pos3[poly[i]];
-    const vec3& c = pos3[poly[(i + 1) % n]];
-    for (int jo = 2; jo <= n - 2; ++jo) {
-      const int j = (i + jo) % n;
-      const vec3& d = pos3[poly[j]];
-      if (Drop2(d, axis) == Drop2(b, axis)) continue;  // 2D twin (bridge)
-      // in-cone at i (collinear prev/next treated as convex half-plane)
-      if (O2(a, b, c, axis) >= 0) {
-        if (!(O2(b, c, d, axis) > 0 && O2(b, d, a, axis) > 0)) continue;
-      } else {
-        if (O2(b, c, d, axis) <= 0 && O2(b, d, a, axis) <= 0) continue;
-      }
-      bool ok = true;
-      for (int k = 0; k < n && ok; ++k) {
-        const int k2 = (k + 1) % n;
-        if (k == i || k2 == i || k == j || k2 == j) continue;
-        if (ProperCross2(b, d, pos3[poly[k]], pos3[poly[k2]], axis)) ok = false;
-      }
-      for (int k = 0; k < n && ok; ++k) {
-        if (k == i || k == j) continue;
-        const vec3& v = pos3[poly[k]];
-        if (Drop2(v, axis) == Drop2(b, axis) ||
-            Drop2(v, axis) == Drop2(d, axis))
-          continue;
-        if (OnOpenSeg2(b, d, v, axis)) ok = false;
-      }
-      if (!ok) continue;
-      std::vector<int> p1, p2;
-      for (int k = i;; k = (k + 1) % n) {
-        p1.push_back(poly[k]);
-        if (k == j) break;
-      }
-      for (int k = j;; k = (k + 1) % n) {
-        p2.push_back(poly[k]);
-        if (k == i) break;
-      }
-      return DiagSplit(p1, pos3, axis, out, depth + 1) &&
-             DiagSplit(p2, pos3, axis, out, depth + 1);
-    }
-  }
-  return false;
-}
-
-inline bool DiagSplitFwd(const std::vector<int>& poly,
-                         const std::vector<vec3>& pos3, int axis,
-                         std::vector<ivec3>& out, int depth) {
-  return DiagSplit(poly, pos3, axis, out, depth);
-}
 
 }  // namespace e1
 
@@ -5919,7 +5721,6 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
         FatalReason::DirtyComponentUnresolved, msg);
   };
   static const bool kDump = std::getenv("E1_DUMP") != nullptr;
-  e1::kDustEps = eps;
 
   // ---- 1. geometric plane groups (exact coplanarity union-find) ----
   std::vector<int> uf(nTri);
@@ -7024,7 +6825,7 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
     }
     for (const std::vector<int>& loop : cells) {
       std::vector<ivec3> tris;
-      if (!e1::Triangulate(loop, pos3, axis, eps, tris)) {
+      if (!exacttri::Triangulate(loop, pos3, axis, eps, tris)) {
         // ALL-OR-NOTHING: a partial covering emits unpaired interior edges
         // (the offline lesson) - discard, then adjudicate by WIDTH: a loop
         // whose area/extent is below the weld scale is a rounded-degenerate
