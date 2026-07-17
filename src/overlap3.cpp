@@ -97,7 +97,7 @@ static std::set<std::tuple<double, double, double>> gF4BTriplePts;
 // absent (the per-face production path), behavior is BYTE-IDENTICAL to the
 // chord-angle form.
 bool SplitTouchingSheets(std::vector<vec3>& verts, Vec<ivec3>& tv,
-                         const std::vector<vec3>* sheetN = nullptr) {
+                         const std::vector<vec3>* sheetN) {
   const int nTri = static_cast<int>(tv.size());
   auto heFrom = [&](int h) { return tv[h / 3][h % 3]; };
   auto heTo = [&](int h) { return tv[h / 3][(h % 3 + 1) % 3]; };
@@ -236,7 +236,7 @@ bool SplitTouchingSheets(std::vector<vec3>& verts, Vec<ivec3>& tv,
             verts[edge.second].x, verts[edge.second].y, verts[edge.second].z);
         for (const RingEntry& r : ring) {
           std::fprintf(stderr, " %.6f%s", r.angle, r.fwd ? "f" : "b");
-          if (sheetN != nullptr) {
+          {
             const vec3& n = (*sheetN)[r.he / 3];
             std::fprintf(stderr, "[n=%.3g,%.3g,%.3g]", n.x, n.y, n.z);
           }
@@ -305,8 +305,9 @@ bool SplitTouchingSheets(std::vector<vec3>& verts, Vec<ivec3>& tv,
   // distinct interior point of the (shared) segment: the surface is
   // pointwise unchanged, the topology becomes representable, and the
   // pairing already proved each copy a coherent two-triangle sheet pair.
-  // Identity-free callers skip this byte-identically (their fatal stands).
-  if (sheetN != nullptr) {
+  // (Post-flip: the engine's provenance is the ONLY mode - the identity-
+  // free chord-angle-only caller died with the per-face world.)
+  {
     std::map<std::pair<int, int>, std::vector<int>> und;  // undirected -> hes
     for (int h = 0; h < 3 * nTri; ++h) {
       const int a = tv[h / 3][h % 3], b = tv[h / 3][(h % 3 + 1) % 3];
@@ -375,9 +376,9 @@ struct GridCellHash {
 // carried through the weld/filter into SplitTouchingSheets' fan pairing (the
 // near-tangent radial branch).  Absent = byte-identical to the identity-free
 // pipeline.
-StageResult<Manifold::Impl> BuildImpl(
-    const std::vector<OutTri3D>& tris, double eps,
-    const std::vector<vec3>* sheetN = nullptr) {
+StageResult<Manifold::Impl> BuildImpl(const std::vector<OutTri3D>& tris,
+                                      double eps,
+                                      const std::vector<vec3>* sheetN) {
   if (tris.empty()) return StageResult<Manifold::Impl>::Ok(Manifold::Impl{});
 
   // Collect verts with an eps-weld.  A uniform hash grid (cell = eps) over the
@@ -442,12 +443,12 @@ StageResult<Manifold::Impl> BuildImpl(
     }
     if (!seenTris.insert({a, b, c}).second) continue;  // exact duplicate
     tv.push_back({v0, v1, v2});
-    if (sheetN != nullptr) tvN.push_back((*sheetN)[i]);
+    tvN.push_back((*sheetN)[i]);
   }
 
   // Touching sheets separate BEFORE the topology is built (spec COPLANAR
   // implementation close: touching contacts).
-  if (!SplitTouchingSheets(verts, tv, sheetN != nullptr ? &tvN : nullptr)) {
+  if (!SplitTouchingSheets(verts, tv, &tvN)) {
     return StageResult<Manifold::Impl>::Fatal(FatalReason::NonManifoldEmission,
                                               "unresolvable sheet contact");
   }
@@ -1055,35 +1056,6 @@ inline HPoint CramerHPoint(const vec3& nF, double dF, const vec3& ng, double dg,
   p.Z = PAdd(PAdd(PMul(Fd, c12z), PMul(Gd, c20z)), PMul(Hd, c01z));
   return p;
 }
-// POINT-PAIR /\ PLANE point (P3, the coplanar-cap seam endpoint): where the
-// input EDGE SEGMENT (u,w) - a point-pair line, two input vertices - pierces
-// plane g. W = ng.(w-u); coord = u*W + (dg - ng.u)*(w-u) so coord/W = u +
-// t(w-u), t = (dg-ng.u)/(ng.(w-u)).  Arises ONLY on an exactly-coplanar
-// cluster's internal edge (across-neighbor coplanar => the edge is not a plane
-// pair), where a transversal seam f/\g ends and the {f,g,neighbor} triple
-// degenerates; the pierce plane is the seam partner NOT on the owner's cluster
-// plane.  Degree <=3 in the plane-coeff basis / <=4 in inputs (STRICTLY under
-// the deg-9/20 triple), SAME homogeneous orient2d form, SAME accumulator (no
-// monomial exceeds 9 plane factors when a P3 row mixes with triple rows).
-// maxdepth's P3 instantiation.
-inline HPoint SegPlaneHPoint(const vec3& u, const vec3& w, const vec3& ng,
-                             double dg) {
-  const Poly ux = PConst(u.x), uy = PConst(u.y), uz = PConst(u.z);
-  const Poly ex = PSub(PConst(w.x), ux), ey = PSub(PConst(w.y), uy),
-             ez = PSub(PConst(w.z), uz);  // w - u
-  const Poly Gx = PConst(ng.x), Gy = PConst(ng.y), Gz = PConst(ng.z);
-  const Poly W =
-      PAdd(PAdd(PMul(Gx, ex), PMul(Gy, ey)), PMul(Gz, ez));  // ng.(w-u)
-  const Poly ngu =
-      PAdd(PAdd(PMul(Gx, ux), PMul(Gy, uy)), PMul(Gz, uz));  // ng.u
-  const Poly num = PSub(PConst(dg), ngu);                    // dg - ng.u
-  HPoint p;
-  p.W = W;
-  p.X = PAdd(PMul(ux, W), PMul(num, ex));
-  p.Y = PAdd(PMul(uy, W), PMul(num, ey));
-  p.Z = PAdd(PMul(uz, W), PMul(num, ez));
-  return p;
-}
 inline const Poly& KeepPoly(const HPoint& p, int axis, int which) {
   const int a0 = (axis == 0) ? 1 : 0;
   const int a1 = (axis == 2) ? 1 : 2;
@@ -1164,23 +1136,6 @@ inline EHPoint ECramerHPoint(const vec3& nF, double dF, const vec3& ng,
       EAdd(EAdd(EMul(EIn(dF), c12y), EMul(EIn(dg), c20y)), EMul(EIn(dh), c01y));
   p.Z =
       EAdd(EAdd(EMul(EIn(dF), c12z), EMul(EIn(dg), c20z)), EMul(EIn(dh), c01z));
-  return p;
-}
-// Filter (running-EBD) companion of SegPlaneHPoint.
-inline EHPoint ESegPlaneHPoint(const vec3& u, const vec3& w, const vec3& ng,
-                               double dg) {
-  const EBD ux = EIn(u.x), uy = EIn(u.y), uz = EIn(u.z);
-  const EBD ex = ESub(EIn(w.x), ux), ey = ESub(EIn(w.y), uy),
-            ez = ESub(EIn(w.z), uz);  // w - u
-  const EBD Gx = EIn(ng.x), Gy = EIn(ng.y), Gz = EIn(ng.z);
-  const EBD W = EAdd(EAdd(EMul(Gx, ex), EMul(Gy, ey)), EMul(Gz, ez));
-  const EBD ngu = EAdd(EAdd(EMul(Gx, ux), EMul(Gy, uy)), EMul(Gz, uz));
-  const EBD num = ESub(EIn(dg), ngu);
-  EHPoint p;
-  p.W = W;
-  p.X = EAdd(EMul(ux, W), EMul(num, ex));
-  p.Y = EAdd(EMul(uy, W), EMul(num, ey));
-  p.Z = EAdd(EMul(uz, W), EMul(num, ez));
   return p;
 }
 inline const EBD& EKeep(const EHPoint& p, int axis, int which) {
@@ -1983,21 +1938,6 @@ std::optional<int> WindingAtCands(const std::vector<std::array<vec3, 3>>& tri,
   return w;
 }
 
-// The seed's plane-side sign per triangle, precomputed once (all clean-face
-// probes share seeds[0]).  filter-then-exact, so the value the winding looks up
-// is bit-identical to the live path.
-std::vector<signed char> PrecomputeSeedSign(
-    const std::vector<std::array<vec3, 3>>& tri, const vec3& seed) {
-  const int nTri = static_cast<int>(tri.size());
-  std::vector<signed char> sign(nTri);
-  for (int t = 0; t < nTri; ++t) {
-    int db = Orient3DFilterSign(tri[t][0], tri[t][1], tri[t][2], seed);
-    if (db == 0) db = Orient3DExactSign(tri[t][0], tri[t][1], tri[t][2], seed);
-    sign[t] = static_cast<signed char>(db);
-  }
-  return sign;
-}
-
 std::optional<int> WindingAt(const Manifold::Impl& in, const vec3& p,
                              const vec3& seed) {
   int w = 0;
@@ -2022,26 +1962,6 @@ std::optional<int> RobustWinding(const Manifold::Impl& in, const vec3& p,
   for (const vec3& s : seeds) {
     const std::optional<int> w = WindingAt(in, p, s);
     if (w) return w;
-  }
-  return std::nullopt;
-}
-
-// RobustWinding through the winding broadphase (clean-face path).  `cands` is a
-// caller-owned scratch buffer reused across queries.  Bit-identical winding
-// VALUE to the walk (crossing-superset proof above), hence identical keep/drop.
-std::optional<int> RobustWindingBVH(const std::vector<std::array<vec3, 3>>& tri,
-                                    const TriWindBVH& bvh, const vec3& p,
-                                    const std::vector<vec3>& seeds,
-                                    std::vector<int>& cands,
-                                    const signed char* seedSign0) {
-  for (size_t i = 0; i < seeds.size(); ++i) {
-    WindCandidates(bvh, p, seeds[i], cands);
-    // The precomputed table is for seeds[0]; the rare seeds[1..] retries go
-    // live.
-    const signed char* sign = (i == 0) ? seedSign0 : nullptr;
-    if (const std::optional<int> w =
-            WindingAtCands(tri, p, seeds[i], cands, sign))
-      return w;
   }
   return std::nullopt;
 }
@@ -2132,40 +2052,6 @@ struct BuildArrangement {
   // from three identical local recomputations).  A seam of face f from partner
   // g lies on planes {planeId[f], planeId[g]}.
   std::vector<int> planeId;
-  // SYMBOLIC PROVENANCE (symwalk lane): the exact HPoint of every arrangement
-  // vertex a WEDGE face's exact-overlay cell walk needs, keyed by the canonical
-  // 3D double bits (the same bits pf.add/addAt deduplicate on).  A vertex is
-  // either an INPUT point (trivial, W==1) or a 3-plane CRAMER intersection
-  // (triangle corner + input-vertex T-junction = trivial; interior triple point
-  // + wedge split = cramer{f,g,h}; seam endpoint = cramer{f,g,edge-neighbor}).
-  // Populated ONLY when a wedge face is flagged (BuildSymbolicProvenance), so
-  // it is an empty no-op on the whole resolving corpus.  The symbolic cell walk
-  // (ExtractCellsSymbolic) orders vertices by the LANDED HomogOrient2D on these
-  // HPoints, realizing the exact arrangement regardless of rounded straddle.
-  struct VProv {
-    bool trivial = true;
-    bool segPlane = false;  // P3: point-pair (su,sw) /\ plane (rep face rg)
-    vec3 v;                 // trivial input point (W==1)
-    vec3 nF, nG, nH;        // cramer: three plane normals (unnormalized)
-    double dF = 0.0, dG = 0.0, dH = 0.0;  // cramer: three plane offsets
-    int pf = -1, pg = -1, ph = -1;  // cramer: the three plane ids (rep faces)
-    int rf = -1, rg = -1,
-        rh = -1;  // cramer: the three rep FACE indices (for
-                  // the INPUT-EXACT Cramer over input verts);
-                  // segPlane reuses rg = the pierce plane rep.
-    vec3 su, sw;  // segPlane: the two input edge vertices
-  };
-  std::map<std::tuple<double, double, double>, VProv> provOf;
-  // Plane id -> (unnormalized normal, a point on the plane), for constructing
-  // the exact crossing point of two symbolic seam sub-edges during the wedge
-  // arrangement completion (symwalk).  Populated with provOf (wedge faces
-  // only).
-  std::map<int, std::pair<vec3, vec3>> planeTab;
-  // Plane id -> rep FACE index (the canonical face whose three input vertices
-  // define the plane), for the INPUT-EXACT basis: every overlay position and
-  // decision is composed exactly from these input doubles, not the rounded
-  // faceN.  Populated alongside planeTab (wedge faces only).
-  std::map<int, int> planeTri;
   // EX2 exact-overlay flag (exact2d lane): faces carrying a GAP-FREE wedge
   // chain (a diverging near-parallel wedge whose exact interior crossing is >
   // the coordinated-collapse envelope from every seam endpoint - the openscad
@@ -2196,15 +2082,6 @@ inline sos::BigHPoint IXTripleHPoint(const BuildArrangement& A, int rf, int rg,
                                      int rh) {
   return sos::CramerBigHPointIX(A.tri[rf].data(), A.tri[rg].data(),
                                 A.tri[rh].data());
-}
-// Input-exact HPoint of a provenance vertex (trivial input point W==1, or the
-// plane triple of its three rep faces).
-inline sos::BigHPoint IXProvHPoint(const BuildArrangement& A,
-                                   const BuildArrangement::VProv& pv) {
-  if (pv.trivial) return sos::TrivialBigHPoint(pv.v);
-  if (pv.segPlane)
-    return sos::SegPlaneBigHPoint(pv.su, pv.sw, A.tri[pv.rg].data());
-  return IXTripleHPoint(A, pv.rf, pv.rg, pv.rh);
 }
 // Input-exact in-face orient2d(P0,P1,P2), dropping the face axis.
 inline int IXOrient2D(const sos::BigHPoint& p0, const sos::BigHPoint& p1,
@@ -2703,138 +2580,6 @@ bool ExtractCells(const std::vector<vec2>& pts,
       else if (holes && loop.size() >= 3)
         holes->push_back(std::move(loop));
     }
-  return true;
-}
-
-// SYMBOLIC CELL WALK (symwalk lane): ExtractCells with the ROUNDED-double atan2
-// radial sort + double area sign REPLACED by the LANDED exact HomogOrient2D on
-// per-vertex symbolic HPoints (eh = filter EHPoint, hp = exact HPoint).  For
-// the wedge faces the rounded seam segments do NOT straddle at their exact
-// interior crossing (that is why the default gate declined them), so the double
-// atan2 order folds back and emits sub-eps slivers that do not pair; the exact
-// angular order realizes the true arrangement regardless.  The comparator uses
-// ONLY HomogOrient2D(center, a, b) on REAL arrangement points (an arbitrary
-// neighbor as the reference ray, collinear ties broken by a non-collinear
-// witness) - no point at infinity, no coordinate-difference sign, NO new
-// predicate form. `axis` = the face-normal dominant axis; `signMul` (+/-1, from
-// the CCW triangle corners) aligns HomogOrient2D's unflipped keep-pair frame to
-// verts2's proj frame so the walk's handedness matches the rest of the
-// pipeline.  The single unbounded outer face (uniquely most-negative double
-// area, |outer| ~ model^2 >> any sub-eps sliver) is dropped; every other loop
-// is a bounded cell in walked (combinatorially CCW) order.  Returns false on a
-// malformed walk (fail closed).
-bool ExtractCellsSymbolic(const std::vector<vec2>& pts,
-                          const std::vector<sos::EHPoint>& eh,
-                          const std::vector<sos::HPoint>& hp,
-                          const std::vector<sos::BigHPoint>& bhp, bool ix,
-                          int axis, int signMul,
-                          const std::vector<std::pair<int, int>>& uedges,
-                          std::vector<std::vector<int>>& cells) {
-  const int n = static_cast<int>(pts.size());
-  auto orient = [&](int i, int a, int b) -> int {
-    int s;
-    if (ix)
-      s = IXOrient2D(bhp[i], bhp[a], bhp[b], axis);
-    else {
-      s = sos::HomogOrient2DFilter(eh[i], eh[a], eh[b], axis);
-      if (s == 0) s = sos::HomogOrient2DExact(hp[i], hp[a], hp[b], axis);
-    }
-    return signMul * s;  // sign in verts2's CCW frame
-  };
-  std::vector<std::set<int>> nbr(n);
-  for (const auto& e : uedges) {
-    if (e.first == e.second) continue;
-    nbr[e.first].insert(e.second);
-    nbr[e.second].insert(e.first);
-  }
-  for (bool changed = true; changed;) {  // prune degree-1 spurs
-    changed = false;
-    for (int v = 0; v < n; ++v)
-      if (nbr[v].size() == 1) {
-        const int w = *nbr[v].begin();
-        nbr[v].clear();
-        nbr[w].erase(v);
-        changed = true;
-      }
-  }
-  std::vector<std::vector<int>> order(n);  // exact-CCW-sorted neighbors
-  std::vector<std::unordered_map<int, int>> at(n);
-  for (int v = 0; v < n; ++v) {
-    order[v].assign(nbr[v].begin(), nbr[v].end());
-    if (order[v].empty()) continue;
-    const int ref = order[v][0];  // reference ray (angle 0); any neighbor works
-    int witness = -1;             // a neighbor NOT collinear with ref through v
-    for (int w : order[v])
-      if (w != ref && orient(v, ref, w) != 0) {
-        witness = w;
-        break;
-      }
-    auto opposite = [&](int w) -> bool {  // w collinear with ref, opposite ray
-      if (witness < 0) return true;       // 1D star: the other direction
-      const int sw = orient(v, witness, w), sr = orient(v, witness, ref);
-      return sw != 0 && sr != 0 && sw != sr;
-    };
-    // Ascending CCW angle from ref in [0, 2pi): group 0 = ref (angle 0), 1 =
-    // CCW half (0,pi), 2 = opposite ref (pi), 3 = CW half (pi,2pi); within a
-    // half a total order by orient sign (span < pi).  Only the CYCLIC order is
-    // used, so the reference/branch-cut choice is immaterial.
-    auto gkey = [&](int w) -> int {
-      if (w == ref) return 0;
-      const int s = orient(v, ref, w);
-      if (s > 0) return 1;
-      if (s < 0) return 3;
-      return opposite(w) ? 2 : 0;
-    };
-    std::sort(order[v].begin(), order[v].end(), [&](int w1, int w2) {
-      if (w1 == w2) return false;
-      const int g1 = gkey(w1), g2 = gkey(w2);
-      if (g1 != g2) return g1 < g2;
-      if (g1 == 0 || g1 == 2) return false;  // single-angle groups: equal
-      return orient(v, w1, w2) > 0;
-    });
-    for (int k = 0; k < static_cast<int>(order[v].size()); ++k)
-      at[v][order[v][k]] = k;
-  }
-  std::set<std::pair<int, int>> visited;
-  std::vector<std::vector<int>> loops;
-  for (int s0 = 0; s0 < n; ++s0)
-    for (const int s1 : order[s0]) {
-      if (visited.count({s0, s1})) continue;
-      std::vector<int> loop;
-      int u = s0, v = s1;
-      bool bad = false;
-      do {
-        visited.insert({u, v});
-        loop.push_back(u);
-        const auto it = at[v].find(u);
-        if (it == at[v].end()) {
-          bad = true;
-          break;
-        }
-        const int deg = static_cast<int>(order[v].size());
-        const int w = order[v][(it->second - 1 + deg) % deg];
-        u = v;
-        v = w;
-      } while (!(u == s0 && v == s1) &&
-               loop.size() <= static_cast<size_t>(2 * uedges.size() + 4));
-      if (bad || !(u == s0 && v == s1)) return false;
-      loops.push_back(std::move(loop));
-    }
-  int outer = -1;
-  double outerArea = 0.0;
-  for (int i = 0; i < static_cast<int>(loops.size()); ++i) {
-    double area = 0.0;
-    const std::vector<int>& L = loops[i];
-    for (size_t k = 0; k < L.size(); ++k)
-      area += la::cross(pts[L[k]], pts[L[(k + 1) % L.size()]]);
-    if (outer < 0 || area < outerArea) {
-      outer = i;
-      outerArea = area;
-    }
-  }
-  for (int i = 0; i < static_cast<int>(loops.size()); ++i)
-    if (i != outer && loops[i].size() >= 3)
-      cells.push_back(std::move(loops[i]));
   return true;
 }
 
@@ -3746,77 +3491,6 @@ void BuildJunctionRegistry(BuildArrangement& A, double eps) {
     }
     if (!dup) A.junctions.push_back(p);
   }
-}
-
-// The registry vertices strictly interior to segment [P0,P1] in frame pf, each
-// returned as {on-line 2D foot, canonical 3D vertex} ordered along the segment.
-// The 2D position is the perpendicular FOOT on the segment line (NOT proj(V),
-// which rounds off-line and would make RemoveOverlaps2D manufacture a fold-back
-// crossing - the B1 lesson), keyed by the once-only 3D bits so every incident
-// face welds onto the identical vertex.  Strict-interior in PARAMETER (never
-// within eps of an endpoint -> no degenerate sub-edge) and on-line within eps.
-std::vector<std::pair<vec2, vec3>> JunctionSplitsOnSegment(
-    const vec2& q0, const vec2& q1, const vec3& P0, const vec3& P1,
-    const std::vector<vec3>& junctions, double eps,
-    const std::vector<vec3>* skipNear = nullptr) {
-  // q0/q1 are the caller's 2D projection of P0/P1 (any affine in-plane frame -
-  // the on-line foot below is frame-agnostic), so this helper is independent of
-  // which face-flattening the driver uses.
-  std::vector<std::pair<double, std::pair<vec2, vec3>>> ord;
-  const vec3 d3 = P1 - P0;
-  const double len2 = la::dot(d3, d3);
-  if (!(len2 > 0.0)) return {};
-  const double len = std::sqrt(len2);
-  const double tlo = eps / len, thi = 1.0 - eps / len;
-  for (const vec3& V : junctions) {
-    // The split DECISION is a pure 3D on-segment test against the segment's own
-    // endpoints, so the two incident faces (which see the IDENTICAL 3D
-    // endpoints of a shared seam / mesh edge) split at the SAME junction set -
-    // no per-frame disagreement near an endpoint (which manufactures new
-    // T-junctions).  An over-inclusive collinear hit is then HARMLESS: both
-    // faces take it, so the sub-edges still pair.
-    const vec3 w = V - P0;
-    const double t = la::dot(w, d3) / len2;
-    if (!(t > tlo && t < thi)) continue;         // strictly interior in param
-    if (la::length(w - t * d3) > eps) continue;  // on the segment line
-    // Skip a junction the face already introduces itself: a vertex coincident
-    // with one of the face's OWN seam endpoints is split into this edge by the
-    // face's own RemoveOverlaps2D, so pre-splitting it would only re-tessellate
-    // an already-complete arrangement (a spurious non-no-op on carriers like
-    // EntangledBars whose seam endpoints land interior to their own wall
-    // edges).  Only FOREIGN junctions - vertices no seam of this face ends at -
-    // are the T-junctions the neighbour fails to split.
-    if (skipNear) {
-      bool own = false;
-      for (const vec3& s : *skipNear)
-        if (la::length(V - s) <= eps) {
-          own = true;
-          break;
-        }
-      if (own) continue;
-    }
-    // 2D position = the on-line foot in THIS face's frame (proj is affine, so
-    // proj(P0 + t*d3) = q0 + t*(q1-q0)), keyed by the once-only 3D bits.  On-
-    // line by construction -> no RemoveOverlaps2D fold-back (the B1 lesson).
-    const vec2 foot = q0 + t * (q1 - q0);
-    ord.push_back({t, {foot, V}});
-  }
-  std::sort(ord.begin(), ord.end(),
-            [](const auto& x, const auto& y) { return x.first < y.first; });
-  std::vector<std::pair<vec2, vec3>> out;
-  out.reserve(ord.size());
-  for (auto& e : ord) out.push_back(e.second);
-  return out;
-}
-
-// 2D point-in-triangle (inclusive), orientation-agnostic: true iff p is on the
-// same side (or on) all three directed edges under either winding.
-bool PointInTri2D(const vec2& p, const vec2& a, const vec2& b, const vec2& c) {
-  const double d1 = la::cross(b - a, p - a), d2 = la::cross(c - b, p - b),
-               d3 = la::cross(a - c, p - c);
-  const bool neg = d1 < 0.0 || d2 < 0.0 || d3 < 0.0;
-  const bool pos = d1 > 0.0 || d2 > 0.0 || d3 > 0.0;
-  return !(neg && pos);
 }
 
 // Winding seeds: a few far points in unrelated directions off the bbox (the
