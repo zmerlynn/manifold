@@ -293,62 +293,6 @@ TEST(Overlap3, Regularize_DirtySingleComponent_RoutesToResolver) {
       << "enclosed volume is not tol-invariant";
 }
 
-// White-box classification pin (reg3d-s7b + reg3d-arr): the clean-face
-// retention inside the resolver's EmitCleanFaces must be PER-FACE, not
-// per-patch.  The everted-corner carrier (PokedCube: the +++ corner collapsed
-// onto ---) puts genuine {w_S>=1} boundary clean faces (own +n winding == 0)
-// and exterior clean faces (own winding == -1) in ONE clean-clean-connected
-// patch.  The old flood classified the whole patch by one representative; here
-// the representative is exterior (w=-1) -> it DROPPED the boundary faces,
-// leaving the open fan the carrier fails on - AND, in the mirror config where
-// the representative is a boundary face, it would EMIT the exterior faces = a
-// silent wrong retain (this is the latent-wrongness class, not merely a
-// fail-closed).  Per-face is uniformly correct: keep iff the face's OWN winding
-// == 0.
-//
-// This pins the FIX at the classification level even though the whole carrier
-// still fails downstream (the unmatched pierce points at the everted spike are
-// a separate arrangement-incompleteness wall, reg3d Stage 2/3).  MUTATION:
-// revert EmitCleanFaces to the per-patch representative flood -> the boundary
-// faces (own winding == 0) are dropped with their patch -> `kept != (ownWinding
-// == 0)`
-// -> this pin REDs.  Bitwise-safe on the resolving fixtures (siA/siB: every
-// face in a patch reaches the same decision, so the emitted set is unchanged).
-TEST(Overlap3, Regularize_CleanFacePerFace_RetainsEvertedBoundary) {
-  const Manifold::Impl in = PokedCube();
-  const CleanFaceProbe p = ClassifyCleanFaces_Probe(in);
-  ASSERT_FALSE(p.faceIdx.empty()) << "PokedCube must reach EmitCleanFaces with "
-                                     "clean faces (arrangement prefix must not "
-                                     "fail before the clean pass)";
-  int nBoundary = 0, nExterior = 0, nUncertain = 0;
-  for (size_t i = 0; i < p.faceIdx.size(); ++i) {
-    // Per-face invariant: a clean face is retained IFF its OWN winding == 0.
-    // This is the mutation-sensitive assertion - the flood breaks it on the
-    // mixed everted-corner patch.
-    const bool ownBoundary = p.ownWinding[i] == 0;
-    EXPECT_EQ(static_cast<bool>(p.kept[i]), ownBoundary)
-        << "clean face " << p.faceIdx[i] << " ownWinding=" << p.ownWinding[i]
-        << " kept=" << static_cast<int>(p.kept[i])
-        << " - retention must follow the face's OWN winding, not a patch "
-           "representative";
-    if (p.ownWinding[i] == kWindingUncertain)
-      ++nUncertain;
-    else if (ownBoundary)
-      ++nBoundary;
-    else if (p.ownWinding[i] < 0)
-      ++nExterior;
-  }
-  EXPECT_EQ(nUncertain, 0) << "no clean face's winding may be filter-uncertain "
-                              "on this fixture (else the pin is vacuous)";
-  // Non-vacuity: the everted corner is a GENUINELY MIXED patch (>=1 boundary
-  // AND
-  // >=1 exterior clean face), which is exactly the config the flood mislabels.
-  EXPECT_GT(nBoundary, 0) << "everted corner must present >=1 genuine boundary "
-                             "clean face (own winding == 0)";
-  EXPECT_GT(nExterior, 0) << "and >=1 exterior clean face (own winding < 0) - "
-                             "the mixed patch the flood dropped wholesale";
-}
-
 // Acceptance: the corpus single-
 // shell self-intersectors self_intersectA/B - genuine w_S in {0,1,2} dirty
 // components with NO negative winding (the clean, safe-by-margin resolver
@@ -1209,25 +1153,16 @@ TEST(Overlap3, Regularize_ExactZeroTie_Openscad_FailClosed) {
           .string());
   if (!fin.is_open()) GTEST_SKIP() << "model not found";
   const Manifold::Impl in(ReadOBJ(fin));
-  // Anchor 1: WITHOUT the engine, the per-face path fails closed at the
-  // emission wall (never a silent wrong resolve).
-  ASSERT_EQ(std::getenv("E1_ENGINE"), nullptr)
-      << "test owns the E1_ENGINE gate";
-  {
-    const RegularizeResult r = RemoveOverlaps3D(in, ImplEps(in));
-    EXPECT_GE(r.counters.dirty, 1) << "coplanar overlap must route to B";
-    ASSERT_TRUE(r.fatal.has_value()) << "engine-off must fail closed";
-    EXPECT_EQ(*r.fatal, FatalReason::NonManifoldEmission) << r.detail;
-    EXPECT_NE(r.detail.find("unresolvable sheet contact"), std::string::npos)
-        << "engine-off residue must name the emission wall: " << r.detail;
-    EXPECT_FALSE(r.impl.has_value()) << "fail-closed yields no partial output";
-  }
-  // With the engine: the component RESOLVES through the FULL operator
-  // (weld, SplitTouchingSheets, manifold gates, exact re-gate arm).
-  setenv("E1_ENGINE", "1", 1);
+  // THE FLIP (stage 4): the coordinated engine is the ONLY dirty-path
+  // emission, so the historical engine-off anchor (the per-face
+  // "unresolvable sheet contact" wall, E1_ENGINE-gated) is deleted WITH its
+  // mechanism.  The pin is now the RESOLVE itself: the component routes
+  // dirty, resolves through the full operator (weld, SplitTouchingSheets,
+  // manifold gates, exact re-gate arm), and lands on the independently
+  // derived volume - the strongest surviving anchor (a wrong emission
+  // cannot hold the exact-divergence volume AND the manifold gates).
   const RegularizeResult r = RemoveOverlaps3D(in, ImplEps(in));
-  unsetenv("E1_ENGINE");
-  EXPECT_GE(r.counters.dirty, 1);
+  EXPECT_GE(r.counters.dirty, 1) << "coplanar overlap must route dirty";
   ASSERT_FALSE(r.fatal.has_value())
       << "engine-on must resolve: " << (r.fatal ? r.detail : "");
   ASSERT_TRUE(r.impl.has_value());

@@ -133,23 +133,6 @@ ComponentEnumProbe EnumerateComponent_Probe(const Manifold::Impl& dirty,
                                             const std::vector<vec3>& probes,
                                             const vec3& seed);
 
-// Test hook: per-clean-face classification inside the resolver's
-// EmitCleanFaces, exposed so the clean-patch PER-FACE hardening can be pinned
-// at the CLASSIFICATION level even when the carrier still fails downstream on
-// the arrangement build.  For each face that reaches EmitCleanFaces as "clean"
-// (neither seamed nor in a coplanar cluster) it reports: the face's OWN +n
-// winding probe (kWindingUncertain if every seed grazed) and whether
-// EmitCleanFaces retained that face in the emitted set.  The per-face rule
-// keeps exactly the own-winding==0 boundary faces; the old per-patch
-// representative flood dropped genuine boundary faces that shared a patch with
-// an exterior (w<0) representative (the everted-corner unsoundness, reg3d-s7b).
-struct CleanFaceProbe {
-  std::vector<int> faceIdx;     // clean face indices, in ascending order
-  std::vector<int> ownWinding;  // each face's own +n winding probe
-  std::vector<char> kept;       // whether EmitCleanFaces retained it (1/0)
-};
-CleanFaceProbe ClassifyCleanFaces_Probe(const Manifold::Impl& soup);
-
 // Test hook: run the resolver (fold + build + re-gate) directly on a soup
 // treated as ONE dirty component, bypassing decompose and the
 // IsSelfIntersecting gate. The self-intersection gate does not flag a pure
