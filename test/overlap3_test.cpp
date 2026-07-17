@@ -2041,20 +2041,25 @@ TEST(Overlap3, Corpus_Offsets_CleanPassThrough) {
 }
 
 // GenericTwin7081: the pair decomposes into 13 components; 11 gate clean and 2
-// carry a within-component defect - two near-flat SHELLS with a 0.002deg
-// near-tangent self-overlap.  History: census -> Cluster-2 seam sub-face;
-// reg3d- c2b -> winding-probe filter-precision (closed by the reg3d-c2bx
-// exact-classify escalation); then the pre-existing Cluster-1 emission wall
-// (unbalanced fans from crossings the shares-vertex broadphase skip DROPPED).
-// reg3d-wjump CLOSES it: the shares-vertex genuine-crossing recovery records
-// those crossings, so both shells complete their arrangement and RESOLVE.
-// Oracle: the near-tangent overlap is measure-~0, so each shell's {w>=1} volume
-// is preserved to its input signed volume (a GWN grid oracle is unusable at
+// carry a within-component defect.  The near-flat twin SHELLS (0.002deg
+// near-tangent self-overlap) are halfedge-welded at the twin seam into ONE
+// JOINED dirty component - connectivity never splits them.  History: census ->
+// Cluster-2 seam sub-face; reg3d-c2b -> winding-probe filter-precision (closed
+// by the reg3d-c2bx exact-classify escalation); the Cluster-1 emission wall
+// (crossings the shares-vertex broadphase skip DROPPED) closed by reg3d-wjump;
+// then the JOINED-component flood conflict (cycle-closing dihedral handoffs at
+// twin scale nuked the winding field; the grazing probe path silently dropped
+// real corridor boundary cells -> SplitTouchingSheets refusal) closed by the
+// gt7081j field-retry: the conflict-consistent spanning-tree field emits the
+// corridor, gated by the same STS + re-gate as every output.
+// Oracle: the near-tangent overlap is measure-~0, so the {w>=1} volume is
+// preserved to the input signed volume (a GWN grid oracle is unusable at
 // these near-flat sheets at scale ~20000 - one cell exceeds the whole solid);
 // the resolve is non-self-intersecting, a valid manifold, and tol-invariant.
-// MUTATION-VERIFIED: reverting the recovery reopens the fans ->
-// NonManifoldEmission.  HEAVY (~45s); run under the corpus resource cap (ulimit
-// -v 4000000; timeout 900).
+// MUTATION-VERIFIED: reverting the wjump recovery reopens the fans ->
+// NonManifoldEmission; reverting the field-retry returns the joined-component
+// refusal.  HEAVY (minutes); run under the corpus resource cap (ulimit -v
+// 4000000; timeout 900).
 TEST(Overlap3, Corpus_GenericTwin7081_Resolves) {
   const auto in = LoadCorpusPair("Generic_Twin_7081.1.t0_left.obj",
                                  "Generic_Twin_7081.1.t0_right.obj");
