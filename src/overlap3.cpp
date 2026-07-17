@@ -5992,7 +5992,80 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
   int nPancake = 0;
   const double scale = in.bBox_.Scale();
 
+  // ==== FLOOD WINDING FIELD (flip arc stage 1) ==============================
+  // The component-global integer winding field over the arrangement cells.
+  // Field value E(c) = the EXACT winding of the epsilon-layer immediately on
+  // the +nHat side of cell c's group plane.  The eps-layer is the right field
+  // variable because its lateral deltas are purely COMBINATORIAL: crossing a
+  // sub-edge crosses exactly the chord-partner sheets ON that sub-edge (a
+  // sheet without a chord there cannot separate the two eps-layers - the
+  // mesh-edge cleanliness argument, exact as eps -> 0), with sign
+  // -sgn(dot(t_out, n_partner)).  The per-cell probe value converts
+  // VERTICALLY: wA = E - sPosFull (sPosFull = signed count of covering foreign
+  // sheets crossed by the cenP vertical between the plane and the probe at
+  // 2T; the gap-finder certifies that set at cenP).  Anchors: (a) the HULL
+  // SEED - at the lex-max input vertex v* the point v* + (d, d^2, d^3) is
+  // exterior (w=0, no ray cast: the lex-max of a compact polyhedron is a
+  // vertex) and lies on the lexsign side of every plane through v*, so a
+  // group with exactly one node cell touching v* anchors combinatorially;
+  // (b) every probe-certified cell.  BFS propagates; ANY value conflict
+  // (including flood-vs-certified = the differential rail) aborts the flood
+  // and preserves today's fail-closed fatal.  v1 routing: the flood fills
+  // ONLY probe-failed (pending) cells; probes stay primary elsewhere.
+  struct FlNode {
+    int g = -1;
+    int jump = 0, ownJump = 0;
+    int sPosFull = 0;  // covering foreign sheets with 0 < tPos < 2T at cenP
+    int sZero = 0;     // covering foreign sheets with tPos == 0 at cenP
+    bool pancake = false;
+    bool pending = false;    // probe grazed: emission awaits the flood
+    bool certified = false;  // probe + certificate passed (anchor)
+    int probeWA = 0;
+    vec3 Nrep;
+    std::vector<std::pair<double, int>> stackSheets;  // pancake layer cert
+    // covering foreign sheets at cenP: (face, sgn(tPos), sgn(dot(n,nHat)))
+    // sorted by face - the stack-crossing parity arm's per-cell record
+    std::vector<std::array<int, 3>> nearSign;
+    std::vector<ivec3> tris;  // pending payload
+    std::map<int, vec3> pos;  // pending payload
+  };
+  std::vector<FlNode> flNodes;
+  std::vector<std::array<int, 3>> flEdges;  // (n0, n1, d): E(n1) = E(n0) + d
+  // handoff records: (input vid pair, sub-edge position bits) ->
+  // (node, eOff) with the invariant E(node) + eOff equal on both sides
+  std::map<std::pair<std::pair<int, int>, SegKey>,
+           std::vector<std::pair<int, int>>>
+      flHand;
+  std::vector<std::pair<int, int>> flSeeds;  // (node, anchored E value)
+  auto flLexsign = [](const vec3& n) -> int {
+    if (n.x != 0.0) return n.x > 0.0 ? 1 : -1;
+    if (n.y != 0.0) return n.y > 0.0 ? 1 : -1;
+    if (n.z != 0.0) return n.z > 0.0 ? 1 : -1;
+    return 0;
+  };
+  // v* = lex-max input vertex (position identity; ties collapse to one K3)
+  K3 flStarKey{0, 0, 0};
+  {
+    bool have = false;
+    for (size_t v = 0; v < in.vertPos_.size(); ++v) {
+      const K3 k = KeyOf(in.vertPos_[v]);
+      if (!have || flStarKey < k) {
+        flStarKey = k;
+        have = true;
+      }
+    }
+  }
+
   for (int g = 0; g < nG; ++g) {
+    int gProbeFail = 0, gProbeCert = 0;  // flood graze census
+    // flood graph collection (this group's arrangement):
+    // sub-edge (lo,hi vertex ids) -> contributing segment indices
+    std::map<std::pair<int, int>, std::vector<int>> flEdgeSegs;
+    // sub-edge -> (node, traversed lo->hi?) per adjacent node cell
+    std::map<std::pair<int, int>, std::vector<std::pair<int, bool>>>
+        flEdgeCells;
+    std::vector<int> flStarNodes;  // node cells touching v* in this group
+    int flVstarLocal = -1;         // v*'s walk-graph id in this group
     // ---- 2. the group's segment set (3D endpoint pairs, shared doubles) ----
     struct Seg {
       vec3 p0, p1;
@@ -6466,6 +6539,9 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
       adj[a].insert(b);
       adj[b].insert(a);
     };
+    auto flEdgeKey = [](int a, int b) {
+      return a < b ? std::make_pair(a, b) : std::make_pair(b, a);
+    };
     for (int i = 0; i < nS; ++i) {
       std::sort(splits[i].begin(), splits[i].end(),
                 [](const auto& x, const auto& y) { return x.first < y.first; });
@@ -6473,11 +6549,18 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
       for (const auto& pr : splits[i]) {
         const int v = vid(pr.second);
         link(prev, v);
+        if (prev != v) flEdgeSegs[flEdgeKey(prev, v)].push_back(i);
         prev = v;
       }
-      link(prev, vid(segs[i].p1));
+      const int last = vid(segs[i].p1);
+      link(prev, last);
+      if (prev != last) flEdgeSegs[flEdgeKey(prev, last)].push_back(i);
     }
     adj.resize(pos3.size());
+    {  // v*'s walk-graph id (cluster rep), if v* is a vertex of this group
+      const auto vit = vidOf.find(flStarKey);
+      flVstarLocal = vit != vidOf.end() ? vit->second : -1;
+    }
     // exact CCW angular order around each vertex (half-plane + orient sign)
     auto angLess = [&](int v, int a, int b) -> bool {
       const vec2 pv = e1::Drop2(pos3[v], axis);
@@ -7043,6 +7126,52 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
       // A sub-weld-WIDE pancake also stays dropped: its side chains weld
       // together and the hole closes in the assembly.
       const bool pancake = (jump == 0 && stackMerged && ownJump != 0);
+      // ---- flood node (flip arc stage 1): every classified cell joins the
+      // component-global field graph, including net-cancelled conduits ----
+      const int flNode = static_cast<int>(flNodes.size());
+      {
+        int sPosFull = 0, sZero = 0;
+        std::vector<std::array<int, 3>> nearSign;
+        for (const auto& dn : nearD) {
+          if (!covers(dn.second)) continue;
+          const double den = la::dot(A.faceN[dn.second], nHat);
+          const double tp =
+              -la::dot(A.faceN[dn.second], cenP - A.tri[dn.second][0]) / den;
+          const int s = den >= 0.0 ? 1 : -1;
+          if (dn.first < off) {
+            if (tp > 0.0)
+              sPosFull += s;
+            else if (tp == 0.0)
+              sZero += s;
+          }
+          // tPos == 0 exactly counts as BELOW - the same convention as
+          // sPosFull and the probe (the eps-above layer sits above a sheet
+          // passing exactly through cenP), so the parity arm sees the flip.
+          nearSign.push_back({dn.second, tp > 0.0 ? 1 : -1, s});
+        }
+        std::sort(nearSign.begin(), nearSign.end());
+        FlNode fn;
+        fn.nearSign = std::move(nearSign);
+        fn.g = g;
+        fn.jump = jump;
+        fn.ownJump = ownJump;
+        fn.sPosFull = sPosFull;
+        fn.sZero = sZero;
+        fn.pancake = pancake;
+        fn.Nrep = Nrep;
+        fn.stackSheets = stackSheets;
+        flNodes.push_back(std::move(fn));
+        bool touch = false;
+        const int m = static_cast<int>(loop.size());
+        for (int k = 0; k < m; ++k) {
+          if (loop[k] == flVstarLocal) touch = true;
+          const int a = loop[k], b = loop[(k + 1) % m];
+          if (a == b) continue;
+          flEdgeCells[a < b ? std::make_pair(a, b) : std::make_pair(b, a)]
+              .push_back({flNode, a < b});
+        }
+        if (touch && flVstarLocal >= 0) flStarNodes.push_back(flNode);
+      }
       if (jump == 0 && !pancake) continue;  // net-cancelled: not a sheet
       if (pancake) {
         // Dust rule for pancakes is EXTENT-outright (the dust-dot rule),
@@ -7066,12 +7195,29 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
       const std::optional<int> wA = RobustWinding(in, cenP + off * nHat, seeds);
       const std::optional<int> wB = RobustWinding(in, cenP - off * nHat, seeds);
       if (!wA || !wB) {
+        // PROBE GRAZE -> PENDING (flip arc stage 1): every seed hit a genuine
+        // exact-zero tie at this cell.  The cell's emission defers to the
+        // flood field; if the flood cannot value it, the original fail-closed
+        // fatal returns at the end of the emission (never weakened).
+        ++gProbeFail;
+        FlNode& fn = flNodes[flNode];
+        fn.pending = true;
+        fn.tris = tris;
+        for (const ivec3& t : tris) {
+          fn.pos.emplace(t.x, pos3[t.x]);
+          fn.pos.emplace(t.y, pos3[t.y]);
+          fn.pos.emplace(t.z, pos3[t.z]);
+        }
         if (kDump)
           std::fprintf(stderr,
-                       "E1 FAIL probe g=%d cen=(%.9g,%.9g,%.9g) off=%.3g\n", g,
-                       cen3.x, cen3.y, cen3.z, off);
-        return fail("e1: winding probe filter-uncertain - fail-closed");
+                       "E1 PROBEFAIL g=%d jump=%d ownJump=%d pancake=%d "
+                       "n=%d cen=(%.9g,%.9g,%.9g) off=%.3g\n",
+                       g, jump, ownJump, pancake ? 1 : 0,
+                       static_cast<int>(loop.size()), cenP.x, cenP.y, cenP.z,
+                       off);
+        continue;
       }
+      ++gProbeCert;
       const bool certified = pancake ? (*wA == *wB) : (*wB - *wA == jump);
       // COMPLETENESS CERTIFICATE: probed delta == combinatorial covering jump
       if (!certified) {
@@ -7144,6 +7290,23 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
         std::fprintf(stderr,
                      "E1 PROBEAT g=%d jump=%d wA=%d wB=%d off=%.3g cert=%d\n",
                      g, jump, *wA, *wB, off, certified ? 1 : 0);
+      // flood anchor: this cell's probe is certified (flip arc stage 1)
+      flNodes[flNode].certified = true;
+      flNodes[flNode].probeWA = *wA;
+      {
+        static const char* kFE = std::getenv("E1_FLOODEDGE");
+        if (kFE && std::atoi(kFE) == g) {
+          std::fprintf(stderr,
+                       "E1 FLNODE n=%d g=%d wA=%d wB=%d jump=%d ownJump=%d "
+                       "sPos=%d cenP=(%.6g,%.6g,%.6g) nHat=(%.3g,%.3g,%.3g)\n",
+                       flNode, g, *wA, *wB, jump, ownJump,
+                       flNodes[flNode].sPosFull, cenP.x, cenP.y, cenP.z, nHat.x,
+                       nHat.y, nHat.z);
+          for (const auto& e2 : flNodes[flNode].nearSign)
+            std::fprintf(stderr, "    near f=%d gid=%d tSign=%d q=%d\n", e2[0],
+                         gid[e2[0]], e2[1], e2[2]);
+        }
+      }
       const bool aIn = *wA >= 1, bIn = *wB >= 1;
       if (!pancake && aIn == bIn) continue;  // not a {w>=1} boundary here
       if (pancake) {
@@ -7197,8 +7360,441 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
         outN.push_back(static_cast<double>(orient) * Nrep);
       }
     }
+    // ---- flood graph (flip arc stage 1): this group's edges + handoffs ----
+    {
+      // Drop2 has no parity swap, so cell-CCW-in-frame is about +nHat only up
+      // to the frame sign: (y,z)/( x,y) are right-handed about +x/+z, (x,z) is
+      // LEFT-handed about +y; and the dominant component of Nrep signs the
+      // projection direction.  t_out (from the cell traversing lo->hi toward
+      // its neighbor) = sigmaF * cross(d3, Nrep).
+      const int sigmaF = (axis == 1 ? -1 : 1) * (Nrep[axis] > 0.0 ? 1 : -1);
+      // Exact plane side of a point vs the group's rep triangle (a,b,c):
+      // Orient3DFilterSign's det is (a-d).((b-d)x(c-d)) = -dot(n_abc, d-a),
+      // so the +Nrep side is a NEGATIVE sign.  Filter-first, exact on 0 -
+      // the blessed WindCrossTri escalation pattern.
+      auto flAbovePlane = [&](const vec3& x) -> int {  // +1 above, -1 below
+        const std::array<vec3, 3>& rt = A.tri[rep[g]];
+        int s = Orient3DFilterSign(rt[0], rt[1], rt[2], x);
+        if (s == 0) s = Orient3DExactSign(rt[0], rt[1], rt[2], x);
+        return -s;
+      };
+      static const char* kFloodEdge = std::getenv("E1_FLOODEDGE");
+      const bool flDump = kFloodEdge && std::atoi(kFloodEdge) == g;
+      for (const auto& ec : flEdgeCells) {
+        const auto& cl = ec.second;
+        const auto es = flEdgeSegs.find(ec.first);
+        if (flDump) {
+          std::fprintf(stderr, "E1 FLEDGE g=%d (%d,%d) cells=[", g,
+                       ec.first.first, ec.first.second);
+          for (const auto& pr : cl)
+            std::fprintf(stderr, " n%d%s", pr.first, pr.second ? "+" : "-");
+          std::fprintf(stderr, " ] segs=%d\n",
+                       es == flEdgeSegs.end()
+                           ? -1
+                           : static_cast<int>(es->second.size()));
+          if (es != flEdgeSegs.end())
+            for (const int si : es->second)
+              std::fprintf(
+                  stderr, "    seg%d planeQ=%d fOwn=%d gidOwn=%d vid=(%d,%d)\n",
+                  si, segs[si].planeQ, segs[si].fOwn, gid[segs[si].fOwn],
+                  segs[si].vidLo, segs[si].vidHi);
+        }
+        if (es == flEdgeSegs.end()) continue;
+        const vec3 d3 = pos3[ec.first.second] - pos3[ec.first.first];
+        const vec3 tOut = static_cast<double>(sigmaF) * la::cross(d3, Nrep);
+        // Scan the segs riding this sub-edge: chord partners cross the plane
+        // HERE (each is one eps-layer crossing, sign -sgn(dot(t_out, n)));
+        // member mesh edges whose manifold twin RISES off-plane (+Nrep side,
+        // exact sign) are RIDGES - the rising twin cuts the eps-layer at the
+        // edge exactly like a chord.  Its crossing sign is combinatorial:
+        // the twin halfedge runs anti-parallel to the member's, and for a
+        // CCW twin rising with interior direction m, n_twin = cross(d_twin,
+        // m), giving delta(c_lo->hi -> other) = sigmaF * sgn(along).
+        int delta = 0;
+        bool bad = false;
+        std::set<int> seenF;                // distinct chord partner faces
+        std::set<std::pair<int, int>> vps;  // distinct member vid pairs
+        std::set<int> ridgeTf;              // twins counted via member segs
+        int handSi = -1, handTf = -1;       // single-pair handoff candidate
+        bool foreignChord = false;          // chord partner != the twin
+        // PASS A: member mesh-edge segs -> manifold-twin ridges.  A twin
+        // rising to the +nHat side cuts the eps-layer at the edge (sign
+        // combinatorial: the twin halfedge runs anti-parallel to the
+        // member's, so delta = sigmaF * sgn(along) - see the derivation in
+        // the flood comment).  A dipping twin leaves the layer intact.
+        for (const int si : es->second) {
+          if (segs[si].planeQ >= 0 || segs[si].vidLo < 0 ||
+              gid[segs[si].fOwn] != g)
+            continue;
+          const int vlo = std::min(segs[si].vidLo, segs[si].vidHi);
+          const int vhi = std::max(segs[si].vidLo, segs[si].vidHi);
+          if (!vps.insert({vlo, vhi}).second) continue;  // twin's own record
+          const int fOwn = segs[si].fOwn;
+          int he = -1;  // recover the halfedge carrying this edge
+          for (int e = 0; e < 3; ++e)
+            if (A.vid[fOwn][e] == segs[si].vidLo &&
+                A.vid[fOwn][(e + 1) % 3] == segs[si].vidHi)
+              he = 3 * fOwn + e;
+          if (he < 0) continue;
+          const int tf = in.halfedge_.Pair(he) / 3;
+          if (tf < 0 || gid[tf] == g) continue;  // coplanar neighbor: delta 0
+          int tv = -1;  // twin's third vertex (not on the shared edge)
+          for (int k = 0; k < 3; ++k)
+            if (A.vid[tf][k] != segs[si].vidLo &&
+                A.vid[tf][k] != segs[si].vidHi)
+              tv = k;
+          const double along = la::dot(d3, segs[si].p1 - segs[si].p0);
+          if (tv < 0 || !(along != 0.0)) {
+            bad = true;
+            break;
+          }
+          const int s3 = flAbovePlane(A.tri[tf][tv]);
+          if (s3 == 0) {
+            bad = true;  // twin's third vertex exactly on-plane: degenerate
+            break;
+          }
+          if (flDump)
+            std::fprintf(stderr,
+                         "    ridge fOwn=%d tf=%d gidT=%d s3=%d al=%s\n", fOwn,
+                         tf, gid[tf], s3, along > 0 ? "+" : "-");
+          if (s3 > 0) delta += sigmaF * (along > 0.0 ? 1 : -1);
+          ridgeTf.insert(tf);
+          handSi = si;
+          handTf = tf;
+        }
+        // PASS B: chord partners.  The ungated seam enumeration records
+        // touching contacts (edge-attached partners) as chords too, so the
+        // partner's EXACT vertex plane-side census decides the topology:
+        // straddle = proper transversal crossing; touch-from-above = an
+        // attached riser (T-junction class, not the halfedge twin); touch-
+        // from-below leaves the eps-layer intact.
+        if (!bad)
+          for (const int si : es->second) {
+            if (segs[si].planeQ < 0) continue;
+            const int f2 = segs[si].fOther;
+            if (ridgeTf.count(f2)) continue;  // already counted as the twin
+            if (!seenF.insert(f2).second) continue;
+            int nAb = 0, nBe = 0, vAb = -1;
+            std::array<int, 3> side;
+            for (int k = 0; k < 3; ++k) {
+              side[k] = flAbovePlane(A.tri[f2][k]);
+              if (side[k] > 0) {
+                ++nAb;
+                vAb = k;
+              } else if (side[k] < 0) {
+                ++nBe;
+              }
+            }
+            if (flDump)
+              std::fprintf(stderr, "    chord fOther=%d gidO=%d ab=%d be=%d\n",
+                           f2, gid[f2], nAb, nBe);
+            foreignChord = true;     // a non-twin partner reaches this sub-edge
+            if (nAb == 0) continue;  // touches/dips below: layer intact
+            if (nBe == 0) {
+              // TOUCH-FROM-ABOVE: attached riser along its on-plane edge
+              // (coincident-position attachment, not the halfedge twin).
+              int e0 = -1;
+              for (int k = 0; k < 3; ++k)
+                if (side[k] == 0 && side[(k + 1) % 3] == 0) e0 = k;
+              if (e0 < 0) continue;  // vertex-touch only: measure-zero
+              const double along =
+                  la::dot(d3, A.tri[f2][(e0 + 1) % 3] - A.tri[f2][e0]);
+              if (!(along != 0.0)) {
+                bad = true;
+                break;
+              }
+              delta += -sigmaF * (along > 0.0 ? 1 : -1);
+              continue;
+            }
+            // STRADDLE: robust two-branch crossing sign.  For steep partners
+            // -sgn(dot(tOut, n)) is solid; for near-tangent partners that
+            // dot is cancellation noise, but q = sgn(dot(Nrep, n)) is solid
+            // and the rising side r comes from the EXACT in-frame O2 of the
+            // above-vertex vs the sub-edge (delta = q * r).
+            const double tv2 = la::dot(tOut, A.faceN[f2]);
+            const double qv = la::dot(Nrep, A.faceN[f2]);
+            if (std::abs(tv2) * la::length(Nrep) >=
+                std::abs(qv) * la::length(tOut)) {
+              if (!(tv2 != 0.0)) {
+                bad = true;
+                break;
+              }
+              delta += tv2 > 0.0 ? -1 : 1;
+            } else {
+              const int o = e1::O2(pos3[ec.first.first], pos3[ec.first.second],
+                                   A.tri[f2][vAb], axis);
+              if (o == 0 || !(qv != 0.0)) {
+                bad = true;
+                break;
+              }
+              delta += (qv > 0.0 ? 1 : -1) * (o < 0 ? 1 : -1);
+            }
+          }
+        if (flDump)
+          std::fprintf(stderr, "    => delta=%d bad=%d foreign=%d vps=%d\n",
+                       delta, bad ? 1 : 0, foreignChord ? 1 : 0,
+                       static_cast<int>(vps.size()));
+        if (bad) continue;
+        // INTRA-GROUP EDGE: exactly two distinct node cells, opposite
+        // traversal directions.
+        if (cl.size() == 2 && cl[0].first != cl[1].first &&
+            cl[0].second != cl[1].second) {
+          const int nA = cl[0].second ? cl[0].first : cl[1].first;
+          const int nB = cl[0].second ? cl[1].first : cl[0].first;
+          // STACK-CROSSING PARITY ARM: a covering foreign SHEET whose signed
+          // tPos FLIPS between the two cenPs crossed the group plane between
+          // them with no representable chord (the sub-eps stack class).  The
+          // eps-layer path crosses it an odd number of times (parity =
+          // endpoint sign flip, path-independent).  Sheets are identified by
+          // their plane GROUP (one sheet may cover the two cenPs with
+          // different member triangles - measured on the near-coplanar
+          // twins), aggregating q = sgn(dot(n, nHat)) into above/below sums
+          // per group; under coverage conservation (same net total on both
+          // sides) the contribution is aboveB - aboveA (= q*r per flipped
+          // sheet, r = +1 iff above on nB's side).  Faces already counted as
+          // chords/ridges on this sub-edge are excluded (a represented
+          // crossing lies on every shared sub-edge of the pair).  A group
+          // with an exact-zero tPos or non-conserved coverage contributes 0
+          // (ends laterally; the differential owns the residue).
+          {
+            // {aboveA, belowA, aboveB, belowB} - GLOBAL aggregate (a warped
+            // foreign quad's triangles land in different plane groups yet
+            // form ONE crossing sheet - measured on the sub-eps-tilted caps;
+            // the global sums still conserve).
+            std::array<int, 4> a{0, 0, 0, 0};
+            auto addTo = [&](const FlNode& fn2, int ia0, int ib0) {
+              for (const auto& e2 : fn2.nearSign) {
+                if (seenF.count(e2[0]) || ridgeTf.count(e2[0])) continue;
+                a[e2[1] > 0 ? ia0 : ib0] += e2[2];
+              }
+            };
+            addTo(flNodes[nA], 0, 1);
+            addTo(flNodes[nB], 2, 3);
+            if (a[0] + a[1] == a[2] + a[3] && a[2] != a[0]) {
+              delta += a[2] - a[0];
+              if (flDump)
+                std::fprintf(stderr, "    parity dAbove=%d (nA=%d nB=%d)\n",
+                             a[2] - a[0], nA, nB);
+            }
+          }
+          flEdges.push_back({nA, nB, delta});
+        }
+        // CROSS-GROUP HANDOFF RECORD: a clean manifold mesh-edge sub-edge -
+        // exactly ONE member vid pair, no THIRD sheet reaching the edge (the
+        // halfedge twin's own touching-contact chord is benign; any other
+        // partner is not) - whose twin face lives in another group.  Both
+        // groups record E(node) + eOff; equal at the sub-edge by the
+        // mesh-edge dihedral rule (eps-layer form).  Multi-pair (geometric
+        // T-junction) sub-edges are skipped: the halfedge twin need not be
+        // fan-adjacent there.
+        if (foreignChord || vps.size() != 1 || handSi < 0) continue;
+        const int fOwn = segs[handSi].fOwn;
+        const double along = la::dot(d3, segs[handSi].p1 - segs[handSi].p0);
+        // f's interior-side cell traverses lo->hi iff the sub-edge runs along
+        // f's own winding direction XNOR f's winding is CCW-in-frame.
+        const bool wantFwd = (along > 0.0) == (fsgn[fOwn] * sigmaF > 0);
+        int node = -1;
+        for (const auto& pr : cl)
+          if (pr.second == wantFwd) {
+            node = node < 0 ? pr.first : -2;  // ambiguous: drop
+            if (node == -2) break;
+          }
+        if (node < 0) continue;
+        const FlNode& fn = flNodes[node];
+        const int eOff = fsgn[fOwn] > 0 ? 0 : fn.ownJump + fn.sZero;
+        const int vlo = std::min(segs[handSi].vidLo, segs[handSi].vidHi);
+        const int vhi = std::max(segs[handSi].vidLo, segs[handSi].vidHi);
+        flHand[{{vlo, vhi},
+                segKeyOf(pos3[ec.first.first], pos3[ec.first.second])}]
+            .push_back({node, eOff});
+      }
+      // THE HULL SEED: exactly one node cell touching v* in this group
+      // anchors combinatorially (see the field comment above).  GUARD: a
+      // covering foreign sheet at the corner cell (nearSign non-empty) can
+      // cross the group plane INSIDE the cell without a chord (the sub-eps
+      // stack class - measured on the GT7863 twins), invalidating the
+      // corner-to-cenP transport of the lexsign value; the seed is skipped
+      // there (certified anchors + handoffs carry those carriers).
+      if (flStarNodes.size() == 1) {
+        const FlNode& fn = flNodes[flStarNodes[0]];
+        const int sg = flLexsign(Nrep);
+        if (sg != 0 && fn.nearSign.empty())
+          flSeeds.push_back(
+              {flStarNodes[0], sg > 0 ? 0 : -(fn.ownJump + fn.sZero)});
+      }
+    }
+    if (kDump && gProbeFail > 0)
+      std::fprintf(stderr, "E1 PROBEGRP g=%d fail=%d cert=%d cells=%d\n", g,
+                   gProbeFail, gProbeCert, static_cast<int>(cells.size()));
     suspectTotal += suspectSnaps;
   }
+  // ---- FLOOD SOLVE (flip arc stage 1) ------------------------------------
+  // BFS the field from the anchors; any value conflict (including a
+  // flood-vs-certified disagreement = the differential rail) aborts the
+  // flood, so pending cells stay unresolved and the original fail-closed
+  // fatal below returns.  E1_FLOODDIFF=1 forces the solve as a byte-clean
+  // shadow (differential census only) even with no pending cell.
+  int flPending = 0;
+  for (const auto& fn : flNodes)
+    if (fn.pending) ++flPending;
+  static const bool kFloodDiff = std::getenv("E1_FLOODDIFF") != nullptr;
+  int flResolved = 0;
+  if (!buildPhase && (flPending > 0 || kFloodDiff)) {
+    static const bool kFlHandDump = std::getenv("E1_FLOODHAND") != nullptr;
+    int flHandEdges = 0, flHandOrphan = 0;
+    for (const auto& kv : flHand) {
+      if (kv.second.size() != 2) {
+        if (kv.second.size() > 2) ++flHandOrphan;
+        continue;
+      }
+      // E(n0) + eOff0 == E(n1) + eOff1  =>  E(n1) = E(n0) + (eOff0 - eOff1)
+      flEdges.push_back({kv.second[0].first, kv.second[1].first,
+                         kv.second[0].second - kv.second[1].second});
+      ++flHandEdges;
+      if (kFlHandDump)
+        std::fprintf(stderr,
+                     "E1 FLHAND vid=(%d,%d) n%d(g%d,eOff%d) <-> n%d(g%d,"
+                     "eOff%d)\n",
+                     kv.first.first.first, kv.first.first.second,
+                     kv.second[0].first, flNodes[kv.second[0].first].g,
+                     kv.second[0].second, kv.second[1].first,
+                     flNodes[kv.second[1].first].g, kv.second[1].second);
+    }
+    if (kFlHandDump)
+      for (const auto& s : flSeeds)
+        std::fprintf(stderr, "E1 FLSEED n=%d g=%d E=%d\n", s.first,
+                     flNodes[s.first].g, s.second);
+    const int nN = static_cast<int>(flNodes.size());
+    std::vector<std::vector<std::pair<int, int>>> nadj(nN);
+    for (const auto& e : flEdges) {
+      nadj[e[0]].push_back({e[1], e[2]});
+      nadj[e[1]].push_back({e[0], -e[2]});
+    }
+    constexpr int kFlUnset = std::numeric_limits<int>::min();
+    std::vector<int> E(nN, kFlUnset);
+    std::vector<int> q;
+    q.reserve(nN);
+    int flMismatch = 0;
+    auto flAnchor = [&](int n, int v) {
+      if (E[n] == kFlUnset) {
+        E[n] = v;
+        q.push_back(n);
+      } else if (E[n] != v) {
+        ++flMismatch;
+        if (kDump && flMismatch <= 8)
+          std::fprintf(stderr,
+                       "E1 FLOOD MISMATCH anchor n=%d g=%d E=%d vs %d\n", n,
+                       flNodes[n].g, E[n], v);
+      }
+    };
+    size_t qh = 0;
+    auto flDrain = [&]() {
+      for (; qh < q.size(); ++qh) {
+        const int n = q[qh];
+        for (const auto& [m, d] : nadj[n]) {
+          const int v = E[n] + d;
+          if (E[m] == kFlUnset) {
+            E[m] = v;
+            q.push_back(m);
+          } else if (E[m] != v) {
+            ++flMismatch;
+            if (kDump && flMismatch <= 8)
+              std::fprintf(stderr,
+                           "E1 FLOOD MISMATCH n=%d g=%d E=%d vs %d (from n=%d "
+                           "g=%d cert=%d)\n",
+                           m, flNodes[m].g, E[m], v, n, flNodes[n].g,
+                           flNodes[n].certified ? 1 : 0);
+          }
+        }
+      }
+    };
+    for (int n = 0; n < nN; ++n)
+      if (flNodes[n].certified)
+        flAnchor(n, flNodes[n].probeWA + flNodes[n].sPosFull);
+    flDrain();
+    // THE HULL SEED as the FALLBACK anchor: applied only to subgraphs no
+    // certified cell reaches.  (Measured on the GT7863 twin corner: the
+    // seed's corner-to-cenP transport can be wrong when a foreign sheet
+    // crosses the plane inside the corner cell without any cenP-visible
+    // record; certified anchors are always cenP-consistent, so they take
+    // precedence.  The flood-primary stage must re-adjudicate the seed -
+    // notebook flip-1784271017.)
+    for (const auto& s : flSeeds)
+      if (E[s.first] == kFlUnset) flAnchor(s.first, s.second);
+    flDrain();
+    int flUnreached = 0;
+    if (flMismatch == 0) {
+      // resolve pending cells off the field: wA = E - sPosFull, wB = wA + jump
+      for (int n = 0; n < nN; ++n) {
+        FlNode& fn = flNodes[n];
+        if (!fn.pending) continue;
+        if (E[n] == kFlUnset) {
+          ++flUnreached;
+          if (kDump)
+            std::fprintf(stderr, "E1 FLOOD UNREACHED n=%d g=%d\n", n, fn.g);
+          continue;
+        }
+        const int wA = E[n] - fn.sPosFull;
+        const int wB = wA + fn.jump;
+        ++flResolved;
+        const bool aIn = wA >= 1, bIn = wB >= 1;
+        if (!fn.pancake && aIn == bIn) continue;  // not a {w>=1} boundary
+        if (fn.pancake) {
+          // the layer certificate, verbatim from the probed path
+          if (aIn) continue;
+          std::vector<std::pair<double, int>> layers = fn.stackSheets;
+          layers.push_back({0.0, fn.ownJump});
+          std::sort(layers.begin(), layers.end(),
+                    [](const std::pair<double, int>& x,
+                       const std::pair<double, int>& y) {
+                      return x.first > y.first;
+                    });
+          int w = wA;
+          bool material = false;
+          for (size_t k = 0; k < layers.size();) {
+            size_t j = k;
+            int dsum = 0;
+            while (j < layers.size() && layers[j].first == layers[k].first) {
+              dsum += layers[j].second;
+              ++j;
+            }
+            w += dsum;
+            if (j < layers.size() && w >= 1) material = true;
+            k = j;
+          }
+          if (!material) continue;
+        }
+        const int orient =
+            fn.pancake ? (fn.ownJump > 0 ? 1 : -1) : (bIn ? 1 : -1);
+        ++nBoundary;
+        for (const ivec3& t : fn.tris) {
+          const vec3 p0 = fn.pos.at(t.x), p1 = fn.pos.at(t.y),
+                     p2 = fn.pos.at(t.z);
+          const vec3 nr = la::cross(p1 - p0, p2 - p0);
+          const double sd = la::dot(nr, fn.Nrep);
+          if ((sd > 0.0 || (sd == 0.0 && orient > 0)) == (orient > 0))
+            out.push_back({{p0, p1, p2}});
+          else
+            out.push_back({{p0, p2, p1}});
+          outG.push_back(fn.g);
+          outN.push_back(static_cast<double>(orient) * fn.Nrep);
+        }
+      }
+    }
+    if (kDump)
+      std::fprintf(stderr,
+                   "E1 FLOOD nodes=%d edges=%d hand=%d orphan=%d seeds=%d "
+                   "reached=%d mismatch=%d pending=%d resolved=%d "
+                   "unreached=%d\n",
+                   nN, static_cast<int>(flEdges.size()), flHandEdges,
+                   flHandOrphan, static_cast<int>(flSeeds.size()),
+                   static_cast<int>(q.size()), flMismatch, flPending,
+                   flResolved, flUnreached);
+  }
+  // The probe-graze fatal: preserved verbatim for any pending cell the flood
+  // could not value (fail-closed never weakened).
+  if (!buildPhase && flResolved < flPending)
+    return fail("e1: winding probe filter-uncertain - fail-closed");
   if (kDump)
     std::fprintf(stderr,
                  "E1 emitted=%d dust=%d triFail=%d spliceFail=%d cells=%d "
