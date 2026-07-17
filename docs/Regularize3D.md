@@ -287,9 +287,9 @@ rounded geometry, and never a lossy fallback. The queued completions:
   shares-vertex skip/recovery keyed on POSITION coincidence (recovering the coincident-vertex
   transversal crossings, the shared vertex the second endpoint), a phantom-seam guard (no clean
   off-plane interior pierce -> measure-zero -> skip), and a sub-eps collapse (endpoints dedup'd
-  under eps -> witness-theorem collapse).  openscad now fails one wall DEEPER at F4, the seam
-  sub-face / winding CLASSIFY probe = the SAME near-tangent winding-probe phenomenon as GT7081];
-  still fail-closed, never a silent wrong resolve.  (iii)
+  under eps -> witness-theorem collapse).  [openscad subsequently CLOSED end-to-end by the
+  coordinated-emission engine (registry + identity-carried emission + exact re-gate arm);
+  the F4-and-beyond arc lives in the e1engine/f4-* lane reports.]  (iii)
   axis-aligned integer geometry can
   graze every winding probe
   seed - NARROWED (reg3d-arr): the CLEAN-face classify now re-probes other interior
@@ -564,7 +564,8 @@ reverted):
   -----------------|--------------------|-------------------------------|--------
   PokedCube        | (RESOLVES wjump)   | - (vol 0.25, GWN-oracle)      | constructed
   GT7863 pair      | (RESOLVES 7863c1)  | - (both dirty comps, GWN)     | corpus
-  openscad soup    | 1 EMISSION (f4-junc| unresolvable sheet contact    | corpus
+  openscad soup    | (RESOLVES e1-eng)  | - (full operator; exact-winding | corpus
+                   |                    |  graded, volume-pinned)        |
   GT7081 pair      | (RESOLVES wjump)   | - (both shells, vol-preserved)| corpus
   NearCoplanarChain| 4 PLANARIZE-GUARD  | global-planarity guard        | constructed
   BridgedCaps      | (RESOLVES)         | -                             | resolves
