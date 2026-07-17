@@ -1184,15 +1184,24 @@ TEST(Overlap3, Regularize_CoplanarFold_Mult3Nested_Resolves) {
 // interior to a neighbour's / third face's edge without a shared split (~2/3 of
 // the open edges).
 //
-// The surviving residue is near-degenerate and fails closed: near-tangent
-// >2-SHEET RADIAL junctions (unbalanced 3-4 halfedge fans; the unbuilt radial
-// branch), genuinely-distinct near-coincident vertices from near-PARALLEL
-// planes (separated far below the model scale but well above eps), a coplanar/
-// transversal ENTANGLEMENT line where the fold's cap-cap crossing and a seamed
-// wall's endpoint differ by more than eps, and collinear clean-clean edge
-// overlaps.  Closing these needs the exact symbolic 3-plane vertex the campaign
-// gates behind the kernel tripwire (the plane-based-representation escalation)
-// - recorded, not built.  Still fail-closed, never a silent wrong resolve.
+// THE PIN, FLIPPED (e1engine acceptance).  The coordinated per-line-registry
+// engine (EmitCoordinatedBoundary) resolves the residue: one exact
+// arrangement for the whole cluster region, identity-carried emission,
+// pancake membranes for net-cancelled sub-weld stacks, the near-tangent
+// radial branch (sheet provenance through the weld + doubled-edge
+// subdivision), and the exact re-gate arm (heuristic flags arbitrated by the
+// exact kernel: sub-eps coincidence is a valid rendering of unseparable
+// geometry, >= eps refuses).  The resolve is oracle-graded: exact volume
+// matches the independent offline derivation, dense exact-winding sampling
+// is mismatch-free, and every residual self-contact is strictly sub-weld.
+//
+// MUTATION ANCHORS: (1) engine off (default env) -> the per-face path still
+// fails closed at the emission wall with the same named fatal - asserted
+// below; (2) sheet provenance off -> the X-contact doubled edge returns and
+// Is2Manifold refuses (dev-verified); (3) exact re-gate arm off -> the
+// heuristic re-gate refuses again (the session-11 measured state);
+// (4) a planted through-wall macro crossing -> the exact arm refuses
+// (dev-verified: E1 EXACTARM violation + re-gate fatal).
 TEST(Overlap3, Regularize_ExactZeroTie_Openscad_FailClosed) {
   std::filesystem::path file(__FILE__);
   std::ifstream fin(
@@ -1200,16 +1209,42 @@ TEST(Overlap3, Regularize_ExactZeroTie_Openscad_FailClosed) {
           .string());
   if (!fin.is_open()) GTEST_SKIP() << "model not found";
   const Manifold::Impl in(ReadOBJ(fin));
+  // Anchor 1: WITHOUT the engine, the per-face path fails closed at the
+  // emission wall (never a silent wrong resolve).
+  ASSERT_EQ(std::getenv("E1_ENGINE"), nullptr)
+      << "test owns the E1_ENGINE gate";
+  {
+    const RegularizeResult r = RemoveOverlaps3D(in, ImplEps(in));
+    EXPECT_GE(r.counters.dirty, 1) << "coplanar overlap must route to B";
+    ASSERT_TRUE(r.fatal.has_value()) << "engine-off must fail closed";
+    EXPECT_EQ(*r.fatal, FatalReason::NonManifoldEmission) << r.detail;
+    EXPECT_NE(r.detail.find("unresolvable sheet contact"), std::string::npos)
+        << "engine-off residue must name the emission wall: " << r.detail;
+    EXPECT_FALSE(r.impl.has_value()) << "fail-closed yields no partial output";
+  }
+  // With the engine: the component RESOLVES through the FULL operator
+  // (weld, SplitTouchingSheets, manifold gates, exact re-gate arm).
+  setenv("E1_ENGINE", "1", 1);
   const RegularizeResult r = RemoveOverlaps3D(in, ImplEps(in));
-  EXPECT_GE(r.counters.dirty, 1) << "coplanar overlap must route to B";
-  ASSERT_TRUE(r.fatal.has_value())
-      << "the narrowed residue must fail closed, never silently resolve";
-  // The triple-point (F4) refusal is DISSOLVED by the once-only construction;
-  // the honest terminal is now the DEEPER emission wall.
-  EXPECT_EQ(*r.fatal, FatalReason::NonManifoldEmission) << r.detail;
-  EXPECT_NE(r.detail.find("unresolvable sheet contact"), std::string::npos)
-      << "residue must name the deeper emission wall: " << r.detail;
-  EXPECT_FALSE(r.impl.has_value()) << "fail-closed yields no partial output";
+  unsetenv("E1_ENGINE");
+  EXPECT_GE(r.counters.dirty, 1);
+  ASSERT_FALSE(r.fatal.has_value())
+      << "engine-on must resolve: " << (r.fatal ? r.detail : "");
+  ASSERT_TRUE(r.impl.has_value());
+  EXPECT_TRUE(r.impl->IsManifold());
+  EXPECT_TRUE(r.impl->Is2Manifold());
+  // Volume pin: exact rational divergence of the returned soup equals the
+  // independently derived truth (engine component 381.138240386508 + the
+  // production-resolved second component).
+  double vol = 0.0;
+  for (size_t t = 0; t < r.impl->halfedge_.size() / 3; ++t) {
+    const vec3 a = r.impl->vertPos_[r.impl->halfedge_.Start(3 * t)];
+    const vec3 b = r.impl->vertPos_[r.impl->halfedge_.Start(3 * t + 1)];
+    const vec3 c = r.impl->vertPos_[r.impl->halfedge_.Start(3 * t + 2)];
+    vol += la::dot(a, la::cross(b, c));
+  }
+  vol /= 6.0;
+  EXPECT_NEAR(vol, 389.196654619781, 1e-6);
 }
 
 // WITHIN-component coplanar carrier (the re-scoped GateComponent axis).

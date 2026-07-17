@@ -7783,6 +7783,180 @@ int Orient3DExactSignProbe(const vec3& a, const vec3& b, const vec3& c,
   return Orient3DExactSign(a, b, c, d);
 }
 
+// EXACT RE-GATE ARM (filter-first).  GateComponent's heuristics
+// (IsSelfIntersecting's PhysX distance test, HasCoplanarOverlap's witness)
+// are the FILTER; when they flag resolver output, THIS is the arbiter.
+// Contract: a contact whose interpenetration is below the weld radius is
+// COINCIDENT/TOUCHING - a valid double-precision rendering of geometry the
+// representation cannot separate (measured on the graded openscad resolve:
+// max crossing depth 0.23 eps, coplanar lens widths <= 4e-7 eps); anything
+// at or beyond eps is a genuine violation and refuses.  TOPOLOGICAL
+// decisions (does an edge strictly cross a triangle; is a coplanar pair
+// overlapping) use the exact kernel (Orient3DFilterSign ->
+// Orient3DExactSign, ExactOrient2DDrop - landed forms only); only the eps-
+// scale MAGNITUDES (depth, lens width) are double arithmetic, with four-plus
+// orders of margin to the threshold.  Adjacency needs no special casing:
+// shared vertices/edges yield orient zeros and strictness rejects them.
+// Returns true iff every contact is within-weld (the component may pass).
+static bool RegateContactsWithinWeld(const Manifold::Impl& m, double eps) {
+  const size_t nTri = m.halfedge_.size() / 3;
+  std::vector<std::array<vec3, 3>> tri(nTri);
+  for (size_t t = 0; t < nTri; ++t)
+    for (int k = 0; k < 3; ++k)
+      tri[t][k] = m.vertPos_[m.halfedge_.Start(3 * t + k)];
+  auto o3 = [](const vec3& a, const vec3& b, const vec3& c,
+               const vec3& d) -> int {
+    const int s = Orient3DFilterSign(a, b, c, d);
+    return s != 0 ? s : Orient3DExactSign(a, b, c, d);
+  };
+  // uniform grid over the triangle boxes
+  const double H = 0.5;
+  std::map<std::tuple<long long, long long, long long>, std::vector<int>> grid;
+  std::vector<Box> boxes(nTri);
+  for (size_t t = 0; t < nTri; ++t) {
+    Box b;
+    for (int k = 0; k < 3; ++k) b.Union(tri[t][k]);
+    boxes[t] = b;
+    for (long long x = static_cast<long long>(std::floor(b.min.x / H));
+         x <= static_cast<long long>(std::floor(b.max.x / H)); ++x)
+      for (long long y = static_cast<long long>(std::floor(b.min.y / H));
+           y <= static_cast<long long>(std::floor(b.max.y / H)); ++y)
+        for (long long z = static_cast<long long>(std::floor(b.min.z / H));
+             z <= static_cast<long long>(std::floor(b.max.z / H)); ++z)
+          grid[{x, y, z}].push_back(static_cast<int>(t));
+  }
+  // strict segment-triangle crossing + penetration depth of the edge tip
+  auto crossingBeyondWeld = [&](const std::array<vec3, 3>& A,
+                                const std::array<vec3, 3>& B) -> bool {
+    for (int k = 0; k < 3; ++k) {
+      const vec3 &p = A[k], &q = A[(k + 1) % 3];
+      const int s1 = o3(B[0], B[1], B[2], p);
+      const int s2 = o3(B[0], B[1], B[2], q);
+      if (s1 == 0 || s2 == 0 || s1 == s2) continue;
+      const int t0 = o3(p, q, B[0], B[1]);
+      const int t1 = o3(p, q, B[1], B[2]);
+      const int t2 = o3(p, q, B[2], B[0]);
+      if (t0 == 0 || t0 != t1 || t1 != t2) continue;
+      // strict crossing: how far does the offending edge extend past B's
+      // plane?  (a lower bound of the surfaces' interpenetration)
+      const vec3 nB = la::cross(B[1] - B[0], B[2] - B[0]);
+      const double nl = la::length(nB);
+      if (!(nl > 0.0)) continue;
+      const double depth = std::min(std::abs(la::dot(nB, p - B[0])),
+                                    std::abs(la::dot(nB, q - B[0]))) /
+                           nl;
+      if (depth >= eps) return true;
+    }
+    return false;
+  };
+  // exact-coplanar 2D overlap + lens width
+  auto coplanarBeyondWeld = [&](const std::array<vec3, 3>& A,
+                                const std::array<vec3, 3>& B) -> bool {
+    for (int k = 0; k < 3; ++k)
+      if (o3(A[0], A[1], A[2], B[k]) != 0) return false;
+    const vec3 nA = la::cross(A[1] - A[0], A[2] - A[0]);
+    const int ax = DominantAxis(nA);
+    auto d2 = [&](const vec3& v) -> vec2 {
+      if (ax == 0) return {v.y, v.z};
+      if (ax == 1) return {v.x, v.z};
+      return {v.x, v.y};
+    };
+    auto o2 = [&](const vec3& a, const vec3& b, const vec3& c) -> int {
+      return ExactOrient2DDrop(a, b, c, ax);
+    };
+    auto strictInside = [&](const vec3& p, const std::array<vec3, 3>& T) {
+      const int a = o2(T[0], T[1], p), b = o2(T[1], T[2], p),
+                c = o2(T[2], T[0], p);
+      return (a > 0 && b > 0 && c > 0) || (a < 0 && b < 0 && c < 0);
+    };
+    auto properX = [&](const vec3& a, const vec3& b, const vec3& c,
+                       const vec3& d) {
+      const int d1 = o2(a, b, c), da = o2(a, b, d), d3 = o2(c, d, a),
+                d4 = o2(c, d, b);
+      return d1 != 0 && da != 0 && d3 != 0 && d4 != 0 && d1 != da && d3 != d4;
+    };
+    bool overlap = false;
+    for (int k = 0; k < 3 && !overlap; ++k)
+      overlap = strictInside(A[k], B) || strictInside(B[k], A);
+    for (int k = 0; k < 3 && !overlap; ++k)
+      for (int j = 0; j < 3 && !overlap; ++j)
+        overlap = properX(A[k], A[(k + 1) % 3], B[j], B[(j + 1) % 3]);
+    if (!overlap) return false;
+    // lens width via Sutherland-Hodgman clip (doubles about a local origin;
+    // error orders below the eps threshold)
+    const vec2 o = d2(A[0]);
+    std::vector<vec2> P, Q;
+    for (int k = 0; k < 3; ++k) P.push_back(d2(A[k]) - o);
+    for (int k = 0; k < 3; ++k) Q.push_back(d2(B[k]) - o);
+    auto ccw = [](std::vector<vec2>& R) {
+      double s = 0;
+      for (size_t k = 0; k < R.size(); ++k) {
+        const vec2 &u = R[k], &v = R[(k + 1) % R.size()];
+        s += u.x * v.y - v.x * u.y;
+      }
+      if (s < 0) std::reverse(R.begin(), R.end());
+    };
+    ccw(P);
+    ccw(Q);
+    std::vector<vec2> out = P;
+    for (size_t k = 0; k < Q.size() && !out.empty(); ++k) {
+      const vec2 &Aq = Q[k], &Bq = Q[(k + 1) % Q.size()];
+      std::vector<vec2> cur = std::move(out);
+      out.clear();
+      for (size_t mI = 0; mI < cur.size(); ++mI) {
+        const vec2 &C = cur[mI], &D = cur[(mI + 1) % cur.size()];
+        const double dc =
+            (Bq.x - Aq.x) * (C.y - Aq.y) - (Bq.y - Aq.y) * (C.x - Aq.x);
+        const double dd =
+            (Bq.x - Aq.x) * (D.y - Aq.y) - (Bq.y - Aq.y) * (D.x - Aq.x);
+        if (dc >= 0) out.push_back(C);
+        if ((dc > 0 && dd < 0) || (dc < 0 && dd > 0)) {
+          const double tt = dc / (dc - dd);
+          out.push_back({C.x + tt * (D.x - C.x), C.y + tt * (D.y - C.y)});
+        }
+      }
+    }
+    if (out.size() < 3) return false;
+    double s = 0;
+    for (size_t k = 0; k < out.size(); ++k) {
+      const vec2 &u = out[k], &v = out[(k + 1) % out.size()];
+      s += u.x * v.y - v.x * u.y;
+    }
+    const double area = std::abs(0.5 * s);
+    if (!(area > 0.0)) return false;
+    vec2 lo{1e300, 1e300}, hi{-1e300, -1e300};
+    for (int k = 0; k < 3; ++k) {
+      lo = la::min(la::min(lo, d2(A[k]) - o), d2(B[k]) - o);
+      hi = la::max(la::max(hi, d2(A[k]) - o), d2(B[k]) - o);
+    }
+    const double ext = std::max(hi.x - lo.x, hi.y - lo.y);
+    const double width = ext > 0.0 ? area / ext : 0.0;
+    return width >= eps;
+  };
+  for (const auto& kv : grid) {
+    const std::vector<int>& v = kv.second;
+    for (size_t a = 0; a < v.size(); ++a)
+      for (size_t b = a + 1; b < v.size(); ++b) {
+        const int i = v[a], j = v[b];
+        if (boxes[i].min.x > boxes[j].max.x + eps ||
+            boxes[j].min.x > boxes[i].max.x + eps ||
+            boxes[i].min.y > boxes[j].max.y + eps ||
+            boxes[j].min.y > boxes[i].max.y + eps ||
+            boxes[i].min.z > boxes[j].max.z + eps ||
+            boxes[j].min.z > boxes[i].max.z + eps)
+          continue;
+        if (crossingBeyondWeld(tri[i], tri[j]) ||
+            crossingBeyondWeld(tri[j], tri[i]) ||
+            coplanarBeyondWeld(tri[i], tri[j])) {
+          if (std::getenv("E1_DUMP") != nullptr)
+            std::fprintf(stderr, "E1 EXACTARM violation t%d x t%d\n", i, j);
+          return false;
+        }
+      }
+  }
+  return true;
+}
+
 RegularizeResult RemoveOverlaps3D(const Manifold::Impl& in, double eps) {
   RegularizeResult result;
 
@@ -7874,7 +8048,22 @@ RegularizeResult RemoveOverlaps3D(const Manifold::Impl& in, double eps) {
                  // unbuilt weld-fold regime.  It is deliberately NOT demoted to
                  // a DEBUG_ASSERT: it must fail closed in RELEASE, not compile
                  // out and admit wrong geometry.
-                 if (GateComponent(bImpl) != GateVerdict::Clean) {
+                 // FILTER-FIRST re-gate: the heuristic gate flags, the EXACT
+                 // arm arbitrates (owner-blessed).  Manifoldness must hold
+                 // regardless; a flagged component passes only when every
+                 // contact is within the weld radius (sub-eps coincidence -
+                 // the correct rendering of unseparable geometry), and any
+                 // genuine crossing/overlap at or beyond eps refuses exactly
+                 // as before.  Placement is SCOPED to the resolver's re-gate:
+                 // the shared IsSelfIntersecting keeps its heuristic
+                 // sensitivity for input ROUTING (a false-positive there
+                 // routes to the resolver, the safe direction) and for its
+                 // external test assertions.
+                 const GateVerdict rgv = GateComponent(bImpl);
+                 const bool regateOk = rgv == GateVerdict::Clean ||
+                                       (rgv == GateVerdict::Dirty &&
+                                        RegateContactsWithinWeld(bImpl, eps));
+                 if (!regateOk) {
                    if (std::getenv("E1_DUMP") != nullptr)
                      std::fprintf(
                          stderr, "E1 REGATE manifold=%d selfx=%d coplanar=%d\n",
