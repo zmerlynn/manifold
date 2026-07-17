@@ -3588,8 +3588,7 @@ struct E1Seam {
 StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
     const Manifold::Impl& in, const BuildArrangement& A, double eps,
     std::map<std::tuple<int, int, int>, std::map<e1::K3, vec3>>& lineReg,
-    std::vector<std::vector<E1Seam>>& seamCache, bool buildPhase,
-    bool keepField = false) {
+    std::vector<std::vector<E1Seam>>& seamCache, bool buildPhase) {
   using e1::K3;
   using e1::KeyOf;
   const int nTri = static_cast<int>(A.tri.size());
@@ -3989,13 +3988,14 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
   // exterior (w=0, no ray cast: the lex-max of a compact polyhedron is a
   // vertex) and lies on the lexsign side of every plane through v*, so a
   // group with exactly one node cell touching v* anchors combinatorially;
-  // (b) residual probes (one certified probe anchors each subgraph).  BFS
-  // propagates over RELIABILITY-FILTERED edges; a conflict clears the field
-  // and the emission probes every cell (the pre-flood per-cell semantics).
+  // (b) residual probes (one decided exact winding anchors each subgraph).
+  // BFS
+  // propagates only over predicate-DECIDED edges.  Grazed edges partition the
+  // graph; each resulting subgraph receives one absolute anchor.  A conflict
+  // among decided edges is an invariant violation and fails closed.
   // FLOOD-PRIMARY (session 3): the field values every cell; the exact probe
-  // remains as (a) the residual subgraph anchor, (b) the per-cell
-  // specialist where edge transport is unreliable (the near-tangent ladder
-  // class), (c) the E1_FLOODDIFF shadow validator.
+  // remains as (a) the one absolute anchor for every non-outer subgraph and
+  // (b) the E1_FLOODDIFF shadow validator.
   struct FlNode {
     int g = -1;
     int jump = 0, ownJump = 0;
@@ -4009,9 +4009,8 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
     // probeState: 0 unprobed, 1 certified (probeWA/WB valid), 2 grazed,
     // 3 probed but certificate failed
     signed char probeState = 0;
-    // anchor-grade: certified at the BASE offset with no retry/acceptance -
-    // ladder-retried readings are trusted for the cell's own emission but
-    // not as the global field base (they sit in delicate corridors)
+    // anchor-grade: a two-sided exact winding certificate at the BASE offset;
+    // ladder-retried or non-boundary-accepted readings never anchor the field.
     bool anchorOK = false;
     bool certified = false;  // == (probeState == 1), kept for the census
     int probeWA = 0, probeWB = 0;
@@ -4029,14 +4028,22 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
     std::map<int, vec3> pos;  // emission payload
   };
   std::vector<FlNode> flNodes;
-  // (n0, n1, d, tag): E(n1) = E(n0) + d; tag = contributing-arm bitmask
-  // (1 straddle-chord, 2 touch-chord, 4 ridge, 8 parity, 32 handoff,
-  // 64 handoff-leg-correction) - the differential's arm-level census
-  std::vector<std::array<int, 4>> flEdges;
+  struct FlEdge {
+    int n0, n1, delta;
+    int tag;       // contributing-arm bitmask for the differential census
+    bool decided;  // every predicate contributing to delta was decisive
+  };
+  // E(n1) = E(n0) + delta.  Tags: 1 straddle-chord, 2 touch-chord,
+  // 4 ridge, 8 parity, 32 handoff, 64 handoff-leg-correction.
+  std::vector<FlEdge> flEdges;
+  struct FlHandRecord {
+    int node, eOff;
+    bool decided;
+    bool groupConserved;
+  };
   // handoff records: (input vid pair, sub-edge position bits) ->
   // (node, eOff) with the invariant E(node) + eOff equal on both sides
-  std::map<std::pair<std::pair<int, int>, SegKey>,
-           std::vector<std::pair<int, int>>>
+  std::map<std::pair<std::pair<int, int>, SegKey>, std::vector<FlHandRecord>>
       flHand;
   std::vector<std::pair<int, int>> flSeeds;  // (node, anchored E value)
   auto flLexsign = [](const vec3& n) -> int {
@@ -5187,8 +5194,8 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
       }
       // FLOOD-PRIMARY (flip arc session 3): the classify loop no longer
       // probes; every emission-eligible cell stores its payload and the
-      // field solve values it (residual probes anchor subgraphs; a BFS
-      // conflict falls back to probe-everything = the old semantics).
+      // field solve values it (one exact probe anchors every reliable
+      // subgraph not containing the hull seed).
       bool emitEligible = !(jump == 0 && !pancake);
       if (emitEligible && pancake) {
         // Dust rule for pancakes is EXTENT-outright (the dust-dot rule),
@@ -5248,7 +5255,7 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
         FlNode& fn = flNodes[flNode];
         fn.probeState = certified ? 1 : 3;
         fn.certified = certified;
-        fn.anchorOK = certified;  // base-offset probe: anchor-grade
+        fn.anchorOK = certified;
         fn.probeWA = *wA;
         fn.probeWB = *wB;
       }
@@ -5261,10 +5268,11 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
         if (kFE && std::atoi(kFE) == g) {
           std::fprintf(stderr,
                        "E1 FLNODE n=%d g=%d wA=%d wB=%d jump=%d ownJump=%d "
-                       "sPos=%d cenP=(%.6g,%.6g,%.6g) nHat=(%.3g,%.3g,%.3g)\n",
+                       "sPos=%d ext=%.17g cenP=(%.17g,%.17g,%.17g) "
+                       "nHat=(%.3g,%.3g,%.3g)\n",
                        flNode, g, *wA, *wB, jump, ownJump,
-                       flNodes[flNode].sPosMid, cenP.x, cenP.y, cenP.z, nHat.x,
-                       nHat.y, nHat.z);
+                       flNodes[flNode].sPosMid, flNodes[flNode].extW, cenP.x,
+                       cenP.y, cenP.z, nHat.x, nHat.y, nHat.z);
           for (const auto& e2 : flNodes[flNode].nearSign)
             std::fprintf(stderr, "    near f=%d gid=%d tSign=%d q=%d\n", e2[0],
                          gid[e2[0]], e2[1], e2[2]);
@@ -5286,7 +5294,7 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
       // Orient3DFilterSign's det is (a-d).((b-d)x(c-d)) = -dot(n_abc, d-a),
       // so the +Nrep side is a NEGATIVE sign.  Filter-first, exact on 0 -
       // the blessed WindCrossTri escalation pattern.
-      auto flAbovePlane = [&](const vec3& x) -> int {  // +1 above, -1 below
+      auto flAbovePlane = [&](const vec3& x) -> int {
         const std::array<vec3, 3>& rt = A.tri[rep[g]];
         int s = Orient3DFilterSign(rt[0], rt[1], rt[2], x);
         if (s == 0) s = Orient3DExactSign(rt[0], rt[1], rt[2], x);
@@ -5326,6 +5334,11 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
         // m), giving delta(c_lo->hi -> other) = sigmaF * sgn(along).
         int delta = 0, tag = 0;
         bool bad = false;
+        // Decidedness is the edge-local reliability certificate.  Exact
+        // predicate results and filter-certified signs keep it true; a
+        // quantity in the existing sub-resolution band, or an incomplete
+        // parity census, makes the transport unusable by the flood.
+        bool decided = true;
         std::set<int> seenF;  // distinct chord partner faces
         std::set<int> seenG;  // their GROUPS (parity-arm exclusion)
         std::set<std::pair<int, int>> vps;  // distinct member vid pairs
@@ -5423,7 +5436,11 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
                   hMax,
                   std::abs(la::dot(Nrep, A.tri[f2][k] - A.tri[rep[g]][0])) /
                       la::length(Nrep));
-            if (hMax <= stackWin) continue;  // in-band sheet: E' uncut
+            if (hMax <= stackWin) {
+              // This sheet belongs to the effective stack.  E' is defined
+              // above that whole band, so its contribution is decisively 0.
+              continue;
+            }
             if (nBe == 0) {
               // TOUCH-FROM-ABOVE: attached riser along its on-plane edge
               // (coincident-position attachment, not the halfedge twin).
@@ -5457,6 +5474,10 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
               delta += tv2 > 0.0 ? -1 : 1;
               tag |= 1;
             } else {
+              // Exact O2 supplies the local combinatorial side, but this
+              // near-tangent branch cannot certify that the separator sheet
+              // continues between both cells (the openscad ladder class).
+              decided = false;
               const int o = e1::O2(pos3[ec.first.first], pos3[ec.first.second],
                                    A.tri[f2][vAb], axis);
               if (o == 0 || !(qv != 0.0)) {
@@ -5478,6 +5499,11 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
             cl[0].second != cl[1].second) {
           const int nA = cl[0].second ? cl[0].first : cl[1].first;
           const int nB = cl[0].second ? cl[1].first : cl[0].first;
+          // A MID-band covering sheet at either endpoint makes the complete
+          // edge delta undecidable, even when that sheet's group also owns a
+          // represented chord and is excluded from the parity sum.  This is
+          // the existing sub-ULP ladder marker; it is not a decided zero.
+          if (flNodes[nA].hasBand || flNodes[nB].hasBand) decided = false;
           // STACK-CROSSING PARITY ARM: a covering foreign SHEET whose signed
           // tPos FLIPS between the two cenPs crossed the group plane between
           // them with no representable chord (the sub-eps stack class).  The
@@ -5494,31 +5520,42 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
           // with an exact-zero tPos or non-conserved coverage contributes 0
           // (ends laterally; the differential owns the residue).
           {
-            // {aboveA, restA, aboveB, restB} - GLOBAL aggregate (a warped
-            // foreign quad's triangles land in different plane groups yet
-            // form ONE crossing sheet; the global sums still conserve).
+            // {aboveA, restA, aboveB, restB}, per foreign plane group.  A
+            // global scalar is not a certificate: one sheet may end while a
+            // different sheet begins with the same signed count.
             // Only ABOVE-state (tPos > stackWin, robust) sheets sit above
             // the E' level; MID (band) and BELOW merge - a band sheet's
             // side is double-noise and its transit is not a crossing of E'
             // (the sub-ULP openscad class, measured).
-            std::array<int, 4> a{0, 0, 0, 0};
+            std::map<int, std::array<int, 4>> byGroup;
+            bool parityBand = false;
             auto addTo = [&](const FlNode& fn2, int ia0, int ib0) {
               for (const auto& e2 : fn2.nearSign) {
-                if (seenG.count(gid[e2[0]])) continue;
-                a[e2[1] > 0 ? ia0 : ib0] += e2[2];
+                const int g2 = gid[e2[0]];
+                if (seenG.count(g2)) continue;
+                if (e2[1] == 0) parityBand = true;
+                byGroup[g2][e2[1] > 0 ? ia0 : ib0] += e2[2];
               }
             };
             addTo(flNodes[nA], 0, 1);
             addTo(flNodes[nB], 2, 3);
-            if (a[0] + a[1] == a[2] + a[3] && a[2] != a[0]) {
-              delta += a[2] - a[0];
+            bool conserved = true;
+            int parityDelta = 0;
+            for (const auto& kv : byGroup) {
+              const auto& a = kv.second;
+              if (a[0] + a[1] != a[2] + a[3]) conserved = false;
+              parityDelta += a[2] - a[0];
+            }
+            if (parityBand || !conserved) decided = false;
+            if (!parityBand && conserved && parityDelta != 0) {
+              delta += parityDelta;
               tag |= 8;
               if (flDump)
                 std::fprintf(stderr, "    parity dAbove=%d (nA=%d nB=%d)\n",
-                             a[2] - a[0], nA, nB);
+                             parityDelta, nA, nB);
             }
           }
-          flEdges.push_back({nA, nB, delta, tag});
+          flEdges.push_back({nA, nB, delta, tag, decided});
         }
         // CROSS-GROUP HANDOFF RECORD: a clean manifold mesh-edge sub-edge -
         // exactly ONE member vid pair, no THIRD sheet reaching the edge (the
@@ -5573,9 +5610,12 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
         // below-layer path crosses the same transiting sheets, so the
         // correction applies uniformly for both fsgn cases.
         int corr = 0;
+        bool corrDecided = true;
+        bool corrGroupConserved = true;
         if (!fn.nearSign.empty()) {
           const vec3 mid = 0.5 * (pos3[ec.first.first] + pos3[ec.first.second]);
           int aCen = 0, totCen = 0, aMid = 0, totMid = 0;
+          std::map<int, std::pair<int, int>> groupCoverage;
           bool degen = false;
           for (const auto& e2 : fn.nearSign) {
             const int f2 = e2[0];
@@ -5584,6 +5624,7 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
             // transiting foreign sheet - excluded from the leg correction
             if (f2 == handTf || ridgeTf.count(f2)) continue;
             totCen += e2[2];
+            groupCoverage[gid[f2]].first += e2[2];
             if (e2[1] > 0) aCen += e2[2];
             const int ax2 = DominantAxis(A.faceN[f2]);
             const int o0 = e1::O2(A.tri[f2][0], A.tri[f2][1], mid, ax2);
@@ -5603,16 +5644,24 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
               break;
             }
             totMid += e2[2];
+            groupCoverage[gid[f2]].second += e2[2];
             if (tp > stackWin) aMid += e2[2];
           }
-          if (!degen && totCen == totMid) corr = aMid - aCen;
+          for (const auto& kv : groupCoverage)
+            if (kv.second.first != kv.second.second) corrGroupConserved = false;
+          if (!degen && totCen == totMid)
+            corr = aMid - aCen;
+          else {
+            corrDecided = false;
+            corr = 0;
+          }
         }
         const int eOff = (fsgn[fOwn] > 0 ? 0 : fn.ownJump + fn.sZero) + corr;
         const int vlo = std::min(segs[handSi].vidLo, segs[handSi].vidHi);
         const int vhi = std::max(segs[handSi].vidLo, segs[handSi].vidHi);
         flHand[{{vlo, vhi},
                 segKeyOf(pos3[ec.first.first], pos3[ec.first.second])}]
-            .push_back({node, eOff});
+            .push_back({node, eOff, corrDecided, corrGroupConserved});
       }
       // THE HULL SEED: exactly one node cell touching v* in this group
       // anchors combinatorially (see the field comment above).  GUARD: a
@@ -5635,10 +5684,10 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
     suspectTotal += suspectSnaps;
   }
   // ---- FLOOD SOLVE + EMISSION (flood-primary, flip arc session 3) --------
-  // Reliability-filtered edges; anchors = residual probes (one certified
-  // probe per unreached subgraph, in node order) then the guarded hull
-  // seeds; a BFS conflict clears the field so the emission below probes
-  // EVERY cell (the pre-flood per-cell semantics, fail-closed intact).
+  // Predicate-decided edges define reliable-connected subgraphs.  The
+  // guarded hull seed anchors the outer subgraph; one base-certified exact
+  // probe anchors every other subgraph.  A decided-edge conflict is an
+  // invariant violation and fails closed.
   // E1_FLOODDIFF probes every cell in the classify loop as a shadow
   // validator and prints the arm census; it never affects anchoring.
   const auto flTS0 = flNow();
@@ -5651,43 +5700,54 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
         continue;
       }
       // E(n0) + eOff0 == E(n1) + eOff1  =>  E(n1) = E(n0) + (eOff0 - eOff1)
-      flEdges.push_back({kv.second[0].first, kv.second[1].first,
-                         kv.second[0].second - kv.second[1].second, 32});
+      const int handDelta = kv.second[0].eOff - kv.second[1].eOff;
+      const bool groupConserved =
+          kv.second[0].groupConserved && kv.second[1].groupConserved;
+      // The clean dihedral rule decides an equal-offset (zero-delta) handoff
+      // directly.  A nonzero transport depends on the cenP-to-edge leg
+      // correction, so both correction predicates and every contributing
+      // plane-group census must be complete.  This is the local separation
+      // between the GT7081 zero corridor and the nonzero curl/ladder edges.
+      const bool decided =
+          handDelta == 0 ||
+          (kv.second[0].decided && kv.second[1].decided && groupConserved);
+      flEdges.push_back(
+          {kv.second[0].node, kv.second[1].node, handDelta, 32, decided});
       ++flHandEdges;
       if (kFlHandDump)
         std::fprintf(stderr,
                      "E1 FLHAND vid=(%d,%d) n%d(g%d,eOff%d) <-> n%d(g%d,"
                      "eOff%d)\n",
                      kv.first.first.first, kv.first.first.second,
-                     kv.second[0].first, flNodes[kv.second[0].first].g,
-                     kv.second[0].second, kv.second[1].first,
-                     flNodes[kv.second[1].first].g, kv.second[1].second);
+                     kv.second[0].node, flNodes[kv.second[0].node].g,
+                     kv.second[0].eOff, kv.second[1].node,
+                     flNodes[kv.second[1].node].g, kv.second[1].eOff);
     }
     if (kFlHandDump)
       for (const auto& s : flSeeds)
         std::fprintf(stderr, "E1 FLSEED n=%d g=%d E=%d\n", s.first,
                      flNodes[s.first].g, s.second);
     const int nN = static_cast<int>(flNodes.size());
-    // EDGE RELIABILITY (the near-tangent-ladder adjudication, measured on
-    // openscad): (a) edges between one cell pair must AGREE - the ladder's
-    // per-sub-edge chord counts are each incomplete in a different way and
-    // disagree, violating path-independence; (b) an edge where BOTH a chord
-    // and the parity arm fired double-counts sheets whose chords ride other
-    // sub-edges of the same corridor (measured 335/335 wrong).  Unreliable
-    // edges are dropped; their cells fall to residual probes.
-    std::vector<bool> flOk(flEdges.size(), true);
-    int flPairDrop = 0, flTagDrop = 0;
+    // EDGE RELIABILITY = DECIDEDNESS.  The producing arm marks an edge
+    // decided only when every sign came from a certified filter or the exact
+    // path.  Existing sub-resolution-band and incomplete-conservation reads
+    // are grazes, so those edges cannot join a reliable-connected subgraph.
+    // The older structural checks remain certificates too: parallel records
+    // for one cell pair must agree, and chord+parity overlap is ambiguous.
+    std::vector<bool> flOk(flEdges.size());
+    int flDecidedDrop = 0, flPairDrop = 0, flTagDrop = 0;
     {
       std::map<std::pair<int, int>, std::vector<size_t>> byPair;
       for (size_t i = 0; i < flEdges.size(); ++i) {
         const auto& e = flEdges[i];
-        if ((e[3] & 8) && (e[3] & 3)) {
+        flOk[i] = e.decided;
+        if (!flOk[i]) ++flDecidedDrop;
+        if ((e.tag & 8) && (e.tag & 3)) {
           flOk[i] = false;
           ++flTagDrop;
-          continue;
         }
-        byPair[e[0] < e[1] ? std::make_pair(e[0], e[1])
-                           : std::make_pair(e[1], e[0])]
+        byPair[e.n0 < e.n1 ? std::make_pair(e.n0, e.n1)
+                           : std::make_pair(e.n1, e.n0)]
             .push_back(i);
       }
       for (const auto& kv : byPair) {
@@ -5695,7 +5755,7 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
         int d0 = 0;
         for (size_t k = 0; k < kv.second.size(); ++k) {
           const auto& e = flEdges[kv.second[k]];
-          const int d = e[0] == kv.first.first ? e[2] : -e[2];
+          const int d = e.n0 == kv.first.first ? e.delta : -e.delta;
           if (k == 0)
             d0 = d;
           else if (d != d0)
@@ -5707,12 +5767,13 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
         }
       }
     }
-    std::vector<std::vector<std::pair<int, int>>> nadj(nN);
+    // (neighbor, signed delta, producing-arm tag), reliable edges only.
+    std::vector<std::vector<std::array<int, 3>>> nadj(nN);
     for (size_t i = 0; i < flEdges.size(); ++i) {
       if (!flOk[i]) continue;
       const auto& e = flEdges[i];
-      nadj[e[0]].push_back({e[1], e[2]});
-      nadj[e[1]].push_back({e[0], -e[2]});
+      nadj[e.n0].push_back({e.n1, e.delta, e.tag});
+      nadj[e.n1].push_back({e.n0, -e.delta, e.tag});
     }
     // ARM-LEVEL DIFFERENTIAL CENSUS: every edge whose BOTH endpoints carry a
     // certified probe is directly checkable (certE(n1)-certE(n0) vs d); the
@@ -5720,21 +5781,22 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
     if (kFloodDiff && kDump) {
       std::map<int, std::pair<int, int>> tagCensus;  // tag -> (checked, bad)
       int badEdges = 0;
-      for (const auto& e : flEdges) {
-        const FlNode& a = flNodes[e[0]];
-        const FlNode& b = flNodes[e[1]];
+      for (size_t edgeIdx = 0; edgeIdx < flEdges.size(); ++edgeIdx) {
+        const auto& e = flEdges[edgeIdx];
+        const FlNode& a = flNodes[e.n0];
+        const FlNode& b = flNodes[e.n1];
         if (!a.certified || !b.certified) continue;
         const int ca = a.probeWA + a.sPosMid, cb = b.probeWA + b.sPosMid;
-        auto& tc = tagCensus[e[3]];
+        auto& tc = tagCensus[e.tag];
         ++tc.first;
-        if (cb - ca != e[2]) {
+        if (cb - ca != e.delta) {
           ++tc.second;
           ++badEdges;
           if (badEdges <= 12)
             std::fprintf(stderr,
                          "E1 FLOOD BADEDGE n%d(g%d)->n%d(g%d) d=%d true=%d "
                          "tag=%d\n",
-                         e[0], a.g, e[1], b.g, e[2], cb - ca, e[3]);
+                         e.n0, a.g, e.n1, b.g, e.delta, cb - ca, e.tag);
         }
       }
       for (const auto& kv : tagCensus)
@@ -5742,6 +5804,25 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
                      kv.first, kv.second.first, kv.second.second);
     }
     constexpr int kFlUnset = std::numeric_limits<int>::min();
+    std::vector<int> flComponent(nN, -1);
+    std::vector<std::vector<int>> flSubgraphs;
+    for (int root = 0; root < nN; ++root) {
+      if (flComponent[root] >= 0) continue;
+      const int id = static_cast<int>(flSubgraphs.size());
+      flSubgraphs.push_back({});
+      std::vector<int> pending{root};
+      flComponent[root] = id;
+      for (size_t i = 0; i < pending.size(); ++i) {
+        const int n = pending[i];
+        flSubgraphs.back().push_back(n);
+        for (const auto& edge : nadj[n]) {
+          const int m = edge[0];
+          if (flComponent[m] >= 0) continue;
+          flComponent[m] = id;
+          pending.push_back(m);
+        }
+      }
+    }
     std::vector<int> E(nN, kFlUnset);
     std::vector<int> q;
     q.reserve(nN);
@@ -5762,7 +5843,8 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
     auto flDrain = [&]() {
       for (; qh < q.size(); ++qh) {
         const int n = q[qh];
-        for (const auto& [m, d] : nadj[n]) {
+        for (const auto& edge : nadj[n]) {
+          const int m = edge[0], d = edge[1], tag = edge[2];
           const int v = E[n] + d;
           if (E[m] == kFlUnset) {
             E[m] = v;
@@ -5772,9 +5854,9 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
             if (kDump && flMismatch <= 8)
               std::fprintf(stderr,
                            "E1 FLOOD MISMATCH n=%d g=%d E=%d vs %d (from n=%d "
-                           "g=%d cert=%d)\n",
+                           "g=%d cert=%d tag=%d)\n",
                            m, flNodes[m].g, E[m], v, n, flNodes[n].g,
-                           flNodes[n].certified ? 1 : 0);
+                           flNodes[n].certified ? 1 : 0, tag);
           }
         }
       }
@@ -5819,7 +5901,9 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
         const bool cert = fn.pancake ? (*pa == *pb) : (*pb - *pa == fn.jump);
         fn.probeState = cert ? 1 : 3;
         if (cert) {
-          fn.anchorOK = mul == 1.0;
+          if (mul == 1.0) {
+            fn.anchorOK = true;
+          }
           break;
         }
       }
@@ -5842,37 +5926,81 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
         fn.probeState = 1;
       fn.certified = fn.probeState == 1;
     };
-    // RESIDUAL-PROBE ANCHORS: in node order, the first certifiable cell of
-    // each unreached subgraph anchors it (typically ONE probe per connected
-    // component - the perf collapse; ladder-class cells whose edges were
-    // dropped each probe individually, exactly the pre-flood cost there).
-    for (int n = 0; n < nN; ++n) {
-      if (E[n] != kFlUnset) continue;
-      flProbe(n);
-      if (flNodes[n].probeState == 1 && flNodes[n].anchorOK) {
-        ++flResAnchor;
-        flAnchor(n, flNodes[n].probeWA + flNodes[n].sPosMid);
-        flDrain();
-      }
+    // PRIMARY SUBGRAPH ANCHORING.  The hull-vertex seed identifies the outer
+    // reliable-connected subgraph.  Its corner-to-cenP transport is
+    // re-adjudicated by one well-conditioned exact probe when available (the
+    // old nearSign guard is insufficient on GT7863); if every cell grazes,
+    // the exterior hull value is the sole anchor.  Every other subgraph gets
+    // exactly one decided base-offset two-sided winding certificate, never a
+    // ladder or non-boundary acceptance.
+    // A non-outer subgraph without such a cell fails closed.
+    int outerSubgraph = -1;
+    std::pair<int, int> hullSeed{-1, 0};
+    if (!flSeeds.empty()) {
+      hullSeed = flSeeds.front();
+      outerSubgraph = flComponent[hullSeed.first];
     }
-    // THE HULL SEED, guarded, for subgraphs where every probe grazed
-    // (the seed's corner-to-cenP transport is refuted on twin corners -
-    // GT7863 measured - so probes take precedence everywhere they certify).
-    for (const auto& s : flSeeds)
-      if (E[s.first] == kFlUnset) flAnchor(s.first, s.second);
-    flDrain();
-    // BFS conflict: clear the field - the emission below probes EVERY cell
-    // (the pre-flood per-cell semantics; fail-closed intact).  FIELD-RETRY
-    // (driver-level): keepField suppresses the nuke so the spanning-tree field
-    // (already conflict-consistent - flDrain never overwrites, it only counts
-    // the cycle-closing handoff edges) drives emission instead of the grazing
-    // per-cell probe.  The driver runs keepField=true as the PRIMARY consume;
-    // on any fatal (a genuinely poisoned tree - the openscad sub-ULP-stack
-    // class, whose field edges are themselves noise) it re-runs with
-    // keepField=false, restoring today's nuke+probe path bit-for-bit.  The nuke
-    // only fires when flMismatch>0, so the two attempts are identical on the
-    // no-conflict path.
-    if (flMismatch > 0 && !keepField) std::fill(E.begin(), E.end(), kFlUnset);
+    for (int id = 0; id < static_cast<int>(flSubgraphs.size()); ++id) {
+      int anchor = -1;
+      for (const int n : flSubgraphs[id]) {
+        flProbe(n);
+        if (flNodes[n].anchorOK) {
+          anchor = n;
+          break;
+        }
+      }
+      if (anchor < 0 && id == outerSubgraph) {
+        flAnchor(hullSeed.first, hullSeed.second);
+        flDrain();
+        continue;
+      }
+      if (anchor < 0) {
+        if (kDump) {
+          std::fprintf(stderr,
+                       "E1 FLOOD NOANCHOR subgraph=%d size=%d outer=%d "
+                       "edges=%d decidedDrop=%d pairDrop=%d tagDrop=%d\n",
+                       id, static_cast<int>(flSubgraphs[id].size()),
+                       outerSubgraph, static_cast<int>(flEdges.size()),
+                       flDecidedDrop, flPairDrop, flTagDrop);
+          int shown = 0;
+          for (const int n : flSubgraphs[id]) {
+            const FlNode& fn = flNodes[n];
+            std::fprintf(stderr,
+                         "  n=%d g=%d probe=%d emit=%d jump=%d ext=%.3g "
+                         "band=%d near=%d\n",
+                         n, fn.g, static_cast<int>(fn.probeState),
+                         fn.emit ? 1 : 0, fn.jump, fn.extW, fn.hasBand ? 1 : 0,
+                         static_cast<int>(fn.nearSign.size()));
+            if (++shown == 12) break;
+          }
+          for (size_t i = 0; i < flEdges.size(); ++i) {
+            const FlEdge& e = flEdges[i];
+            bool incident = false;
+            for (const int n : flSubgraphs[id])
+              if (e.n0 == n || e.n1 == n) incident = true;
+            if (!incident) continue;
+            std::fprintf(stderr,
+                         "  edge n%d(g%d)->n%d(g%d) d=%d tag=%d decided=%d "
+                         "ok=%d\n",
+                         e.n0, flNodes[e.n0].g, e.n1, flNodes[e.n1].g, e.delta,
+                         e.tag, e.decided ? 1 : 0, flOk[i] ? 1 : 0);
+          }
+        }
+        return fail(
+            "e1: reliable winding subgraph has no well-conditioned exact "
+            "anchor - fail-closed");
+      }
+      ++flResAnchor;
+      flAnchor(anchor, flNodes[anchor].probeWA + flNodes[anchor].sPosMid);
+      flDrain();
+    }
+    if (flMismatch > 0) {
+      DEBUG_ASSERT(false, logicErr,
+                   "conflict among decided winding-field edges");
+      return fail(
+          "e1: decided winding-field edge conflict (invariant violation) - "
+          "fail-closed");
+    }
     // FLOOD-PRIMARY DIFFERENTIAL (E1_FLOODDIFF): field vs the shadow probes
     int flDiffBad = 0;
     if (kFloodDiff) {
@@ -5982,12 +6110,14 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
     if (kDump)
       std::fprintf(stderr,
                    "E1 FLOOD nodes=%d edges=%d hand=%d orphan=%d seeds=%d "
-                   "reached=%d mismatch=%d pairDrop=%d tagDrop=%d "
+                   "subgraphs=%d reached=%d mismatch=%d decidedDrop=%d "
+                   "pairDrop=%d tagDrop=%d "
                    "resProbe=%d resAnchor=%d diffBad=%d\n",
                    nN, static_cast<int>(flEdges.size()), flHandEdges,
                    flHandOrphan, static_cast<int>(flSeeds.size()),
-                   static_cast<int>(q.size()), flMismatch, flPairDrop,
-                   flTagDrop, flResProbe, flResAnchor, flDiffBad);
+                   static_cast<int>(flSubgraphs.size()),
+                   static_cast<int>(q.size()), flMismatch, flDecidedDrop,
+                   flPairDrop, flTagDrop, flResProbe, flResAnchor, flDiffBad);
   }
   tSolve = flMs(flTS0, flNow());
   if (kFlTime)
@@ -6068,29 +6198,9 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundary(const Manifold::Impl& in,
     if (sz == prev) break;  // registry stable
     prev = sz;
   }
-  // FIELD-RETRY: consume once preferring the spanning-tree field over per-cell
-  // probes on a flood conflict (keepField=true).  On ANY fatal - a poisoned
-  // tree whose edges are themselves sub-ULP noise (openscad) - fall back to
-  // today's nuke+probe consume (keepField=false), the SAME code path,
-  // bit-identical to the historic output.  Both attempts pass the SAME
-  // BuildImpl / SplitTouchingSheets gate inside the Impl call, so the retry
-  // is provably no-worse; it only does extra work when a conflict actually
-  // fired (flMismatch>0), which the no-conflict carriers never hit (primary
-  // == fallback there, so no double run).
-  static const bool kDrv = std::getenv("E1_DUMP") != nullptr;
-  StageResult<Manifold::Impl> primary =
-      EmitCoordinatedBoundaryImpl(in, A, eps, lineReg, seamCache, false, true);
-  if (primary.ok()) {
-    if (kDrv) std::fprintf(stderr, "E1 FIELD-RETRY primary(keepField) ok\n");
-    return primary;
-  }
-  if (kDrv)
-    std::fprintf(stderr,
-                 "E1 FIELD-RETRY primary(keepField) fatal [%s] -> nuke+probe "
-                 "fallback\n",
-                 primary.detail.c_str());
-  return EmitCoordinatedBoundaryImpl(in, A, eps, lineReg, seamCache, false,
-                                     false);
+  // The consume is single-shot: edge decidedness partitions the field before
+  // BFS, so there is no retry or whole-field regime switch.
+  return EmitCoordinatedBoundaryImpl(in, A, eps, lineReg, seamCache, false);
 }
 
 // NEAR-COPLANAR WIDEN + GLOBAL-PLANARITY GUARD (docs/Regularize3D.md stage-5;
