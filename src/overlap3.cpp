@@ -3588,7 +3588,8 @@ struct E1Seam {
 StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
     const Manifold::Impl& in, const BuildArrangement& A, double eps,
     std::map<std::tuple<int, int, int>, std::map<e1::K3, vec3>>& lineReg,
-    std::vector<std::vector<E1Seam>>& seamCache, bool buildPhase) {
+    std::vector<std::vector<E1Seam>>& seamCache, bool buildPhase,
+    bool keepField = false) {
   using e1::K3;
   using e1::KeyOf;
   const int nTri = static_cast<int>(A.tri.size());
@@ -5828,8 +5829,16 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
       // near-collinear corridor slivers, measured on GT7081 shell2).  The
       // cell drops as non-boundary; a WRONG drop cannot be silent (the
       // unpaired neighbours surface at SplitTouchingSheets - fail-closed).
+      // SUB-WELD GATE: the acceptance is only sound where the cell is itself
+      // sub-weld-thin (extW <= weld).  A MACRO cell (extW > weld) whose probe
+      // grazes carries a real combinatorial jump the near-tangent probe cannot
+      // resolve at double precision (GT7081-joined's torn corridor); overriding
+      // its exact jump with the grazing probe silently tears the sheet.  Gated,
+      // such a cell reaches the honest completeness cert-fatal (5936) instead -
+      // still fail-closed.  Sub-weld cells still weld away as before, so the
+      // heuristic's originating cell (GT7081 shell2 n3818) resolves unchanged.
       if (fn.probeState == 3 && consistent >= 2 && fn.probeWA == fn.probeWB &&
-          !fn.pancake)
+          !fn.pancake && fn.extW <= 0.99 * eps)
         fn.probeState = 1;
       fn.certified = fn.probeState == 1;
     };
@@ -5853,8 +5862,17 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
       if (E[s.first] == kFlUnset) flAnchor(s.first, s.second);
     flDrain();
     // BFS conflict: clear the field - the emission below probes EVERY cell
-    // (the pre-flood per-cell semantics; fail-closed intact).
-    if (flMismatch > 0) std::fill(E.begin(), E.end(), kFlUnset);
+    // (the pre-flood per-cell semantics; fail-closed intact).  FIELD-RETRY
+    // (driver-level): keepField suppresses the nuke so the spanning-tree field
+    // (already conflict-consistent - flDrain never overwrites, it only counts
+    // the cycle-closing handoff edges) drives emission instead of the grazing
+    // per-cell probe.  The driver runs keepField=true as the PRIMARY consume;
+    // on any fatal (a genuinely poisoned tree - the openscad sub-ULP-stack
+    // class, whose field edges are themselves noise) it re-runs with
+    // keepField=false, restoring today's nuke+probe path bit-for-bit.  The nuke
+    // only fires when flMismatch>0, so the two attempts are identical on the
+    // no-conflict path.
+    if (flMismatch > 0 && !keepField) std::fill(E.begin(), E.end(), kFlUnset);
     // FLOOD-PRIMARY DIFFERENTIAL (E1_FLOODDIFF): field vs the shadow probes
     int flDiffBad = 0;
     if (kFloodDiff) {
@@ -6050,7 +6068,29 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundary(const Manifold::Impl& in,
     if (sz == prev) break;  // registry stable
     prev = sz;
   }
-  return EmitCoordinatedBoundaryImpl(in, A, eps, lineReg, seamCache, false);
+  // FIELD-RETRY: consume once preferring the spanning-tree field over per-cell
+  // probes on a flood conflict (keepField=true).  On ANY fatal - a poisoned
+  // tree whose edges are themselves sub-ULP noise (openscad) - fall back to
+  // today's nuke+probe consume (keepField=false), the SAME code path,
+  // bit-identical to the historic output.  Both attempts pass the SAME
+  // BuildImpl / SplitTouchingSheets gate inside the Impl call, so the retry
+  // is provably no-worse; it only does extra work when a conflict actually
+  // fired (flMismatch>0), which the no-conflict carriers never hit (primary
+  // == fallback there, so no double run).
+  static const bool kDrv = std::getenv("E1_DUMP") != nullptr;
+  StageResult<Manifold::Impl> primary =
+      EmitCoordinatedBoundaryImpl(in, A, eps, lineReg, seamCache, false, true);
+  if (primary.ok()) {
+    if (kDrv) std::fprintf(stderr, "E1 FIELD-RETRY primary(keepField) ok\n");
+    return primary;
+  }
+  if (kDrv)
+    std::fprintf(stderr,
+                 "E1 FIELD-RETRY primary(keepField) fatal [%s] -> nuke+probe "
+                 "fallback\n",
+                 primary.detail.c_str());
+  return EmitCoordinatedBoundaryImpl(in, A, eps, lineReg, seamCache, false,
+                                     false);
 }
 
 // NEAR-COPLANAR WIDEN + GLOBAL-PLANARITY GUARD (docs/Regularize3D.md stage-5;
