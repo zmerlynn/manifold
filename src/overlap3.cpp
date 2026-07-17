@@ -5997,6 +5997,7 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
 
   std::vector<OutTri3D> out;
   std::vector<int> outG;  // per-tri emitting group (diagnostics)
+  int suspectTotal = 0;   // snap-grid identity audit (owner invariant 2)
   int dustTri = 0, triFail = 0, spliceFail = 0;
   int nCells = 0, nNeg = 0, nJump = 0, nBoundary = 0, nOwned = 0, nDustCell = 0;
   const double scale = in.bBox_.Scale();
@@ -6061,11 +6062,34 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
     // drops those slivers and their pairing halfedges (measured: four
     // 5e-16-apart variants of one vertex around an open edge).  The radius is
     // far below representable structure - this collapses noise, not geometry.
+    // OWNER INVARIANTS (snap-grid review): (1) the snap applies to
+    // CONSTRUCTED vertices only - INPUT vertices are excluded (identity =
+    // the given bits / the F11 position rule; snapping inputs would move
+    // real data); (2) the grid must never merge two vertices of DIFFERENT
+    // canonical identity - audited cheaply below: snaps beyond the ~few-ULP
+    // derivation-noise band are counted and reported under E1_DUMP (any such
+    // event indicates an identity-keying bug, not a tolerance issue).  The
+    // 64-ULP radius is a margin INSIDE the measured safe band (noise ~few
+    // ULP; smallest real structure 0.586 eps and ~1e-8 pairs, orders above);
+    // an eps-scale snap would merge real structure and is banned.
     const double rho =
         64.0 * std::numeric_limits<double>::epsilon() * (1.0 + scale);
+    const double rhoNoise =
+        8.0 * std::numeric_limits<double>::epsilon() * (1.0 + scale);
+    int suspectSnaps = 0;
     std::map<std::tuple<long long, long long, long long>, std::vector<vec3>>
         canonGrid;
+    std::set<e1::K3> inputVerts;
+    for (int f2 = 0; f2 < nTri; ++f2)
+      for (int k = 0; k < 3; ++k) inputVerts.insert(KeyOf(A.tri[f2][k]));
+    auto gridInsert = [&](const vec3& v) {
+      canonGrid[{static_cast<long long>(std::floor(v.x / rho)),
+                 static_cast<long long>(std::floor(v.y / rho)),
+                 static_cast<long long>(std::floor(v.z / rho))}]
+          .push_back(v);
+    };
     auto canonV = [&](const vec3& v) -> vec3 {
+      if (inputVerts.count(KeyOf(v))) return v;  // inputs are never snapped
       const long long cx = static_cast<long long>(std::floor(v.x / rho));
       const long long cy = static_cast<long long>(std::floor(v.y / rho));
       const long long cz = static_cast<long long>(std::floor(v.z / rho));
@@ -6074,15 +6098,28 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
           for (long long dz = -1; dz <= 1; ++dz) {
             const auto it = canonGrid.find({cx + dx, cy + dy, cz + dz});
             if (it == canonGrid.end()) continue;
-            for (const vec3& w : it->second)
-              if (la::length(w - v) <= rho) return w;
+            for (const vec3& w : it->second) {
+              const double d = la::length(w - v);
+              if (d <= rho) {
+                if (d > rhoNoise) ++suspectSnaps;  // identity audit trail
+                return w;
+              }
+            }
           }
-      canonGrid[{cx, cy, cz}].push_back(v);
+      gridInsert(v);
       return v;
     };
     for (const Seg& s : segs) {  // seed: endpoints are the canonical anchors
-      canonV(s.p0);
-      canonV(s.p1);
+      // inputs register unconditionally (never merged); constructed endpoints
+      // register-or-anchor through the snap
+      if (inputVerts.count(KeyOf(s.p0)))
+        gridInsert(s.p0);
+      else
+        canonV(s.p0);
+      if (inputVerts.count(KeyOf(s.p1)))
+        gridInsert(s.p1);
+      else
+        canonV(s.p1);
     }
     auto addSplit = [&](int si, const vec3& Vraw) -> bool {
       const vec3 V = canonV(Vraw);
@@ -6234,6 +6271,54 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
                        static_cast<int>(extraJ->size()));
       }
 
+      // COLLINEAR-BUNDLE FOOT EXCHANGE: an input-vert mesh edge and the
+      // constructed seam of the same corner line differ by ~eps (the input's
+      // own placement noise) - two parallel chains AT the weld margin whose
+      // independent subdivisions leave unmergeable stubs (measured: 1-eps-
+      // separated corner chains, sub-edges 1e-8..1e-5).  For segment pairs
+      // near-collinear within the weld scale over their overlap, insert the
+      // ON-SEGMENT FOOT of each other's splits/endpoints: the chain stays
+      // exactly straight (no bend) and each foot welds with its sibling.
+      for (int i = 0; i < nS; ++i) {
+        const vec2 a0 = e1::Drop2(segs[i].p0, axis),
+                   a1 = e1::Drop2(segs[i].p1, axis);
+        const vec2 di = a1 - a0;
+        const double li = la::length(di);
+        if (!(li > 0.0)) continue;
+        for (int j = i + 1; j < nS; ++j) {
+          const vec2 b0 = e1::Drop2(segs[j].p0, axis),
+                     b1 = e1::Drop2(segs[j].p1, axis);
+          if (std::max(a0.x, a1.x) < std::min(b0.x, b1.x) - 2.0 * eps ||
+              std::max(b0.x, b1.x) < std::min(a0.x, a1.x) - 2.0 * eps ||
+              std::max(a0.y, a1.y) < std::min(b0.y, b1.y) - 2.0 * eps ||
+              std::max(b0.y, b1.y) < std::min(a0.y, a1.y) - 2.0 * eps)
+            continue;
+          const vec2 dj = b1 - b0;
+          const double lj = la::length(dj);
+          if (!(lj > 0.0)) continue;
+          if (std::abs(la::cross(di, b0 - a0)) / li > 2.0 * eps ||
+              std::abs(la::cross(di, b1 - a0)) / li > 2.0 * eps ||
+              std::abs(la::cross(dj, a0 - b0)) / lj > 2.0 * eps ||
+              std::abs(la::cross(dj, a1 - b0)) / lj > 2.0 * eps)
+            continue;  // not a near-collinear bundle at weld scale
+          auto footEx = [&](int si, int sj) {
+            const Seg& s = segs[si];
+            const vec3 d3 = s.p1 - s.p0;
+            const double len2 = la::dot(d3, d3);
+            if (!(len2 > 0.0)) return;
+            auto tryV = [&](const vec3& V) {
+              const double t = la::dot(V - s.p0, d3) / len2;
+              if (!(t > 0.0 && t < 1.0)) return;
+              addSplit(si, s.p0 + t * d3);
+            };
+            tryV(segs[sj].p0);
+            tryV(segs[sj].p1);
+            for (const auto& pr : splits[sj]) tryV(pr.second);
+          };
+          footEx(i, j);
+          footEx(j, i);
+        }
+      }
       // PLANARITY COMPLETION (all remaining segment-pair crossings): the exact
       // seam-x-seam enumeration and the endpoint pool cover the canonical
       // crossings, but the drawn (rounded) graph must be PLANAR for the face
@@ -6952,13 +7037,16 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
         outG.push_back(g);
       }
     }
+    suspectTotal += suspectSnaps;
   }
   if (kDump)
     std::fprintf(stderr,
                  "E1 emitted=%d dust=%d triFail=%d spliceFail=%d cells=%d "
-                 "neg=%d jump=%d owned=%d boundary=%d dustCell=%d\n",
+                 "neg=%d jump=%d owned=%d boundary=%d dustCell=%d "
+                 "suspectSnaps=%d\n",
                  static_cast<int>(out.size()), dustTri, triFail, spliceFail,
-                 nCells, nNeg, nJump, nOwned, nBoundary, nDustCell);
+                 nCells, nNeg, nJump, nOwned, nBoundary, nDustCell,
+                 suspectTotal);
   if (collectT)
     for (const auto& kv : tripleCache)
       if (kv.second.first) collectT->push_back(kv.second.second);
