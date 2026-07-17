@@ -6830,7 +6830,12 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
         // (the offline lesson) - discard, then adjudicate by WIDTH: a loop
         // whose area/extent is below the weld scale is a rounded-degenerate
         // sliver (non-simple at double precision) that welds away; anything
-        // wider is an honest triangulation failure (fail-closed below).
+        // wider is an honest triangulation failure - DEMOTED (owner
+        // adjudication, s2-tri): DEBUG assert; in release SKIP the cell and
+        // let the emission's re-gate refuse the resulting unpaired boundary
+        // (fail-closed, with the skip count breadcrumbed into the fatal
+        // detail).  NO fallback triangulator - a macro failure here is an
+        // upstream invariant violation and masking it is banned.
         tris.clear();
         const double s = e1::LoopShoelace(loop, pos3, axis);
         double ext = 0.0;
@@ -6848,7 +6853,10 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
           ++nDustCell;  // rounded-degenerate sliver cell: weld dust
           continue;
         }
-        ++triFail;
+        DEBUG_ASSERT(false, geometryErr,
+                     "regularize3d: macro arrangement cell failed exact "
+                     "triangulation");
+        ++triFail;  // breadcrumb: rides into the re-gate's fatal detail
         if (kDump && triFail <= 8) {
           const vec2 c0 = e1::Drop2(pos3[loop[0]], axis);
           std::fprintf(stderr,
@@ -7217,8 +7225,10 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
   if (buildPhase)
     return StageResult<Manifold::Impl>::Fatal(
         FatalReason::DirtyComponentUnresolved, "e1: build phase");
-  if (triFail > 0 || spliceFail > 0)
-    return fail("e1: cell triangulation/hole-splice incomplete - fail-closed");
+  // Triangulation failures are DEMOTED (skip-and-continue at the cell; the
+  // re-gate below refuses the resulting unpaired boundary) - only the
+  // hole-splice failures keep their own census fatal.
+  if (spliceFail > 0) return fail("e1: hole-splice incomplete - fail-closed");
   if (const char* sf = std::getenv("E1_SOUPFILE")) {  // offline diagnostics
     if (FILE* fp = std::fopen(sf, "w")) {
       for (size_t k = 0; k < out.size(); ++k) {
@@ -7232,7 +7242,14 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
   }
   // Sheet provenance rides through the weld: the radial branch's fan pairing
   // is provenance-driven where the chord angle is weld-bent noise.
-  return BuildImpl(out, eps, &outN);
+  StageResult<Manifold::Impl> built = BuildImpl(out, eps, &outN);
+  // Demoted-skip breadcrumb: when skipped cells leave the boundary unpaired,
+  // the re-gate's fatal should name the true first cause.
+  if (!built.ok() && triFail > 0)
+    built.detail += " [" + std::to_string(triFail) +
+                    " arrangement cell(s) skipped after exact-triangulation "
+                    "failure]";
+  return built;
 }
 
 // Two-pass driver: pass 1 collects the failing walks' observed self-crossing
