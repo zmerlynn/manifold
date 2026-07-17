@@ -7550,6 +7550,23 @@ StageResult<Manifold::Impl> ResolveComponent(const Manifold::Impl& dirty,
   // triples) so every emit path splits its edges at the non-proper-crossing
   // junctions the triple enumeration misses (no-op off openscad).
   BuildJunctionRegistry(A, eps);
+  // E1_FLIP (flip arc, differential harness - SCAFFOLDING for the emission-
+  // unification flip; deleted at stage 4 when the engine becomes unconditional
+  // primary).  Runs the coordinated engine as the PRIMARY emission for the
+  // dirty component, falling back to the per-face path only when the engine
+  // fails closed - so the suite stays green while the engine's per-carrier
+  // outcome (resolve / fail-closed) is measured via E1_DUMP.  This reproduces
+  // the s2-arch flip table (the DEBUG LIST) on the canonical tree and is the
+  // differential reference the flood/collider/STS stages build against. Default
+  // OFF = byte-identical (per-face primary + the E1_ENGINE fallback below).
+  static const bool kE1Flip = std::getenv("E1_FLIP") != nullptr;
+  if (kE1Flip) {
+    StageResult<Manifold::Impl> e1r = EmitCoordinatedBoundary(in, A, eps);
+    if (std::getenv("E1_DUMP") != nullptr)
+      std::fprintf(stderr, "E1 FLIP engine-fatal=%s\n",
+                   e1r.fatal ? e1r.detail.c_str() : "(resolved)");
+    if (!e1r.fatal) return e1r;
+  }
   StageResult<Manifold::Impl> r =
       EmitComponentBoundary(in, A, face2cluster, eps);
   // E1 COORDINATED ENGINE (e1engine): the fallback resolver for the component
