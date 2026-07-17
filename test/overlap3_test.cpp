@@ -253,8 +253,8 @@ TEST(Overlap3, Regularize_MultiComponent_CleanPlusDirty_DispatchCounts) {
 // dropped those crossings, leaving an incomplete arrangement whose emission
 // opened (unbalanced fans - the 8-edge-hole family, reg3d-c1a).  The
 // reg3d-wjump shares-vertex genuine-crossing recovery records them (SoS-decided
-// pierces, seam [V, offVertexP]), completing the arrangement so the per-face
-// witness rule classifies the everted (w=-1, dropped) region apart from the
+// pierces, seam [V, offVertexP]), completing the arrangement so the coordinated
+// winding field classifies the everted (w=-1, dropped) region apart from the
 // {w>=1} boundary. Oracle-graded: the emitted volume matches an INDEPENDENT
 // winding-number MC oracle, is tol-invariant, non-self-intersecting, and a
 // valid manifold.
@@ -1104,48 +1104,15 @@ TEST(Overlap3, Regularize_CoplanarFold_Mult3Nested_Resolves) {
 // crossings recovered, and sub-eps crossings collapsed, RecordSeams COMPLETES:
 // the F11 seam-truncation wall is CLOSED.
 //
-// B1 ONCE-ONLY TRIPLE POINTS (f4-b1) DISSOLVE the F4 seam-arrangement wall: the
-// genuine 3-face triple points on the large dirty component are enumerated ONCE
-// (EnumerateTriplePoints), each built as ONE canonical 3D point keyed by its
-// sorted plane triple, and threaded into all three incident faces' overlays by
-// pre-splitting the seams at the exact on-seam crossing (keyed to the shared 3D
-// point).  Every seam sub-face vertex now has an input preimage, so the pos2in
-// "not exactly resolvable" refusal (F4) no longer fires; openscad then fails
-// one wall DEEPER, at the EMISSION wall (SplitTouchingSheets open boundary ->
-// NonManifoldEmission "unresolvable sheet contact").
-//
-// f4-junction NARROWS that emission residue in two in-form steps (both a
-// byte-for-byte no-op off openscad; the resolving corpus is FNV-identical
-// pre/post): (1) BOTH-SIDES RETENTION - EmitSeamedFace probes w_S on both sides
-// and retains iff exactly one is inside {w_S>=1} (the coplanar fold's rule),
-// closing the radial ties + material overlaps that were a one-sided-rule
-// artifact where the true jump != 1; (2) the GLOBAL JUNCTION REGISTRY - every
-// once-only arrangement vertex (seam endpoints + triples) is deduped canonical
-// and every emit path (seamed / clean / fold) pre-splits its edges at each
-// registry vertex strictly interior to it (a pure 3D on-segment decision on the
-// shared endpoints, so both incident faces split identically).  This closes the
-// dominant T-junction residue - a seam endpoint / triple that terminated
-// interior to a neighbour's / third face's edge without a shared split (~2/3 of
-// the open edges).
-//
-// THE PIN, FLIPPED (e1engine acceptance).  The coordinated per-line-registry
-// engine (EmitCoordinatedBoundary) resolves the residue: one exact
+// The coordinated per-line-registry engine resolves this pin with one exact
 // arrangement for the whole cluster region, identity-carried emission,
 // pancake membranes for net-cancelled sub-weld stacks, the near-tangent
-// radial branch (sheet provenance through the weld + doubled-edge
-// subdivision), and the exact re-gate arm (heuristic flags arbitrated by the
-// exact kernel: sub-eps coincidence is a valid rendering of unseparable
-// geometry, >= eps refuses).  The resolve is oracle-graded: exact volume
-// matches the independent offline derivation, dense exact-winding sampling
-// is mismatch-free, and every residual self-contact is strictly sub-weld.
-//
-// MUTATION ANCHORS: (1) engine off (default env) -> the per-face path still
-// fails closed at the emission wall with the same named fatal - asserted
-// below; (2) sheet provenance off -> the X-contact doubled edge returns and
-// Is2Manifold refuses (dev-verified); (3) exact re-gate arm off -> the
-// heuristic re-gate refuses again (the session-11 measured state);
-// (4) a planted through-wall macro crossing -> the exact arm refuses
-// (dev-verified: E1 EXACTARM violation + re-gate fatal).
+// doubled-edge subdivision, and the exact re-gate arm (heuristic flags
+// arbitrated by the exact kernel: sub-eps coincidence is a valid rendering of
+// unseparable geometry, >= eps refuses).  The resolve is oracle-graded: exact
+// volume matches the independent offline derivation, dense exact-winding
+// sampling is mismatch-free, and every residual self-contact is strictly
+// sub-weld.
 TEST(Overlap3, Regularize_ExactZeroTie_Openscad_FailClosed) {
   std::filesystem::path file(__FILE__);
   std::ifstream fin(
@@ -1153,11 +1120,8 @@ TEST(Overlap3, Regularize_ExactZeroTie_Openscad_FailClosed) {
           .string());
   if (!fin.is_open()) GTEST_SKIP() << "model not found";
   const Manifold::Impl in(ReadOBJ(fin));
-  // THE FLIP (stage 4): the coordinated engine is the ONLY dirty-path
-  // emission, so the historical engine-off anchor (the per-face
-  // "unresolvable sheet contact" wall, E1_ENGINE-gated) is deleted WITH its
-  // mechanism.  The pin is now the RESOLVE itself: the component routes
-  // dirty, resolves through the full operator (weld, SplitTouchingSheets,
+  // The component routes dirty and resolves through the full coordinated
+  // operator (weld, SplitTouchingSheets,
   // manifold gates, exact re-gate arm), and lands on the independently
   // derived volume - the strongest surviving anchor (a wrong emission
   // cannot hold the exact-divergence volume AND the manifold gates).
@@ -1567,13 +1531,8 @@ TEST(Overlap3, Regularize_ExactZeroTie_EntangledBarsRotated_Resolves) {
 // TARGET (e) variant: the same two bars OFFSET in z (no coincident caps - the
 // fold is NOT reached, coplanarClusterFaces == 0), walls crossing edge-on-edge
 // at exact ties (the SoS axis, decided).  The seamed faces build; the
-// clean-face winding classify then GRAZED every seed at the triangle centroid
-// on this axis-aligned integer geometry - the old flood, probing one centroid
-// per patch, fail-closed on the COMPONENT-LOCAL SEED graze.  The per-face clean
-// rule (reg3d-arr) re-probes OTHER interior points of the same clean triangle,
-// which sample the SAME (constant) winding cell above an uncrossed face,
-// dodging the graze SOUNDLY (every emitted face's winding is directly measured,
-// no uniformity/borrow assumption).  So this now RESOLVES oracle-true: the
+// coordinated winding field must handle the axis-aligned exact ties without a
+// component-local seed graze. This resolves oracle-true: the
 // {w_S>=1} boundary is the exact union of the two bars.  This CLOSES the
 // component-local seed-policy open for this carrier (a bounded
 // decision-completion: sample the constant cell, not a global seed policy).
@@ -1589,8 +1548,8 @@ TEST(Overlap3, Regularize_ExactZeroTie_BarsCrossZ_Resolves) {
 
   const double eps = EpsilonFromScale(in.bBox_.Scale(), 1000);
   const RegularizeResult r = ResolveComponentDirect(in, eps);
-  ASSERT_FALSE(r.fatal.has_value()) << "the per-face clean rule must resolve "
-                                       "the seed-graze, not fail closed: "
+  ASSERT_FALSE(r.fatal.has_value()) << "the coordinated field must resolve "
+                                       "the exact-tie seed graze: "
                                     << r.detail;
   ASSERT_TRUE(r.impl.has_value());
   EXPECT_EQ(r.counters.regularized, 1);
