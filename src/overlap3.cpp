@@ -6045,8 +6045,9 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
     for (const int f : members[g]) {
       for (int e = 0; e < 3; ++e) {
         const int v0 = A.vid[f][e], v1 = A.vid[f][(e + 1) % 3];
-        segs.push_back({A.tri[f][e], A.tri[f][(e + 1) % 3], -1, f, -1,
-                        std::min(v0, v1), std::max(v0, v1)});
+        // vids POSITION-MATCHED to p0/p1 (pierce identities need the
+        // canonical vid order with matching positions); sorted at use sites
+        segs.push_back({A.tri[f][e], A.tri[f][(e + 1) % 3], -1, f, -1, v0, v1});
       }
       for (const ESeam& s : eSeams[f])
         segs.push_back({s.p0, s.p1, gid[s.other], f, s.other});
@@ -6084,8 +6085,8 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
       stackFaces.push_back(f2);
       for (int e = 0; e < 3; ++e) {
         const int v0 = A.vid[f2][e], v1 = A.vid[f2][(e + 1) % 3];
-        segs.push_back({A.tri[f2][e], A.tri[f2][(e + 1) % 3], -1, f2, -1,
-                        std::min(v0, v1), std::max(v0, v1)});
+        segs.push_back(
+            {A.tri[f2][e], A.tri[f2][(e + 1) % 3], -1, f2, -1, v0, v1});
       }
     }
     const int nS = static_cast<int>(segs.size());
@@ -6170,7 +6171,8 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
         const auto pq = std::minmax(g, segs[si].planeQ);
         return {1, pq.first, pq.second};
       }
-      return {0, segs[si].vidLo, segs[si].vidHi};
+      return {0, std::min(segs[si].vidLo, segs[si].vidHi),
+              std::max(segs[si].vidLo, segs[si].vidHi)};
     };
     auto addSplit = [&](int si, const vec3& Vraw) -> bool {
       const vec3 V = canonV(Vraw);
@@ -6392,20 +6394,50 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
                 segs[i].planeQ != segs[j].planeQ)
               have = triplePos(g, segs[i].planeQ, segs[j].planeQ, X);
             if (!have) {
-              // in-plane crossing, interpolated along segment i (NOTE for
-              // stage 2: an interpolated position lies exactly on ONE line
-              // only, so it must NOT be memo-committed across carriers - the
-              // once-only committed crossing needs the exact construction:
-              // triple identity when both carriers are seams, else the
-              // symbolic segment-pair crossing; measured: memoizing the
-              // interpolation across groups bent foreign chains)
-              const double dax = a1.x - a0.x, day = a1.y - a0.y;
-              const double dbx = b1.x - b0.x, dby = b1.y - b0.y;
-              const double den = dax * dby - day * dbx;
-              if (den == 0.0) continue;
-              const double t =
-                  ((b0.x - a0.x) * dby - (b0.y - a0.y) * dbx) / den;
-              X = segs[i].p0 + t * (segs[i].p1 - segs[i].p0);
+              // EXACT-CONSTRUCTION crossings (the interpolated-memo
+              // refutation is the design constraint): an interpolated point
+              // lies exactly on ONE line only, so wherever a committed
+              // identity exists, use it -
+              //   edge x seam  -> the PIERCE of the edge through the seam's
+              //                   partner plane (once-only, on BOTH lines)
+              //   edge x edge / seam-twin pairs -> canonical interpolation
+              //                   (deterministic carrier order, bit-equal
+              //                   across groups)
+              const bool iEdge = segs[i].planeQ < 0, jEdge = segs[j].planeQ < 0;
+              bool built = false;
+              if (iEdge != jEdge) {
+                const int se = iEdge ? i : j;  // the edge carrier
+                const int ss = iEdge ? j : i;  // the seam carrier
+                const int q = segs[ss].planeQ;
+                const bool fwd = segs[se].vidLo <= segs[se].vidHi;
+                const int vlo = fwd ? segs[se].vidLo : segs[se].vidHi;
+                const int vhi = fwd ? segs[se].vidHi : segs[se].vidLo;
+                const vec3& u = fwd ? segs[se].p0 : segs[se].p1;
+                const vec3& w = fwd ? segs[se].p1 : segs[se].p0;
+                if (const auto P = pierceGet(vlo, vhi, u, w, q)) {
+                  X = *P;
+                  built = true;
+                }
+              }
+              if (!built) {
+                // canonical carrier: the smaller segment identity
+                const int ci = segKeyOf(segs[i].p0, segs[i].p1) <=
+                                       segKeyOf(segs[j].p0, segs[j].p1)
+                                   ? i
+                                   : j;
+                const int cj = ci == i ? j : i;
+                const vec2 c0 = e1::Drop2(segs[ci].p0, axis),
+                           c1 = e1::Drop2(segs[ci].p1, axis);
+                const vec2 e0 = e1::Drop2(segs[cj].p0, axis),
+                           e1v = e1::Drop2(segs[cj].p1, axis);
+                const double dax = c1.x - c0.x, day = c1.y - c0.y;
+                const double dbx = e1v.x - e0.x, dby = e1v.y - e0.y;
+                const double den = dax * dby - day * dbx;
+                if (den == 0.0) continue;
+                const double t =
+                    ((e0.x - c0.x) * dby - (e0.y - c0.y) * dbx) / den;
+                X = segs[ci].p0 + t * (segs[ci].p1 - segs[ci].p0);
+              }
             }
             addSplit(i, X);
             addSplit(j, X);
