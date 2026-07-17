@@ -138,3 +138,6 @@ extras/ember_tests/testfiles/raw_meshes
 #Eclipse project files
 /.project
 /.cproject
+
+# lane/scratch build dirs (build-verify, build-flip, ...)
+build*/
