@@ -5762,8 +5762,8 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
     const std::vector<std::pair<int, vec3>>* extraJ,
     std::vector<std::pair<int, vec3>>* collectX,
     std::vector<vec3>* collectT = nullptr,
-    std::map<std::pair<int, int>, std::vector<vec3>>* seamX = nullptr,
-    bool seamXInject = false) {
+    std::map<std::tuple<int, int, int>, std::vector<vec3>>* lineReg = nullptr,
+    bool lineRegInject = false) {
   using e1::K3;
   using e1::KeyOf;
   const int nTri = static_cast<int>(A.tri.size());
@@ -5998,6 +5998,20 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
   std::vector<OutTri3D> out;
   std::vector<int> outG;  // per-tri emitting group (diagnostics)
   int suspectTotal = 0;   // snap-grid identity audit (owner invariant 2)
+  // MEMOIZED CONSTRUCTION (owner directive; the campaign's memoize-values
+  // principle = the stage-2 shape): every constructed point is committed
+  // ONCE under its canonical identity; every later path LOOKS IT UP -
+  // bit-equality by construction.  Identities: seam endpoints (edge vids,
+  // plane gid) -> pierceCache; triples (sorted gid triple) -> tripleCache;
+  // pair crossings (unordered segment-identity pair) -> crossMemo; feet
+  // (vertex bits, segment identity) -> footMemo.  A segment's identity is
+  // its endpoint bit-pair (endpoints are themselves committed identities).
+  using SegKey = std::pair<e1::K3, e1::K3>;
+  auto segKeyOf = [](const vec3& p0, const vec3& p1) -> SegKey {
+    const e1::K3 a = e1::KeyOf(p0), b = e1::KeyOf(p1);
+    return a < b ? SegKey{a, b} : SegKey{b, a};
+  };
+  std::map<std::pair<e1::K3, SegKey>, vec3> footMemo;
   int dustTri = 0, triFail = 0, spliceFail = 0;
   int nCells = 0, nNeg = 0, nJump = 0, nBoundary = 0, nOwned = 0, nDustCell = 0;
   const double scale = in.bBox_.Scale();
@@ -6008,11 +6022,15 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
       vec3 p0, p1;
       int planeQ;  // partner group (-1 = member triangle edge)
       int fOwn, fOther;
+      int vidLo = -1, vidHi = -1;  // mesh-edge line identity (planeQ < 0)
     };
     std::vector<Seg> segs;
     for (const int f : members[g]) {
-      for (int e = 0; e < 3; ++e)
-        segs.push_back({A.tri[f][e], A.tri[f][(e + 1) % 3], -1, f, -1});
+      for (int e = 0; e < 3; ++e) {
+        const int v0 = A.vid[f][e], v1 = A.vid[f][(e + 1) % 3];
+        segs.push_back({A.tri[f][e], A.tri[f][(e + 1) % 3], -1, f, -1,
+                        std::min(v0, v1), std::max(v0, v1)});
+      }
       for (const ESeam& s : eSeams[f])
         segs.push_back({s.p0, s.p1, gid[s.other], f, s.other});
     }
@@ -6047,8 +6065,11 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
                stackWin;
       if (!near) continue;
       stackFaces.push_back(f2);
-      for (int e = 0; e < 3; ++e)
-        segs.push_back({A.tri[f2][e], A.tri[f2][(e + 1) % 3], -1, f2, -1});
+      for (int e = 0; e < 3; ++e) {
+        const int v0 = A.vid[f2][e], v1 = A.vid[f2][(e + 1) % 3];
+        segs.push_back({A.tri[f2][e], A.tri[f2][(e + 1) % 3], -1, f2, -1,
+                        std::min(v0, v1), std::max(v0, v1)});
+      }
     }
     const int nS = static_cast<int>(segs.size());
 
@@ -6121,6 +6142,16 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
       else
         canonV(s.p1);
     }
+    // PER-LINE REGISTRY key: seams by plane-gid pair; mesh edges by vid pair
+    // (one geometric line = one split list, shared by every segment record
+    // and every group on it)
+    auto lineKeyOf = [&](int si) -> std::tuple<int, int, int> {
+      if (segs[si].planeQ >= 0) {
+        const auto pq = std::minmax(g, segs[si].planeQ);
+        return {1, pq.first, pq.second};
+      }
+      return {0, segs[si].vidLo, segs[si].vidHi};
+    };
     auto addSplit = [&](int si, const vec3& Vraw) -> bool {
       const vec3 V = canonV(Vraw);
       const Seg& s = segs[si];
@@ -6139,6 +6170,7 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
       for (const auto& pr : splits[si])
         if (KeyOf(pr.second) == KeyOf(V)) return false;
       splits[si].push_back({t, V});
+      if (lineReg) (*lineReg)[lineKeyOf(si)].push_back(V);
       return true;
     };
     for (int i = 0; i < nS; ++i) {
@@ -6182,19 +6214,31 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
     // representatives sit up to eps off the exact lines, and inserting them
     // with an eps window BENDS the chains by eps - the bent sub-chains then
     // properly cross and fragment the walk (measured: a split cascade).
-    // CROSS-GROUP SEAM SPLIT UNION (pass 2+): a seam (f1,f2) is ONE geometric
-    // segment present in BOTH incident groups, but each group unifies splits
-    // only internally (the 4-tri crossing tests legitimately differ across
-    // groups), so the shared chain diverges - the cross-plane turn opens.
-    // Inject the union collected in the previous pass, keyed by the seam's
-    // face-pair identity.
-    if (seamX && seamXInject) {
+    // PER-LINE REGISTRY INJECTION (pass 2+): every line's accumulated split
+    // union - seams by plane pair, mesh edges by vid pair - lands on every
+    // segment record of that line, across groups (the registry-first shape;
+    // subsumes the former per-seam union and extends it to shared mesh
+    // edges).
+    if (lineReg && lineRegInject) {
       for (int i = 0; i < nS; ++i) {
-        if (segs[i].planeQ < 0) continue;
-        const auto key = std::minmax(g, segs[i].planeQ);
-        const auto it = seamX->find({key.first, key.second});
-        if (it == seamX->end()) continue;
-        for (const vec3& V : it->second) addSplit(i, V);
+        const auto it = lineReg->find(lineKeyOf(i));
+        if (it == lineReg->end()) continue;
+        const Seg& s = segs[i];
+        const vec3 d3 = s.p1 - s.p0;
+        const double len2 = la::dot(d3, d3);
+        if (!(len2 > 0.0)) continue;
+        const size_t n0 = it->second.size();  // entries may grow; snapshot
+        for (size_t k = 0; k < n0; ++k) {
+          const vec3 V = it->second[k];
+          // ON-LINE GUARD: one plane-pair key can span near-tangent seam
+          // records on lines microns apart (the lens family); an entry only
+          // lands on THIS segment when it lies on ITS line (else the chain
+          // bends and the walk fractures - measured)
+          const double t = la::dot(V - s.p0, d3) / len2;
+          if (!(t > 0.0 && t < 1.0)) continue;
+          if (la::length(V - s.p0 - t * d3) > 8.0 * rho) continue;
+          addSplit(i, V);
+        }
       }
     }
     // OUTER FIXPOINT: the exchange and the completion feed each other - a
@@ -6306,10 +6350,20 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
             const vec3 d3 = s.p1 - s.p0;
             const double len2 = la::dot(d3, d3);
             if (!(len2 > 0.0)) return;
+            const SegKey sk = segKeyOf(s.p0, s.p1);
             auto tryV = [&](const vec3& V) {
               const double t = la::dot(V - s.p0, d3) / len2;
               if (!(t > 0.0 && t < 1.0)) return;
-              addSplit(si, s.p0 + t * d3);
+              const std::pair<e1::K3, SegKey> fk{e1::KeyOf(V), sk};
+              const auto itf = footMemo.find(fk);
+              vec3 F;
+              if (itf != footMemo.end()) {
+                F = itf->second;
+              } else {
+                F = s.p0 + t * d3;
+                footMemo.emplace(fk, F);
+              }
+              addSplit(si, F);
             };
             tryV(segs[sj].p0);
             tryV(segs[sj].p1);
@@ -6350,7 +6404,13 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
               segs[i].planeQ != segs[j].planeQ)
             have = triplePos(g, segs[i].planeQ, segs[j].planeQ, X);
           if (!have) {
-            // in-plane 2D crossing, interpolated along segment i's 3D span
+            // in-plane crossing, interpolated along segment i (NOTE for
+            // stage 2: an interpolated position lies exactly on ONE line
+            // only, so it must NOT be memo-committed across carriers - the
+            // once-only committed crossing needs the exact construction:
+            // triple identity when both carriers are seams, else the
+            // symbolic segment-pair crossing; measured: memoizing the
+            // interpolation across groups bent foreign chains)
             const double dax = a1.x - a0.x, day = a1.y - a0.y;
             const double dbx = b1.x - b0.x, dby = b1.y - b0.y;
             const double den = dax * dby - day * dbx;
@@ -6366,20 +6426,6 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
       size_t nsplit1 = 0;
       for (int i = 0; i < nS; ++i) nsplit1 += splits[i].size();
       if (nsplit1 == nsplit0) break;
-    }
-    if (seamX) {
-      for (int i = 0; i < nS; ++i) {
-        if (segs[i].planeQ < 0) continue;
-        // PER-LINE registry key: the PLANE pair (one geometric line may carry
-        // several face-pair seam records; keying by faces left the same
-        // line's chains diverged across records - measured: corner-line
-        // sub-edge mismatches at 1e-8..1e-6)
-        const auto key = std::minmax(g, segs[i].planeQ);
-        auto& lst = (*seamX)[{key.first, key.second}];
-        for (const auto& pr : splits[i]) lst.push_back(pr.second);
-        lst.push_back(segs[i].p0);
-        lst.push_back(segs[i].p1);
-      }
     }
     // NOTE: no sub-edge-level completion pass is needed: with the exact
     // endpoint pool and the rounding-scale on-line tolerance, chain bends are
@@ -7076,19 +7122,19 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundary(const Manifold::Impl& in,
                                                     double eps) {
   std::vector<std::pair<int, vec3>> crossX;
   std::vector<vec3> triples;
-  std::map<std::pair<int, int>, std::vector<vec3>> seamX;
+  std::map<std::tuple<int, int, int>, std::vector<vec3>> lineReg;
   StageResult<Manifold::Impl> r = EmitCoordinatedBoundaryImpl(
-      in, A, eps, nullptr, &crossX, &triples, &seamX, false);
+      in, A, eps, nullptr, &crossX, &triples, &lineReg, false);
   if (!r.fatal) return r;
   for (const vec3& t : triples) crossX.push_back({-1, t});
   for (int pass = 0; pass < 6 && r.fatal; ++pass) {
     const size_t b1 = crossX.size();
     size_t b2 = 0;
-    for (const auto& kv : seamX) b2 += kv.second.size();
+    for (const auto& kv : lineReg) b2 += kv.second.size();
     r = EmitCoordinatedBoundaryImpl(in, A, eps, &crossX, &crossX, nullptr,
-                                    &seamX, true);
+                                    &lineReg, true);
     size_t a2 = 0;
-    for (const auto& kv : seamX) a2 += kv.second.size();
+    for (const auto& kv : lineReg) a2 += kv.second.size();
     if (crossX.size() == b1 && a2 == b2) break;  // converged/stuck
   }
   return r;
