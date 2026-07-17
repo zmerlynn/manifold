@@ -5758,6 +5758,23 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
     }
     return true;
   };
+  // SNAPPED-CLUSTER UNIONS (stage 3): faces of one near-coplanar cluster are
+  // ONE semantic plane - the planarize snap's contract, carried by A.planeId.
+  // The snap's projected coordinates are coplanar only to ~1e-13, so the
+  // exact-coplanarity test below cannot re-derive the cluster; without this
+  // union the engine emitted each cluster face as its own group and the
+  // mutual footprints rang unpaired (measured: the near-coplanar folds'
+  // 4+3 fan1 opens at SplitTouchingSheets).
+  if (!A.planeId.empty()) {
+    std::map<int, int> firstOfPlane;
+    for (int f = 0; f < nTri; ++f) {
+      const auto it = firstOfPlane.find(A.planeId[f]);
+      if (it == firstOfPlane.end())
+        firstOfPlane.emplace(A.planeId[f], f);
+      else
+        uf[find(f)] = find(it->second);
+    }
+  }
   for (int i = 0; i < nTri; ++i)
     for (int j = i + 1; j < nTri; ++j) {
       if (find(i) == find(j)) continue;
@@ -7646,6 +7663,23 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
         // band makes the edge-level transport double-ambiguous (its side is
         // noise); the record is dropped and connectivity routes elsewhere.
         if (flNodes[node].hasBand) continue;
+        // COMPOSITE-BAND GUARD: group members other than fOwn covering
+        // either side of the sub-edge put the whole coplanar band into the
+        // edge fan (the doubled-cap class) and the two-sheet dihedral rule
+        // does not apply.  In the exactly-coplanar case the WALL side is
+        // refused by its foreignChord (the band's touching-contact chord
+        // rides the same sub-edge), but a sub-eps TILT moves that chord off
+        // the edge and evades it (measured: the near-coplanar fold's 4 bad
+        // handoffs, d=0 vs true +-1).  Skip conservatively; connectivity
+        // falls to the residual probes.
+        {
+          int farNode = -1;
+          for (const auto& pr : cl)
+            if (pr.first != node && pr.second != wantFwd) farNode = pr.first;
+          if (fn.ownJump != fsgn[fOwn] ||
+              (farNode >= 0 && flNodes[farNode].ownJump != 0))
+            continue;
+        }
         // HANDOFF PARITY CORRECTION: the dihedral rule equates the eps-layer
         // values AT the edge, but the node's E is cenP-anchored; a covering
         // foreign sheet that flips plane-side between cenP and the sub-edge
