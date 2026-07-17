@@ -4951,11 +4951,19 @@ static bool RegateContactsWithinWeld(const Manifold::Impl& m, double eps) {
     const double width = ext > 0.0 ? area / ext : 0.0;
     return width >= eps;
   };
+  // A large triangle spans many grid cells, so the same pair can occur in
+  // hundreds of buckets. The predicates below are pure; retain the legacy
+  // first-encounter order and skip only subsequent visits to the same pair.
+  std::unordered_map<uint64_t, char> seen;
+  seen.reserve(nTri * 8);
   for (const auto& kv : grid) {
     const std::vector<int>& v = kv.second;
     for (size_t a = 0; a < v.size(); ++a)
       for (size_t b = a + 1; b < v.size(); ++b) {
         const int i = v[a], j = v[b];
+        const uint64_t key = (static_cast<uint64_t>(std::min(i, j)) << 32) |
+                             static_cast<uint32_t>(std::max(i, j));
+        if (!seen.emplace(key, 0).second) continue;
         if (boxes[i].min.x > boxes[j].max.x + eps ||
             boxes[j].min.x > boxes[i].max.x + eps ||
             boxes[i].min.y > boxes[j].max.y + eps ||
