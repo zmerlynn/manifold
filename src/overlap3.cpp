@@ -7601,7 +7601,47 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
           }
         if (node < 0) continue;
         const FlNode& fn = flNodes[node];
-        const int eOff = fsgn[fOwn] > 0 ? 0 : fn.ownJump + fn.sZero;
+        // HANDOFF PARITY CORRECTION: the dihedral rule equates the eps-layer
+        // values AT the edge, but the node's E is cenP-anchored; a covering
+        // foreign sheet that flips plane-side between cenP and the sub-edge
+        // (the stack-crossing class) shifts the edge value by q per flip.
+        // Same aggregation + conservation guard as the intra parity arm,
+        // with "B" = the sub-edge midpoint (sheets ending laterally break
+        // conservation and skip - the differential owns that residue).  The
+        // below-layer path crosses the same transiting sheets, so the
+        // correction applies uniformly for both fsgn cases.
+        int corr = 0;
+        if (!fn.nearSign.empty()) {
+          const vec3 mid = 0.5 * (pos3[ec.first.first] + pos3[ec.first.second]);
+          int aCen = 0, totCen = 0, aMid = 0, totMid = 0;
+          bool degen = false;
+          for (const auto& e2 : fn.nearSign) {
+            const int f2 = e2[0];
+            // the pair's own twin (and any ridge twin attached AT this
+            // sub-edge) is the dihedral rule's sector structure, not a
+            // transiting foreign sheet - excluded from the leg correction
+            if (f2 == handTf || ridgeTf.count(f2)) continue;
+            totCen += e2[2];
+            if (e2[1] > 0) aCen += e2[2];
+            const int ax2 = DominantAxis(A.faceN[f2]);
+            const int o0 = e1::O2(A.tri[f2][0], A.tri[f2][1], mid, ax2);
+            const int o1 = e1::O2(A.tri[f2][1], A.tri[f2][2], mid, ax2);
+            const int o2 = e1::O2(A.tri[f2][2], A.tri[f2][0], mid, ax2);
+            const bool neg = o0 < 0 || o1 < 0 || o2 < 0;
+            const bool pos = o0 > 0 || o1 > 0 || o2 > 0;
+            if (neg && pos) continue;  // not covering the midpoint
+            const double den = la::dot(A.faceN[f2], nHat);
+            if (!(den != 0.0)) {
+              degen = true;
+              break;
+            }
+            const double tp = -la::dot(A.faceN[f2], mid - A.tri[f2][0]) / den;
+            totMid += e2[2];
+            if (tp > 0.0) aMid += e2[2];  // tp == 0 counts BELOW (convention)
+          }
+          if (!degen && totCen == totMid) corr = aMid - aCen;
+        }
+        const int eOff = (fsgn[fOwn] > 0 ? 0 : fn.ownJump + fn.sZero) + corr;
         const int vlo = std::min(segs[handSi].vidLo, segs[handSi].vidHi);
         const int vhi = std::max(segs[handSi].vidLo, segs[handSi].vidHi);
         flHand[{{vlo, vhi},
