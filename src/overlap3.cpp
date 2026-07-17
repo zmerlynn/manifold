@@ -5757,13 +5757,15 @@ inline bool DiagSplitFwd(const std::vector<int>& poly,
 
 }  // namespace e1
 
+// TWO-PHASE ENGINE (registry-first): buildPhase writes every split-producing
+// event into the ONE per-line registry (no cells, no classification); the
+// consume phase reads the registry ONLY (zero local reconciliation) and runs
+// the walk/classify/emit machinery.  The wrapper iterates build to a global
+// fixpoint, then consumes once.
 StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
     const Manifold::Impl& in, const BuildArrangement& A, double eps,
-    const std::vector<std::pair<int, vec3>>* extraJ,
-    std::vector<std::pair<int, vec3>>* collectX,
-    std::vector<vec3>* collectT = nullptr,
-    std::map<std::tuple<int, int, int>, std::vector<vec3>>* lineReg = nullptr,
-    bool lineRegInject = false) {
+    std::map<std::tuple<int, int, int>, std::map<e1::K3, vec3>>& lineReg,
+    bool buildPhase) {
   using e1::K3;
   using e1::KeyOf;
   const int nTri = static_cast<int>(A.tri.size());
@@ -5855,9 +5857,24 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
     int other;
   };
   std::vector<std::vector<ESeam>> eSeams(nTri);
+  // hoisted memos (the completion pass constructs edge x seam crossings as
+  // PIERCE identities - the exact once-only construction on BOTH lines)
+  std::map<std::pair<int, int>, int> sideCache;  // (vert id, gid) -> sign
+  std::map<std::tuple<int, int, int>, vec3> pierceCache;
+  auto pierceGet = [&](int vlo, int vhi, const vec3& u, const vec3& w,
+                       int q) -> std::optional<vec3> {
+    const auto key = std::make_tuple(vlo, vhi, q);
+    const auto it = pierceCache.find(key);
+    if (it != pierceCache.end()) return it->second;
+    const sos::BigHPoint X = sos::SegPlaneBigHPoint(u, w, A.tri[rep[q]].data());
+    if (sos::BigSign(X.W) == 0) return std::nullopt;
+    const vec3 P = sos::BigHPointToPos(X);
+    if (!(std::isfinite(P.x) && std::isfinite(P.y) && std::isfinite(P.z)))
+      return std::nullopt;
+    pierceCache.emplace(key, P);
+    return P;
+  };
   {
-    std::map<std::pair<int, int>, int> sideCache;  // (vert id, gid) -> sign
-    std::map<std::tuple<int, int, int>, vec3> pierceCache;
     auto sideOf = [&](int f, int k, int q) -> int {
       const auto key = std::make_pair(A.vid[f][k], q);
       const auto it = sideCache.find(key);
@@ -6073,6 +6090,9 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
     }
     const int nS = static_cast<int>(segs.size());
 
+    // ---- BUILD PHASE ONLY: the split producers (crossing enumeration,
+    // T-junction pool, foot exchange, planarity completion) write into the
+    // registry via addSplit; the consume phase reads the registry only.
     // ---- 3. splits: engine triples (input-exact, symmetric) + registry ----
     std::vector<std::vector<std::pair<double, vec3>>> splits(nS);
     // CANONICAL VERTEX GRID (rounding-scale): every split point is snapped
@@ -6170,262 +6190,234 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
       for (const auto& pr : splits[si])
         if (KeyOf(pr.second) == KeyOf(V)) return false;
       splits[si].push_back({t, V});
-      if (lineReg) (*lineReg)[lineKeyOf(si)].push_back(V);
+      if (buildPhase) lineReg[lineKeyOf(si)].emplace(KeyOf(V), V);
       return true;
     };
-    for (int i = 0; i < nS; ++i) {
-      if (segs[i].planeQ < 0) continue;
-      for (int j = i + 1; j < nS; ++j) {
-        if (segs[j].planeQ < 0 || segs[j].planeQ == segs[i].planeQ) continue;
-        // quick reject: 2D bboxes of the two seams disjoint
-        const vec2 a0 = e1::Drop2(segs[i].p0, axis),
-                   a1 = e1::Drop2(segs[i].p1, axis),
-                   b0 = e1::Drop2(segs[j].p0, axis),
-                   b1 = e1::Drop2(segs[j].p1, axis);
-        if (std::max(a0.x, a1.x) < std::min(b0.x, b1.x) - eps ||
-            std::max(b0.x, b1.x) < std::min(a0.x, a1.x) - eps ||
-            std::max(a0.y, a1.y) < std::min(b0.y, b1.y) - eps ||
-            std::max(b0.y, b1.y) < std::min(a0.y, a1.y) - eps)
-          continue;
-        // exact symmetric existence: X = {g, Qi, Qj} strictly interior to all
-        // four bounding triangles (both seams' extents)
-        if (!tripleInTri(g, segs[i].planeQ, segs[j].planeQ, segs[i].fOwn))
-          continue;
-        if (!tripleInTri(g, segs[i].planeQ, segs[j].planeQ, segs[i].fOther))
-          continue;
-        if (segs[j].fOwn != segs[i].fOwn &&
-            !tripleInTri(g, segs[i].planeQ, segs[j].planeQ, segs[j].fOwn))
-          continue;
-        if (!tripleInTri(g, segs[i].planeQ, segs[j].planeQ, segs[j].fOther))
-          continue;
-        vec3 X;
-        if (!triplePos(g, segs[i].planeQ, segs[j].planeQ, X)) continue;
-        addSplit(i, X);
-        addSplit(j, X);
-      }
-    }
-    // T-junction splits (shared canonical doubles): the group's OWN segment
-    // endpoints (engine seam ends + member corners - the offline pool) plus
-    // the production registry; the same on-line rule everywhere, consistent
-    // across groups because every group reads identical (vertex, segment)
-    // bits.
-    // pool = the group's OWN segment endpoints (exact once-only constructions,
-    // ULP-accurate - the offline pool).  NOT A.junctions: its eps-deduped
-    // representatives sit up to eps off the exact lines, and inserting them
-    // with an eps window BENDS the chains by eps - the bent sub-chains then
-    // properly cross and fragment the walk (measured: a split cascade).
-    // PER-LINE REGISTRY INJECTION (pass 2+): every line's accumulated split
+    // PER-LINE REGISTRY READ (both phases): every line's accumulated split
     // union - seams by plane pair, mesh edges by vid pair - lands on every
-    // segment record of that line, across groups (the registry-first shape;
-    // subsumes the former per-seam union and extends it to shared mesh
-    // edges).
-    if (lineReg && lineRegInject) {
-      for (int i = 0; i < nS; ++i) {
-        const auto it = lineReg->find(lineKeyOf(i));
-        if (it == lineReg->end()) continue;
-        const Seg& s = segs[i];
-        const vec3 d3 = s.p1 - s.p0;
-        const double len2 = la::dot(d3, d3);
-        if (!(len2 > 0.0)) continue;
-        const size_t n0 = it->second.size();  // entries may grow; snapshot
-        for (size_t k = 0; k < n0; ++k) {
-          const vec3 V = it->second[k];
-          // ON-LINE GUARD: one plane-pair key can span near-tangent seam
-          // records on lines microns apart (the lens family); an entry only
-          // lands on THIS segment when it lies on ITS line (else the chain
-          // bends and the walk fractures - measured)
-          const double t = la::dot(V - s.p0, d3) / len2;
-          if (!(t > 0.0 && t < 1.0)) continue;
-          if (la::length(V - s.p0 - t * d3) > 8.0 * rho) continue;
-          addSplit(i, V);
-        }
+    // segment record of that line, across groups.  ON-LINE GUARD: one
+    // plane-pair key can span near-tangent lens records microns apart; an
+    // entry only lands where it lies on THIS segment's line.
+    for (int i = 0; i < nS; ++i) {
+      const auto it = lineReg.find(lineKeyOf(i));
+      if (it == lineReg.end()) continue;
+      const Seg& s = segs[i];
+      const vec3 d3 = s.p1 - s.p0;
+      const double len2 = la::dot(d3, d3);
+      if (!(len2 > 0.0)) continue;
+      for (const auto& kv : it->second) {
+        const vec3& V = kv.second;
+        const double t = la::dot(V - s.p0, d3) / len2;
+        if (!(t > 0.0 && t < 1.0)) continue;
+        if (la::length(V - s.p0 - t * d3) > 8.0 * rho) continue;
+        addSplit(i, V);
       }
     }
-    // OUTER FIXPOINT: the exchange and the completion feed each other - a
-    // completion-added crossing (ill-conditioned on near-collinear pairs:
-    // the same line's overlapping segments each get their own noisy
-    // crossing position) must be EXCHANGED onto every collinear twin, and
-    // exchanged points can expose new crossings.  (Measured: identical-
-    // endpoint twin segments carrying different completion splits 2.4e-5
-    // apart - the T-junction/lens class.)
-    for (int outer = 0; outer < 4; ++outer) {
-      size_t nsplit0 = 0;
-      for (int i = 0; i < nS; ++i) nsplit0 += splits[i].size();
-      // T-junction pool pass, iterated to FIXPOINT with ALL SPLIT POINTS in
-      // the pool: near-collinear overlapping chains (the same line reached via
-      // different member pairs, ULP apart) must carry IDENTICAL subdivisions -
-      // endpoint-only exchange left one chain split where its twin spanned
-      // whole (measured: intra-group T-junctions with the on-vertex 9e-16 off
-      // the unsplit edge).  Split values are canonical (snap grid), so the
-      // exchange converges.
-      // 8*rho: the canonical snap grid moves split points up to rho off their
-      // segment lines, so on-line tests must budget the snap displacement
-      const double tolLine = 8.0 * rho;
-      for (int round = 0; round < 4; ++round) {
-        std::vector<vec3> pool;
-        pool.reserve(2 * segs.size());
-        for (const Seg& s : segs) {
-          pool.push_back(s.p0);
-          pool.push_back(s.p1);
-        }
-        for (int i = 0; i < nS; ++i)
-          for (const auto& pr : splits[i]) pool.push_back(pr.second);
-        bool added = false;
-        for (int i = 0; i < nS; ++i) {
-          const Seg& s = segs[i];
-          const vec3 d3 = s.p1 - s.p0;
-          const double len2 = la::dot(d3, d3);
-          if (!(len2 > 0.0)) continue;
-          const double len = std::sqrt(len2);
-          for (const vec3& V : pool) {
-            const vec3 w = V - s.p0;
-            const double t = la::dot(w, d3) / len2;
-            if (!(t > eps / len && t < 1.0 - eps / len)) continue;
-            if (la::length(w - t * d3) > tolLine) continue;
-            added |= addSplit(i, V);
-          }
-        }
-        if (!added) break;
-      }
-      // RETRY SPLITS (second pass): the first pass's failing walks' observed
-      // self-crossing points, injected group-globally so every incident cell
-      // subdivides identically.
-      if (extraJ) {
-        int landed = 0;
-        for (int i = 0; i < nS; ++i) {
-          const Seg& s = segs[i];
-          const vec3 d3 = s.p1 - s.p0;
-          const double len2 = la::dot(d3, d3);
-          if (!(len2 > 0.0)) continue;
-          const double tolLine2 = 8.0 * rho;
-          for (const auto& gv : *extraJ) {
-            // group-scoped (loop-derived points splash); g==-1 = GLOBAL entries
-            // (canonical triple constructions: exact, safe everywhere)
-            if (gv.first != g && gv.first != -1) continue;
-            const vec3& V = gv.second;
-            const vec3 w = V - s.p0;
-            const double t = la::dot(w, d3) / len2;
-            if (!(t > 0.0 && t < 1.0)) continue;
-            if (la::length(w - t * d3) > tolLine2) continue;
-            if (addSplit(i, V)) ++landed;
-          }
-        }
-        if (kDump && landed)
-          std::fprintf(stderr, "E1 retry g=%d landed=%d/%d\n", g, landed,
-                       static_cast<int>(extraJ->size()));
-      }
-
-      // COLLINEAR-BUNDLE FOOT EXCHANGE: an input-vert mesh edge and the
-      // constructed seam of the same corner line differ by ~eps (the input's
-      // own placement noise) - two parallel chains AT the weld margin whose
-      // independent subdivisions leave unmergeable stubs (measured: 1-eps-
-      // separated corner chains, sub-edges 1e-8..1e-5).  For segment pairs
-      // near-collinear within the weld scale over their overlap, insert the
-      // ON-SEGMENT FOOT of each other's splits/endpoints: the chain stays
-      // exactly straight (no bend) and each foot welds with its sibling.
+    if (buildPhase) {
       for (int i = 0; i < nS; ++i) {
-        const vec2 a0 = e1::Drop2(segs[i].p0, axis),
-                   a1 = e1::Drop2(segs[i].p1, axis);
-        const vec2 di = a1 - a0;
-        const double li = la::length(di);
-        if (!(li > 0.0)) continue;
+        if (segs[i].planeQ < 0) continue;
         for (int j = i + 1; j < nS; ++j) {
-          const vec2 b0 = e1::Drop2(segs[j].p0, axis),
-                     b1 = e1::Drop2(segs[j].p1, axis);
-          if (std::max(a0.x, a1.x) < std::min(b0.x, b1.x) - 2.0 * eps ||
-              std::max(b0.x, b1.x) < std::min(a0.x, a1.x) - 2.0 * eps ||
-              std::max(a0.y, a1.y) < std::min(b0.y, b1.y) - 2.0 * eps ||
-              std::max(b0.y, b1.y) < std::min(a0.y, a1.y) - 2.0 * eps)
-            continue;
-          const vec2 dj = b1 - b0;
-          const double lj = la::length(dj);
-          if (!(lj > 0.0)) continue;
-          if (std::abs(la::cross(di, b0 - a0)) / li > 2.0 * eps ||
-              std::abs(la::cross(di, b1 - a0)) / li > 2.0 * eps ||
-              std::abs(la::cross(dj, a0 - b0)) / lj > 2.0 * eps ||
-              std::abs(la::cross(dj, a1 - b0)) / lj > 2.0 * eps)
-            continue;  // not a near-collinear bundle at weld scale
-          auto footEx = [&](int si, int sj) {
-            const Seg& s = segs[si];
-            const vec3 d3 = s.p1 - s.p0;
-            const double len2 = la::dot(d3, d3);
-            if (!(len2 > 0.0)) return;
-            const SegKey sk = segKeyOf(s.p0, s.p1);
-            auto tryV = [&](const vec3& V) {
-              const double t = la::dot(V - s.p0, d3) / len2;
-              if (!(t > 0.0 && t < 1.0)) return;
-              const std::pair<e1::K3, SegKey> fk{e1::KeyOf(V), sk};
-              const auto itf = footMemo.find(fk);
-              vec3 F;
-              if (itf != footMemo.end()) {
-                F = itf->second;
-              } else {
-                F = s.p0 + t * d3;
-                footMemo.emplace(fk, F);
-              }
-              addSplit(si, F);
-            };
-            tryV(segs[sj].p0);
-            tryV(segs[sj].p1);
-            for (const auto& pr : splits[sj]) tryV(pr.second);
-          };
-          footEx(i, j);
-          footEx(j, i);
-        }
-      }
-      // PLANARITY COMPLETION (all remaining segment-pair crossings): the exact
-      // seam-x-seam enumeration and the endpoint pool cover the canonical
-      // crossings, but the drawn (rounded) graph must be PLANAR for the face
-      // walk - overlapping coplanar members (the fold structure) cross member
-      // edges and same-line seams in ways the passes above miss (measured:
-      // properly-crossing sub-edges -> bowtie walks -> untriangulable cells).
-      // Detect every remaining proper crossing exactly on the shared rounded
-      // endpoints and split both segments; the split point uses the canonical
-      // triple when both carriers are seams of distinct planes, else the
-      // in-segment interpolation (identity across groups holds within weld
-      // tolerance via the shared-endpoint constructions).
-      for (int i = 0; i < nS; ++i) {
-        const vec2 a0 = e1::Drop2(segs[i].p0, axis),
-                   a1 = e1::Drop2(segs[i].p1, axis);
-        for (int j = i + 1; j < nS; ++j) {
-          const vec2 b0 = e1::Drop2(segs[j].p0, axis),
+          if (segs[j].planeQ < 0 || segs[j].planeQ == segs[i].planeQ) continue;
+          // quick reject: 2D bboxes of the two seams disjoint
+          const vec2 a0 = e1::Drop2(segs[i].p0, axis),
+                     a1 = e1::Drop2(segs[i].p1, axis),
+                     b0 = e1::Drop2(segs[j].p0, axis),
                      b1 = e1::Drop2(segs[j].p1, axis);
           if (std::max(a0.x, a1.x) < std::min(b0.x, b1.x) - eps ||
               std::max(b0.x, b1.x) < std::min(a0.x, a1.x) - eps ||
               std::max(a0.y, a1.y) < std::min(b0.y, b1.y) - eps ||
               std::max(b0.y, b1.y) < std::min(a0.y, a1.y) - eps)
             continue;
-          if (!e1::ProperCross2(segs[i].p0, segs[i].p1, segs[j].p0, segs[j].p1,
-                                axis))
+          // exact symmetric existence: X = {g, Qi, Qj} strictly interior to all
+          // four bounding triangles (both seams' extents)
+          if (!tripleInTri(g, segs[i].planeQ, segs[j].planeQ, segs[i].fOwn))
+            continue;
+          if (!tripleInTri(g, segs[i].planeQ, segs[j].planeQ, segs[i].fOther))
+            continue;
+          if (segs[j].fOwn != segs[i].fOwn &&
+              !tripleInTri(g, segs[i].planeQ, segs[j].planeQ, segs[j].fOwn))
+            continue;
+          if (!tripleInTri(g, segs[i].planeQ, segs[j].planeQ, segs[j].fOther))
             continue;
           vec3 X;
-          bool have = false;
-          if (segs[i].planeQ >= 0 && segs[j].planeQ >= 0 &&
-              segs[i].planeQ != segs[j].planeQ)
-            have = triplePos(g, segs[i].planeQ, segs[j].planeQ, X);
-          if (!have) {
-            // in-plane crossing, interpolated along segment i (NOTE for
-            // stage 2: an interpolated position lies exactly on ONE line
-            // only, so it must NOT be memo-committed across carriers - the
-            // once-only committed crossing needs the exact construction:
-            // triple identity when both carriers are seams, else the
-            // symbolic segment-pair crossing; measured: memoizing the
-            // interpolation across groups bent foreign chains)
-            const double dax = a1.x - a0.x, day = a1.y - a0.y;
-            const double dbx = b1.x - b0.x, dby = b1.y - b0.y;
-            const double den = dax * dby - day * dbx;
-            if (den == 0.0) continue;
-            const double t = ((b0.x - a0.x) * dby - (b0.y - a0.y) * dbx) / den;
-            X = segs[i].p0 + t * (segs[i].p1 - segs[i].p0);
-          }
+          if (!triplePos(g, segs[i].planeQ, segs[j].planeQ, X)) continue;
           addSplit(i, X);
           addSplit(j, X);
         }
       }
+      // T-junction splits (shared canonical doubles): the group's OWN segment
+      // endpoints (engine seam ends + member corners - the offline pool) plus
+      // the production registry; the same on-line rule everywhere, consistent
+      // across groups because every group reads identical (vertex, segment)
+      // bits.
+      // pool = the group's OWN segment endpoints (exact once-only
+      // constructions, ULP-accurate - the offline pool).  NOT A.junctions: its
+      // eps-deduped representatives sit up to eps off the exact lines, and
+      // inserting them with an eps window BENDS the chains by eps - the bent
+      // sub-chains then properly cross and fragment the walk (measured: a split
+      // cascade). OUTER FIXPOINT: the exchange and the completion feed each
+      // other - a completion-added crossing (ill-conditioned on near-collinear
+      // pairs: the same line's overlapping segments each get their own noisy
+      // crossing position) must be EXCHANGED onto every collinear twin, and
+      // exchanged points can expose new crossings.  (Measured: identical-
+      // endpoint twin segments carrying different completion splits 2.4e-5
+      // apart - the T-junction/lens class.)
+      for (int outer = 0; outer < 4; ++outer) {
+        size_t nsplit0 = 0;
+        for (int i = 0; i < nS; ++i) nsplit0 += splits[i].size();
+        // T-junction pool pass, iterated to FIXPOINT with ALL SPLIT POINTS in
+        // the pool: near-collinear overlapping chains (the same line reached
+        // via different member pairs, ULP apart) must carry IDENTICAL
+        // subdivisions - endpoint-only exchange left one chain split where its
+        // twin spanned whole (measured: intra-group T-junctions with the
+        // on-vertex 9e-16 off the unsplit edge).  Split values are canonical
+        // (snap grid), so the exchange converges. 8*rho: the canonical snap
+        // grid moves split points up to rho off their segment lines, so on-line
+        // tests must budget the snap displacement
+        const double tolLine = 8.0 * rho;
+        for (int round = 0; round < 4; ++round) {
+          std::vector<vec3> pool;
+          pool.reserve(2 * segs.size());
+          for (const Seg& s : segs) {
+            pool.push_back(s.p0);
+            pool.push_back(s.p1);
+          }
+          for (int i = 0; i < nS; ++i)
+            for (const auto& pr : splits[i]) pool.push_back(pr.second);
+          bool added = false;
+          for (int i = 0; i < nS; ++i) {
+            const Seg& s = segs[i];
+            const vec3 d3 = s.p1 - s.p0;
+            const double len2 = la::dot(d3, d3);
+            if (!(len2 > 0.0)) continue;
+            const double len = std::sqrt(len2);
+            for (const vec3& V : pool) {
+              const vec3 w = V - s.p0;
+              const double t = la::dot(w, d3) / len2;
+              if (!(t > eps / len && t < 1.0 - eps / len)) continue;
+              if (la::length(w - t * d3) > tolLine) continue;
+              added |= addSplit(i, V);
+            }
+          }
+          if (!added) break;
+        }
 
-      size_t nsplit1 = 0;
-      for (int i = 0; i < nS; ++i) nsplit1 += splits[i].size();
-      if (nsplit1 == nsplit0) break;
+        // COLLINEAR-BUNDLE FOOT EXCHANGE: an input-vert mesh edge and the
+        // constructed seam of the same corner line differ by ~eps (the input's
+        // own placement noise) - two parallel chains AT the weld margin whose
+        // independent subdivisions leave unmergeable stubs (measured: 1-eps-
+        // separated corner chains, sub-edges 1e-8..1e-5).  For segment pairs
+        // near-collinear within the weld scale over their overlap, insert the
+        // ON-SEGMENT FOOT of each other's splits/endpoints: the chain stays
+        // exactly straight (no bend) and each foot welds with its sibling.
+        for (int i = 0; i < nS; ++i) {
+          const vec2 a0 = e1::Drop2(segs[i].p0, axis),
+                     a1 = e1::Drop2(segs[i].p1, axis);
+          const vec2 di = a1 - a0;
+          const double li = la::length(di);
+          if (!(li > 0.0)) continue;
+          for (int j = i + 1; j < nS; ++j) {
+            const vec2 b0 = e1::Drop2(segs[j].p0, axis),
+                       b1 = e1::Drop2(segs[j].p1, axis);
+            if (std::max(a0.x, a1.x) < std::min(b0.x, b1.x) - 2.0 * eps ||
+                std::max(b0.x, b1.x) < std::min(a0.x, a1.x) - 2.0 * eps ||
+                std::max(a0.y, a1.y) < std::min(b0.y, b1.y) - 2.0 * eps ||
+                std::max(b0.y, b1.y) < std::min(a0.y, a1.y) - 2.0 * eps)
+              continue;
+            const vec2 dj = b1 - b0;
+            const double lj = la::length(dj);
+            if (!(lj > 0.0)) continue;
+            if (std::abs(la::cross(di, b0 - a0)) / li > 2.0 * eps ||
+                std::abs(la::cross(di, b1 - a0)) / li > 2.0 * eps ||
+                std::abs(la::cross(dj, a0 - b0)) / lj > 2.0 * eps ||
+                std::abs(la::cross(dj, a1 - b0)) / lj > 2.0 * eps)
+              continue;  // not a near-collinear bundle at weld scale
+            auto footEx = [&](int si, int sj) {
+              const Seg& s = segs[si];
+              const vec3 d3 = s.p1 - s.p0;
+              const double len2 = la::dot(d3, d3);
+              if (!(len2 > 0.0)) return;
+              const SegKey sk = segKeyOf(s.p0, s.p1);
+              auto tryV = [&](const vec3& V) {
+                const double t = la::dot(V - s.p0, d3) / len2;
+                if (!(t > 0.0 && t < 1.0)) return;
+                const std::pair<e1::K3, SegKey> fk{e1::KeyOf(V), sk};
+                const auto itf = footMemo.find(fk);
+                vec3 F;
+                if (itf != footMemo.end()) {
+                  F = itf->second;
+                } else {
+                  F = s.p0 + t * d3;
+                  footMemo.emplace(fk, F);
+                }
+                addSplit(si, F);
+              };
+              tryV(segs[sj].p0);
+              tryV(segs[sj].p1);
+              for (const auto& pr : splits[sj]) tryV(pr.second);
+            };
+            footEx(i, j);
+            footEx(j, i);
+          }
+        }
+        // PLANARITY COMPLETION (all remaining segment-pair crossings): the
+        // exact seam-x-seam enumeration and the endpoint pool cover the
+        // canonical crossings, but the drawn (rounded) graph must be PLANAR for
+        // the face walk - overlapping coplanar members (the fold structure)
+        // cross member edges and same-line seams in ways the passes above miss
+        // (measured: properly-crossing sub-edges -> bowtie walks ->
+        // untriangulable cells). Detect every remaining proper crossing exactly
+        // on the shared rounded endpoints and split both segments; the split
+        // point uses the canonical triple when both carriers are seams of
+        // distinct planes, else the in-segment interpolation (identity across
+        // groups holds within weld tolerance via the shared-endpoint
+        // constructions).
+        for (int i = 0; i < nS; ++i) {
+          const vec2 a0 = e1::Drop2(segs[i].p0, axis),
+                     a1 = e1::Drop2(segs[i].p1, axis);
+          for (int j = i + 1; j < nS; ++j) {
+            const vec2 b0 = e1::Drop2(segs[j].p0, axis),
+                       b1 = e1::Drop2(segs[j].p1, axis);
+            if (std::max(a0.x, a1.x) < std::min(b0.x, b1.x) - eps ||
+                std::max(b0.x, b1.x) < std::min(a0.x, a1.x) - eps ||
+                std::max(a0.y, a1.y) < std::min(b0.y, b1.y) - eps ||
+                std::max(b0.y, b1.y) < std::min(a0.y, a1.y) - eps)
+              continue;
+            if (!e1::ProperCross2(segs[i].p0, segs[i].p1, segs[j].p0,
+                                  segs[j].p1, axis))
+              continue;
+            vec3 X;
+            bool have = false;
+            if (segs[i].planeQ >= 0 && segs[j].planeQ >= 0 &&
+                segs[i].planeQ != segs[j].planeQ)
+              have = triplePos(g, segs[i].planeQ, segs[j].planeQ, X);
+            if (!have) {
+              // in-plane crossing, interpolated along segment i (NOTE for
+              // stage 2: an interpolated position lies exactly on ONE line
+              // only, so it must NOT be memo-committed across carriers - the
+              // once-only committed crossing needs the exact construction:
+              // triple identity when both carriers are seams, else the
+              // symbolic segment-pair crossing; measured: memoizing the
+              // interpolation across groups bent foreign chains)
+              const double dax = a1.x - a0.x, day = a1.y - a0.y;
+              const double dbx = b1.x - b0.x, dby = b1.y - b0.y;
+              const double den = dax * dby - day * dbx;
+              if (den == 0.0) continue;
+              const double t =
+                  ((b0.x - a0.x) * dby - (b0.y - a0.y) * dbx) / den;
+              X = segs[i].p0 + t * (segs[i].p1 - segs[i].p0);
+            }
+            addSplit(i, X);
+            addSplit(j, X);
+          }
+        }
+
+        size_t nsplit1 = 0;
+        for (int i = 0; i < nS; ++i) nsplit1 += splits[i].size();
+        if (nsplit1 == nsplit0) break;
+      }
+      suspectTotal += suspectSnaps;
+      continue;  // build phase: no cells, no classification
     }
     // NOTE: no sub-edge-level completion pass is needed: with the exact
     // endpoint pool and the rounding-scale on-line tolerance, chain bends are
@@ -6809,29 +6801,6 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
           ++nDustCell;  // rounded-degenerate sliver cell: weld dust
           continue;
         }
-        if (collectX) {
-          // planarize-detect: record the failing walk's own proper crossings
-          const int mm = static_cast<int>(loop.size());
-          for (int u = 0; u < mm; ++u) {
-            const vec3 &ua = pos3[loop[u]], &ub = pos3[loop[(u + 1) % mm]];
-            for (int v = u + 1; v < mm; ++v) {
-              const vec3 &va = pos3[loop[v]], &vb = pos3[loop[(v + 1) % mm]];
-              if (KeyOf(ua) == KeyOf(va) || KeyOf(ua) == KeyOf(vb) ||
-                  KeyOf(ub) == KeyOf(va) || KeyOf(ub) == KeyOf(vb))
-                continue;
-              if (!e1::ProperCross2(ua, ub, va, vb, axis)) continue;
-              const vec2 a0 = e1::Drop2(ua, axis), a1 = e1::Drop2(ub, axis);
-              const vec2 b0 = e1::Drop2(va, axis), b1 = e1::Drop2(vb, axis);
-              const double dax = a1.x - a0.x, day = a1.y - a0.y;
-              const double dbx = b1.x - b0.x, dby = b1.y - b0.y;
-              const double den = dax * dby - day * dbx;
-              if (den == 0.0) continue;
-              const double t =
-                  ((b0.x - a0.x) * dby - (b0.y - a0.y) * dbx) / den;
-              collectX->push_back({g, ua + t * (ub - ua)});
-            }
-          }
-        }
         ++triFail;
         if (kDump && triFail <= 8) {
           const vec2 c0 = e1::Drop2(pos3[loop[0]], axis);
@@ -7093,9 +7062,9 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
                  static_cast<int>(out.size()), dustTri, triFail, spliceFail,
                  nCells, nNeg, nJump, nOwned, nBoundary, nDustCell,
                  suspectTotal);
-  if (collectT)
-    for (const auto& kv : tripleCache)
-      if (kv.second.first) collectT->push_back(kv.second.second);
+  if (buildPhase)
+    return StageResult<Manifold::Impl>::Fatal(
+        FatalReason::DirtyComponentUnresolved, "e1: build phase");
   if (triFail > 0 || spliceFail > 0)
     return fail("e1: cell triangulation/hole-splice incomplete - fail-closed");
   if (const char* sf = std::getenv("E1_SOUPFILE")) {  // offline diagnostics
@@ -7120,24 +7089,17 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
 StageResult<Manifold::Impl> EmitCoordinatedBoundary(const Manifold::Impl& in,
                                                     const BuildArrangement& A,
                                                     double eps) {
-  std::vector<std::pair<int, vec3>> crossX;
-  std::vector<vec3> triples;
-  std::map<std::tuple<int, int, int>, std::vector<vec3>> lineReg;
-  StageResult<Manifold::Impl> r = EmitCoordinatedBoundaryImpl(
-      in, A, eps, nullptr, &crossX, &triples, &lineReg, false);
-  if (!r.fatal) return r;
-  for (const vec3& t : triples) crossX.push_back({-1, t});
-  for (int pass = 0; pass < 6 && r.fatal; ++pass) {
-    const size_t b1 = crossX.size();
-    size_t b2 = 0;
-    for (const auto& kv : lineReg) b2 += kv.second.size();
-    r = EmitCoordinatedBoundaryImpl(in, A, eps, &crossX, &crossX, nullptr,
-                                    &lineReg, true);
-    size_t a2 = 0;
-    for (const auto& kv : lineReg) a2 += kv.second.size();
-    if (crossX.size() == b1 && a2 == b2) break;  // converged/stuck
+  // BUILD to a global registry fixpoint, then CONSUME once.
+  std::map<std::tuple<int, int, int>, std::map<e1::K3, vec3>> lineReg;
+  size_t prev = static_cast<size_t>(-1);
+  for (int round = 0; round < 8; ++round) {
+    EmitCoordinatedBoundaryImpl(in, A, eps, lineReg, true);
+    size_t sz = 0;
+    for (const auto& kv : lineReg) sz += kv.second.size();
+    if (sz == prev) break;  // registry stable
+    prev = sz;
   }
-  return r;
+  return EmitCoordinatedBoundaryImpl(in, A, eps, lineReg, false);
 }
 
 // THE BUILD driver: fold exactly-coplanar clusters in-plane, emit seamed
