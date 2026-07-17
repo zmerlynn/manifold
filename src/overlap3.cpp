@@ -6001,36 +6001,53 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
   // sheet without a chord there cannot separate the two eps-layers - the
   // mesh-edge cleanliness argument, exact as eps -> 0), with sign
   // -sgn(dot(t_out, n_partner)).  The per-cell probe value converts
-  // VERTICALLY: wA = E - sPosFull (sPosFull = signed count of covering foreign
+  // VERTICALLY: wA = E - sPosMid (sPosMid = signed count of covering foreign
   // sheets crossed by the cenP vertical between the plane and the probe at
   // 2T; the gap-finder certifies that set at cenP).  Anchors: (a) the HULL
   // SEED - at the lex-max input vertex v* the point v* + (d, d^2, d^3) is
   // exterior (w=0, no ray cast: the lex-max of a compact polyhedron is a
   // vertex) and lies on the lexsign side of every plane through v*, so a
   // group with exactly one node cell touching v* anchors combinatorially;
-  // (b) every probe-certified cell.  BFS propagates; ANY value conflict
-  // (including flood-vs-certified = the differential rail) aborts the flood
-  // and preserves today's fail-closed fatal.  v1 routing: the flood fills
-  // ONLY probe-failed (pending) cells; probes stay primary elsewhere.
+  // (b) residual probes (one certified probe anchors each subgraph).  BFS
+  // propagates over RELIABILITY-FILTERED edges; a conflict clears the field
+  // and the emission probes every cell (the pre-flood per-cell semantics).
+  // FLOOD-PRIMARY (session 3): the field values every cell; the exact probe
+  // remains as (a) the residual subgraph anchor, (b) the per-cell
+  // specialist where edge transport is unreliable (the near-tangent ladder
+  // class), (c) the E1_FLOODDIFF shadow validator.
   struct FlNode {
     int g = -1;
     int jump = 0, ownJump = 0;
-    int sPosFull = 0;  // covering foreign sheets with 0 < tPos < 2T at cenP
-    int sZero = 0;     // covering foreign sheets with tPos == 0 at cenP
+    int sPosMid = 0;       // covering sheets with stackWin < tPos < 2T at cenP
+    int sZero = 0;         // covering foreign sheets with tPos == 0 at cenP
+    bool hasBand = false;  // any covering sheet inside the sub-resolution
+                           // band (|tPos| <= stackWin): its side is not
+                           // double-resolvable (the engine's stack class)
     bool pancake = false;
-    bool pending = false;    // probe grazed: emission awaits the flood
-    bool certified = false;  // probe + certificate passed (anchor)
-    int probeWA = 0;
+    bool emit = false;  // carries emission payload (jump!=0 or pancake)
+    // probeState: 0 unprobed, 1 certified (probeWA/WB valid), 2 grazed,
+    // 3 probed but certificate failed
+    signed char probeState = 0;
+    bool certified = false;  // == (probeState == 1), kept for the census
+    int probeWA = 0, probeWB = 0;
+    vec3 cenP;        // projected probe center (residual probing)
+    double off = 0;   // probe offset 2T
+    double extW = 0;  // largest-subtri altitude (the dust-width rule)
     vec3 Nrep;
     std::vector<std::pair<double, int>> stackSheets;  // pancake layer cert
-    // covering foreign sheets at cenP: (face, sgn(tPos), sgn(dot(n,nHat)))
-    // sorted by face - the stack-crossing parity arm's per-cell record
+    // covering foreign sheets at cenP: (face, state, sgn(dot(n,nHat)))
+    // with state +1 ABOVE (tPos > stackWin), 0 MID (in-band), -1 BELOW -
+    // sorted by face; the field level E' sits just above the MID band, so
+    // only ABOVE-state changes are lateral crossings (band sides are noise)
     std::vector<std::array<int, 3>> nearSign;
-    std::vector<ivec3> tris;  // pending payload
-    std::map<int, vec3> pos;  // pending payload
+    std::vector<ivec3> tris;  // emission payload
+    std::map<int, vec3> pos;  // emission payload
   };
   std::vector<FlNode> flNodes;
-  std::vector<std::array<int, 3>> flEdges;  // (n0, n1, d): E(n1) = E(n0) + d
+  // (n0, n1, d, tag): E(n1) = E(n0) + d; tag = contributing-arm bitmask
+  // (1 straddle-chord, 2 touch-chord, 4 ridge, 8 parity, 32 handoff,
+  // 64 handoff-leg-correction) - the differential's arm-level census
+  std::vector<std::array<int, 4>> flEdges;
   // handoff records: (input vid pair, sub-edge position bits) ->
   // (node, eOff) with the invariant E(node) + eOff equal on both sides
   std::map<std::pair<std::pair<int, int>, SegKey>,
@@ -6043,6 +6060,7 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
     if (n.z != 0.0) return n.z > 0.0 ? 1 : -1;
     return 0;
   };
+  static const bool kFloodDiff = std::getenv("E1_FLOODDIFF") != nullptr;
   // v* = lex-max input vertex (position identity; ties collapse to one K3)
   K3 flStarKey{0, 0, 0};
   {
@@ -7130,7 +7148,8 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
       // component-global field graph, including net-cancelled conduits ----
       const int flNode = static_cast<int>(flNodes.size());
       {
-        int sPosFull = 0, sZero = 0;
+        int sPosMid = 0, sZero = 0;
+        bool hasBand = false;
         std::vector<std::array<int, 3>> nearSign;
         for (const auto& dn : nearD) {
           if (!covers(dn.second)) continue;
@@ -7138,24 +7157,25 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
           const double tp =
               -la::dot(A.faceN[dn.second], cenP - A.tri[dn.second][0]) / den;
           const int s = den >= 0.0 ? 1 : -1;
-          if (dn.first < off) {
-            if (tp > 0.0)
-              sPosFull += s;
-            else if (tp == 0.0)
-              sZero += s;
+          const int state = tp > stackWin ? 1 : (tp < -stackWin ? -1 : 0);
+          if (state == 0) {
+            hasBand = true;
+            if (tp == 0.0) sZero += s;
           }
-          // tPos == 0 exactly counts as BELOW - the same convention as
-          // sPosFull and the probe (the eps-above layer sits above a sheet
-          // passing exactly through cenP), so the parity arm sees the flip.
-          nearSign.push_back({dn.second, tp > 0.0 ? 1 : -1, s});
+          // E' (the field) sits just above the sub-resolution band: the
+          // anchor conversion crosses exactly the robust ABOVE sheets below
+          // the probe (band sides are double-noise and never counted).
+          if (state > 0 && dn.first < off) sPosMid += s;
+          nearSign.push_back({dn.second, state, s});
         }
         std::sort(nearSign.begin(), nearSign.end());
         FlNode fn;
         fn.nearSign = std::move(nearSign);
+        fn.hasBand = hasBand;
         fn.g = g;
         fn.jump = jump;
         fn.ownJump = ownJump;
-        fn.sPosFull = sPosFull;
+        fn.sPosMid = sPosMid;
         fn.sZero = sZero;
         fn.pancake = pancake;
         fn.Nrep = Nrep;
@@ -7172,8 +7192,12 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
         }
         if (touch && flVstarLocal >= 0) flStarNodes.push_back(flNode);
       }
-      if (jump == 0 && !pancake) continue;  // net-cancelled: not a sheet
-      if (pancake) {
+      // FLOOD-PRIMARY (flip arc session 3): the classify loop no longer
+      // probes; every emission-eligible cell stores its payload and the
+      // field solve values it (residual probes anchor subgraphs; a BFS
+      // conflict falls back to probe-everything = the old semantics).
+      bool emitEligible = !(jump == 0 && !pancake);
+      if (emitEligible && pancake) {
         // Dust rule for pancakes is EXTENT-outright (the dust-dot rule),
         // NOT altitude: a strip 0.96 eps wide does NOT weld closed when its
         // side-chain vertices are staggered along the strip (measured: the
@@ -7188,111 +7212,56 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
         }
         if (std::max(hi.x - lo.x, hi.y - lo.y) <= 0.99 * eps) {
           ++nDustCell;
-          continue;  // dust dot: welds to a point
+          emitEligible = false;  // dust dot: welds to a point
+        } else {
+          ++nPancake;
         }
-        ++nPancake;
       }
+      {
+        FlNode& fn = flNodes[flNode];
+        fn.cenP = cenP;
+        fn.off = off;
+        if (emitEligible) {
+          fn.emit = true;
+          fn.tris = tris;
+          for (const ivec3& t : tris) {
+            fn.pos.emplace(t.x, pos3[t.x]);
+            fn.pos.emplace(t.y, pos3[t.y]);
+            fn.pos.emplace(t.z, pos3[t.z]);
+          }
+          double eMax = 0.0;
+          {
+            const vec2 q0 = e1::Drop2(pos3[tris[best].x], axis);
+            const vec2 q1 = e1::Drop2(pos3[tris[best].y], axis);
+            const vec2 q2 = e1::Drop2(pos3[tris[best].z], axis);
+            eMax = std::max({la::length(q1 - q0), la::length(q2 - q1),
+                             la::length(q0 - q2)});
+          }
+          fn.extW = eMax > 0.0 ? bestA / eMax : 0.0;
+        }
+      }
+      if (!kFloodDiff) continue;
+      // FULL DIFFERENTIAL (E1_FLOODDIFF): probe + certify every cell as a
+      // shadow validator; the values are NOT anchors (the solve anchors from
+      // residual probes + seeds, so the differential grades flood-primary).
       const std::optional<int> wA = RobustWinding(in, cenP + off * nHat, seeds);
       const std::optional<int> wB = RobustWinding(in, cenP - off * nHat, seeds);
       if (!wA || !wB) {
-        // PROBE GRAZE -> PENDING (flip arc stage 1): every seed hit a genuine
-        // exact-zero tie at this cell.  The cell's emission defers to the
-        // flood field; if the flood cannot value it, the original fail-closed
-        // fatal returns at the end of the emission (never weakened).
-        ++gProbeFail;
-        FlNode& fn = flNodes[flNode];
-        fn.pending = true;
-        fn.tris = tris;
-        for (const ivec3& t : tris) {
-          fn.pos.emplace(t.x, pos3[t.x]);
-          fn.pos.emplace(t.y, pos3[t.y]);
-          fn.pos.emplace(t.z, pos3[t.z]);
-        }
-        if (kDump)
-          std::fprintf(stderr,
-                       "E1 PROBEFAIL g=%d jump=%d ownJump=%d pancake=%d "
-                       "n=%d cen=(%.9g,%.9g,%.9g) off=%.3g\n",
-                       g, jump, ownJump, pancake ? 1 : 0,
-                       static_cast<int>(loop.size()), cenP.x, cenP.y, cenP.z,
-                       off);
+        flNodes[flNode].probeState = 2;
         continue;
       }
-      ++gProbeCert;
       const bool certified = pancake ? (*wA == *wB) : (*wB - *wA == jump);
-      // COMPLETENESS CERTIFICATE: probed delta == combinatorial covering jump
-      if (!certified) {
-        // a DUST cell - WIDTH below the weld scale - cannot be probed (its
-        // interior hugs seam-line structure closer than the probe window, and
-        // containment of off-plane points is unreliable within that scale)
-        // and welds away regardless: its long sides are closer than eps, so
-        // the assembly weld collapses it and the neighbours carry the
-        // boundary.  Width = altitude of the largest sub-triangle.
-        double eMax = 0.0;
-        {
-          const vec2 q0 = e1::Drop2(pos3[tris[best].x], axis);
-          const vec2 q1 = e1::Drop2(pos3[tris[best].y], axis);
-          const vec2 q2 = e1::Drop2(pos3[tris[best].z], axis);
-          eMax = std::max(
-              {la::length(q1 - q0), la::length(q2 - q1), la::length(q0 - q2)});
-        }
-        const double ext = eMax > 0.0 ? bestA / eMax : 0.0;  // = width
-        if (ext <= 0.99 * eps) continue;  // sub-weld-width sliver: dust
-        if (kDump) {
-          std::fprintf(stderr,
-                       "E1 FAIL cert g=%d jump=%d wA=%d wB=%d n=%d off=%.3g "
-                       "ext=%.3g cen=(%.9g,%.9g,%.9g) d0=%.3g\n",
-                       g, jump, *wA, *wB, static_cast<int>(loop.size()), off,
-                       ext, cen3.x, cen3.y, cen3.z, d0);
-          for (const auto& dn : nearD) {
-            if (dn.first > T) break;
-            const int f2 = dn.second;
-            std::fprintf(stderr,
-                         "  E1 stack f=%d gid=%d dist=%.3g covers=%d sgn=%d\n",
-                         f2, gid[f2], dn.first, covers(f2) ? 1 : 0,
-                         la::dot(A.faceN[f2], nHat) >= 0.0 ? 1 : -1);
-            std::fprintf(stderr,
-                         "    tri |N|=%.3g v0=(%.9g,%.9g,%.9g) "
-                         "v1=(%.9g,%.9g,%.9g) v2=(%.9g,%.9g,%.9g)\n",
-                         la::length(A.faceN[f2]), A.tri[f2][0].x,
-                         A.tri[f2][0].y, A.tri[f2][0].z, A.tri[f2][1].x,
-                         A.tri[f2][1].y, A.tri[f2][1].z, A.tri[f2][2].x,
-                         A.tri[f2][2].y, A.tri[f2][2].z);
-            const int oA0 = e1::O2(A.tri[f2][0], A.tri[f2][1], cenP, axis);
-            const int oA1 = e1::O2(A.tri[f2][1], A.tri[f2][2], cenP, axis);
-            const int oA2 = e1::O2(A.tri[f2][2], A.tri[f2][0], cenP, axis);
-            std::fprintf(stderr, "    o=%d,%d,%d\n", oA0, oA1, oA2);
-          }
-          for (const int f : members[g]) {
-            const int o0 = e1::O2(A.tri[f][0], A.tri[f][1], cenP, axis);
-            const int o1 = e1::O2(A.tri[f][1], A.tri[f][2], cenP, axis);
-            const int o2 = e1::O2(A.tri[f][2], A.tri[f][0], cenP, axis);
-            const bool neg = o0 < 0 || o1 < 0 || o2 < 0;
-            const bool pos = o0 > 0 || o1 > 0 || o2 > 0;
-            if (!(neg && pos) || (!neg == !pos))
-              std::fprintf(stderr,
-                           "  E1 member f=%d sgn=%d o=%d,%d,%d covers=%d\n", f,
-                           fsgn[f], o0, o1, o2, !(neg && pos) ? 1 : 0);
-          }
-          for (double mul = 1.0; mul <= 1000.0; mul *= 10.0) {
-            const std::optional<int> wa =
-                RobustWinding(in, cenP + mul * off * nHat, seeds);
-            const std::optional<int> wb =
-                RobustWinding(in, cenP - mul * off * nHat, seeds);
-            std::fprintf(stderr, "  E1 ladder off=%.3g wA=%d wB=%d\n",
-                         mul * off, wa ? *wa : -99, wb ? *wb : -99);
-          }
-        }
-        return fail(
-            "e1: coordinated-arrangement completeness certificate failed "
-            "(winding delta != covering jump) - fail-closed");
+      {
+        FlNode& fn = flNodes[flNode];
+        fn.probeState = certified ? 1 : 3;
+        fn.certified = certified;
+        fn.probeWA = *wA;
+        fn.probeWB = *wB;
       }
       if (probeHit)
         std::fprintf(stderr,
                      "E1 PROBEAT g=%d jump=%d wA=%d wB=%d off=%.3g cert=%d\n",
                      g, jump, *wA, *wB, off, certified ? 1 : 0);
-      // flood anchor: this cell's probe is certified (flip arc stage 1)
-      flNodes[flNode].certified = true;
-      flNodes[flNode].probeWA = *wA;
       {
         static const char* kFE = std::getenv("E1_FLOODEDGE");
         if (kFE && std::atoi(kFE) == g) {
@@ -7300,67 +7269,17 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
                        "E1 FLNODE n=%d g=%d wA=%d wB=%d jump=%d ownJump=%d "
                        "sPos=%d cenP=(%.6g,%.6g,%.6g) nHat=(%.3g,%.3g,%.3g)\n",
                        flNode, g, *wA, *wB, jump, ownJump,
-                       flNodes[flNode].sPosFull, cenP.x, cenP.y, cenP.z, nHat.x,
+                       flNodes[flNode].sPosMid, cenP.x, cenP.y, cenP.z, nHat.x,
                        nHat.y, nHat.z);
           for (const auto& e2 : flNodes[flNode].nearSign)
             std::fprintf(stderr, "    near f=%d gid=%d tSign=%d q=%d\n", e2[0],
                          gid[e2[0]], e2[1], e2[2]);
         }
       }
-      const bool aIn = *wA >= 1, bIn = *wB >= 1;
-      if (!pancake && aIn == bIn) continue;  // not a {w>=1} boundary here
-      if (pancake) {
-        // LAYER CERTIFICATE for the slab: walking down from the wA probe,
-        // accumulate w across the sheets in SIGNED along-nHat order; the
-        // slab is MATERIAL only if some inter-sheet layer is {w>=1} while
-        // the outside is not (measured: the corner-C slab walks 0|1|0 =
-        // material, cap; a corner-D anti-above-own patch walks 0|-1|0 =
-        // void, where a cap is an oracle-false EXTRA sheet).  Sheets at
-        // exactly equal positions merge first: a zero-thickness layer holds
-        // no material.  An outside-material pancake (wA>=1, a sub-weld
-        // crack) regularizes FILLED: no membrane.
-        if (aIn) continue;
-        std::vector<std::pair<double, int>> layers = stackSheets;
-        layers.push_back({0.0, ownJump});
-        std::sort(
-            layers.begin(), layers.end(),
-            [](const std::pair<double, int>& x,
-               const std::pair<double, int>& y) { return x.first > y.first; });
-        int w = *wA;
-        bool material = false;
-        for (size_t k = 0; k < layers.size();) {
-          size_t j = k;
-          int dsum = 0;
-          while (j < layers.size() && layers[j].first == layers[k].first) {
-            dsum += layers[j].second;
-            ++j;
-          }
-          w += dsum;
-          if (j < layers.size() && w >= 1) material = true;
-          k = j;
-        }
-        if (!material) continue;  // void slab: nothing to cap
-      }
-      // +1: solid below, outward = +nHat; a pancake membrane continues the
-      // OWN sheet's orientation (the probes agree, so bIn is uninformative)
-      const int orient = pancake ? (ownJump > 0 ? 1 : -1) : (bIn ? 1 : -1);
-      ++nBoundary;
-      for (const ivec3& t : tris) {
-        const vec3 nr = la::cross(pos3[t.y] - pos3[t.x], pos3[t.z] - pos3[t.x]);
-        const double sd = la::dot(nr, Nrep);
-        // sd == 0 (rounded-degenerate): keep it - the cap triangle's edges
-        // are real boundary; loop order is the cell's CCW, so orient decides
-        if ((sd > 0.0 || (sd == 0.0 && orient > 0)) == (orient > 0))
-          out.push_back({{pos3[t.x], pos3[t.y], pos3[t.z]}});
-        else
-          out.push_back({{pos3[t.x], pos3[t.z], pos3[t.y]}});
-        outG.push_back(g);
-        // oriented sheet provenance: the group's exact representative plane
-        // normal, signed by the emitted winding (the radial-branch payload)
-        outN.push_back(static_cast<double>(orient) * Nrep);
-      }
     }
     // ---- flood graph (flip arc stage 1): this group's edges + handoffs ----
+    // // ---- flood graph (flip arc stage 1): this group's edges + handoffs
+    // ----
     {
       // Drop2 has no parity swap, so cell-CCW-in-frame is about +nHat only up
       // to the frame sign: (y,z)/( x,y) are right-handed about +x/+z, (x,z) is
@@ -7410,9 +7329,10 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
         // the twin halfedge runs anti-parallel to the member's, and for a
         // CCW twin rising with interior direction m, n_twin = cross(d_twin,
         // m), giving delta(c_lo->hi -> other) = sigmaF * sgn(along).
-        int delta = 0;
+        int delta = 0, tag = 0;
         bool bad = false;
-        std::set<int> seenF;                // distinct chord partner faces
+        std::set<int> seenF;  // distinct chord partner faces
+        std::set<int> seenG;  // their GROUPS (parity-arm exclusion)
         std::set<std::pair<int, int>> vps;  // distinct member vid pairs
         std::set<int> ridgeTf;              // twins counted via member segs
         int handSi = -1, handTf = -1;       // single-pair handoff candidate
@@ -7457,8 +7377,17 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
             std::fprintf(stderr,
                          "    ridge fOwn=%d tf=%d gidT=%d s3=%d al=%s\n", fOwn,
                          tf, gid[tf], s3, along > 0 ? "+" : "-");
-          if (s3 > 0) delta += sigmaF * (along > 0.0 ? 1 : -1);
+          // band check: a twin rising but staying inside the sub-resolution
+          // band never crosses the E' level (h3 in doubles; s3 exact)
+          const double h3 =
+              std::abs(la::dot(Nrep, A.tri[tf][tv] - A.tri[rep[g]][0])) /
+              la::length(Nrep);
+          if (s3 > 0 && h3 > stackWin) {
+            delta += sigmaF * (along > 0.0 ? 1 : -1);
+            tag |= 4;
+          }
           ridgeTf.insert(tf);
+          seenG.insert(gid[tf]);
           handSi = si;
           handTf = tf;
         }
@@ -7474,6 +7403,7 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
             const int f2 = segs[si].fOther;
             if (ridgeTf.count(f2)) continue;  // already counted as the twin
             if (!seenF.insert(f2).second) continue;
+            seenG.insert(gid[f2]);
             int nAb = 0, nBe = 0, vAb = -1;
             std::array<int, 3> side;
             for (int k = 0; k < 3; ++k) {
@@ -7490,6 +7420,15 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
                            f2, gid[f2], nAb, nBe);
             foreignChord = true;     // a non-twin partner reaches this sub-edge
             if (nAb == 0) continue;  // touches/dips below: layer intact
+            // band check (as the ridge arm): the highest above-vertex must
+            // clear the band for the sheet to cross the E' level
+            double hMax = 0.0;
+            for (int k = 0; k < 3; ++k)
+              hMax = std::max(
+                  hMax,
+                  std::abs(la::dot(Nrep, A.tri[f2][k] - A.tri[rep[g]][0])) /
+                      la::length(Nrep));
+            if (hMax <= stackWin) continue;  // in-band sheet: E' uncut
             if (nBe == 0) {
               // TOUCH-FROM-ABOVE: attached riser along its on-plane edge
               // (coincident-position attachment, not the halfedge twin).
@@ -7504,6 +7443,7 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
                 break;
               }
               delta += -sigmaF * (along > 0.0 ? 1 : -1);
+              tag |= 2;
               continue;
             }
             // STRADDLE: robust two-branch crossing sign.  For steep partners
@@ -7520,6 +7460,7 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
                 break;
               }
               delta += tv2 > 0.0 ? -1 : 1;
+              tag |= 1;
             } else {
               const int o = e1::O2(pos3[ec.first.first], pos3[ec.first.second],
                                    A.tri[f2][vAb], axis);
@@ -7528,6 +7469,7 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
                 break;
               }
               delta += (qv > 0.0 ? 1 : -1) * (o < 0 ? 1 : -1);
+              tag |= 1;
             }
           }
         if (flDump)
@@ -7557,14 +7499,17 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
           // with an exact-zero tPos or non-conserved coverage contributes 0
           // (ends laterally; the differential owns the residue).
           {
-            // {aboveA, belowA, aboveB, belowB} - GLOBAL aggregate (a warped
+            // {aboveA, restA, aboveB, restB} - GLOBAL aggregate (a warped
             // foreign quad's triangles land in different plane groups yet
-            // form ONE crossing sheet - measured on the sub-eps-tilted caps;
-            // the global sums still conserve).
+            // form ONE crossing sheet; the global sums still conserve).
+            // Only ABOVE-state (tPos > stackWin, robust) sheets sit above
+            // the E' level; MID (band) and BELOW merge - a band sheet's
+            // side is double-noise and its transit is not a crossing of E'
+            // (the sub-ULP openscad class, measured).
             std::array<int, 4> a{0, 0, 0, 0};
             auto addTo = [&](const FlNode& fn2, int ia0, int ib0) {
               for (const auto& e2 : fn2.nearSign) {
-                if (seenF.count(e2[0]) || ridgeTf.count(e2[0])) continue;
+                if (seenG.count(gid[e2[0]])) continue;
                 a[e2[1] > 0 ? ia0 : ib0] += e2[2];
               }
             };
@@ -7572,12 +7517,13 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
             addTo(flNodes[nB], 2, 3);
             if (a[0] + a[1] == a[2] + a[3] && a[2] != a[0]) {
               delta += a[2] - a[0];
+              tag |= 8;
               if (flDump)
                 std::fprintf(stderr, "    parity dAbove=%d (nA=%d nB=%d)\n",
                              a[2] - a[0], nA, nB);
             }
           }
-          flEdges.push_back({nA, nB, delta});
+          flEdges.push_back({nA, nB, delta, tag});
         }
         // CROSS-GROUP HANDOFF RECORD: a clean manifold mesh-edge sub-edge -
         // exactly ONE member vid pair, no THIRD sheet reaching the edge (the
@@ -7601,6 +7547,10 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
           }
         if (node < 0) continue;
         const FlNode& fn = flNodes[node];
+        // Band contamination: a covering sheet inside the sub-resolution
+        // band makes the edge-level transport double-ambiguous (its side is
+        // noise); the record is dropped and connectivity routes elsewhere.
+        if (flNodes[node].hasBand) continue;
         // HANDOFF PARITY CORRECTION: the dihedral rule equates the eps-layer
         // values AT the edge, but the node's E is cenP-anchored; a covering
         // foreign sheet that flips plane-side between cenP and the sub-edge
@@ -7636,8 +7586,12 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
               break;
             }
             const double tp = -la::dot(A.faceN[f2], mid - A.tri[f2][0]) / den;
+            if (std::abs(tp) <= stackWin) {
+              degen = true;  // transiting the band at the edge: ambiguous
+              break;
+            }
             totMid += e2[2];
-            if (tp > 0.0) aMid += e2[2];  // tp == 0 counts BELOW (convention)
+            if (tp > stackWin) aMid += e2[2];
           }
           if (!degen && totCen == totMid) corr = aMid - aCen;
         }
@@ -7668,18 +7622,14 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
                    gProbeFail, gProbeCert, static_cast<int>(cells.size()));
     suspectTotal += suspectSnaps;
   }
-  // ---- FLOOD SOLVE (flip arc stage 1) ------------------------------------
-  // BFS the field from the anchors; any value conflict (including a
-  // flood-vs-certified disagreement = the differential rail) aborts the
-  // flood, so pending cells stay unresolved and the original fail-closed
-  // fatal below returns.  E1_FLOODDIFF=1 forces the solve as a byte-clean
-  // shadow (differential census only) even with no pending cell.
-  int flPending = 0;
-  for (const auto& fn : flNodes)
-    if (fn.pending) ++flPending;
-  static const bool kFloodDiff = std::getenv("E1_FLOODDIFF") != nullptr;
-  int flResolved = 0;
-  if (!buildPhase && (flPending > 0 || kFloodDiff)) {
+  // ---- FLOOD SOLVE + EMISSION (flood-primary, flip arc session 3) --------
+  // Reliability-filtered edges; anchors = residual probes (one certified
+  // probe per unreached subgraph, in node order) then the guarded hull
+  // seeds; a BFS conflict clears the field so the emission below probes
+  // EVERY cell (the pre-flood per-cell semantics, fail-closed intact).
+  // E1_FLOODDIFF probes every cell in the classify loop as a shadow
+  // validator and prints the arm census; it never affects anchoring.
+  if (!buildPhase) {
     static const bool kFlHandDump = std::getenv("E1_FLOODHAND") != nullptr;
     int flHandEdges = 0, flHandOrphan = 0;
     for (const auto& kv : flHand) {
@@ -7689,7 +7639,7 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
       }
       // E(n0) + eOff0 == E(n1) + eOff1  =>  E(n1) = E(n0) + (eOff0 - eOff1)
       flEdges.push_back({kv.second[0].first, kv.second[1].first,
-                         kv.second[0].second - kv.second[1].second});
+                         kv.second[0].second - kv.second[1].second, 32});
       ++flHandEdges;
       if (kFlHandDump)
         std::fprintf(stderr,
@@ -7705,10 +7655,78 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
         std::fprintf(stderr, "E1 FLSEED n=%d g=%d E=%d\n", s.first,
                      flNodes[s.first].g, s.second);
     const int nN = static_cast<int>(flNodes.size());
+    // EDGE RELIABILITY (the near-tangent-ladder adjudication, measured on
+    // openscad): (a) edges between one cell pair must AGREE - the ladder's
+    // per-sub-edge chord counts are each incomplete in a different way and
+    // disagree, violating path-independence; (b) an edge where BOTH a chord
+    // and the parity arm fired double-counts sheets whose chords ride other
+    // sub-edges of the same corridor (measured 335/335 wrong).  Unreliable
+    // edges are dropped; their cells fall to residual probes.
+    std::vector<bool> flOk(flEdges.size(), true);
+    int flPairDrop = 0, flTagDrop = 0;
+    {
+      std::map<std::pair<int, int>, std::vector<size_t>> byPair;
+      for (size_t i = 0; i < flEdges.size(); ++i) {
+        const auto& e = flEdges[i];
+        if ((e[3] & 8) && (e[3] & 3)) {
+          flOk[i] = false;
+          ++flTagDrop;
+          continue;
+        }
+        byPair[e[0] < e[1] ? std::make_pair(e[0], e[1])
+                           : std::make_pair(e[1], e[0])]
+            .push_back(i);
+      }
+      for (const auto& kv : byPair) {
+        bool same = true;
+        int d0 = 0;
+        for (size_t k = 0; k < kv.second.size(); ++k) {
+          const auto& e = flEdges[kv.second[k]];
+          const int d = e[0] == kv.first.first ? e[2] : -e[2];
+          if (k == 0)
+            d0 = d;
+          else if (d != d0)
+            same = false;
+        }
+        if (!same) {
+          for (const size_t i : kv.second) flOk[i] = false;
+          ++flPairDrop;
+        }
+      }
+    }
     std::vector<std::vector<std::pair<int, int>>> nadj(nN);
-    for (const auto& e : flEdges) {
+    for (size_t i = 0; i < flEdges.size(); ++i) {
+      if (!flOk[i]) continue;
+      const auto& e = flEdges[i];
       nadj[e[0]].push_back({e[1], e[2]});
       nadj[e[1]].push_back({e[0], -e[2]});
+    }
+    // ARM-LEVEL DIFFERENTIAL CENSUS: every edge whose BOTH endpoints carry a
+    // certified probe is directly checkable (certE(n1)-certE(n0) vs d); the
+    // per-tag failure counts attribute wrong deltas to their producing arm.
+    if (kFloodDiff && kDump) {
+      std::map<int, std::pair<int, int>> tagCensus;  // tag -> (checked, bad)
+      int badEdges = 0;
+      for (const auto& e : flEdges) {
+        const FlNode& a = flNodes[e[0]];
+        const FlNode& b = flNodes[e[1]];
+        if (!a.certified || !b.certified) continue;
+        const int ca = a.probeWA + a.sPosMid, cb = b.probeWA + b.sPosMid;
+        auto& tc = tagCensus[e[3]];
+        ++tc.first;
+        if (cb - ca != e[2]) {
+          ++tc.second;
+          ++badEdges;
+          if (badEdges <= 12)
+            std::fprintf(stderr,
+                         "E1 FLOOD BADEDGE n%d(g%d)->n%d(g%d) d=%d true=%d "
+                         "tag=%d\n",
+                         e[0], a.g, e[1], b.g, e[2], cb - ca, e[3]);
+        }
+      }
+      for (const auto& kv : tagCensus)
+        std::fprintf(stderr, "E1 FLOOD ARMCENSUS tag=%d checked=%d bad=%d\n",
+                     kv.first, kv.second.first, kv.second.second);
     }
     constexpr int kFlUnset = std::numeric_limits<int>::min();
     std::vector<int> E(nN, kFlUnset);
@@ -7748,35 +7766,93 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
         }
       }
     };
-    for (int n = 0; n < nN; ++n)
-      if (flNodes[n].certified)
-        flAnchor(n, flNodes[n].probeWA + flNodes[n].sPosFull);
-    flDrain();
-    // THE HULL SEED as the FALLBACK anchor: applied only to subgraphs no
-    // certified cell reaches.  (Measured on the GT7863 twin corner: the
-    // seed's corner-to-cenP transport can be wrong when a foreign sheet
-    // crosses the plane inside the corner cell without any cenP-visible
-    // record; certified anchors are always cenP-consistent, so they take
-    // precedence.  The flood-primary stage must re-adjudicate the seed -
-    // notebook flip-1784271017.)
+    int flResProbe = 0, flResAnchor = 0;
+    auto flProbe = [&](int pn) {
+      FlNode& fn = flNodes[pn];
+      if (fn.probeState != 0) return;
+      ++flResProbe;
+      const vec3 nH = fn.Nrep / la::length(fn.Nrep);
+      const std::optional<int> pa =
+          RobustWinding(in, fn.cenP + fn.off * nH, seeds);
+      const std::optional<int> pb =
+          RobustWinding(in, fn.cenP - fn.off * nH, seeds);
+      if (!pa || !pb) {
+        fn.probeState = 2;
+        return;
+      }
+      fn.probeWA = *pa;
+      fn.probeWB = *pb;
+      const bool cert = fn.pancake ? (*pa == *pb) : (*pb - *pa == fn.jump);
+      fn.probeState = cert ? 1 : 3;
+      fn.certified = cert;
+    };
+    // RESIDUAL-PROBE ANCHORS: in node order, the first certifiable cell of
+    // each unreached subgraph anchors it (typically ONE probe per connected
+    // component - the perf collapse; ladder-class cells whose edges were
+    // dropped each probe individually, exactly the pre-flood cost there).
+    for (int n = 0; n < nN; ++n) {
+      if (E[n] != kFlUnset) continue;
+      flProbe(n);
+      if (flNodes[n].probeState == 1) {
+        ++flResAnchor;
+        flAnchor(n, flNodes[n].probeWA + flNodes[n].sPosMid);
+        flDrain();
+      }
+    }
+    // THE HULL SEED, guarded, for subgraphs where every probe grazed
+    // (the seed's corner-to-cenP transport is refuted on twin corners -
+    // GT7863 measured - so probes take precedence everywhere they certify).
     for (const auto& s : flSeeds)
       if (E[s.first] == kFlUnset) flAnchor(s.first, s.second);
     flDrain();
-    int flUnreached = 0;
-    if (flMismatch == 0) {
-      // resolve pending cells off the field: wA = E - sPosFull, wB = wA + jump
-      for (int n = 0; n < nN; ++n) {
-        FlNode& fn = flNodes[n];
-        if (!fn.pending) continue;
-        if (E[n] == kFlUnset) {
-          ++flUnreached;
-          if (kDump)
-            std::fprintf(stderr, "E1 FLOOD UNREACHED n=%d g=%d\n", n, fn.g);
-          continue;
+    // BFS conflict: clear the field - the emission below probes EVERY cell
+    // (the pre-flood per-cell semantics; fail-closed intact).
+    if (flMismatch > 0) std::fill(E.begin(), E.end(), kFlUnset);
+    // FLOOD-PRIMARY DIFFERENTIAL (E1_FLOODDIFF): field vs the shadow probes
+    int flDiffBad = 0;
+    if (kFloodDiff) {
+      for (int n = 0; n < nN; ++n)
+        if (flNodes[n].certified && E[n] != kFlUnset &&
+            E[n] != flNodes[n].probeWA + flNodes[n].sPosMid) {
+          ++flDiffBad;
+          if (kDump && flDiffBad <= 8)
+            std::fprintf(stderr, "E1 FLOOD DIFF n=%d g=%d E=%d cert=%d\n", n,
+                         flNodes[n].g, E[n],
+                         flNodes[n].probeWA + flNodes[n].sPosMid);
         }
-        const int wA = E[n] - fn.sPosFull;
-        const int wB = wA + fn.jump;
-        ++flResolved;
+    }
+    // ---- EMISSION off the field (per-cell probes where unvalued) ----
+    for (int n = 0; n < nN; ++n) {
+      FlNode& fn = flNodes[n];
+      if (!fn.emit) continue;
+      int wA, wB;
+      if (E[n] != kFlUnset) {
+        wA = E[n] - fn.sPosMid;
+        wB = wA + fn.jump;
+      } else {
+        flProbe(n);
+        if (fn.probeState == 2) {
+          if (kDump)
+            std::fprintf(stderr, "E1 FLOOD GRAZE n=%d g=%d\n", n, fn.g);
+          return fail("e1: winding probe filter-uncertain - fail-closed");
+        }
+        if (fn.probeState == 3) {
+          // certificate failed: a sub-weld-width sliver welds away; a
+          // macro cell is an honest completeness failure
+          if (fn.extW <= 0.99 * eps) continue;
+          if (kDump)
+            std::fprintf(stderr,
+                         "E1 FAIL cert n=%d g=%d jump=%d wA=%d wB=%d "
+                         "ext=%.3g\n",
+                         n, fn.g, fn.jump, fn.probeWA, fn.probeWB, fn.extW);
+          return fail(
+              "e1: coordinated-arrangement completeness certificate failed "
+              "(winding delta != covering jump) - fail-closed");
+        }
+        wA = fn.probeWA;
+        wB = fn.probeWB;
+      }
+      {
         const bool aIn = wA >= 1, bIn = wB >= 1;
         if (!fn.pancake && aIn == bIn) continue;  // not a {w>=1} boundary
         if (fn.pancake) {
@@ -7824,17 +7900,13 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
     if (kDump)
       std::fprintf(stderr,
                    "E1 FLOOD nodes=%d edges=%d hand=%d orphan=%d seeds=%d "
-                   "reached=%d mismatch=%d pending=%d resolved=%d "
-                   "unreached=%d\n",
+                   "reached=%d mismatch=%d pairDrop=%d tagDrop=%d "
+                   "resProbe=%d resAnchor=%d diffBad=%d\n",
                    nN, static_cast<int>(flEdges.size()), flHandEdges,
                    flHandOrphan, static_cast<int>(flSeeds.size()),
-                   static_cast<int>(q.size()), flMismatch, flPending,
-                   flResolved, flUnreached);
+                   static_cast<int>(q.size()), flMismatch, flPairDrop,
+                   flTagDrop, flResProbe, flResAnchor, flDiffBad);
   }
-  // The probe-graze fatal: preserved verbatim for any pending cell the flood
-  // could not value (fail-closed never weakened).
-  if (!buildPhase && flResolved < flPending)
-    return fail("e1: winding probe filter-uncertain - fail-closed");
   if (kDump)
     std::fprintf(stderr,
                  "E1 emitted=%d dust=%d triFail=%d spliceFail=%d cells=%d "
