@@ -19,10 +19,13 @@ a user tolerance. w_S is the signed winding of the oriented input face soup.
 ## Contract and semantics
 
 RemoveOverlaps3D is the REGULARIZATION OPERATOR the library never had: the map from
-any valid oriented face soup to the boundary of the solid {p : w_S(p) >= 1}. It takes
-a `Manifold::Impl` that may be self-overlapping (a valid oriented 2-manifold whose
-interior is multiply covered) and returns the boundary of the region covered at least
-once - the boundary-of-a-simple-solid reading downstream consumers assume.
+a VALID ORIENTED IMMERSED 2-MANIFOLD to the boundary of the solid
+{p : w_S(p) >= 1}.  The input is NOT an arbitrary soup: the gate requires a
+consistently-oriented 2-manifold (`IsManifold` && `Is2Manifold`); what may be
+degenerate is the IMAGE - the immersion may self-overlap (a valid oriented
+2-manifold whose interior is multiply covered).  The operator returns the
+boundary of the region covered at least once - the boundary-of-a-simple-solid
+reading downstream consumers assume.
 
 What it is NOT. It is not the Boolean. It never FUSES separate objects, and the contract
 is UNIFORM: cross-component interaction - overlapping, touching, coplanar OR transversal -
@@ -97,10 +100,20 @@ The operator's phases and where they live in src/overlap3.cpp (the sole impl):
                 route dirty, re-gate, compose).
 - RESOLVE    -> ResolveComponent (the dirty-core resolver, next section), which runs:
     - PLANARIZE -> SnapNearCoplanarClusters (near-coplanar widen + global-planarity guard).
-    - ENUMERATE -> RecordSeams (+ EnumerateSelfCrossings / EdgePiercesTri, sos::* kernel).
-    - WIND      -> WindingAt / RobustWinding (coupled integer-delta w_S).
-    - EMIT      -> EmitComponentBoundary: FoldCoplanarClusters, EmitSeamedFace,
-                   EmitCleanFaces, then the assembly (BuildImpl + SplitTouchingSheets).
+    - ENUMERATE -> RecordSeams (+ EnumerateSelfCrossings / EdgePiercesTri, sos::* kernel),
+                   EnumerateTriplePoints / EnumerateWedgeSplits -> BuildJunctionRegistry
+                   (the once-only junction registry the engine consumes).
+    - EMIT      -> EmitCoordinatedBoundary, THE single emission engine (the flip):
+                   per-plane groups, the ungated exact seam enumeration, the per-line
+                   split registry to a build fixpoint, the exact rotation walk, the
+                   component-global integer WINDING FIELD (residual-probe/seed
+                   anchored, reliability-filtered combinatorial deltas; the exact
+                   probe survives as the residual anchor + the per-cell specialist
+                   where transport is unreliable + the E1_FLOODDIFF validator),
+                   then the assembly (BuildImpl + SplitTouchingSheets with sheet
+                   provenance).  The per-face path (EmitComponentBoundary /
+                   FoldCoplanarClusters / EmitSeamedFace / EmitCleanFaces) was
+                   DELETED at the flip; the engine is the only implementation.
 - RE-GATE    -> a second GateComponent on the resolver's double-rounded output.
 - COMPOSE    -> ComposeComponents (concatenation, no fusion).
 
@@ -577,6 +590,14 @@ the one terminal wall) the spec and price to cross it.  No history-narration
 here; the notebooks carry the landings.
 
 REACHABLY-TRIPPED ARMS (a live carrier forces each):
+
+- POST-FLIP STOP (flip arc, owner review pending): GT7081's JOINED-component
+  invocation (both twin shells as one connected component) fails closed at
+  SplitTouchingSheets after the winding-field fallback - the near-tangent
+  twin-corridor curl (per-edge truth in the flip lane notebook).  The shells
+  resolve individually; the joined case is the one stuck carrier of the
+  flip's corpus sweep.  Fail-closed, never wrong; queued for the coordination
+  completion, not a reason for a second code path.
 
 - E1 EMISSION - "unresolvable sheet contact" (SplitTouchingSheets open
   boundary).  openscad's large dirty component (corpus), the sole

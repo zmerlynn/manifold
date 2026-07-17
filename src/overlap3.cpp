@@ -5247,6 +5247,7 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
         FlNode& fn = flNodes[flNode];
         fn.probeState = certified ? 1 : 3;
         fn.certified = certified;
+        fn.anchorOK = certified;  // base-offset probe: anchor-grade
         fn.probeWA = *wA;
         fn.probeWB = *wB;
       }
