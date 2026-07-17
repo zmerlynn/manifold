@@ -6154,7 +6154,7 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
     if (seamX && seamXInject) {
       for (int i = 0; i < nS; ++i) {
         if (segs[i].planeQ < 0) continue;
-        const auto key = std::minmax(segs[i].fOwn, segs[i].fOther);
+        const auto key = std::minmax(g, segs[i].planeQ);
         const auto it = seamX->find({key.first, key.second});
         if (it == seamX->end()) continue;
         for (const vec3& V : it->second) addSplit(i, V);
@@ -6285,9 +6285,15 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
     if (seamX) {
       for (int i = 0; i < nS; ++i) {
         if (segs[i].planeQ < 0) continue;
-        const auto key = std::minmax(segs[i].fOwn, segs[i].fOther);
+        // PER-LINE registry key: the PLANE pair (one geometric line may carry
+        // several face-pair seam records; keying by faces left the same
+        // line's chains diverged across records - measured: corner-line
+        // sub-edge mismatches at 1e-8..1e-6)
+        const auto key = std::minmax(g, segs[i].planeQ);
         auto& lst = (*seamX)[{key.first, key.second}];
         for (const auto& pr : splits[i]) lst.push_back(pr.second);
+        lst.push_back(segs[i].p0);
+        lst.push_back(segs[i].p1);
       }
     }
     // NOTE: no sub-edge-level completion pass is needed: with the exact
