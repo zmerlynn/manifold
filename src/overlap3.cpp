@@ -5597,6 +5597,28 @@ inline bool ProperCross2(const vec3& p, const vec3& q, const vec3& a,
   return d1 != 0 && d2 != 0 && d3 != 0 && d4 != 0 && d1 != d2 && d3 != d4;
 }
 
+// Signed shoelace sum (2x area) of a projected loop, accumulated about the
+// loop's OWN first vertex.  The shoelace is translation-invariant in exact
+// arithmetic; translating collapses the roundoff floor from ulp(|coord|^2)
+// (raw terms ~coord^2 cancel catastrophically) to ~ulp(span^2).  On raw
+// coordinates a micro cell far from the origin has |true s| at or below the
+// term noise and its SIGN is garbage - a real CCW cell then misroutes into
+// the hole-ring/dust arms and its half-edges vanish unpaired (measured: the
+// openscad double-vertex-fan tip triangle, |s|=5.4e-14 against term ulp
+// 5.7e-14, silently dropped -> the corner stub family).
+inline double LoopShoelace(const std::vector<int>& L,
+                           const std::vector<vec3>& pos3, int axis) {
+  if (L.empty()) return 0.0;
+  const vec2 o = Drop2(pos3[L[0]], axis);
+  double s = 0.0;
+  for (size_t k = 0; k < L.size(); ++k) {
+    const vec2 p1 = Drop2(pos3[L[k]], axis) - o;
+    const vec2 p2 = Drop2(pos3[L[(k + 1) % L.size()]], axis) - o;
+    s += p1.x * p2.y - p2.x * p1.y;
+  }
+  return s;
+}
+
 // Exact diagonal-split triangulation of a weakly-simple CCW polygon (collinear
 // runs, pinch-repeated vertices, keyhole-duplicated bridges all allowed).
 // poly = vertex indices into pos3; emits index triples.  Returns false when no
@@ -5653,13 +5675,12 @@ inline bool Triangulate(const std::vector<int>& loop,
         out.insert(out.end(), rem.begin(), rem.end());
         return true;
       }
-      double s = 0.0, ext = 0.0;
+      const double s = LoopShoelace(idx, pos3, axis);
+      double ext = 0.0;
       vec2 lo{1e300, 1e300}, hi{-1e300, -1e300};
       const int mm = static_cast<int>(idx.size());
       for (int k = 0; k < mm; ++k) {
         const vec2 p1 = Drop2(pos3[idx[k]], axis);
-        const vec2 p2 = Drop2(pos3[idx[(k + 1) % mm]], axis);
-        s += p1.x * p2.y - p2.x * p1.y;
         lo = la::min(lo, p1);
         hi = la::max(hi, p1);
       }
@@ -6163,17 +6184,26 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
       gridInsert(v);
       return v;
     };
-    for (const Seg& s : segs) {  // seed: endpoints are the canonical anchors
-      // inputs register unconditionally (never merged); constructed endpoints
-      // register-or-anchor through the snap
-      if (inputVerts.count(KeyOf(s.p0)))
-        gridInsert(s.p0);
-      else
-        canonV(s.p0);
-      if (inputVerts.count(KeyOf(s.p1)))
-        gridInsert(s.p1);
-      else
-        canonV(s.p1);
+    // SEED + ENDPOINT ADOPTION, two passes.  Pass 1: input endpoints are the
+    // unconditional anchors (identity = the given bits, never snapped).
+    // Pass 2: constructed endpoints ADOPT an existing anchor within the
+    // rounding band or become one - and the record is REWRITTEN to the
+    // adopted bits.  Seeding without rewriting left a junction represented
+    // TWICE: a pierce constructed within a few ULP of an input vertex kept
+    // its own rounding as a segment endpoint, so one line's chain ended at
+    // the input bits while the crossing line's chain ran through the pierce
+    // bits with NO adjacency between them - the rotation walk then sews the
+    // two fans into one self-overlapping macro cell whose boundary is
+    // oracle-false (measured: the (-17.9,0.6,-204) junction, twins 3.3e-15
+    // apart, the whole z=-204 over/under-emission family).  Input-first
+    // ordering makes the adopted identity deterministic and input-preferring.
+    for (const Seg& s : segs) {
+      if (inputVerts.count(KeyOf(s.p0))) gridInsert(s.p0);
+      if (inputVerts.count(KeyOf(s.p1))) gridInsert(s.p1);
+    }
+    for (Seg& s : segs) {
+      if (!inputVerts.count(KeyOf(s.p0))) s.p0 = canonV(s.p0);
+      if (!inputVerts.count(KeyOf(s.p1))) s.p1 = canonV(s.p1);
     }
     // PER-LINE REGISTRY key: seams by plane-gid pair; mesh edges by vid pair
     // (one geometric line = one split list, shared by every segment record
@@ -6455,15 +6485,52 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
       }
     }
     // ---- 4. 2D graph (verts keyed by 3D bits) + exact rotation walk ----
+    // SUB-RHO JUNCTION CLUSTERING: distinct committed identities inside the
+    // rounding band (unmergeable anchors - e.g. an input twin pair 3.3e-15
+    // apart in this corpus) become ONE walk-graph node.  Their chain systems
+    // can properly CROSS within the band (measured: 4.7e-13 from the twin
+    // endpoints - below the split-interiority floor, so the crossing is
+    // unrepresentable as a graph vertex); a graph that keeps the copies
+    // separate is then NON-PLANAR and the rotation walk sews the fans into
+    // self-overlapping macro cells whose classification paints oracle-false
+    // boundary (measured: the (-17.9,0.6,-204) input twin pair, the whole
+    // z=-204 over/under-emission family).  Collapsing the band collapses the
+    // crossing INTO the junction, exactly where the exact arrangement's
+    // structure lands once rounded.  The REGISTRY identities stay distinct
+    // (this is emission topology, not an identity merge); the node's
+    // representative is a committed identity (first-seen anchor, inputs
+    // first via the endpoint-adoption pass), and the assembly weld (radius
+    // eps, two orders above rho) identifies the pair in the output
+    // regardless.
     std::map<K3, int> vidOf;
     std::vector<vec3> pos3;
+    std::map<std::tuple<long long, long long, long long>, std::vector<int>>
+        vidGrid;
+    auto vidCellOf = [&](const vec3& p) {
+      return std::make_tuple(static_cast<long long>(std::floor(p.x / rho)),
+                             static_cast<long long>(std::floor(p.y / rho)),
+                             static_cast<long long>(std::floor(p.z / rho)));
+    };
     auto vid = [&](const vec3& p) -> int {
       auto it = vidOf.find(KeyOf(p));
-      if (it == vidOf.end()) {
-        it = vidOf.emplace(KeyOf(p), static_cast<int>(pos3.size())).first;
-        pos3.push_back(p);
-      }
-      return it->second;
+      if (it != vidOf.end()) return it->second;
+      const auto [cx, cy, cz] = vidCellOf(p);
+      for (long long dx = -1; dx <= 1; ++dx)
+        for (long long dy = -1; dy <= 1; ++dy)
+          for (long long dz = -1; dz <= 1; ++dz) {
+            const auto git = vidGrid.find({cx + dx, cy + dy, cz + dz});
+            if (git == vidGrid.end()) continue;
+            for (const int w : git->second)
+              if (la::length(pos3[w] - p) <= rho) {
+                vidOf.emplace(KeyOf(p), w);  // alias into the cluster
+                return w;
+              }
+          }
+      const int id = static_cast<int>(pos3.size());
+      vidOf.emplace(KeyOf(p), id);
+      pos3.push_back(p);
+      vidGrid[{cx, cy, cz}].push_back(id);
+      return id;
     };
     std::vector<std::set<int>> adj;
     auto link = [&](int a, int b) {
@@ -6504,6 +6571,48 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
       });
       for (size_t k = 0; k < nb.size(); ++k)
         cwprev[v][nb[k]] = nb[(k + nb.size() - 1) % nb.size()];
+    }
+    // WALK TRACER (E1_WALKAT="g,u1,v1,u2,v2"): follow the rotation walk
+    // from the half-edge whose endpoints are nearest the two 2D points -
+    // the face boundary containing that half-edge, step by step.
+    if (const char* wa = std::getenv("E1_WALKAT")) {
+      int pg = -1;
+      double u1, v1, u2, v2;
+      if (std::sscanf(wa, "%d,%lf,%lf,%lf,%lf", &pg, &u1, &v1, &u2, &v2) == 5 &&
+          pg == g) {
+        auto nearest = [&](double uu, double vv) -> int {
+          int best = -1;
+          double bd = 1e300;
+          for (size_t k = 0; k < pos3.size(); ++k) {
+            const vec2 p = e1::Drop2(pos3[k], axis);
+            const double d = la::length(p - vec2{uu, vv});
+            if (d < bd) {
+              bd = d;
+              best = static_cast<int>(k);
+            }
+          }
+          return best;
+        };
+        const int va = nearest(u1, v1), vb = nearest(u2, v2);
+        std::fprintf(stderr, "E1 WALK start %d->%d\n", va, vb);
+        int ca = va, cb = vb;
+        for (int s = 0; s < 60; ++s) {
+          const vec2 p = e1::Drop2(pos3[ca], axis);
+          std::fprintf(stderr, "  step %d: v%d (%.12g,%.12g) deg=%d\n", s, ca,
+                       p.x, p.y, static_cast<int>(adj[ca].size()));
+          const auto it = cwprev[cb].find(ca);
+          if (it == cwprev[cb].end()) {
+            std::fprintf(stderr, "  walk broke\n");
+            break;
+          }
+          ca = cb;
+          cb = it->second;
+          if (ca == va && cb == vb) {
+            std::fprintf(stderr, "  walk closed after %d steps\n", s + 1);
+            break;
+          }
+        }
+      }
     }
     std::set<std::pair<int, int>> used;
     std::vector<std::vector<int>> cells, negloops;
@@ -6577,12 +6686,7 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
           // multi-keyholes with shared ring vertices (measured stall).
           {
             auto lobeSign = [&](const std::vector<int>& lb) -> int {
-              double s = 0.0;
-              for (size_t k = 0; k < lb.size(); ++k) {
-                const vec2 p1 = e1::Drop2(pos3[lb[k]], axis);
-                const vec2 p2 = e1::Drop2(pos3[lb[(k + 1) % lb.size()]], axis);
-                s += p1.x * p2.y - p2.x * p1.y;
-              }
+              const double s = e1::LoopShoelace(lb, pos3, axis);
               return s > 0 ? 1 : (s < 0 ? -1 : 0);
             };
             std::map<int, int> seen;
@@ -6628,12 +6732,7 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
               }
           }
           if (L.size() < 3) continue;
-          double s = 0.0;
-          for (size_t k = 0; k < L.size(); ++k) {
-            const vec2 p1 = e1::Drop2(pos3[L[k]], axis);
-            const vec2 p2 = e1::Drop2(pos3[L[(k + 1) % L.size()]], axis);
-            s += p1.x * p2.y - p2.x * p1.y;
-          }
+          const double s = e1::LoopShoelace(L, pos3, axis);
           if (s > 0)
             cells.push_back(std::move(L));
           else if (s < 0)
@@ -6643,13 +6742,7 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
 
     // ---- 5. disconnected island hole-rings: containment + keyhole ----
     auto loopArea = [&](const std::vector<int>& loop) -> double {
-      double s = 0.0;
-      for (size_t k = 0; k < loop.size(); ++k) {
-        const vec2 p1 = e1::Drop2(pos3[loop[k]], axis);
-        const vec2 p2 = e1::Drop2(pos3[loop[(k + 1) % loop.size()]], axis);
-        s += p1.x * p2.y - p2.x * p1.y;
-      }
-      return s;
+      return e1::LoopShoelace(loop, pos3, axis);
     };
     auto inLoop = [&](const vec2& p, const std::vector<int>& loop) -> bool {
       static const double kSlope[] = {1.0 / 7919.0, 3.0 / 104729.0,
@@ -6701,12 +6794,11 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
         // strangles the triangulation on sub-ULP structure, and at the weld
         // it vanishes anyway - drop the ring, keep the cell solid.
         {
-          double s = 0.0, ext = 0.0;
+          const double s = e1::LoopShoelace(nl, pos3, axis);
+          double ext = 0.0;
           vec2 lo{1e300, 1e300}, hi{-1e300, -1e300};
           for (size_t k = 0; k < nl.size(); ++k) {
             const vec2 p1 = e1::Drop2(pos3[nl[k]], axis);
-            const vec2 p2 = e1::Drop2(pos3[nl[(k + 1) % nl.size()]], axis);
-            s += p1.x * p2.y - p2.x * p1.y;
             lo = la::min(lo, p1);
             hi = la::max(hi, p1);
           }
@@ -6773,6 +6865,38 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
     // ---- 6. classify + emit ----
     nCells += static_cast<int>(cells.size());
     nNeg += static_cast<int>(negloops.size());
+    // window dump (E1_CELLWIN="g,u1,v1,u2,v2"): every cell whose bbox
+    // intersects the window, with its vertex list - collection-vs-classify
+    // disposition tracing.
+    static const char* kCellWin = std::getenv("E1_CELLWIN");
+    if (kCellWin) {
+      int pg = -1;
+      double wu1, wv1, wu2, wv2;
+      if (std::sscanf(kCellWin, "%d,%lf,%lf,%lf,%lf", &pg, &wu1, &wv1, &wu2,
+                      &wv2) == 5 &&
+          pg == g) {
+        auto dumpLoop = [&](const std::vector<int>& L, const char* tag) {
+          vec2 lo{1e300, 1e300}, hi{-1e300, -1e300};
+          for (const int v : L) {
+            const vec2 p = e1::Drop2(pos3[v], axis);
+            lo = la::min(lo, p);
+            hi = la::max(hi, p);
+          }
+          if (hi.x < wu1 || lo.x > wu2 || hi.y < wv1 || lo.y > wv2) return;
+          std::fprintf(stderr, "E1 CELLWIN %s n=%d:", tag,
+                       static_cast<int>(L.size()));
+          for (size_t k = 0; k < L.size() && k < 16; ++k)
+            std::fprintf(stderr, " v%d", L[k]);
+          std::fprintf(stderr, "\n");
+          for (size_t k = 0; k < L.size() && k < 16; ++k) {
+            const vec2 p = e1::Drop2(pos3[L[k]], axis);
+            std::fprintf(stderr, "    v%d (%.17g,%.17g)\n", L[k], p.x, p.y);
+          }
+        };
+        for (const auto& L : cells) dumpLoop(L, "cell");
+        for (const auto& L : negloops) dumpLoop(L, "neg");
+      }
+    }
     for (const std::vector<int>& loop : cells) {
       std::vector<ivec3> tris;
       if (!e1::Triangulate(loop, pos3, axis, eps, tris)) {
@@ -6782,12 +6906,11 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
         // sliver (non-simple at double precision) that welds away; anything
         // wider is an honest triangulation failure (fail-closed below).
         tris.clear();
-        double s = 0.0, ext = 0.0;
+        const double s = e1::LoopShoelace(loop, pos3, axis);
+        double ext = 0.0;
         vec2 lo{1e300, 1e300}, hi{-1e300, -1e300};
         for (size_t k = 0; k < loop.size(); ++k) {
           const vec2 p1 = e1::Drop2(pos3[loop[k]], axis);
-          const vec2 p2 = e1::Drop2(pos3[loop[(k + 1) % loop.size()]], axis);
-          s += p1.x * p2.y - p2.x * p1.y;
           lo = la::min(lo, p1);
           hi = la::max(hi, p1);
         }
