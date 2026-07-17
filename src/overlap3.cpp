@@ -6177,6 +6177,17 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
       return {0, std::min(segs[si].vidLo, segs[si].vidHi),
               std::max(segs[si].vidLo, segs[si].vidHi)};
     };
+    // ENDPOINT REGISTRATION (build): every segment record's endpoints are
+    // committed identities (pierces / input verts); registering them on the
+    // line lets every OTHER record of the line split at record boundaries -
+    // otherwise a longer record spans past a shorter one's end and the
+    // handoff stub opens (the measured residue class).
+    if (buildPhase)
+      for (int i = 0; i < nS; ++i) {
+        auto& ent = lineReg[lineKeyOf(i)];
+        ent.emplace(KeyOf(segs[i].p0), segs[i].p0);
+        ent.emplace(KeyOf(segs[i].p1), segs[i].p1);
+      }
     auto addSplit = [&](int si, const vec3& Vraw) -> bool {
       const vec3 V = canonV(Vraw);
       const Seg& s = segs[si];
