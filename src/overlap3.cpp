@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -5703,15 +5704,23 @@ inline K3 KeyOf(const vec3& p) { return {p.x, p.y, p.z}; }
 
 }  // namespace e1
 
+// engine seam pair-record (tri-tri intersection segment; `other` = partner)
+struct E1Seam {
+  vec3 p0, p1;
+  int other;
+};
+
 // TWO-PHASE ENGINE (registry-first): buildPhase writes every split-producing
 // event into the ONE per-line registry (no cells, no classification); the
 // consume phase reads the registry ONLY (zero local reconciliation) and runs
 // the walk/classify/emit machinery.  The wrapper iterates build to a global
-// fixpoint, then consumes once.
+// fixpoint, then consumes once.  seamCache: the ungated seam enumeration
+// depends only on A, so the driver computes it once and every fixpoint
+// round reuses it (it was re-enumerated per round - measured waste).
 StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
     const Manifold::Impl& in, const BuildArrangement& A, double eps,
     std::map<std::tuple<int, int, int>, std::map<e1::K3, vec3>>& lineReg,
-    bool buildPhase) {
+    std::vector<std::vector<E1Seam>>& seamCache, bool buildPhase) {
   using e1::K3;
   using e1::KeyOf;
   const int nTri = static_cast<int>(A.tri.size());
@@ -5722,6 +5731,15 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
   };
   static const bool kDump = std::getenv("E1_DUMP") != nullptr;
 
+  // E1_TIME: coarse per-phase wall clocks (stage-2 hot-spot attribution)
+  static const bool kFlTime = std::getenv("E1_TIME") != nullptr;
+  auto flNow = []() { return std::chrono::steady_clock::now(); };
+  auto flMs = [](std::chrono::steady_clock::time_point a,
+                 std::chrono::steady_clock::time_point b) {
+    return std::chrono::duration<double, std::milli>(b - a).count();
+  };
+  const auto flT0 = flNow();
+  double tSeam = 0, tGroups = 0, tWalk = 0, tClassify = 0, tSolve = 0;
   // ---- 1. geometric plane groups (exact coplanarity union-find) ----
   std::vector<int> uf(nTri);
   for (int f = 0; f < nTri; ++f) uf[f] = f;
@@ -5777,6 +5795,24 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
     for (int k = 0; k < 3; ++k) b.Union(A.tri[f][k]);
     fbox[f] = b;
   }
+  // input-vertex identity set (canonV's never-snap rule), HOISTED: it
+  // depends only on A.tri, and the former per-group rebuild dominated the
+  // whole engine wall on the large self-intersector (measured 91%: 17k
+  // groups x 51k ordered-set inserts per round)
+  std::set<e1::K3> inputVerts;
+  for (int f2 = 0; f2 < nTri; ++f2)
+    for (int k = 0; k < 3; ++k) inputVerts.insert(KeyOf(A.tri[f2][k]));
+  // the shared-collider broadphase over the component's triangles (the
+  // proven exact box-overlap superset - the winding BVH reused for the
+  // stack-face and near-sheet scans; candidates sorted for determinism)
+  std::vector<std::array<vec3, 3>> flTriArr(nTri);
+  for (int f = 0; f < nTri; ++f) flTriArr[f] = A.tri[f];
+  const TriWindBVH flBvh = BuildTriWindBVH(flTriArr, in.bBox_);
+  std::vector<int> flCands;
+  auto flBoxQuery = [&](const vec3& lo, const vec3& hi) {
+    WindCandidates(flBvh, lo, hi, flCands);
+    std::sort(flCands.begin(), flCands.end());
+  };
 
   // ---- 1b. ENGINE SEAMS: UNGATED exact tri-tri intersection segments ----
   // RecordSeams' production seams are representability-GATED (F11 sub-eps
@@ -5797,18 +5833,29 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
   //  - a candidate joins the seam iff INCLUSIVELY inside the OTHER triangle
   //    (input-exact IXOrient2D signs); 2 survivors = the seam segment, >2
   //    (degenerate contacts) = the extremes along the plane-pair direction.
-  struct ESeam {
-    vec3 p0, p1;
-    int other;
-  };
-  std::vector<std::vector<ESeam>> eSeams(nTri);
+  using ESeam = E1Seam;
+  const auto flTSeam0 = flNow();
+  const double scaleTop = in.bBox_.Scale();
+  std::vector<vec3> cand;  // hoisted pair-candidate scratch (alloc churn)
+  const bool seamCached = !seamCache.empty();
+  if (!seamCached) seamCache.resize(nTri);
+  std::vector<std::vector<ESeam>>& eSeams = seamCache;
   // hoisted memos (the completion pass constructs edge x seam crossings as
   // PIERCE identities - the exact once-only construction on BOTH lines)
-  std::map<std::pair<int, int>, int> sideCache;  // (vert id, gid) -> sign
-  std::map<std::tuple<int, int, int>, vec3> pierceCache;
+  // packed-key hash memos (profiled: the ordered-map lookups per pair were
+  // a top-of-profile cost on GT7081's dense near-tangent pair set)
+  std::unordered_map<int64_t, int> sideCache;  // (vid<<32|gid) -> sign
+  std::unordered_map<int64_t, vec3> pierceCache;
+  auto sideKey = [](int vid2, int q) {
+    return (static_cast<int64_t>(vid2) << 32) | static_cast<uint32_t>(q);
+  };
+  auto pierceKey = [](int v0, int v1, int q) {
+    return (static_cast<int64_t>(v0) << 42) | (static_cast<int64_t>(v1) << 21) |
+           q;
+  };
   auto pierceGet = [&](int vlo, int vhi, const vec3& u, const vec3& w,
                        int q) -> std::optional<vec3> {
-    const auto key = std::make_tuple(vlo, vhi, q);
+    const int64_t key = pierceKey(vlo, vhi, q);
     const auto it = pierceCache.find(key);
     if (it != pierceCache.end()) return it->second;
     const sos::BigHPoint X = sos::SegPlaneBigHPoint(u, w, A.tri[rep[q]].data());
@@ -5819,9 +5866,9 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
     pierceCache.emplace(key, P);
     return P;
   };
-  {
+  if (!seamCached) {
     auto sideOf = [&](int f, int k, int q) -> int {
-      const auto key = std::make_pair(A.vid[f][k], q);
+      const int64_t key = sideKey(A.vid[f][k], q);
       const auto it = sideCache.find(key);
       if (it != sideCache.end()) return it->second;
       const int r = rep[q];
@@ -5854,7 +5901,29 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
             ba.min.y > bb.max.y + eps || bb.min.y > ba.max.y + eps ||
             ba.min.z > bb.max.z + eps || bb.min.z > ba.max.z + eps)
           continue;
-        std::vector<vec3> cand;
+        // EARLY PAIR REJECT (sound): a genuine tri-tri crossing needs a
+        // plane straddle; if every vertex of one triangle sits STRICTLY one
+        // side of the other's rep plane with a margin nine-plus orders above
+        // the double dot's rounding, the pair has no seam.  (Profiled: the
+        // per-pair memo/alloc constant on the dense GT7081 pair set was the
+        // enumeration wall; most pairs are box-close but plane-separated.)
+        auto farOneSide = [&](int fa, int fb) -> bool {
+          const int q = gid[fb];
+          const vec3& nq = A.faceN[rep[q]];
+          const vec3& pq = A.tri[rep[q]][0];
+          const double M = 1e-6 * (1.0 + scaleTop) * la::length(nq);
+          int abv = 0, blw = 0;
+          for (int k = 0; k < 3; ++k) {
+            const double d = la::dot(nq, A.tri[fa][k] - pq);
+            if (d > M)
+              ++abv;
+            else if (d < -M)
+              ++blw;
+          }
+          return abv == 3 || blw == 3;
+        };
+        if (farOneSide(f, f2) || farOneSide(f2, f)) continue;
+        cand.clear();
         auto addCand = [&](const vec3& p) {
           for (const auto& c : cand)
             if (KeyOf(c) == KeyOf(p)) return;
@@ -5878,7 +5947,7 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
                 std::swap(v0, v1);
                 std::swap(u, w);
               }
-              const auto key = std::make_tuple(v0, v1, q);
+              const int64_t key = pierceKey(v0, v1, q);
               auto it = pierceCache.find(key);
               if (it == pierceCache.end()) {
                 const sos::BigHPoint X =
@@ -5890,6 +5959,31 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
               if (!(std::isfinite(P.x) && std::isfinite(P.y) &&
                     std::isfinite(P.z)))
                 continue;
+              // COARSE INCLUSION PRE-CHECK on the once-rounded P: the three
+              // dropped-frame edge dets in doubles.  P is within ~2^-52
+              // relative of the exact pierce, so each det's error is below
+              // ~1e-15*scale^2; the margin sits NINE-plus orders above it -
+              // a verdict outside the margin band cannot flip.  Only the
+              // margin band pays the Big construction + exact inclusion
+              // (the per-pair Big tests were the GT7081 seam wall: 177s).
+              const int axF = DominantAxis(A.faceN[fb]);
+              const double mIncl =
+                  1e-6 * (1.0 + in.bBox_.Scale()) * (1.0 + in.bBox_.Scale());
+              int cPos = 0, cNeg = 0;
+              double dMin = std::numeric_limits<double>::infinity();
+              for (int ee = 0; ee < 3; ++ee) {
+                const vec2 a2 = e1::Drop2(A.tri[fb][ee], axF);
+                const vec2 b2 = e1::Drop2(A.tri[fb][(ee + 1) % 3], axF);
+                const vec2 p2 = e1::Drop2(P, axF);
+                const double det = la::cross(b2 - a2, p2 - a2);
+                dMin = std::min(dMin, std::abs(det));
+                if (det > 0.0) ++cPos;
+                if (det < 0.0) ++cNeg;
+              }
+              if (dMin > mIncl) {
+                if (!(cPos && cNeg)) addCand(P);
+                continue;
+              }
               const sos::BigHPoint X =
                   sos::SegPlaneBigHPoint(u, w, A.tri[rep[q]].data());
               if (bigInTriIncl(X, fb)) addCand(P);
@@ -5937,6 +6031,7 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
     }
   }
 
+  tSeam += flMs(flTSeam0, flNow());
   // canonical engine triple positions, once per sorted gid triple
   std::map<std::array<int, 3>, std::pair<bool, vec3>> tripleCache;
   auto triplePos = [&](int g0, int g1, int g2, vec3& pos) -> bool {
@@ -6075,6 +6170,7 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
   }
 
   for (int g = 0; g < nG; ++g) {
+    const auto flTG0 = flNow();
     int gProbeFail = 0, gProbeCert = 0;  // flood graze census
     // flood graph collection (this group's arrangement):
     // sub-edge (lo,hi vertex ids) -> contributing segment indices
@@ -6171,9 +6267,6 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
     int suspectSnaps = 0;
     std::map<std::tuple<long long, long long, long long>, std::vector<vec3>>
         canonGrid;
-    std::set<e1::K3> inputVerts;
-    for (int f2 = 0; f2 < nTri; ++f2)
-      for (int k = 0; k < 3; ++k) inputVerts.insert(KeyOf(A.tri[f2][k]));
     auto gridInsert = [&](const vec3& v) {
       canonGrid[{static_cast<long long>(std::floor(v.x / rho)),
                  static_cast<long long>(std::floor(v.y / rho)),
@@ -6462,6 +6555,7 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
         if (nsplit1 == nsplit0) break;
       }
       suspectTotal += suspectSnaps;
+      tGroups += flMs(flTG0, flNow());
       continue;  // build phase: no cells, no classification
     }
     // NOTE: no sub-edge-level completion pass is needed: with the exact
@@ -6501,6 +6595,8 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
         }
       }
     }
+    tGroups += flMs(flTG0, flNow());
+    const auto flTW0 = flNow();
     // ---- 4. 2D graph (verts keyed by 3D bits) + exact rotation walk ----
     // SUB-RHO JUNCTION CLUSTERING: distinct committed identities inside the
     // rounding band (unmergeable anchors - e.g. an input twin pair 3.3e-15
@@ -6889,6 +6985,8 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
       }
     }
 
+    tWalk += flMs(flTW0, flNow());
+    const auto flTC0 = flNow();
     // ---- 6. classify + emit ----
     nCells += static_cast<int>(cells.size());
     nNeg += static_cast<int>(negloops.size());
@@ -7061,14 +7159,10 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
       // else).  Stack sheets covering the point join the NET jump; the lowest
       // covering gid owns the cell.
       std::vector<std::pair<double, int>> nearD;
-      for (int f2 = 0; f2 < nTri; ++f2) {
+      const double m = 1e-6 * (1.0 + scale);
+      flBoxQuery(cenP - vec3(m), cenP + vec3(m));
+      for (const int f2 : flCands) {
         if (gid[f2] == g) continue;
-        const Box& b = fbox[f2];
-        const double m = 1e-6 * (1.0 + scale);
-        if (cenP.x < b.min.x - m || cenP.x > b.max.x + m ||
-            cenP.y < b.min.y - m || cenP.y > b.max.y + m ||
-            cenP.z < b.min.z - m || cenP.z > b.max.z + m)
-          continue;
         // ALONG-nHat crossing distance: the probe segment runs along nHat,
         // so the relevant quantity is where the segment meets the plane, not
         // the perpendicular plane distance (a steep transversal wall has a
@@ -7277,6 +7371,7 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
         }
       }
     }
+    tClassify += flMs(flTC0, flNow());
     // ---- flood graph (flip arc stage 1): this group's edges + handoffs ----
     // // ---- flood graph (flip arc stage 1): this group's edges + handoffs
     // ----
@@ -7629,6 +7724,7 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
   // EVERY cell (the pre-flood per-cell semantics, fail-closed intact).
   // E1_FLOODDIFF probes every cell in the classify loop as a shadow
   // validator and prints the arm census; it never affects anchoring.
+  const auto flTS0 = flNow();
   if (!buildPhase) {
     static const bool kFlHandDump = std::getenv("E1_FLOODHAND") != nullptr;
     int flHandEdges = 0, flHandOrphan = 0;
@@ -7907,6 +8003,13 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
                    static_cast<int>(q.size()), flMismatch, flPairDrop,
                    flTagDrop, flResProbe, flResAnchor, flDiffBad);
   }
+  tSolve = flMs(flTS0, flNow());
+  if (kFlTime)
+    std::fprintf(stderr,
+                 "E1 TIME build=%d total=%.0f seam=%.0f groups=%.0f "
+                 "walk=%.0f classify=%.0f solve=%.0f\n",
+                 buildPhase ? 1 : 0, flMs(flT0, flNow()), tSeam, tGroups, tWalk,
+                 tClassify, tSolve);
   if (kDump)
     std::fprintf(stderr,
                  "E1 emitted=%d dust=%d triFail=%d spliceFail=%d cells=%d "
@@ -7970,15 +8073,16 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundary(const Manifold::Impl& in,
                                                     double eps) {
   // BUILD to a global registry fixpoint, then CONSUME once.
   std::map<std::tuple<int, int, int>, std::map<e1::K3, vec3>> lineReg;
+  std::vector<std::vector<E1Seam>> seamCache;  // enumerated once, reused
   size_t prev = static_cast<size_t>(-1);
   for (int round = 0; round < 8; ++round) {
-    EmitCoordinatedBoundaryImpl(in, A, eps, lineReg, true);
+    EmitCoordinatedBoundaryImpl(in, A, eps, lineReg, seamCache, true);
     size_t sz = 0;
     for (const auto& kv : lineReg) sz += kv.second.size();
     if (sz == prev) break;  // registry stable
     prev = sz;
   }
-  return EmitCoordinatedBoundaryImpl(in, A, eps, lineReg, false);
+  return EmitCoordinatedBoundaryImpl(in, A, eps, lineReg, seamCache, false);
 }
 
 // THE BUILD driver: fold exactly-coplanar clusters in-plane, emit seamed
