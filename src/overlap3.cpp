@@ -866,20 +866,59 @@ inline int SoSOrient3D(const double pts[4][3], const int idx[4]) {
 // depth-general/sound).
 // Construction only here (position + the offline-validated decisions); the
 // production decision predicate reuses the same form.
+// Each nonzero finite double is m*2^e with |m| < 2^53 and
+// e in [-1126,971].  The widest supported expression is the generic
+// degree-20 determinant below.  Expanded only for this storage proof (the
+// evaluator remains compositional), its operand bounds are:
+//   edge=2 terms; normal=2*2*2=8; plane d=3*8=24;
+//   normal cross=2*8*8=128; Cramer W=3*8*128=3072;
+//   Cramer coordinate=3*24*128=9216.
+// Thus the determinant has at most 6*9216^2*3072 < 2^41 signed
+// monomials. After alignment to the least exponent, its magnitude is below
+// 2^(20*(53 + (971-(-1126))) + 41) = 2^43041: at most 673 limbs.
+// Three extra limbs cover the one-limb scratch widening in shift/add/multiply.
+// The hard capacity checks are deliberately live in Release: overflow here
+// would silently change an exact sign.
+constexpr int kBigLimbs = 676;
+inline void BigAssertCapacity(long n) {
+  if (n < 0 || n > kBigLimbs) {
+    std::fprintf(stderr, "Big magnitude capacity exceeded: %ld > %d\n", n,
+                 kBigLimbs);
+    std::abort();
+  }
+}
 struct Big {
   int sign = 0;
   long e = 0;
-  std::vector<uint64_t> m;  // little-endian, no high zero limbs
+  int n = 0;
+  uint64_t m[kBigLimbs];  // little-endian, no high zero limbs
+
+  Big() = default;
+  Big(const Big& b) : sign(b.sign), e(b.e), n(b.n) {
+    BigAssertCapacity(n);
+    std::copy_n(b.m, n, m);
+  }
+  Big& operator=(const Big& b) {
+    if (this == &b) return *this;
+    BigAssertCapacity(b.n);
+    sign = b.sign;
+    e = b.e;
+    n = b.n;
+    std::copy_n(b.m, n, m);
+    return *this;
+  }
 };
-inline void BigTrim(std::vector<uint64_t>& m) {
-  while (!m.empty() && m.back() == 0) m.pop_back();
+inline void BigTrim(Big& b) {
+  while (b.n > 0 && b.m[b.n - 1] == 0) --b.n;
 }
 inline Big BigFromME(int64_t mant, long exp) {
   Big b;
   if (mant == 0) return b;
   b.sign = mant < 0 ? -1 : 1;
   b.e = exp;
-  b.m.push_back((uint64_t)(mant < 0 ? -(unsigned long long)mant : mant));
+  BigAssertCapacity(1);
+  b.n = 1;
+  b.m[0] = (uint64_t)(mant < 0 ? -(unsigned long long)mant : mant);
   return b;
 }
 inline Big BigFromDouble(double d) {
@@ -888,81 +927,91 @@ inline Big BigFromDouble(double d) {
   const double f = std::frexp(d, &ex);
   return BigFromME((int64_t)std::ldexp(f, 53), ex - 53);
 }
-inline int BigCmpMag(const std::vector<uint64_t>& a,
-                     const std::vector<uint64_t>& b) {
-  if (a.size() != b.size()) return a.size() < b.size() ? -1 : 1;
-  for (size_t i = a.size(); i-- > 0;)
-    if (a[i] != b[i]) return a[i] < b[i] ? -1 : 1;
+inline int BigCmpMag(const Big& a, const Big& b) {
+  if (a.n != b.n) return a.n < b.n ? -1 : 1;
+  for (int i = a.n; i-- > 0;)
+    if (a.m[i] != b.m[i]) return a.m[i] < b.m[i] ? -1 : 1;
   return 0;
 }
-inline std::vector<uint64_t> BigAddMag(const std::vector<uint64_t>& a,
-                                       const std::vector<uint64_t>& b) {
-  std::vector<uint64_t> r;
-  const size_t n = std::max(a.size(), b.size());
-  r.resize(n + 1, 0);
+inline void BigAddMag(Big& r, const Big& a, const Big& b) {
+  const int n = std::max(a.n, b.n);
+  BigAssertCapacity(n + 1L);
+  r.n = n + 1;
   unsigned __int128 carry = 0;
-  for (size_t i = 0; i < n; ++i) {
+  for (int i = 0; i < n; ++i) {
     unsigned __int128 s = carry;
-    if (i < a.size()) s += a[i];
-    if (i < b.size()) s += b[i];
-    r[i] = (uint64_t)s;
+    if (i < a.n) s += a.m[i];
+    if (i < b.n) s += b.m[i];
+    r.m[i] = (uint64_t)s;
     carry = s >> 64;
   }
-  r[n] = (uint64_t)carry;
+  r.m[n] = (uint64_t)carry;
   BigTrim(r);
-  return r;
 }
-inline std::vector<uint64_t> BigSubMag(
-    const std::vector<uint64_t>& a,
-    const std::vector<uint64_t>& b) {  // a>=b
-  std::vector<uint64_t> r(a.size(), 0);
+inline void BigSubMag(Big& r, const Big& a, const Big& b) {  // a>=b
+  BigAssertCapacity(a.n);
+  r.n = a.n;
   __int128 borrow = 0;
-  for (size_t i = 0; i < a.size(); ++i) {
-    __int128 s = (__int128)a[i] - borrow - (i < b.size() ? b[i] : 0);
+  for (int i = 0; i < a.n; ++i) {
+    __int128 s = (__int128)a.m[i] - borrow - (i < b.n ? b.m[i] : 0);
     if (s < 0) {
       s += ((__int128)1 << 64);
       borrow = 1;
     } else
       borrow = 0;
-    r[i] = (uint64_t)s;
+    r.m[i] = (uint64_t)s;
   }
   BigTrim(r);
-  return r;
 }
-inline std::vector<uint64_t> BigShl(const std::vector<uint64_t>& m, long k) {
-  if (m.empty() || k == 0) return m;
+inline void BigShlMag(Big& r, const Big& a, long k) {
+  if (a.n == 0) {
+    r.n = 0;
+    return;
+  }
+  if (k == 0) {
+    BigAssertCapacity(a.n);
+    r.n = a.n;
+    std::copy_n(a.m, a.n, r.m);
+    return;
+  }
   const long limbShift = k / 64, bitShift = k % 64;
-  std::vector<uint64_t> r(m.size() + limbShift + 1, 0);
-  for (size_t i = 0; i < m.size(); ++i) {
-    r[i + limbShift] |= m[i] << bitShift;
-    if (bitShift) r[i + limbShift + 1] |= m[i] >> (64 - bitShift);
+  const long n = a.n + limbShift + 1;
+  BigAssertCapacity(n);
+  r.n = static_cast<int>(n);
+  std::fill_n(r.m, r.n, uint64_t{0});
+  for (int i = 0; i < a.n; ++i) {
+    r.m[i + limbShift] |= a.m[i] << bitShift;
+    if (bitShift) r.m[i + limbShift + 1] |= a.m[i] >> (64 - bitShift);
   }
   BigTrim(r);
-  return r;
 }
-inline std::vector<uint64_t> BigMulMag(const std::vector<uint64_t>& a,
-                                       const std::vector<uint64_t>& b) {
-  if (a.empty() || b.empty()) return {};
-  std::vector<uint64_t> r(a.size() + b.size(), 0);
-  for (size_t i = 0; i < a.size(); ++i) {
+inline void BigMulMag(Big& r, const Big& a, const Big& b) {
+  if (a.n == 0 || b.n == 0) {
+    r.n = 0;
+    return;
+  }
+  BigAssertCapacity(a.n + static_cast<long>(b.n));
+  r.n = a.n + b.n;
+  std::fill_n(r.m, r.n, uint64_t{0});
+  for (int i = 0; i < a.n; ++i) {
     unsigned __int128 carry = 0;
-    for (size_t j = 0; j < b.size(); ++j) {
-      unsigned __int128 s = (unsigned __int128)a[i] * b[j] + r[i + j] + carry;
-      r[i + j] = (uint64_t)s;
+    for (int j = 0; j < b.n; ++j) {
+      unsigned __int128 s =
+          (unsigned __int128)a.m[i] * b.m[j] + r.m[i + j] + carry;
+      r.m[i + j] = (uint64_t)s;
       carry = s >> 64;
     }
-    r[i + b.size()] += (uint64_t)carry;
+    r.m[i + b.n] += (uint64_t)carry;
   }
   BigTrim(r);
-  return r;
 }
 inline Big BigMul(const Big& a, const Big& b) {
   Big r;
   if (a.sign == 0 || b.sign == 0) return r;
   r.sign = a.sign * b.sign;
   r.e = a.e + b.e;
-  r.m = BigMulMag(a.m, b.m);
-  if (r.m.empty()) r.sign = 0;
+  BigMulMag(r, a, b);
+  if (r.n == 0) r.sign = 0;
   return r;
 }
 inline Big BigAddSub(const Big& a, const Big& b, bool sub) {
@@ -974,25 +1023,26 @@ inline Big BigAddSub(const Big& a, const Big& b, bool sub) {
   }
   if (bsign == 0) return a;
   const long emin = std::min(a.e, b.e);
-  std::vector<uint64_t> ma = BigShl(a.m, a.e - emin);
-  std::vector<uint64_t> mb = BigShl(b.m, b.e - emin);
+  Big ma, mb;
+  BigShlMag(ma, a, a.e - emin);
+  BigShlMag(mb, b, b.e - emin);
   Big r;
   r.e = emin;
   if (a.sign == bsign) {
-    r.m = BigAddMag(ma, mb);
+    BigAddMag(r, ma, mb);
     r.sign = a.sign;
   } else {
     const int c = BigCmpMag(ma, mb);
     if (c == 0) return Big{};
     if (c > 0) {
-      r.m = BigSubMag(ma, mb);
+      BigSubMag(r, ma, mb);
       r.sign = a.sign;
     } else {
-      r.m = BigSubMag(mb, ma);
+      BigSubMag(r, mb, ma);
       r.sign = bsign;
     }
   }
-  if (r.m.empty()) r.sign = 0;
+  if (r.n == 0) r.sign = 0;
   return r;
 }
 inline Big BigAdd(const Big& a, const Big& b) { return BigAddSub(a, b, false); }
@@ -1002,7 +1052,7 @@ inline int BigSign(const Big& a) { return a.sign; }
 // for a position quotient (result rounds to a double).
 inline long double BigToLD(const Big& b) {
   if (b.sign == 0) return 0.0L;
-  const int n = (int)b.m.size();
+  const int n = b.n;
   long double v = (long double)b.m[n - 1];
   long lowExp = b.e + 64L * (n - 1);
   if (n >= 2) {
@@ -1026,18 +1076,18 @@ inline BigHPoint TrivialBigHPoint(const vec3& v) {
 inline BigHPoint CramerBigHPointIX(const vec3 tf[3], const vec3 tg[3],
                                    const vec3 th[3]) {
   auto planeBig = [](const vec3 t[3], Big& nx, Big& ny, Big& nz, Big& d) {
-    const Big ax = BigSub(BigFromDouble(t[1].x), BigFromDouble(t[0].x));
-    const Big ay = BigSub(BigFromDouble(t[1].y), BigFromDouble(t[0].y));
-    const Big az = BigSub(BigFromDouble(t[1].z), BigFromDouble(t[0].z));
-    const Big bx = BigSub(BigFromDouble(t[2].x), BigFromDouble(t[0].x));
-    const Big by = BigSub(BigFromDouble(t[2].y), BigFromDouble(t[0].y));
-    const Big bz = BigSub(BigFromDouble(t[2].z), BigFromDouble(t[0].z));
+    const Big x0 = BigFromDouble(t[0].x), y0 = BigFromDouble(t[0].y),
+              z0 = BigFromDouble(t[0].z);
+    const Big x1 = BigFromDouble(t[1].x), y1 = BigFromDouble(t[1].y),
+              z1 = BigFromDouble(t[1].z);
+    const Big x2 = BigFromDouble(t[2].x), y2 = BigFromDouble(t[2].y),
+              z2 = BigFromDouble(t[2].z);
+    const Big ax = BigSub(x1, x0), ay = BigSub(y1, y0), az = BigSub(z1, z0);
+    const Big bx = BigSub(x2, x0), by = BigSub(y2, y0), bz = BigSub(z2, z0);
     nx = BigSub(BigMul(ay, bz), BigMul(az, by));
     ny = BigSub(BigMul(az, bx), BigMul(ax, bz));
     nz = BigSub(BigMul(ax, by), BigMul(ay, bx));
-    d = BigAdd(BigAdd(BigMul(nx, BigFromDouble(t[0].x)),
-                      BigMul(ny, BigFromDouble(t[0].y))),
-               BigMul(nz, BigFromDouble(t[0].z)));
+    d = BigAdd(BigAdd(BigMul(nx, x0), BigMul(ny, y0)), BigMul(nz, z0));
   };
   Big Fx, Fy, Fz, Fd, Gx, Gy, Gz, Gd, Hx, Hy, Hz, Hd;
   planeBig(tf, Fx, Fy, Fz, Fd);
@@ -1067,23 +1117,25 @@ inline BigHPoint CramerBigHPointIX(const vec3 tf[3], const vec3 tg[3],
 // (adaptive Big).
 inline BigHPoint SegPlaneBigHPoint(const vec3& u, const vec3& w,
                                    const vec3 tg[3]) {
-  const Big ax = BigSub(BigFromDouble(tg[1].x), BigFromDouble(tg[0].x));
-  const Big ay = BigSub(BigFromDouble(tg[1].y), BigFromDouble(tg[0].y));
-  const Big az = BigSub(BigFromDouble(tg[1].z), BigFromDouble(tg[0].z));
-  const Big bx = BigSub(BigFromDouble(tg[2].x), BigFromDouble(tg[0].x));
-  const Big by = BigSub(BigFromDouble(tg[2].y), BigFromDouble(tg[0].y));
-  const Big bz = BigSub(BigFromDouble(tg[2].z), BigFromDouble(tg[0].z));
+  const Big x0 = BigFromDouble(tg[0].x), y0 = BigFromDouble(tg[0].y),
+            z0 = BigFromDouble(tg[0].z);
+  const Big x1 = BigFromDouble(tg[1].x), y1 = BigFromDouble(tg[1].y),
+            z1 = BigFromDouble(tg[1].z);
+  const Big x2 = BigFromDouble(tg[2].x), y2 = BigFromDouble(tg[2].y),
+            z2 = BigFromDouble(tg[2].z);
+  const Big ax = BigSub(x1, x0), ay = BigSub(y1, y0), az = BigSub(z1, z0);
+  const Big bx = BigSub(x2, x0), by = BigSub(y2, y0), bz = BigSub(z2, z0);
   const Big ngx = BigSub(BigMul(ay, bz), BigMul(az, by));
   const Big ngy = BigSub(BigMul(az, bx), BigMul(ax, bz));
   const Big ngz = BigSub(BigMul(ax, by), BigMul(ay, bx));
-  const Big dg = BigAdd(BigAdd(BigMul(ngx, BigFromDouble(tg[0].x)),
-                               BigMul(ngy, BigFromDouble(tg[0].y))),
-                        BigMul(ngz, BigFromDouble(tg[0].z)));
+  const Big dg =
+      BigAdd(BigAdd(BigMul(ngx, x0), BigMul(ngy, y0)), BigMul(ngz, z0));
   const Big ux = BigFromDouble(u.x), uy = BigFromDouble(u.y),
             uz = BigFromDouble(u.z);
-  const Big ex = BigSub(BigFromDouble(w.x), ux),
-            ey = BigSub(BigFromDouble(w.y), uy),
-            ez = BigSub(BigFromDouble(w.z), uz);  // w - u
+  const Big wx = BigFromDouble(w.x), wy = BigFromDouble(w.y),
+            wz = BigFromDouble(w.z);
+  const Big ex = BigSub(wx, ux), ey = BigSub(wy, uy),
+            ez = BigSub(wz, uz);  // w - u
   const Big W =
       BigAdd(BigAdd(BigMul(ngx, ex), BigMul(ngy, ey)), BigMul(ngz, ez));
   const Big ngu =
@@ -1104,12 +1156,16 @@ inline vec3 BigHPointToPos(const BigHPoint& p) {
 }
 // axis-dropped 2D homogeneous coords (A,B,W) for the in-face orient2d.
 struct BigP2 {
-  Big A, B, W;
+  const Big& A;
+  const Big& B;
+  const Big& W;
 };
 inline BigP2 BigExtract2D(const BigHPoint& p, int axis) {
   const int a0 = (axis == 0) ? 1 : 0;
   const int a1 = (axis == 2) ? 1 : 2;
-  auto coord = [&](int a) { return a == 0 ? p.X : (a == 1 ? p.Y : p.Z); };
+  auto coord = [&](int a) -> const Big& {
+    return a == 0 ? p.X : (a == 1 ? p.Y : p.Z);
+  };
   return {coord(a0), coord(a1), p.W};
 }
 // INPUT-EXACT orient2d(P0,P1,P2) = sign(det[[A,B,W]...]) * sign(prod W).  The
@@ -2541,11 +2597,12 @@ StageResult<Manifold::Impl> RunCoordinatedBoundaryPass(
     auto bigInTriIncl = [&](const sos::BigHPoint& X, int t) -> bool {
       if (sos::BigSign(X.W) == 0) return false;
       const int ax = DominantAxis(A.faceN[t]);
+      const sos::BigHPoint edge[3] = {sos::TrivialBigHPoint(A.tri[t][0]),
+                                      sos::TrivialBigHPoint(A.tri[t][1]),
+                                      sos::TrivialBigHPoint(A.tri[t][2])};
       int pos = 0, neg = 0;
       for (int e = 0; e < 3; ++e) {
-        const int o =
-            IXOrient2D(sos::TrivialBigHPoint(A.tri[t][e]),
-                       sos::TrivialBigHPoint(A.tri[t][(e + 1) % 3]), X, ax);
+        const int o = IXOrient2D(edge[e], edge[(e + 1) % 3], X, ax);
         if (o > 0) ++pos;
         if (o < 0) ++neg;
       }
@@ -2696,10 +2753,12 @@ StageResult<Manifold::Impl> RunCoordinatedBoundaryPass(
     const sos::BigHPoint X = IXTripleHPoint(A, rep[g0], rep[g1], rep[g2]);
     if (sos::BigSign(X.W) == 0) return false;
     const int axis = DominantAxis(A.faceN[t]);
+    const sos::BigHPoint edge[3] = {sos::TrivialBigHPoint(A.tri[t][0]),
+                                    sos::TrivialBigHPoint(A.tri[t][1]),
+                                    sos::TrivialBigHPoint(A.tri[t][2])};
     int o[3];
     for (int e = 0; e < 3; ++e) {
-      o[e] = IXOrient2D(sos::TrivialBigHPoint(A.tri[t][e]),
-                        sos::TrivialBigHPoint(A.tri[t][(e + 1) % 3]), X, axis);
+      o[e] = IXOrient2D(edge[e], edge[(e + 1) % 3], X, axis);
       if (o[e] == 0) return false;
     }
     return o[0] == o[1] && o[1] == o[2];
