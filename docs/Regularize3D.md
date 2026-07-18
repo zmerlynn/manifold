@@ -624,9 +624,10 @@ REACHABLY-TRIPPED BRANCHES (a live fixture forces each):
   arrangement over CONSTRUCTED intersection points.  The single tripwire crossing
   is orient2d on a constructed near-tangent point (not on input coords).
   STATUS (homog-design + e1-plumb): the exact predicate is LANDED and VALIDATED -
-  the degree-9 constructed-point orient2d (sos::HomogOrient2DExact / the
-  construction-aware HomogOrient2DFilter, instantiation (2) of the ONE homogeneous
-  form, on the widened SumSignN<8> accumulator).  The intersection-segment-crossing enumeration now
+  the degree-9 constructed-point orient2d (sos::BigOrient2D via IXOrient2D / the
+  construction-aware degree-9 filter now part of IXOrient2D on the Big basis,
+  instantiation (2) of the ONE homogeneous form, on the widened SumSignN<8>
+  accumulator).  The intersection-segment-crossing enumeration now
   carries each intersection segment's extent SYMBOLICALLY (e1-plumb): a proper segment x segment
   crossing is the constructed triple point X={f,g,h} STRICTLY INTERIOR TO ALL THREE
   intersection-segment triangles f, g, h (ExactSeamsCross via HPointStrictlyInTri) - X within intersection-segment

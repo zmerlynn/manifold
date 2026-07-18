@@ -491,6 +491,24 @@ ComponentDisposition ClassifyComponent(const Manifold::Impl& comp) {
 // {w_S>=1} boundary EMISSION sits on top.
 // ---------------------------------------------------------------------------
 
+// ===========================================================================
+// COMPLETE EXACT-ARITHMETIC SURFACE - resolver fail-safe only.
+// This block contains the complete exact-arithmetic fail-safe of the resolver:
+// sos::SumSignN/SumSign and their helpers; Orient3DExactSign + Orient3DSoS for
+// degree-3 input-point orient3d; BigOrient2D + IXOrient2D for degree-9
+// constructed-point orient2d; ExactOrient2DDrop; and their Big*/Trivial*
+// helpers.  Every entry is FILTER-FIRST: exact arithmetic fires only behind a
+// filter 0 (an uncertain double sign); the certified fast path never touches
+// it.  These are the only two instantiations: input-point orient3d for
+// structural input ties, resolved by the single-global SoS, and
+// constructed-point orient2d for the near-degenerate plane-triple "star" where
+// determinant W tends to zero.  The surface is DORMANT on the entire corpus:
+// zero exact constructed-point calls fire on openscad/GT7863/GT7081.  The star
+// is provably minimal and its exact decision is genuinely forced; see
+// .claude/lane-reports/orderproto-*.md and kernel-forced-obstruction.  Nothing
+// outside this surface performs exact or multi-precision arithmetic.
+// ===========================================================================
+
 // ---------------------------------------------------------------------------
 // SINGLE GLOBAL TIE-BREAK CONVENTION (SoS), docs/Regularize3D.md stage 6.
 // ONE exact integer implementation, threaded through every enumeration
@@ -706,8 +724,9 @@ inline void DecomposeH(const double pts[4][4], int64_t M[4][4], int E[4][4]) {
 // iff the four points are exactly coplanar).  TrivialW=false keeps the W column
 // (4-factor terms) and multiplies in the weight-product sign; it is not
 // instantiated in production (the two production instantiations are this
-// TrivialW=true orient3d and the degree-9 HomogOrient2DExact).  TOTAL: no
-// window-fail; an exact 0 is a genuine geometric tie.
+// TrivialW=true orient3d and the degree-9 BigOrient2D via IXOrient2D and its
+// construction-aware filter).  TOTAL: no window-fail; an exact 0 is a genuine
+// geometric tie.
 template <bool TrivialW>
 inline int HomogOrient3DSign(const double pts[4][4]) {
   int64_t M[4][4];
@@ -829,219 +848,16 @@ inline int SoSOrient3D(const double pts[4][3], const int idx[4]) {
 // disagreements, ZERO wrong filter certs (harness h2).  An INPUT vertex is the
 // trivial triple (W==1), so mixed orient2d (a constructed crossing vs input
 // triangle vertices) is the same form at lower degree.
-//
-// A degree-<=9 monomial: |product of nf mantissas| * sign * 2^e.
-struct Mono2D {
-  uint64_t mant[9];  // abs mantissas, each < 2^53
-  int nf;            // number of factors (<= 9)
-  long e;            // sum of exponents
-  int sign;          // +-1
-};
-using Poly = std::vector<Mono2D>;  // a sum of monomials
-inline Poly PConst(double d) {
-  if (d == 0.0) return {};
-  int ex;
-  const double f = std::frexp(d, &ex);
-  const int64_t M = (int64_t)std::ldexp(f, 53);
-  Mono2D m;
-  m.nf = 1;
-  m.mant[0] = (uint64_t)(M < 0 ? -M : M);
-  m.e = ex - 53;
-  m.sign = M < 0 ? -1 : 1;
-  return {m};
-}
-inline Poly PMul(const Poly& a, const Poly& b) {
-  Poly r;
-  r.reserve(a.size() * b.size());
-  for (const auto& x : a)
-    for (const auto& y : b) {
-      Mono2D m;
-      m.nf = x.nf + y.nf;  // <= 9 by construction
-      for (int i = 0; i < x.nf; ++i) m.mant[i] = x.mant[i];
-      for (int i = 0; i < y.nf; ++i) m.mant[x.nf + i] = y.mant[i];
-      m.e = x.e + y.e;
-      m.sign = x.sign * y.sign;
-      r.push_back(m);
-    }
-  return r;
-}
-inline Poly PAdd(Poly a, const Poly& b) {
-  a.insert(a.end(), b.begin(), b.end());
-  return a;
-}
-inline Poly PNeg(Poly a) {
-  for (auto& m : a) m.sign = -m.sign;
-  return a;
-}
-inline Poly PSub(const Poly& a, const Poly& b) { return PAdd(a, PNeg(b)); }
-// Sign of the exact integer sum of a Poly's monomials, on the ONE accumulator.
-inline int PolySumSign(const Poly& p) {
-  if (p.empty()) return 0;
-  std::vector<TermN<8>> t;
-  t.reserve(p.size());
-  for (const auto& m : p) {
-    int64_t pm[9];
-    for (int i = 0; i < m.nf; ++i) pm[i] = (int64_t)m.mant[i];  // < 2^53
-    TermN<8> term;
-    term.sign = m.sign * MulMagN<8>(pm, m.nf, term.mag);
-    term.e = m.e;
-    t.push_back(term);
-  }
-  return SumSignN<8>(t.data(), (int)t.size());
-}
-// A homogeneous point as Polys (X,Y,Z,W).  A plane triple point (cramer) is
-// degree 3; an input vertex (Trivial) is degree 1 with W==1.
-struct HPoint {
-  Poly X, Y, Z, W;
-};
-inline HPoint TrivialHPoint(const vec3& v) {
-  return {PConst(v.x), PConst(v.y), PConst(v.z), PConst(1.0)};
-}
-// The crossing point F /\ g /\ h (matches Intersect3Planes: c12=cross(g,h),
-// c20=cross(h,F), c01=cross(F,g); W=F.c12; X=dF*c12+dg*c20+dh*c01).
-inline HPoint CramerHPoint(const vec3& nF, double dF, const vec3& ng, double dg,
-                           const vec3& nh, double dh) {
-  const Poly Fx = PConst(nF.x), Fy = PConst(nF.y), Fz = PConst(nF.z);
-  const Poly Gx = PConst(ng.x), Gy = PConst(ng.y), Gz = PConst(ng.z);
-  const Poly Hx = PConst(nh.x), Hy = PConst(nh.y), Hz = PConst(nh.z);
-  const Poly Fd = PConst(dF), Gd = PConst(dg), Hd = PConst(dh);
-  auto cross = [](const Poly& ax, const Poly& ay, const Poly& az,
-                  const Poly& bx, const Poly& by, const Poly& bz, Poly& cx,
-                  Poly& cy, Poly& cz) {
-    cx = PSub(PMul(ay, bz), PMul(az, by));
-    cy = PSub(PMul(az, bx), PMul(ax, bz));
-    cz = PSub(PMul(ax, by), PMul(ay, bx));
-  };
-  Poly c12x, c12y, c12z, c20x, c20y, c20z, c01x, c01y, c01z;
-  cross(Gx, Gy, Gz, Hx, Hy, Hz, c12x, c12y, c12z);
-  cross(Hx, Hy, Hz, Fx, Fy, Fz, c20x, c20y, c20z);
-  cross(Fx, Fy, Fz, Gx, Gy, Gz, c01x, c01y, c01z);
-  HPoint p;
-  p.W = PAdd(PAdd(PMul(Fx, c12x), PMul(Fy, c12y)), PMul(Fz, c12z));
-  p.X = PAdd(PAdd(PMul(Fd, c12x), PMul(Gd, c20x)), PMul(Hd, c01x));
-  p.Y = PAdd(PAdd(PMul(Fd, c12y), PMul(Gd, c20y)), PMul(Hd, c01y));
-  p.Z = PAdd(PAdd(PMul(Fd, c12z), PMul(Gd, c20z)), PMul(Hd, c01z));
-  return p;
-}
-inline const Poly& KeepPoly(const HPoint& p, int axis, int which) {
-  const int a0 = (axis == 0) ? 1 : 0;
-  const int a1 = (axis == 2) ? 1 : 2;
-  const int a = which == 0 ? a0 : a1;
-  return a == 0 ? p.X : (a == 1 ? p.Y : p.Z);
-}
-// EXACT orient2d(P0,P1,P2) in face F's plane, dropping `axis` (the face
-// normal's dominant axis).  = sign(det[[A0,B0,W0],...]) * sign(W0 W1 W2).
-// Returns 0 iff the three points are exactly collinear in the face (a genuine
-// coincidence - concurrency / aliased crossing - routed by the caller, never
-// perturbed).
-inline int HomogOrient2DExact(const HPoint& P0, const HPoint& P1,
-                              const HPoint& P2, int axis) {
-  const Poly& A0 = KeepPoly(P0, axis, 0);
-  const Poly& B0 = KeepPoly(P0, axis, 1);
-  const Poly& A1 = KeepPoly(P1, axis, 0);
-  const Poly& B1 = KeepPoly(P1, axis, 1);
-  const Poly& A2 = KeepPoly(P2, axis, 0);
-  const Poly& B2 = KeepPoly(P2, axis, 1);
-  const Poly det = PAdd(PSub(PMul(A0, PSub(PMul(B1, P2.W), PMul(B2, P1.W))),
-                             PMul(A1, PSub(PMul(B0, P2.W), PMul(B2, P0.W)))),
-                        PMul(A2, PSub(PMul(B0, P1.W), PMul(B1, P0.W))));
-  const int sDet = PolySumSign(det);
-  const int sW = PolySumSign(P0.W) * PolySumSign(P1.W) * PolySumSign(P2.W);
-  return sDet * sW;
-}
-
-// --- construction-aware filter (EBD running forward-error bound) ------------
-// The naive final-determinant permanent is UNSOUND: in the near-parallel wedge
-// regime the constructed coords are ~eps by O(1) cancellation, so the permanent
-// collapses to ~eps^3 while the error floor stays ~u (ratio blows up ~1e15).
-// The certified filter propagates the running forward error THROUGH the
-// construction; certified iff the det AND all three W's are sign-certified.
-struct EBD {
-  double v, err;  // |true - v| <= err
-};
-constexpr double kEbdU = 0x1p-53;
-inline EBD EIn(double d) { return {d, 0.0}; }
-inline EBD EAdd(EBD a, EBD b) {
-  const double v = a.v + b.v;
-  return {v, a.err + b.err + kEbdU * std::abs(v)};
-}
-inline EBD ESub(EBD a, EBD b) {
-  const double v = a.v - b.v;
-  return {v, a.err + b.err + kEbdU * std::abs(v)};
-}
-inline EBD EMul(EBD a, EBD b) {
-  const double v = a.v * b.v;
-  return {v, std::abs(a.v) * b.err + std::abs(b.v) * a.err + a.err * b.err +
-                 kEbdU * std::abs(v)};
-}
-struct EHPoint {
-  EBD X, Y, Z, W;
-};
-inline EHPoint ETrivialHPoint(const vec3& v) {
-  return {EIn(v.x), EIn(v.y), EIn(v.z), EIn(1.0)};
-}
-inline EHPoint ECramerHPoint(const vec3& nF, double dF, const vec3& ng,
-                             double dg, const vec3& nh, double dh) {
-  auto cross = [](EBD ax, EBD ay, EBD az, EBD bx, EBD by, EBD bz, EBD& cx,
-                  EBD& cy, EBD& cz) {
-    cx = ESub(EMul(ay, bz), EMul(az, by));
-    cy = ESub(EMul(az, bx), EMul(ax, bz));
-    cz = ESub(EMul(ax, by), EMul(ay, bx));
-  };
-  const EBD Fx = EIn(nF.x), Fy = EIn(nF.y), Fz = EIn(nF.z);
-  const EBD Gx = EIn(ng.x), Gy = EIn(ng.y), Gz = EIn(ng.z);
-  const EBD Hx = EIn(nh.x), Hy = EIn(nh.y), Hz = EIn(nh.z);
-  EBD c12x, c12y, c12z, c20x, c20y, c20z, c01x, c01y, c01z;
-  cross(Gx, Gy, Gz, Hx, Hy, Hz, c12x, c12y, c12z);
-  cross(Hx, Hy, Hz, Fx, Fy, Fz, c20x, c20y, c20z);
-  cross(Fx, Fy, Fz, Gx, Gy, Gz, c01x, c01y, c01z);
-  EHPoint p;
-  p.W = EAdd(EAdd(EMul(Fx, c12x), EMul(Fy, c12y)), EMul(Fz, c12z));
-  p.X =
-      EAdd(EAdd(EMul(EIn(dF), c12x), EMul(EIn(dg), c20x)), EMul(EIn(dh), c01x));
-  p.Y =
-      EAdd(EAdd(EMul(EIn(dF), c12y), EMul(EIn(dg), c20y)), EMul(EIn(dh), c01y));
-  p.Z =
-      EAdd(EAdd(EMul(EIn(dF), c12z), EMul(EIn(dg), c20z)), EMul(EIn(dh), c01z));
-  return p;
-}
-inline const EBD& EKeep(const EHPoint& p, int axis, int which) {
-  const int a0 = (axis == 0) ? 1 : 0;
-  const int a1 = (axis == 2) ? 1 : 2;
-  const int a = which == 0 ? a0 : a1;
-  return a == 0 ? p.X : (a == 1 ? p.Y : p.Z);
-}
-// Filter verdict: +-1 if certified, 0 if uncertain (escalate to exact).
-inline int HomogOrient2DFilter(const EHPoint& P0, const EHPoint& P1,
-                               const EHPoint& P2, int axis) {
-  auto certSign = [](EBD e) -> int {
-    if (std::abs(e.v) > e.err) return e.v > 0 ? 1 : -1;
-    return 0;
-  };
-  const int sW0 = certSign(P0.W), sW1 = certSign(P1.W), sW2 = certSign(P2.W);
-  const EBD& A0 = EKeep(P0, axis, 0);
-  const EBD& B0 = EKeep(P0, axis, 1);
-  const EBD& A1 = EKeep(P1, axis, 0);
-  const EBD& B1 = EKeep(P1, axis, 1);
-  const EBD& A2 = EKeep(P2, axis, 0);
-  const EBD& B2 = EKeep(P2, axis, 1);
-  const EBD det = EAdd(ESub(EMul(A0, ESub(EMul(B1, P2.W), EMul(B2, P1.W))),
-                            EMul(A1, ESub(EMul(B0, P2.W), EMul(B2, P0.W)))),
-                       EMul(A2, ESub(EMul(B0, P1.W), EMul(B1, P0.W))));
-  const int sDet = certSign(det);
-  if (sDet == 0 || sW0 == 0 || sW1 == 0 || sW2 == 0) return 0;
-  return sDet * sW0 * sW1 * sW2;
-}
-
 // ===========================================================================
 // INPUT-EXACT compositional evaluator (depthk lane, ported).  The CAVEAT the
-// theory lanes flagged: CramerHPoint above takes ROUNDED faceN doubles, so it
-// is exact-relative-to-rounded-planes.  This evaluator composes each plane's
+// theory lanes flagged: the superseded path took ROUNDED faceN doubles, so it
+// was exact-relative-to-rounded-planes.  This evaluator composes each plane's
 // (n = cross, d = dot) EXACTLY from the input vertex doubles, so every
 // construction and decision is exact w.r.t. the true input coordinates (the
 // degree-20-in-inputs instantiation of the ONE homogeneous form).  Carried as
 // exact-integer sign-magnitude bigints (value = sign*mag*2^e), no monomial
-// expansion (depthk: d2-vs-Fractions 0 disagreements, EBD depth-general/sound).
+// expansion (depthk: d2-vs-Fractions 0 disagreements, forward bound
+// depth-general/sound).
 // Construction only here (position + the offline-validated decisions); the
 // production decision predicate reuses the same form.
 struct Big {
@@ -1358,12 +1174,12 @@ inline int Orient3DFilterSign(const vec3& a, const vec3& b, const vec3& c,
 //  (2) CONSTRUCTED-POINT ORIENT2D (degree 9): three in-face crossing points,
 //      each the Cramer intersection of a plane triple {F,g,h} (homogeneous
 //      X,Y,W are 3x3 determinants of the plane coefficients).  This is the SAME
-//      form at degree 9 - sos::HomogOrient2DFilter (the construction-aware EBD
-//      running forward-error filter; the naive final-determinant permanent is
-//      UNSOUND, it collapses in the near-parallel wedge regime, so the
-//      certified bound propagates the error THROUGH the construction)
-//      filter-first, then on a filter-0 the exact sos::HomogOrient2DExact fires
-//      (the degree-9 monomial determinant summed on sos::SumSignN<8>).  An
+//      form at degree 9 - IXOrient2D's construction-aware filter on the Big
+//      basis (the naive final-determinant permanent is UNSOUND, because it
+//      collapses in the near-parallel wedge regime, so the certified bound
+//      propagates the error THROUGH the construction), filter-first, then on a
+//      filter-0 sos::BigOrient2D makes the exact degree-9 constructed-point
+//      decision.  An
 //      exact zero is a GENUINE coincidence (concurrent triple points / aliased
 //      crossing) routed to the level-0 incidence path (nomerge), never a
 //      perturbation - the new site needs no SoS (SoS stays input-point-scoped).
@@ -1381,6 +1197,7 @@ inline int Orient3DFilterSign(const vec3& a, const vec3& b, const vec3& c,
 // VENDOR Shewchuk's public-domain predicates.c - do NOT rebuild expansion
 // arithmetic piecemeal.  The certified fast path never touches the exact
 // kernel.
+// exact surface - see the kernel banner above
 inline int Orient3DExactSign(const vec3& a, const vec3& b, const vec3& c,
                              const vec3& d) {
   // The w==1 instantiation of the ONE form: an input point is the intersection
@@ -1402,6 +1219,7 @@ inline int Orient3DExactSign(const vec3& a, const vec3& b, const vec3& c,
 // separate ExactSign call ahead of it would return the identical value and is
 // provably redundant (a bitwise no-op, verified).  A genuine exact zero (K==0
 // group sums to zero) falls through to the perturbation, as it must.
+// exact surface - see the kernel banner above
 inline int Orient3DSoS(const vec3& a, const vec3& b, const vec3& c,
                        const vec3& d, int ia, int ib, int ic, int id) {
   const int s = Orient3DFilterSign(a, b, c, d);
@@ -1880,6 +1698,7 @@ inline sos::BigHPoint IXTripleHPoint(const BuildArrangement& A, int rf, int rg,
                                 A.tri[rh].data());
 }
 // Input-exact in-face orient2d(P0,P1,P2), dropping the face axis.
+// exact surface - see the kernel banner above
 inline int IXOrient2D(const sos::BigHPoint& p0, const sos::BigHPoint& p1,
                       const sos::BigHPoint& p2, int axis) {
   return sos::BigOrient2D(sos::BigExtract2D(p0, axis),
@@ -2352,6 +2171,7 @@ bool Intersect3Planes(const vec3& n0, const vec3& a0, const vec3& n1,
 // predicate, one implementation.
 }  // namespace
 
+// exact surface - see the kernel banner above
 int ExactOrient2DDrop(const vec3& p, const vec3& q, const vec3& r, int axis) {
   auto proj = [&](const vec3& v) -> vec3 {
     if (axis == 0) return {v.y, v.z, 0.0};
