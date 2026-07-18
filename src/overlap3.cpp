@@ -497,16 +497,22 @@ ComponentDisposition ClassifyComponent(const Manifold::Impl& comp) {
 // sos::SumSignN/SumSign and their helpers; Orient3DExactSign + Orient3DSoS for
 // degree-3 input-point orient3d; BigOrient2D + IXOrient2D for degree-9
 // constructed-point orient2d; ExactOrient2DDrop; and their Big*/Trivial*
-// helpers.  Every entry is FILTER-FIRST: exact arithmetic fires only behind a
-// filter 0 (an uncertain double sign); the certified fast path never touches
-// it.  These are the only two instantiations: input-point orient3d for
-// structural input ties, resolved by the single-global SoS, and
-// constructed-point orient2d for the near-degenerate plane-triple "star" where
-// determinant W tends to zero.  The surface is DORMANT on the entire corpus:
-// zero exact constructed-point calls fire on openscad/GT7863/GT7081.  The star
-// is provably minimal and its exact decision is genuinely forced; see
-// .claude/lane-reports/orderproto-*.md and kernel-forced-obstruction.  Nothing
-// outside this surface performs exact or multi-precision arithmetic.
+// helpers.  The two instantiations escalate DIFFERENTLY.  Input-point orient3d
+// (Orient3DExactSign/Orient3DSoS - structural input ties, broken by the
+// single-global SoS) is PER-CALL FILTER-FIRST: it fires only behind an
+// Orient3DFilterSign 0, so the frequent seam-scan predicates escalate rarely.
+// Constructed-point orient2d (IXOrient2D/BigOrient2D - the plane-triple "star",
+// W -> 0) is instead UNCONDITIONALLY exact per call (a double filter on a
+// rounded constructed point is itself unreliable) and only CANDIDATE-GATED:
+// reached for the triple crossings that survive the double broadphase.  It
+// therefore DOES fire across the corpus (order 1e4-1e5 raw per carrier) -
+// overwhelmingly to REJECT a candidate crossing.  Genuine accepted triple-node
+// closures are far rarer (order 1e2, openscad only; ZERO on GT7863/GT7081,
+// which accept no generic triple).  Those accepted decisions are provably
+// minimal and genuinely forced (kernel-forced-obstruction); the orderproto
+// prototype removes them corpus-wide with binary128+identity, but not
+// universally - orderproto-*.md. Nothing outside this surface performs exact or
+// multi-precision arithmetic.
 // ===========================================================================
 
 // ---------------------------------------------------------------------------
@@ -1174,22 +1180,22 @@ inline int Orient3DFilterSign(const vec3& a, const vec3& b, const vec3& c,
 //  (2) CONSTRUCTED-POINT ORIENT2D (degree 9): three in-face crossing points,
 //      each the Cramer intersection of a plane triple {F,g,h} (homogeneous
 //      X,Y,W are 3x3 determinants of the plane coefficients).  This is the SAME
-//      form at degree 9 - IXOrient2D's construction-aware filter on the Big
-//      basis (the naive final-determinant permanent is UNSOUND, because it
-//      collapses in the near-parallel wedge regime, so the certified bound
-//      propagates the error THROUGH the construction), filter-first, then on a
-//      filter-0 sos::BigOrient2D makes the exact degree-9 constructed-point
-//      decision.  An
-//      exact zero is a GENUINE coincidence (concurrent triple points / aliased
-//      crossing) routed to the level-0 incidence path (nomerge), never a
-//      perturbation - the new site needs no SoS (SoS stays input-point-scoped).
-//      Its production caller is ExactSeamsCross (via HPointStrictlyInTri): the
-//      EXACT segment x segment straddle deciding the intersection
-//      segment-crossing enumeration's existence decision - the constructed
-//      crossing X={f,g,h} strictly interior to all three intersection segment
-//      triangles f, g, h (X within both intersection segments' symbolic
-//      extent), which carries the intersection segment SEGMENT extent, not just
-//      the line.
+//      form at degree 9 - IXOrient2D -> sos::BigOrient2D on the Big basis,
+//      evaluated UNCONDITIONALLY exact per call: NOT per-call filtered (a
+//      double orient2d on a rounded constructed point is itself unreliable -
+//      the naive final-determinant permanent collapses in the near-parallel
+//      wedge regime - which is why the earlier construction-aware filter,
+//      HomogOrient2DFilter, had zero callers and was removed).  It is only
+//      CANDIDATE-GATED by the double broadphase upstream.  An exact zero is a
+//      GENUINE coincidence (concurrent triple points / aliased crossing) routed
+//      to the level-0 incidence path (nomerge), never a perturbation - the new
+//      site needs no SoS (SoS stays input-point-scoped). Its production caller
+//      is ExactSeamsCross (via HPointStrictlyInTri): the EXACT segment x
+//      segment straddle deciding the intersection segment-crossing
+//      enumeration's existence decision - the constructed crossing X={f,g,h}
+//      strictly interior to all three intersection segment triangles f, g, h (X
+//      within both intersection segments' symbolic extent), which carries the
+//      intersection segment SEGMENT extent, not just the line.
 // A THIRD instantiation of a NEW DEGREE (or any new constructed-point form) is
 // an OWNER DECISION - it widens the accumulator's proven totality bound and
 // needs a new per-degree filter constant; never add one silently.  Vendoring

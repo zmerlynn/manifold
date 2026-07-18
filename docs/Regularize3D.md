@@ -384,9 +384,11 @@ order-freeness promises, now a standing rail.
   unchanged; differential harness 0 diff over >1e7 inputs incl forced ties), and
   (2) CONSTRUCTED-POINT orient2d (degree 9: three in-face intersection segment crossing points, each
   the Cramer intersection of a plane triple {F,g,h}; the SAME form at higher degree,
-  filter-first via a degree-9 construction-aware static bound, on the widened
-  accumulator - the naive final-determinant permanent is UNSOUND in the near-parallel
-  wedge regime and must be replaced by the all-abs companion Pdet).  Its production
+  evaluated UNCONDITIONALLY exact on the arbitrary-width Big representation -
+  candidate-gated by the double broadphase, NOT per-call filtered.  A double orient2d
+  on a rounded constructed point is itself unreliable in the near-parallel wedge regime
+  (the naive final-determinant permanent collapses there), which is why the earlier
+  construction-aware filter was dropped).  Its production
   caller is HPointStrictlyInTri (e1-plumb): X={f,g,h} strictly interior to an intersection-segment
   triangle, three orient2d against the triangle edges - the exact intersection-segment
   extent clip in ExactSeamsCross.  ADDITIONAL
@@ -624,10 +626,12 @@ REACHABLY-TRIPPED BRANCHES (a live fixture forces each):
   arrangement over CONSTRUCTED intersection points.  The single tripwire crossing
   is orient2d on a constructed near-tangent point (not on input coords).
   STATUS (homog-design + e1-plumb): the exact predicate is LANDED and VALIDATED -
-  the degree-9 constructed-point orient2d (sos::BigOrient2D via IXOrient2D / the
-  construction-aware degree-9 filter now part of IXOrient2D on the Big basis,
-  instantiation (2) of the ONE homogeneous form, on the widened SumSignN<8>
-  accumulator).  The intersection-segment-crossing enumeration now
+  the degree-9 constructed-point orient2d (sos::BigOrient2D via IXOrient2D,
+  instantiation (2) of the ONE homogeneous form, on the arbitrary-width Big
+  representation).  IXOrient2D is UNCONDITIONALLY exact per call - candidate-gated
+  by the double broadphase, NOT per-call filtered (a double on a constructed point
+  is unreliable); the earlier construction-aware degree-9 filter (HomogOrient2DFilter)
+  had zero callers and was removed.  The intersection-segment-crossing enumeration now
   carries each intersection segment's extent SYMBOLICALLY (e1-plumb): a proper segment x segment
   crossing is the constructed triple point X={f,g,h} STRICTLY INTERIOR TO ALL THREE
   intersection-segment triangles f, g, h (ExactSeamsCross via HPointStrictlyInTri) - X within intersection-segment
