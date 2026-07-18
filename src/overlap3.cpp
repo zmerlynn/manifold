@@ -13,8 +13,8 @@
 // limitations under the License.
 
 // RemoveOverlaps3D: the regularization operator (valid oriented soup ->
-// boundary of {w_S >= 1}).  Phases: decompose -> gate -> planarize ->
-// arrange -> wind -> emit -> re-gate.  Design: docs/Regularize3D.md.
+// boundary of {w_S >= 1}). Phases: decompose -> classify -> planarize ->
+// arrange -> wind -> emit -> validate output. Design: docs/Regularize3D.md.
 
 #include "overlap3.h"
 
@@ -45,12 +45,13 @@ namespace {
 using OutTri3D = std::array<vec3, 3>;
 
 // ---------------------------------------------------------------------------
-// Assembly: weld verts, drop exact-duplicate triangles, build Impl.
+// Assembly: merge vertices, drop exact-duplicate triangles, build Impl.
 // ---------------------------------------------------------------------------
 
-// Split geometrically-welded touching sheets back into topologically
+// Split geometrically merged touching sheets back into topologically
 // separate manifolds - the epsilon-valid posture Boolean3 itself emits for
-// touching solids (coincident geometry, separate topology).  The eps-weld
+// touching solids (coincident geometry, separate topology).  The eps vertex
+// merge
 // fuses surfaces that touch on measure-zero sets (edge-on-face, edge-edge,
 // self-touch) into complexes with 2k-halfedge fan edges and non-disk vertex
 // links.  Resolution in two steps:
@@ -99,16 +100,16 @@ bool SplitTouchingSheets(std::vector<vec3>& verts, Vec<ivec3>& tv) {
     ring.reserve(hes.size());
     vec3 u(0.0), v(0.0);
     for (const int h : hes) {
-      // Ring direction: the third-vertex CHORD, in BOTH modes.  A
+      // Ring direction: the third-vertex radial vector, in BOTH modes.  A
       // provenance-ray variant (cross(sheetN, heDir)) was built and
-      // MEASURED-REFUTED: at the micro X-contact the fan structure is
+      // MEASURED-REFUTED: at the local X-contact the fan structure is
       // RADIUS-DEPENDENT (the near-tangent wedge sheets pass within
       // ~1e-11 of the edge, not through it, so their crossing order at
       // r=1e-8 is the REVERSE of their r->0 ray order) - no single per-
       // sheet angle exists and the ray ordering broke alternation on a fan
-      // the chord ordering pairs oracle-TRUE.  The chord pairing was
+      // the radial-vector ordering pairs oracle-TRUE.  The radial pairing was
       // verified against exact sector windings on every multi-sheet fan of
-      // the carrier corpus.
+      // the test corpus.
       const int c = tv[h / 3][(h % 3 + 2) % 3];
       vec3 d = verts[c] - pa;
       d -= la::dot(d, ax) * ax;
@@ -129,7 +130,7 @@ bool SplitTouchingSheets(std::vector<vec3>& verts, Vec<ivec3>& tv) {
               });
     const int k = static_cast<int>(ring.size());
     // Ties (including the wraparound pair) and alternation.  Genuine
-    // touching contacts have macro dihedral separation; kAngleTie guards
+    // touching contacts have well-separated dihedral angles; kAngleTie guards
     // the tangent-sheet coin flip.
     constexpr double kAngleTie = 1e-9;
     for (int i = 0; i < k; ++i) {
@@ -205,7 +206,8 @@ bool SplitTouchingSheets(std::vector<vec3>& verts, Vec<ivec3>& tv) {
         seen.insert(p);
         // a triangle already subdivided under another doubled edge no longer
         // carries this halfedge's original corners - leave it (the manifold
-        // gate stays the fail-closed backstop for the unhandled residue)
+        // check stays the fail-closed final validation for the unhandled
+        // residue)
         auto still = [&](int hh) {
           const int a = tv[hh / 3][hh % 3], b = tv[hh / 3][(hh % 3 + 1) % 3];
           return std::minmax(a, b) ==
@@ -233,7 +235,8 @@ bool SplitTouchingSheets(std::vector<vec3>& verts, Vec<ivec3>& tv) {
   return true;
 }
 
-// Integer cell key for the assembly weld's uniform hash grid (cell = eps).
+// Integer cell key for the assembly vertex merge's uniform hash grid (cell =
+// eps).
 struct GridCell {
   int64_t x, y, z;
   bool operator==(const GridCell& o) const {
@@ -254,7 +257,8 @@ StageResult<Manifold::Impl> BuildImpl(const std::vector<OutTri3D>& tris,
                                       double eps) {
   if (tris.empty()) return StageResult<Manifold::Impl>::Ok(Manifold::Impl{});
 
-  // Collect verts with an eps-weld.  A uniform hash grid (cell = eps) over the
+  // Collect verts with an eps vertex merge.  A uniform hash grid (cell = eps)
+  // over the
   // growing vert list makes each query O(1) amortized instead of O(n); it
   // returns the MINIMUM-INDEX vert within eps, identical to the linear
   // first-match scan it replaces - a point within eps of the query lies in the
@@ -289,7 +293,8 @@ StageResult<Manifold::Impl> BuildImpl(const std::vector<OutTri3D>& tris,
   // Filter degenerate and duplicate triangles.
   // Degenerate: strip quads whose corners collapse within eps produce v0==v1
   // etc., which would crash CreateHalfedges.
-  // Duplicate: after the weld two emitted triangles can share the same vertex
+  // Duplicate: after vertex merging, two emitted triangles can share the same
+  // vertex
   // triple; drop exact duplicates (keeping one) - a repeated face would break
   // the 2-manifold topology.
   Vec<ivec3> tv;
@@ -330,9 +335,9 @@ StageResult<Manifold::Impl> BuildImpl(const std::vector<OutTri3D>& tris,
     impl.vertPos_[i] = verts[i];
 
   impl.CreateHalfedges(tv);
-  // The full 2-manifold gate (edge pairing AND vertex links): edge-on-face
-  // touching contact welds into a genuinely non-manifold union - the honest
-  // outcome is this named fatal, not a downstream assertion.
+  // The full 2-manifold validation (edge pairing AND vertex links):
+  // edge-on-face touching contact vertex-merges into a genuinely non-manifold
+  // union - the honest outcome is this named fatal, not a downstream assertion.
   if (!impl.IsManifold() || !impl.Is2Manifold()) {
     return StageResult<Manifold::Impl>::Fatal(
         FatalReason::NonManifoldEmission,
@@ -347,27 +352,28 @@ StageResult<Manifold::Impl> BuildImpl(const std::vector<OutTri3D>& tris,
 }
 
 // Forward decl (defined below): exactly-coplanar overlap cluster id per face
-// (or -1). Used by GateComponent to route a within-component coplanar-overlap
-// component to the resolver (the R2(i) blind spot the self-intersection test
-// misses).
+// (or -1). Used by ClassifyComponent to route a within-component
+// coplanar-overlap component to the regularizer (the R2(i) blind spot the
+// self-intersection test misses).
 std::vector<int> DetectCoplanarClusters(const Manifold::Impl& in);
 
 // Forward decl (defined below): does `in` carry ANY within-component coplanar
 // overlap?  Exactly DetectCoplanarClusters' pass-1 seed existence: pass 2 only
 // EXTENDS pass-1 clusters (it unites only when a side is already clustered), so
-// a face gets a cluster id iff pass 1 seeded one.  The gate reads this bool
-// with an early-out instead of computing the full labeling (which the resolver
-// still does on the dirty path).
+// a face gets a cluster id iff pass 1 seeded one. Classification reads this
+// bool with an early-out instead of computing the full labeling (which the
+// regularizer
+// still does during regularization).
 bool HasCoplanarOverlap(const Manifold::Impl& in);
 
 // Split `in` into connected components by halfedge connectivity - the Decompose
 // primitive (constructors.cpp:455) mirrored at the Impl level so the operator
 // never round-trips through the CSG layer.  Each returned component is a
 // finished Impl (bbox/normals/collider) whose epsilon_ is pinned to the
-// resolved global machine scale, so the per-component gate (IsSelfIntersecting
-// reads collider_, faceNormal_, epsilon_) runs directly.  A single connected
-// input returns exactly one component that IS a copy of `in`, so a clean
-// input of one component passes through unchanged.
+// resolved global machine scale, so component classification
+// (IsSelfIntersecting reads collider_, faceNormal_, epsilon_) runs directly.  A
+// single connected input returns exactly one component that IS a copy of `in`,
+// so an unchanged input component passes through unchanged.
 //
 // NON-FUSION POSTURE (docs/Regularize3D.md contract): the connectivity split is
 // the unit of scope, PERIOD.  Cross-component interaction - overlapping,
@@ -377,7 +383,8 @@ bool HasCoplanarOverlap(const Manifold::Impl& in);
 // never united.  A global {w_S>=1} read WOULD fuse them, but that is the
 // Boolean's job (already done upstream in any operation chain); the per-
 // component read is the deliberate choice, matching the touching-contact
-// posture.  The coplanar fold reaches a defect only when it is INTERNAL to one
+// posture. The coplanar arrangement reaches a defect only when it is INTERNAL
+// to one
 // connected component (a doubled wall / folded flap stitched into the shell).
 std::vector<Manifold::Impl> DecomposeComponents(const Manifold::Impl& in,
                                                 double eps) {
@@ -394,9 +401,11 @@ std::vector<Manifold::Impl> DecomposeComponents(const Manifold::Impl& in,
   const int numComponents = uf.connectedComponents(vertLabel);
 
   if (numComponents == 1) {
-    // The whole input is one component; copy it through unchanged so a clean
+    // The whole input is one component; copy it through unchanged so an
+    // unchanged
     // single-component input is bitwise pass-through.  Its finished state
-    // (collider/normals from construction) drives the gate; only epsilon_ is
+    // (collider/normals from construction) drives classification; only
+    // epsilon_ is
     // pinned to the resolved machine scale.
     out.push_back(in);
     out.back().epsilon_ = eps;
@@ -421,7 +430,8 @@ std::vector<Manifold::Impl> DecomposeComponents(const Manifold::Impl& in,
       comp.vertPos_[i] = in.vertPos_[vertNew2Old[i]];
     comp.GatherFaces(in, faceNew2Old);  // halfedges with OLD vert ids
     comp.ReindexVerts(vertNew2Old, in.NumVert());  // remap to the compacted ids
-    // Finish so the gate has bbox/collider/normals; pin epsilon_ to the global
+    // Finish so classification has bbox/collider/normals; pin epsilon_ to the
+    // global
     // machine scale for a consistent 2*eps relaxation across components.
     comp.CalculateBBox();
     comp.SetEpsilon();
@@ -433,9 +443,9 @@ std::vector<Manifold::Impl> DecomposeComponents(const Manifold::Impl& in,
   return out;
 }
 
-enum class GateVerdict { Clean, Dirty, Invalid };
+enum class ComponentDisposition { Unchanged, NeedsRegularization, Invalid };
 
-// The per-component gate (docs/Regularize3D.md step 2): valid AND
+// Per-component classification (docs/Regularize3D.md step 2): valid AND
 // non-self-intersecting.  Components of a valid oriented 2-manifold are
 // themselves valid, so Invalid is defensive (never expected on a valid input).
 //
@@ -443,44 +453,49 @@ enum class GateVerdict { Clean, Dirty, Invalid };
 // systematically CLEAN-biased - its 2*eps shares-vertex relaxation SUPPRESSES
 // near-miss detection (it returns non-intersecting when an eps normal nudge
 // separates the pair), it does not flag near-misses.  So a genuine crossing
-// whose two verts sit in the thin band just outside the eps weld can pass the
-// gate, EARLY-EXIT as clean, and carry an unregularized self-overlap through
-// silently (the R2(i) = R1 blind spot).  This gate does not close that narrow
+// whose two verts sit in the thin band just outside eps can be classified as
+// unchanged and carry an unregularized self-overlap through silently (the
+// R2(i) = R1 blind spot).  Classification does not close that narrow
 // hole; it is a recorded open, not a claim of completeness.
-GateVerdict GateComponent(const Manifold::Impl& comp) {
-  if (!comp.IsManifold() || !comp.Is2Manifold()) return GateVerdict::Invalid;
-  if (comp.IsSelfIntersecting()) return GateVerdict::Dirty;
+ComponentDisposition ClassifyComponent(const Manifold::Impl& comp) {
+  if (!comp.IsManifold() || !comp.Is2Manifold())
+    return ComponentDisposition::Invalid;
+  if (comp.IsSelfIntersecting())
+    return ComponentDisposition::NeedsRegularization;
   // WITHIN-COMPONENT coplanar overlap.  A single connected component that
   // passes the self-intersection test can still carry a pure COPLANAR overlap
   // between its OWN faces (a doubled internal wall / folded-flat flap whose two
   // sheets coincide): IsSelfIntersecting does NOT flag coplanar coincidence
-  // (docs/Regularize3D.md R2(i)), so such a component would early-exit "clean"
+  // (docs/Regularize3D.md R2(i)), so such a component would be classified as
+  // unchanged
   // yet is NOT the {w_S>=1} boundary.  DetectCoplanarClusters (bbox-overlap
   // prefilter, then exact orient3d coplanarity + a 2D-area overlap witness),
-  // run on THIS component only, routes it to the resolver where the
-  // exact-coplanar fold consumes the overlap.  This is WITHIN-component by
+  // run on THIS component only, routes it to the regularizer where the
+  // coplanar arrangement consumes the overlap.  This is WITHIN-component by
   // construction: `comp` is one connectivity component, so a CROSS-component
   // coplanar overlap (two distinct components that happen to coincide) is
-  // invisible here BY DESIGN - the non-fusion posture (fusion is the Boolean's
-  // job).  A clean solid with no internal coplanar overlap detects nothing and
-  // stays Clean (bitwise pass-through); the cost is the prefiltered scan,
+  // invisible here BY DESIGN - the non-fusion contract (fusion is the
+  // Boolean's job).  A component with no internal coplanar overlap remains
+  // unchanged (bitwise pass-through); the cost is the prefiltered scan,
   // proportional to the input.
-  if (HasCoplanarOverlap(comp)) return GateVerdict::Dirty;
-  return GateVerdict::Clean;
+  if (HasCoplanarOverlap(comp))
+    return ComponentDisposition::NeedsRegularization;
+  return ComponentDisposition::Unchanged;
 }
 
 // ---------------------------------------------------------------------------
-// The resolver mechanism (docs/Regularize3D.md "the resolver's mechanism"):
+// The regularizer mechanism (docs/Regularize3D.md):
 // operand-agnostic ENUMERATION (level-0 pierce predicates through a static
 // Shewchuk filter) + coupled integer-delta WINDING.  Every crossing DECISION is
 // a level-0 orient3d on INPUT coordinates.  The cell-complex + halfedge
-// {w_S>=1} boundary EMISSION (THE BUILD) sits on top.
+// {w_S>=1} boundary EMISSION sits on top.
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
 // SINGLE GLOBAL TIE-BREAK CONVENTION (SoS), docs/Regularize3D.md stage 6.
 // ONE exact integer implementation, threaded through every enumeration
-// predicate so a ray or edge grazing a shared boundary resolves identically for
+// predicate so a ray or edge hitting an exact shared boundary resolves
+// identically for
 // every probe.  Each coord is decomposed to (mantissa * 2^exp) via frexp; the
 // perturbed 4x4 orient3d cascade (the e^0 exact orient3d plus the symbolic
 // higher-e terms) evaluates on one integer path - products of <= 3 mantissas
@@ -681,7 +696,8 @@ inline void DecomposeH(const double pts[4][4], int64_t M[4][4], int E[4][4]) {
 }
 // The ONE blessed exact predicate FORM (homog-design): the sign of the
 // homogeneous orientation determinant of four points (X,Y,Z,W), corrected by
-// sign(prod W_i) - see the TRIPWIRE at Orient3DExactSign.  TrivialW=true is the
+// sign(prod W_i) - see the invariant check at Orient3DExactSign.
+// TrivialW=true is the
 // INPUT-POINT orient3d instantiation: each point has W==1 (an input double
 // point is the intersection of its three trivial axis planes, denominator 1),
 // so the W column is the literal ones column (skipped exactly as the historical
@@ -1293,7 +1309,7 @@ inline int BigOrient2D(const BigP2& p0, const BigP2& p1, const BigP2& p2) {
 // constant).  Returns the CERTIFIED sign (+/-1) when |det| exceeds the
 // permanent-scaled error bound; returns 0 when the filtered sign is UNCERTAIN
 // (sub-bound or exact-zero).  The 0 case is no longer a fail-closed boundary:
-// it routes to the micro exact tie-test (Orient3DExactSign, filter-0-only) and
+// it routes to the exact-kernel tie test (Orient3DExactSign, filter-0-only) and
 // - on a genuine exact zero - the single-global SoS (Orient3DSoS), per the
 // stage-6 owner contract.  On the corpus single-shell self-intersectors this
 // filter certifies every enumeration predicate (v5b-r4: siA/siB 100% certified,
@@ -1315,9 +1331,10 @@ inline int Orient3DFilterSign(const vec3& a, const vec3& b, const vec3& c,
   return 0;  // uncertain -> Orient3DExactSign, then SoS (Orient3DSoS)
 }
 
-// The micro exact tie-test: the EXACT orient3d sign, 0 iff the four points are
+// The exact-kernel tie test: the EXACT orient3d sign, 0 iff the four points are
 // exactly coplanar.  TOTAL for every finite-double input.
-// TRIPWIRE (owner contract, docs/Regularize3D.md open list): this is the ONE
+// INVARIANT CHECK (owner contract, docs/Regularize3D.md open list): this is the
+// ONE
 // blessed exact predicate FORM - the sign of a homogeneous orientation
 // determinant corrected by sign(prod W_i), summed on the ONE adaptive-width
 // integer accumulator (sos::SumSignN).  It has exactly TWO instantiations:
@@ -1329,14 +1346,15 @@ inline int Orient3DFilterSign(const vec3& a, const vec3& b, const vec3& c,
 //      <=3-factor width-3 accumulation) - every existing caller unchanged: the
 //      EdgePiercesTriSoS edge-in-plane guard; the winding-crossing escalation
 //      (WindCrossTri, shared by the O(nTri) walk, the winding broadphase, the
-//      once-per-component seed-sign precompute, and the RecordSeams
-//      phantom-seam guard's strict-interior pierce test); the junction
-//      registry's input-vertex-on-edge arm (InputVertexStrictlyOnEdge, via
+//      once-per-component seed-sign precompute, and the
+//      RecordIntersectionSegments spurious-intersection check's strict-interior
+//      pierce test); the junction shared split-point table's
+//      input-vertex-on-edge contribution (InputVertexStrictlyOnEdge, via
 //      ExactOrient2DDrop); ExactSegProperCross/ExactOrient2DDrop (exact
-//      in-plane orient2d on the ROUNDED seam endpoint doubles, drop the
-//      dominant normal axis), now the E1_OFF/E1_MEASURE seam-crossing levers
-//      only; the tie cascade Orient3DSoS (whose SoS K==0 group IS this exact
-//      sign); and the test probe.
+//      in-plane orient2d on the ROUNDED intersection-segment endpoint doubles,
+//      drop the dominant normal axis), now the E1_OFF/E1_MEASURE intersection
+//      segment-crossing levers only; the tie cascade Orient3DSoS (whose SoS
+//      K==0 group IS this exact sign); and the test probe.
 //  (2) CONSTRUCTED-POINT ORIENT2D (degree 9): three in-face crossing points,
 //      each the Cramer intersection of a plane triple {F,g,h} (homogeneous
 //      X,Y,W are 3x3 determinants of the plane coefficients).  This is the SAME
@@ -1350,10 +1368,11 @@ inline int Orient3DFilterSign(const vec3& a, const vec3& b, const vec3& c,
 //      crossing) routed to the level-0 incidence path (nomerge), never a
 //      perturbation - the new site needs no SoS (SoS stays input-point-scoped).
 //      Its production caller is ExactSeamsCross (via HPointStrictlyInTri): the
-//      EXACT segment x segment straddle deciding the seam-crossing
-//      enumeration's existence decision - the constructed crossing X={f,g,h}
-//      strictly interior to all three seam triangles f, g, h (X within both
-//      seams' symbolic extent), which carries the seam SEGMENT extent, not just
+//      EXACT segment x segment straddle deciding the intersection
+//      segment-crossing enumeration's existence decision - the constructed
+//      crossing X={f,g,h} strictly interior to all three intersection segment
+//      triangles f, g, h (X within both intersection segments' symbolic
+//      extent), which carries the intersection segment SEGMENT extent, not just
 //      the line.
 // A THIRD instantiation of a NEW DEGREE (or any new constructed-point form) is
 // an OWNER DECISION - it widens the accumulator's proven totality bound and
@@ -1397,7 +1416,7 @@ inline int Orient3DSoS(const vec3& a, const vec3& b, const vec3& c,
 // into the D1 straddle (orient3d of the plane vs each endpoint) and the D3
 // edge-edge z-order (orient3d of the edge vs each triangle edge) - the v5b-r4
 // P4 centerpiece.  Returns 1 (genuine pierce), 0 (no pierce), or -1 (a deciding
-// predicate was filter-uncertain / an exact-zero boundary: the SoS axis).
+// predicate was filter-uncertain / an exact-zero boundary: the SoS case).
 int EdgePiercesTri(const vec3& u, const vec3& v, const vec3& a, const vec3& b,
                    const vec3& c) {
   const int su = Orient3DFilterSign(a, b, c, u);
@@ -1416,9 +1435,10 @@ int EdgePiercesTri(const vec3& u, const vec3& v, const vec3& a, const vec3& b,
 // edge-on-edge), which the single-global SoS now DECIDES to a definite pierce
 // (1) or non-pierce (0) - never refuses.  `i*` are the vertices' global
 // indices.  The caller restricts this to the transversal residue (the coplanar
-// / cluster-riser / benign ties are the fold's, handled before this is
-// reached); the edge-in-plane guard below is a defensive second gate so a
-// coplanar incidence can never manufacture a phantom seam.
+// / incident-noncoplanar-face / benign ties belong to the coplanar arrangement,
+// handled before this is
+// reached); the edge-in-plane guard below is a defensive second check so a
+// coplanar incidence can never manufacture a spurious intersection segment.
 int EdgePiercesTriSoS(const vec3& u, const vec3& v, const vec3& a,
                       const vec3& b, const vec3& c, int iu, int iv, int ia,
                       int ib, int ic) {
@@ -1426,7 +1446,8 @@ int EdgePiercesTriSoS(const vec3& u, const vec3& v, const vec3& a,
   const int fv = Orient3DFilterSign(a, b, c, v);
   if (fu == 0 && fv == 0 && Orient3DExactSign(a, b, c, u) == 0 &&
       Orient3DExactSign(a, b, c, v) == 0)
-    return 0;  // edge exactly in the tri plane: the fold's, never a seam
+    return 0;  // edge exactly in the tri plane: handled by the coplanar
+               // arrangement, never an intersection segment
   const int su = Orient3DSoS(a, b, c, u, ia, ib, ic, iu);
   const int sv = Orient3DSoS(a, b, c, v, ia, ib, ic, iv);
   if (su == sv) return 0;  // both same (perturbed) side -> no straddle
@@ -1441,8 +1462,9 @@ int EdgePiercesTriSoS(const vec3& u, const vec3& v, const vec3& a,
 // snap): each triangle's three vertex positions and global ids plus its AABB,
 // with the bbox-overlap and shared-vertex (self-adjacency) skips every scan
 // applies before any predicate.  Selection/compare only (la::min/max, integer
-// equality), so it is bit-for-bit the inline builds it replaces.  RecordSeams
-// keeps its own copy because it stores tri/vid/faceN into the BuildArrangement.
+// equality), so it is bit-for-bit the inline builds it replaces.
+// RecordIntersectionSegments keeps its own copy because it stores tri/vid/faceN
+// into the BuildArrangement.
 struct TriSoup {
   std::vector<std::array<vec3, 3>> tri;
   std::vector<std::array<int, 3>> vid;
@@ -1475,7 +1497,8 @@ struct TriSoup {
 // filter sign; a 0 means the vertex is within ~1 ULP of the plane, i.e. the
 // coplanarity gap is far below eps.  Returns a SIGN-derived bool (no
 // constructed geometry), so it is the single implementation of the
-// "filter-coplanar pair" test the exact-fold detector, the seam recorder, and
+// "filter-coplanar pair" test the coplanar-arrangement detector, the
+// intersection segment recorder, and
 // the near-coplanar snap all share.
 bool FacesFilterCoplanar(const std::array<vec3, 3>& Ti,
                          const std::array<vec3, 3>& Tj) {
@@ -1487,7 +1510,8 @@ bool FacesFilterCoplanar(const std::array<vec3, 3>& Ti,
 }
 
 // Do two coplanar (or near-coplanar) triangles share positive 2D area,
-// projected into Ti's plane?  Only genuinely OVERLAPPING faces need folding;
+// projected into Ti's plane? Only genuinely OVERLAPPING faces need a coplanar
+// arrangement;
 // the coplanar tiles of one flat face (an annulus, a subdivided facet) merely
 // abut and must NOT cluster - a vertex strictly inside the other, or a
 // properly-crossing edge pair, is the area-overlap witness (triangles are
@@ -1531,18 +1555,19 @@ bool TrianglesOverlap2D(const std::array<vec3, 3>& Ti,
   return false;
 }
 
-// EXACT-COPLANAR FOLD, cluster detection (docs/Regularize3D.md coplanar axis).
+// EXACT-COPLANAR ARRANGEMENT, cluster detection
+// (docs/Regularize3D.md coplanar issue).
 // Union non-self-adjacent, bbox-overlapping faces that are EXACTLY coplanar -
 // every vertex of each lies on the other's plane, decided by the level-0
 // orient3d filter (all six cross-checks certified 0).  The filter returns 0
 // only when the vertex is within ~1 ULP (relative) of the plane, i.e. the
-// coplanarity gap is far below eps (the machine weld radius), so projecting the
+// coplanarity gap is far below eps, so projecting the
 // cluster onto one plane is eps-valid.  The NEAR-coplanar thin band (gap above
 // the filter's error bound but below eps) has a NONZERO filter sign and is NOT
-// clustered here - it is PLANARIZED upstream by SnapNearCoplanarClusters (stage
-// 5) so that by the time this exact detector runs its clusters are exactly
-// coplanar again. Returns a cluster id for each face, or -1 for a face in no
-// multi-face coplanar cluster (the ordinary transversal path).
+// clustered here - it is PLANARIZED upstream by PlanarizeNearCoplanarClusters
+// (stage 5) so that by the time this exact detector runs its clusters are
+// exactly coplanar again. Returns a cluster id for each face, or -1 for a face
+// in no multi-face coplanar cluster (the ordinary transversal path).
 std::vector<int> DetectCoplanarClusters(const Manifold::Impl& in) {
   const int nTri = static_cast<int>(in.NumTri());
   const TriSoup soup(in);
@@ -1572,7 +1597,8 @@ std::vector<int> DetectCoplanarClusters(const Manifold::Impl& in) {
   // PASS 2 - EXTEND a seeded cluster through SHARED-CORNER overlaps.  A
   // coplanar self-overlap group's faces meet at shared corners/edges too (the
   // GT7863 flat face's tiles that touch a distinct-patch overlap at a vertex);
-  // leaving them out made the fold's cluster INCOMPLETE, so its in-plane cover
+  // leaving them out made the coplanar arrangement's cluster INCOMPLETE, so
+  // its in-plane cover
   // disagreed with the 3D winding (the self-check fired) and the partial
   // re-triangulation T-junctioned against the un-clustered coplanar neighbours
   // (an OPEN-BOUNDARY emission fail).  But a shares-vertex overlap with NO
@@ -1581,7 +1607,7 @@ std::vector<int> DetectCoplanarClusters(const Manifold::Impl& in) {
   // from it.  So only join a shared-corner pair when one side already belongs
   // to a seeded cluster; iterate to a fixpoint so a chain extends fully.  (This
   // mirrors the shares-vertex arrangement-completeness fix reg3d-wjump made in
-  // RecordSeams; reg3d-7863c1.)
+  // RecordIntersectionSegments; reg3d-7863c1.)
   if (any) {
     std::vector<int> setSize(nTri, 0);
     for (int f = 0; f < nTri; ++f) ++setSize[static_cast<int>(uf.find(f))];
@@ -1620,9 +1646,11 @@ std::vector<int> DetectCoplanarClusters(const Manifold::Impl& in) {
   return face2cluster;
 }
 
-// The gate's cheap existence probe: DetectCoplanarClusters' pass-1 seed test
+// Classification's cheap existence probe: DetectCoplanarClusters' pass-1 seed
+// test
 // with an early-out - the FIRST distinct-patch (non-self-adjacent) coplanar
-// overlap makes the component dirty, without building the DisjointSets, the
+// overlap marks the component as needing regularization, without building the
+// DisjointSets, the
 // shared-corner extension, or the id renumber.  Answer-identical to
 // "any face id >= 0 from DetectCoplanarClusters" (proven above: pass 2 only
 // extends pass-1 seeds, so a face is clustered iff pass 1 seeded).
@@ -1647,23 +1675,24 @@ bool HasCoplanarOverlap(const Manifold::Impl& in) {
 // static filter (the Winding03 discipline, boolean3.cpp:388).  The delta per
 // crossed face is sign(dot(seed-p, n_f)) on the input normal - a +/-1 integer,
 // FP-safe by construction.  A filter-uncertain deciding predicate ESCALATES to
-// the exact tie-test (below), which decides the near-tangent graze the filter
+// the exact tie-test (below), which decides the near-tangent contact the filter
 // refuses (reg3d-c2bx: GT7081's near-coplanar shallow-dihedral faces).  Returns
 // nullopt only when the escalation finds a GENUINE exact-zero tie (the probe
-// grazes a vertex/edge/plane exactly): there the caller re-seeds or fails
+// hits a vertex/edge/plane exactly): there the caller re-seeds or fails
 // closed, since the soup winding is single-valued only OFF the surface.
 // One triangle's oriented crossing contribution for the winding ray p->seed,
 // factored so the O(nTri) walk and the winding broadphase (below) share ONE
 // exact predicate chain (the "one predicate / one implementation" discipline).
-// TRIPWIRE caller (winding probe, docs/Regularize3D.md open list): a filter-0
+// INVARIANT-CHECK caller (winding probe, docs/Regularize3D.md open list): a
+// filter-0
 // plane-side tie is NOT a fail-closed boundary - it ESCALATES to the exact
 // tie-test (filter-first: exact fires only on filter-0).  A near-tangent
-// shallow-dihedral face grazes the static filter's uncertainty band while the
+// shallow-dihedral face makes the static filter uncertain while the
 // exact kernel decides the constructed probe DECIDABLY off the plane
 // (reg3d-c2b: GT7081's minGap is a few eps, exactly ONE such face per shell).
 // The probe is a constructed double the exact kernel reads verbatim, so no SoS
 // / vertex index is needed.  Returns false on a GENUINE exact-zero tie (p/seed
-// lie ON a face plane, or the segment grazes an edge/vertex exactly) - the soup
+// lie ON a face plane, or the segment hits an edge/vertex exactly) - the soup
 // winding is single-valued only OFF the surface, so the caller re-seeds / fails
 // closed; on true, `delta` is the signed crossing (0 none, +/-1).
 // dbCached == kWindDbLive: compute the seed's plane-side sign live (the walk).
@@ -1700,7 +1729,7 @@ inline bool WindCrossTri(const vec3& a, const vec3& b, const vec3& c,
 }
 
 // ---------------------------------------------------------------------------
-// WINDING BROADPHASE (perf: docs/Regularize3D.md winding-query axis).  The
+// WINDING BROADPHASE (perf: docs/Regularize3D.md winding-query issue).  The
 // clean-face winding walks EVERY triangle per query (O(nTri * cleanFaces), the
 // resolve hot loop on single-component shells).  A per-component Morton
 // triangle collider shrinks each query to the triangles whose AABB overlaps the
@@ -1788,7 +1817,8 @@ std::optional<int> WindingAt(const Manifold::Impl& in, const vec3& p,
 }
 
 // Robust soup winding: try the coupled ray winding from a few unrelated seeds
-// and take the first that grazes no vertex/edge (the winding is single-valued
+// and take the first with no boundary-degenerate vertex/edge hit (the winding
+// is single-valued
 // off-surface, so any certified seed is authoritative).  nullopt only if EVERY
 // seed hit a filter-uncertain deciding predicate (SoS / near-degenerate).
 std::optional<int> RobustWinding(const Manifold::Impl& in, const vec3& p,
@@ -1802,9 +1832,10 @@ std::optional<int> RobustWinding(const Manifold::Impl& in, const vec3& p,
 
 // ---------------------------------------------------------------------------
 // Validate the component's transversal crossings before coordinated emission.
-// The coordinated engine independently constructs its complete, input-exact
-// seam set; this pass retains the resolver's structural fail-closed checks and
-// supplies the classification counters used by the test probe.
+// The coordinated-boundary emitter independently constructs its complete,
+// input-exact intersection segment set; this pass retains the regularizer's
+// structural fail-closed checks and supplies the classification counters used
+// by the test probe.
 // ---------------------------------------------------------------------------
 
 using PierceKey =
@@ -1831,11 +1862,11 @@ struct BuildArrangement {
   bool ok = true;  // false = a structural anomaly (fail closed)
 };
 
-// INPUT-EXACT basis lever: construct coordinated-engine positions from planes
-// composed exactly from input vertex doubles instead of rounded faceN. The
-// rounded-plane basis misplaces near-tangent triple points by up to ~1400x eps,
-// scrambling the order of clusters separated by only ~22x eps; input-exact
-// places and orders them correctly (offline: exact-vs-Fractions 0
+// INPUT-EXACT basis lever: construct coordinated-boundary-emitter positions
+// from planes composed exactly from input vertex doubles instead of rounded
+// faceN. The rounded-plane basis misplaces near-tangent triple points by up to
+// ~1400x eps, scrambling the order of clusters separated by only ~22x eps;
+// input-exact places and orders them correctly (offline: exact-vs-Fractions 0
 // disagreements, every openscad cluster genuinely distinct + above the merge
 // radius).
 inline bool IXEnabled() {
@@ -1857,8 +1888,9 @@ inline int IXOrient2D(const sos::BigHPoint& p0, const sos::BigHPoint& p1,
 }
 
 // 3D point-vs-triangle classification with an area-scaled margin - the shared
-// core of RecordSeams' vertex-on-face graze test and the cap-plane seam
-// endpoint test.  P is assumed on the triangle's plane; n = the raw
+// core of RecordIntersectionSegments' vertex-on-face boundary-degenerate-hit
+// test and the coplanar-cluster-plane intersection-segment endpoint test.  P
+// is assumed on the triangle's plane; n = the raw
 // (unnormalized) normal, area2 = |n|^2, margin = area2 * 1e-9.  Returns
 // kDegenerate if area2 == 0, else kInside if P is within margin of all three
 // directed edges, else kOutside.
@@ -1879,13 +1911,14 @@ inline TriSide ClassifyPointInTri3D(const vec3& P, const vec3& t0,
 // Validate the self-crossing arrangement. `face2cluster` (from
 // DetectCoplanarClusters)
 // marks exactly-coplanar face groups: same-cluster pairs are SKIPPED here (the
-// in-plane fold resolves them, not the transversal seam machinery).  The
-// optional seamCountOut/boundaryTouchOut fold the test probe's level-0
-// self-crossing counts onto this scan (nullptr in production).
-BuildArrangement RecordSeams(const Manifold::Impl& in,
-                             const std::vector<int>& face2cluster, double eps,
-                             int* seamCountOut = nullptr,
-                             int* boundaryTouchOut = nullptr) {
+// coplanar arrangement resolves them, not the transversal intersection-segment
+// machinery).  The
+// optional intersectionSegmentCountOut/boundaryTouchOut fold the test probe's
+// level-0 self-crossing counts onto this scan (nullptr in production).
+BuildArrangement RecordIntersectionSegments(
+    const Manifold::Impl& in, const std::vector<int>& face2cluster, double eps,
+    int* intersectionSegmentCountOut = nullptr,
+    int* boundaryTouchOut = nullptr) {
   BuildArrangement A;
   const int nTri = static_cast<int>(in.NumTri());
   A.tri.resize(nTri);
@@ -1906,9 +1939,10 @@ BuildArrangement RecordSeams(const Manifold::Impl& in,
   }
   // Once-only pierce cache (doc R1): the UNDIRECTED (min,max) edge key makes a
   // shared mesh edge traversed in opposite order by two adjacent faces resolve
-  // to ONE bit-identical pierce point, so chaining seams meet exactly and the
-  // cross-face weld cannot manufacture a twin.  A correctness-by-construction
-  // backstop for the near-parallel tail, not a runtime check (measured
+  // to ONE bit-identical pierce point, so chaining intersection segments meet
+  // exactly and the cross-face vertex merge cannot manufacture a twin. A
+  // correctness-by-construction final validation for the near-parallel tail,
+  // not a runtime check (measured
   // non-load-bearing on the corpus, but retained; docs/Regularize3D.md R1).
   std::map<PierceKey, vec3> cache;
   auto pierce = [&](int edgeV0, int edgeV1, int piercedTri) -> vec3 {
@@ -1923,8 +1957,9 @@ BuildArrangement RecordSeams(const Manifold::Impl& in,
     return p;
   };
   // Vertices used by each coplanar cluster (all lie on that cluster's plane):
-  // an edge touching a folded plane at one of ITS OWN cluster vertices is a
-  // riser vertex, not a transversal vertex-on-face SoS tie.
+  // an edge touching a coplanar-arrangement plane at one of ITS OWN cluster
+  // vertices is an
+  // incident-noncoplanar-face vertex, not a transversal vertex-on-face SoS tie.
   int nClusters = 0;
   for (int c : face2cluster) nClusters = std::max(nClusters, c + 1);
   std::vector<std::set<int>> clusterVerts(nClusters);
@@ -1939,14 +1974,14 @@ BuildArrangement RecordSeams(const Manifold::Impl& in,
       // EnumerateComponent_Probe reports, folded onto THIS scan so no separate
       // enumeration pass is needed.  Non-adjacent (shares-vertex skipped, S4a)
       // bbox-overlap pairs are graded by the raw level-0 pierce test: a genuine
-      // pierce (r==1) is a seam, else a filter-uncertain touch (r==-1) is a
-      // boundary-touch pair.  nullptr (production) skips this entirely, so the
-      // recorded arrangement is unchanged.
-      if (seamCountOut && boundaryTouchOut) {
+      // pierce (r==1) is an intersection segment, else a filter-uncertain touch
+      // (r==-1) is a boundary-touch pair.  nullptr (production) skips this
+      // entirely, so the recorded arrangement is unchanged.
+      if (intersectionSegmentCountOut && boundaryTouchOut) {
         // Index-keyed shares-vertex skip, PROBE-ONLY (inlined at its one use so
         // it does not read as a shared production helper).  The production
         // recovery and skip below key on POSITION coincidence; the probe's
-        // welded synthetic meshes carry no unwelded duplicates, so index
+        // vertex-merged synthetic meshes carry no unmerged duplicates, so index
         // equality is the right adjacency test here.
         bool sharesVertIdx = false;
         for (int a = 0; a < 3 && !sharesVertIdx; ++a)
@@ -1969,7 +2004,7 @@ BuildArrangement RecordSeams(const Manifold::Impl& in,
             if (r == -1) boundary = true;
           }
           if (genuine)
-            ++*seamCountOut;
+            ++*intersectionSegmentCountOut;
           else if (boundary)
             ++*boundaryTouchOut;
         }
@@ -1980,23 +2015,24 @@ BuildArrangement RecordSeams(const Manifold::Impl& in,
       // self-adjacent => no transversal crossing, which is UNSOUND for a
       // self-intersecting soup where two faces sharing a vertex fold back and
       // cross elsewhere (the everted-corner / near-triple-point arrangement
-      // incompleteness: PokedCube's spike, reg3d-c1a/s7b's "unmatched seam
-      // pierce points").  An imported soup additionally carries UNWELDED
-      // DUPLICATE vertices (identical position, distinct global id); two faces
-      // meeting only at such a coincident corner are self-adjacent-at-a-point
-      // exactly like an index-shared pair, but an index-keyed skip MISSES them
-      // (measuring shares-vertex by INDEX reads no shared vertex and wrongly
-      // rules the family out - it IS the shares-vertex family, keyed on
-      // POSITION).  Key the skip/recovery on position coincidence (index
-      // equality implies it).  Recover the pair ONLY when an edge with NEITHER
-      // endpoint at a coincident-vertex position genuinely pierces the other
-      // triangle's interior (a real OFF-VERTEX transversal crossing); the
-      // coincident-vertex / shared-edge touches the skip correctly drops have
-      // no such off-vertex pierce and stay skipped.  The SoS convention
-      // (EdgePiercesTriSoS) decides the shared-vertex edge incidences when the
-      // seam is assembled below (EXACT-INCIDENT TIES).  (The probe classify
-      // above keys sharesVert by INDEX: its welded synthetic meshes carry no
-      // unwelded duplicates, and it never runs on the production path.)
+      // incompleteness: PokedCube's spike, reg3d-c1a/s7b's "unmatched
+      // intersection segment pierce points").  An imported soup additionally
+      // carries UNWELDED DUPLICATE vertices (identical position, distinct
+      // global id); two faces meeting only at such a coincident corner are
+      // self-adjacent-at-a-point exactly like an index-shared pair, but an
+      // index-keyed skip MISSES them (measuring shares-vertex by INDEX reads no
+      // shared vertex and wrongly rules the family out - it IS the
+      // shares-vertex family, keyed on POSITION).  Key the skip/recovery on
+      // position coincidence (index equality implies it).  Recover the pair
+      // ONLY when an edge with NEITHER endpoint at a coincident-vertex position
+      // genuinely pierces the other triangle's interior (a real OFF-VERTEX
+      // transversal crossing); the coincident-vertex / shared-edge touches the
+      // skip correctly drops have no such off-vertex pierce and stay skipped.
+      // The SoS convention (EdgePiercesTriSoS) decides the shared-vertex edge
+      // incidences when the intersection segment is assembled below
+      // (EXACT-INCIDENT TIES).  (The probe classify above keys sharesVert by
+      // INDEX: its vertex-merged synthetic meshes carry no unwelded duplicates,
+      // and it never runs on the production path.)
       bool recoveredSV = false;
       vec3 svPos(0.0);
       int nShared = 0;
@@ -2035,15 +2071,16 @@ BuildArrangement RecordSeams(const Manifold::Impl& in,
         if (!offVertexPierces(i, j) && !offVertexPierces(j, i)) continue;
         recoveredSV = true;
       }
-      // Same exactly-coplanar cluster: the in-plane fold owns this pair; its
-      // exact-zero pierce ties are not a seam and not an SoS boundary-touch.
+      // Same exactly-coplanar cluster: the coplanar arrangement owns this pair;
+      // its exact-zero pierce ties are not an intersection segment and not an
+      // SoS boundary touch.
       if (face2cluster[i] >= 0 && face2cluster[i] == face2cluster[j]) continue;
       const auto& T0 = A.tri[i];
       const auto& T1 = A.tri[j];
-      // Collect the up-to-two seam endpoints: i's edges piercing tri j (keyed
-      // to plane j) and j's edges piercing tri i (keyed to plane i).  Every
-      // endpoint lands on the plane-i/\plane-j intersection line, so it is
-      // exact in both faces' bases.
+      // Collect the up-to-two intersection-segment endpoints: i's edges
+      // piercing tri j (keyed to plane j) and j's edges piercing tri i (keyed
+      // to plane i).  Every endpoint lands on the plane-i/\plane-j intersection
+      // line, so it is exact in both faces' bases.
       std::array<vec3, 4> pts;
       int nPts = 0;
       // An edge of `owner` that only TOUCHES `tgt`'s plane (does not cross it)
@@ -2052,14 +2089,16 @@ BuildArrangement RecordSeams(const Manifold::Impl& in,
       //  - EDGE-IN-PLANE (both endpoints on the plane): in a valid 2-manifold
       //  the
       //    edge lies outside tgt's triangle or on a shared (skipped) boundary,
-      //    so benign when tgt is unfolded; when tgt is a folded cluster face it
+      //    so benign when tgt is outside an arrangement; when tgt is a
+      //    coplanar-arrangement cluster face it
       //    is benign only if the edge is that cluster's own boundary (opposite
-      //    face a cluster member) - a wall rising off the fold, already a
-      //    constraint.
+      //    face a cluster member) - a wall incident to the coplanar
+      //    arrangement, already a constraint.
       //  - CLUSTER-VERTEX-ON-PLANE (one endpoint on the plane, and that
       //  endpoint
-      //    is one of tgt's cluster's OWN vertices): a riser vertex of the fold,
-      //    not the transversal vertex-on-face SoS tie.
+      //    is one of tgt's cluster's OWN vertices): an
+      //    incident-noncoplanar-face vertex of the coplanar arrangement, not
+      //    the transversal vertex-on-face SoS tie.
       // Anything else (a non-cluster vertex on a face, or an edge-edge
       // crossing) stays the single-global-SoS residue.
       auto benignInPlane = [&](int owner, int e, int tgt) {
@@ -2076,12 +2115,13 @@ BuildArrangement RecordSeams(const Manifold::Impl& in,
         }
         if ((su == 0) != (sv == 0)) {  // vertex-on-plane
           const int onV = (su == 0) ? A.vid[owner][e] : A.vid[owner][e1];
-          // A cluster vertex on its own folded plane is a fold-owned riser.
+          // A cluster vertex on its own coplanar-arrangement plane belongs to
+          // an incident noncoplanar face.
           if (face2cluster[tgt] >= 0 &&
               clusterVerts[face2cluster[tgt]].count(onV) > 0)
             return true;
           // A vertex on tgt's plane but strictly OUTSIDE tgt's triangle does
-          // not touch tgt's face - benign (a valid-manifold corner grazing an
+          // not touch tgt's face - benign (a valid-manifold corner hitting an
           // adjacent face's plane).  Only a vertex inside / on tgt's triangle
           // is the vertex-on-face SoS tie.
           const vec3& p =
@@ -2094,11 +2134,12 @@ BuildArrangement RecordSeams(const Manifold::Impl& in,
         return false;  // edge-edge crossing tie: real
       };
       // An edge whose BOTH endpoints are vertices of one coplanar cluster lies
-      // in that cluster's folded plane; its exact-zero grazes are coplanar
-      // in-plane incidences the fold owns (cluster-face edges and the cap edges
-      // of walls rising off the fold).  A genuine transversal cross of a
-      // cluster face is a PIERCE (r==1) recorded as a seam and caught as
-      // entanglement; only a graze OUTSIDE every cluster plane is the SoS
+      // in that cluster's coplanar-arrangement plane; its exact-zero
+      // boundary-degenerate hits are coplanar in-plane incidences the
+      // arrangement owns (cluster-face edges and cap edges of attached faces).
+      // A genuine transversal cross of a cluster face is a PIERCE (r==1)
+      // recorded as an intersection segment and caught as entanglement; only a
+      // boundary-degenerate hit OUTSIDE every cluster plane is the SoS
       // residue.
       auto edgeInClusterPlane = [&](int owner, int e) {
         const int a = A.vid[owner][e], b = A.vid[owner][(e + 1) % 3];
@@ -2107,16 +2148,19 @@ BuildArrangement RecordSeams(const Manifold::Impl& in,
         return false;
       };
       // Pair coplanarity (filter): a coplanar pair's exact-zero ties belong to
-      // the in-plane FOLD, never the SoS transversal path (the s3/s4adj sliver
-      // rail).  Only a NON-coplanar transversal residue is SoS-decided.
+      // the in-plane coplanar arrangement, never the SoS transversal path (the
+      // s3/s4adj sliver rail). Only a NON-coplanar transversal residue is
+      // SoS-decided.
       const bool pairCoplanar = FacesFilterCoplanar(T0, T1);
       // Record the crossing points of `owner`'s edges through `tgt`.  A FILTER-
       // certified pierce (r==1) records directly.  A filter-refused (-1)
-      // GENUINE transversal exact-zero tie - not a cluster riser, not a benign
-      // graze, and the pair is non-coplanar - is DECIDED by the single-global
+      // GENUINE transversal exact-zero tie - not an incident-noncoplanar-face
+      // case, not a benign boundary-degenerate hit, and with a non-coplanar
+      // pair - is DECIDED by the single-global
       // SoS (EdgePiercesTriSoS): the stage-6 completion of the vertex-on-face /
-      // edge-on-edge tie family.  Coplanar / cluster-riser / benign ties record
-      // nothing (the fold or the valid-manifold structure owns them).
+      // edge-on-edge tie family.  Coplanar / incident-noncoplanar-face / benign
+      // ties record nothing (the coplanar arrangement or the valid-manifold
+      // structure owns them).
       auto recordEdge = [&](int owner, int e, int tgt) {
         const vec3& u = A.tri[owner][e];
         const vec3& w = A.tri[owner][(e + 1) % 3];
@@ -2135,17 +2179,19 @@ BuildArrangement RecordSeams(const Manifold::Impl& in,
                                 A.vid[tgt][1], A.vid[tgt][2]);
           if (sp == 1) hit = true;
         }
-        // CAP-PLANE SEAM ENDPOINT (coplanar/transversal junction completion):
+        // COPLANAR-CLUSTER-PLANE INTERSECTION-SEGMENT ENDPOINT
+        // (coplanar/transversal junction completion):
         // when BOTH faces of a wall-wall pair are non-cluster (neither is a
-        // folded cap) but `owner`'s edge LIES in a coplanar cap cluster plane
+        // coplanar cluster) but `owner`'s edge LIES in a coplanar-cluster plane
         // and PROPERLY CROSSES `tgt`'s plane (both endpoints strictly off it,
         // on opposite sides) at a point on/inside `tgt`'s triangle, that
-        // crossing is a genuine transversal seam endpoint sitting ON the cap
-        // fold's in-plane arrangement (an overlap-corner vertex the fold also
-        // emits). edgeInClusterPlane's blanket suppression would drop it,
-        // truncating the seam (nPts==1) at the junction; recording it gives the
-        // endpoint the fold arrangement's identity so the seamed wall and the
-        // folded cap weld shut at the reentrant corner.  The symmetric
+        // crossing is a genuine transversal intersection-segment endpoint on
+        // the coplanar arrangement (an overlap-corner vertex the arrangement
+        // also emits). edgeInClusterPlane's blanket suppression would drop it,
+        // truncating the intersection segment (nPts==1) at the junction;
+        // recording it gives the endpoint the coplanar arrangement's identity
+        // so the intersection-split wall and coplanar-cluster face merge shut
+        // at the reentrant corner.  The symmetric
         // double-pierce (both walls' cap edges meet here) is deduped below; any
         // mis-/over-recovery only ever makes nPts!=2 -> fail closed, never a
         // wrong resolve.
@@ -2164,11 +2210,12 @@ BuildArrangement RecordSeams(const Manifold::Impl& in,
       };
       for (int e = 0; e < 3; ++e) recordEdge(i, e, j);
       for (int e = 0; e < 3; ++e) recordEdge(j, e, i);
-      // Dedup endpoints within the weld radius: a cap-plane reentrant junction
+      // Dedup endpoints within eps: a coplanar-cluster-plane reentrant junction
       // is pierced by BOTH walls' cap edges (the symmetric corner incidence)
-      // and so is recorded twice; the emission weld would merge them anyway.
-      // Genuine distinct seam endpoints are far more than eps apart, so an
-      // ordinary seam is untouched (bitwise).
+      // and so is recorded twice; emission's vertex merge would combine them
+      // anyway.
+      // Genuine distinct intersection-segment endpoints are far more than eps
+      // apart, so an ordinary intersection segment is untouched (bitwise).
       const int nPtsPre = nPts;
       for (int a = 0; a + 1 < nPts; ++a)
         for (int b = nPts - 1; b > a; --b)
@@ -2182,33 +2229,35 @@ BuildArrangement RecordSeams(const Manifold::Impl& in,
       // the recorded off-vertex crossing and V is the shared corner (on both
       // planes, on both boundaries).  The edges incident to V only TOUCH at V
       // (not a transversal pierce), so V is not collected; supply it as the
-      // second seam endpoint (on both faces' boundary).
+      // second intersection-segment endpoint (on both faces' boundary).
       if (nPts == 1 && recoveredSV && nShared == 1 &&
           la::length(pts[0] - svPos) > eps) {
         pts[1] = svPos;
         nPts = 2;
       }
       if (nPts != 2) {
-        // PHANTOM-SEAM GUARD (reg3d-oscad REOPEN).  A lone / absent endpoint is
-        // a genuine seam only where the pair CROSSES TRANSVERSALLY.  Exact
-        // rational reconstruction of the imported-soup residue showed the
-        // dominant nPts==1 truncations are MEASURE-ZERO contacts (coincident-
-        // vertex duplicates, vertex-on-edge / vertex-on-face T-junctions,
-        // collinear edge-on-edge overlaps) whose exact tri-tri intersection is
-        // a POINT or a boundary segment - the filter/SoS recorded a PHANTOM
-        // endpoint but a valid arrangement has NO seam there (proven exactly:
-        // not one has a clean off-plane edge piercing the other's strict
-        // interior).
+        // SPURIOUS-INTERSECTION CHECK (reg3d-oscad REOPEN).  A lone / absent
+        // endpoint is a genuine intersection segment only where the pair
+        // CROSSES TRANSVERSALLY.  Exact rational reconstruction of the
+        // imported-soup residue showed the dominant nPts==1 truncations are
+        // MEASURE-ZERO contacts (coincident- vertex duplicates, vertex-on-edge
+        // / vertex-on-face T-junctions, collinear edge-on-edge overlaps) whose
+        // exact tri-tri intersection is a POINT or a boundary segment - the
+        // filter/SoS recorded a spurious endpoint but a valid arrangement has
+        // NO intersection segment there (proven exactly: not one has a clean
+        // off-plane edge piercing the other's strict interior).
         //
-        // SUB-EPS SEAM COLLAPSE (witness theorem): if two or more endpoints
-        // were collected but the dedup merged them under the weld radius to a
-        // single point (nPtsPre>=2 -> nPts==1), the seam degenerates to a point
-        // below eps and its endpoints weld - the cancel/collapse case.  It
+        // SUB-EPS INTERSECTION-SEGMENT COLLAPSE (witness theorem): if two or
+        // more endpoints were collected but the dedup merged them under eps to
+        // a single point (nPtsPre>=2 -> nPts==1), the intersection segment
+        // degenerates to a point below eps and its endpoints merge - the
+        // cancel/collapse case.  It
         // contributes NO split; skip it.  Exact (no re-derivation): only a pair
         // that actually recorded a second endpoint within eps collapses, so a
-        // genuine >eps seam cannot be dropped here.
+        // genuine >eps intersection segment cannot be dropped here.
         if (nPts == 1 && nPtsPre >= 2) continue;
-        // MEASURE-ZERO CONTACT: a seam is real only where an edge CLEANLY
+        // MEASURE-ZERO CONTACT: an intersection segment is real only where an
+        // edge CLEANLY
         // pierces the other's STRICT interior - both endpoints strictly off the
         // plane on OPPOSITE sides AND the crossing strictly inside the triangle
         // (all three edge-edge orientations one nonzero sign).  This is the
@@ -2216,10 +2265,11 @@ BuildArrangement RecordSeams(const Manifold::Impl& in,
         // sign is completed by the EXACT predicate (Orient3DExactSign, filter-
         // first), and ANY exact-zero - an endpoint exactly ON the plane
         // (vertex-on-face / edge T-junction) or a crossing exactly ON the
-        // triangle boundary (collinear edge-on-edge graze) - is a MEASURE-ZERO
+        // triangle boundary (collinear edge-on-edge boundary-degenerate hit) -
+        // is a MEASURE-ZERO
         // contact, NOT a clean pierce, so that edge is skipped.  It must NOT be
         // handed to the SoS convention (EdgePiercesTriSoS): SoS answers "which
-        // way under perturbation", which manufactures a PHANTOM pierce out of
+        // way under perturbation", which manufactures a spurious pierce out of
         // exactly these measure-zero contacts (the openscad soup is dense with
         // them; the oscad-reopen exact reconstruction proved NONE has a clean
         // strict-interior pierce).  A genuine near-tangent crossing the filter
@@ -2273,7 +2323,7 @@ inline int DominantAxis(const vec3& n) {
 // planes, so a sorted key feeds identical bits for all three incident faces.
 // Returns false on a (near-)degenerate triple (planes not independent): the
 // caller then declines to pre-split and the crossing falls to the pos2in
-// fail-closed backstop - never a garbage constructed vertex.
+// fail-closed final validation - never a garbage constructed vertex.
 bool Intersect3Planes(const vec3& n0, const vec3& a0, const vec3& n1,
                       const vec3& a1, const vec3& n2, const vec3& a2,
                       vec3& out) {
@@ -2291,7 +2341,8 @@ bool Intersect3Planes(const vec3& n0, const vec3& a0, const vec3& n1,
 // of the surviving axis pair as the padded orient3d (embed at z=0, lift the
 // first point in +z) through the ONE blessed exact predicate FORM
 // (Orient3DExactSign), FILTER-FIRST - the SAME exact helper the input-vertex
-// T-junction arm (InputVertexStrictlyOnEdge) now uses for its collinearity
+// T-junction contribution (InputVertexStrictlyOnEdge) now uses for its
+// collinearity
 // test.  Dropping the dominant normal axis keeps the projection non-degenerate.
 // NO new predicate FORM, NO exact-on-constructed (dyadic input coords only).
 // The crossing test below compares only relative signs, so handedness is moot.
@@ -2333,7 +2384,8 @@ inline bool CanonTriplePos(const BuildArrangement& A, int r0, int r1, int r2,
 
 // Winding seeds: a few far points in unrelated directions off the bbox (the
 // coupled winding is single-valued off-surface, so any certified seed is
-// authoritative; several give the robust-winding graze fallbacks).
+// authoritative; several give the robust-winding boundary-degenerate-hit
+// fallbacks).
 std::vector<vec3> WindingSeeds(const Box& bBox) {
   const vec3 c = bBox.Center();
   const double L = bBox.Scale() + 1.0;
@@ -2342,10 +2394,12 @@ std::vector<vec3> WindingSeeds(const Box& bBox) {
           c + L * vec3(2.39, -4.61, 3.07),  c + L * vec3(-1.51, 3.89, -4.43)};
 }
 
-// ========================= E1 COORDINATED ENGINE ===========================
-// The single emission engine for every dirty component. It builds one
+// ===================== COORDINATED-BOUNDARY EMITTER =========================
+// The single emission path for every component that needs regularization. It
+// constructs one
 // coordinated arrangement across geometric plane groups, emits the boundary of
-// {w_S >= 1}, then passes the ordinary BuildImpl gate and component re-gate.
+// {w_S >= 1}, then passes ordinary BuildImpl validation and component output
+// validation.
 // Any incomplete or contradictory arrangement fails closed.
 //
 // The recipe (validated offline in exact rationals, e1engine notebook: the
@@ -2355,16 +2409,20 @@ std::vector<vec3> WindingSeeds(const Box& bBox) {
 //      GEOMETRIC coplanarity (anti-oriented coplanar faces share a group with
 //      sign -1), so coincident sheets are classified ONCE with a net covering
 //      jump.
-//   2. Segments per group: member triangle edges + the recorded seams
-//      found by the engine's input-exact pair scan. Cross-plane subdivision
-//      T-consistency is BY SHARED DOUBLES: seam endpoints are stored once per
+//   2. Segments per group: member triangle edges + the recorded intersection
+//   segments
+//      found by the coordinated-boundary emitter's input-exact pair scan.
+//      Cross-plane subdivision T-consistency is BY SHARED DOUBLES:
+//      intersection-segment endpoints are stored once per
 //      pair, triple crossings once per sorted plane triple (CanonTriplePos),
-//      and the per-line registry gives every group identical split-point bits.
+//      and the per-line shared split-point table gives every group identical
+//      split-point bits.
 //   3. Crossing EXISTENCE is INPUT-EXACT and symmetric (IXOrient2D strict
 //      point-in-triangle of the triple against all four bounding triangles),
 //      so any two groups agree on every split by construction.  No filter in
 //      front (a rounded-basis certificate can disagree with input-exact truth
-//      - inexact-basis); the engine runs once, on one failing component.
+//      - inexact-basis); the coordinated-boundary emitter runs once, on one
+//      component that needs regularization.
 //   4. Cells by rotation-system trace with an EXACT angular comparator
 //      (ExactOrient2DDrop on the shared doubles - no atan2, the exact2d
 //      fold-back lesson).  Pinched loops are kept WHOLE (a cell's islands ring
@@ -2381,20 +2439,22 @@ std::vector<vec3> WindingSeeds(const Box& bBox) {
 //   6. Boundary cells ({w>=1} transition) triangulated as polygons-WITH-HOLES
 //      by the shared EXACT triangulator (manifold::exacttri, polygon.cpp;
 //      exact diagonal-split - earclip is not hole-safe), oriented per-triangle
-//      toward the exterior; assembled by the ordinary BuildImpl eps-weld (the
-//      offline run proved the once-rounded coordinated soup position-welds
-//      CLOSED - identity plumbing through the weld is not needed: shared
+//      toward the exterior; assembled by the ordinary BuildImpl eps vertex
+//      merge (the offline run proved the once-rounded coordinated soup merges
+//      CLOSED - identity plumbing through vertex merging is not needed: shared
 //      doubles make every coincident vertex byte-equal).
-namespace e1 {
+namespace coordinated {
 
 // The exact drop-frame helpers + the exact earclip/diagonal-split triangulator
 // RELOCATED to the shared triangulation module (manifold::exacttri,
-// polygon.cpp + polygon_internal.h) - the s2-tri unification.  The resolver's
-// e1:: spelling stays valid at every call site via these using-declarations;
-// the module comment in polygon.cpp records why the engine's cell
-// triangulation must be the EXACT mode (dust-cell orientation is noise at the
-// weld scale; only the exact deterministic diagonalization keeps shared-edge
-// emission anti-correlated across adjacent cells).
+// polygon.cpp + polygon_internal.h) - the s2-tri unification.  The
+// regularizer's
+// coordinated:: spelling stays valid at every call site via these
+// using-declarations; the module comment in polygon.cpp records why the
+// coordinated-boundary emitter's cell triangulation must be the EXACT mode
+// (sub-epsilon-cell orientation is noise at eps; only the exact deterministic
+// diagonalization keeps shared-edge emission anti-correlated across adjacent
+// cells).
 using exacttri::Drop2;
 using exacttri::LoopShoelace;
 using exacttri::O2;
@@ -2404,15 +2464,16 @@ using exacttri::ProperCross2;
 using K3 = std::tuple<double, double, double>;
 inline K3 KeyOf(const vec3& p) { return {p.x, p.y, p.z}; }
 
-}  // namespace e1
+}  // namespace coordinated
 
-// engine seam pair-record (tri-tri intersection segment; `other` = partner)
-struct E1Seam {
+// coordinated-boundary emitter intersection segment pair-record (tri-tri
+// intersection segment; `other` = partner)
+struct IntersectionSegmentRecord {
   vec3 p0, p1;
   int other;
 };
 
-// Immutable setup shared by every BUILD round and the final CONSUME pass.
+// Immutable setup shared by every COLLECT-SPLITS round and the final EMIT pass.
 // Every member is derived solely from the fixed arrangement input A, its
 // component bbox, and the fixed component epsilon.  Construction deliberately
 // preserves the former in-round computation and insertion order verbatim.
@@ -2426,8 +2487,8 @@ struct EngineSetup {
   std::vector<int> fsgn;
   std::vector<Box> fbox;
   std::vector<Box> gbox;
-  std::set<e1::K3> inputVerts;
-  e1::K3 flStarKey{0, 0, 0};
+  std::set<coordinated::K3> inputVerts;
+  coordinated::K3 flStarKey{0, 0, 0};
   TriWindBVH flBvh;
   double scale = 0.0;
   double probeMargin = 0.0;
@@ -2438,7 +2499,7 @@ struct EngineSetup {
 
 EngineSetup BuildEngineSetup(const Manifold::Impl& in,
                              const BuildArrangement& A, double eps) {
-  using e1::KeyOf;
+  using coordinated::KeyOf;
   EngineSetup setup;
   setup.nTri = static_cast<int>(A.tri.size());
   setup.seeds = WindingSeeds(in.bBox_);
@@ -2518,7 +2579,7 @@ EngineSetup BuildEngineSetup(const Manifold::Impl& in,
   {
     bool have = false;
     for (size_t v = 0; v < in.vertPos_.size(); ++v) {
-      const e1::K3 k = KeyOf(in.vertPos_[v]);
+      const coordinated::K3 k = KeyOf(in.vertPos_[v]);
       if (!have || setup.flStarKey < k) {
         setup.flStarKey = k;
         have = true;
@@ -2543,20 +2604,26 @@ EngineSetup BuildEngineSetup(const Manifold::Impl& in,
   return setup;
 }
 
-// TWO-PHASE ENGINE (registry-first): buildPhase writes every split-producing
-// event into the ONE per-line registry (no cells, no classification); the
-// consume phase reads the registry ONLY (zero local reconciliation) and runs
-// the walk/classify/emit machinery.  The wrapper iterates build to a global
-// fixpoint, then consumes once.  seamCache: the ungated seam enumeration
-// depends only on A, so the driver computes it once and every fixpoint
-// round reuses it (it was re-enumerated per round - measured waste).
-StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
+// TWO-PHASE coordinated-boundary emitter (shared-split-point-table-first):
+// collectSplits writes every split-producing event into the ONE per-line shared
+// split-point table (no cells, no classification); the EMIT phase reads the
+// shared split-point table ONLY (zero local reconciliation) and runs the
+// walk/classify/emit machinery.  The wrapper iterates split collection to a
+// global
+// fixpoint, then emits once.  intersectionSegmentCache: the ungated
+// intersection segment enumeration depends only on A, so the driver computes it
+// once and every fixpoint round reuses it (it was re-enumerated per round -
+// measured waste).
+StageResult<Manifold::Impl> RunCoordinatedBoundaryPass(
     const Manifold::Impl& in, const BuildArrangement& A,
     const EngineSetup& setup, double eps,
-    std::map<std::tuple<int, int, int>, std::map<e1::K3, vec3>>& lineReg,
-    std::vector<std::vector<E1Seam>>& seamCache, bool buildPhase) {
-  using e1::K3;
-  using e1::KeyOf;
+    std::map<std::tuple<int, int, int>, std::map<coordinated::K3, vec3>>&
+        lineSplitPoints,
+    std::vector<std::vector<IntersectionSegmentRecord>>&
+        intersectionSegmentCache,
+    bool collectSplits) {
+  using coordinated::K3;
+  using coordinated::KeyOf;
   const int nTri = setup.nTri;
   const int nG = setup.nG;
   const auto& seeds = setup.seeds;
@@ -2576,15 +2643,17 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
   const double stackWin = setup.stackWin;
   auto fail = [](const char* msg) {
     return StageResult<Manifold::Impl>::Fatal(
-        FatalReason::DirtyComponentUnresolved, msg);
+        FatalReason::RegularizationIncomplete, msg);
   };
   std::vector<int> flCands;
 
-  // ---- 1b. ENGINE SEAMS: UNGATED exact tri-tri intersection segments ----
+  // ---- 1b. EMITTER INTERSECTION SEGMENTS: UNGATED exact tri-tri results ----
   // The validation pass is representability-gated (F11 sub-eps collapse,
-  // phantom guard), while the coordinated engine needs the FULL crossing
+  // spurious-intersection check), while the coordinated-boundary emitter needs
+  // the FULL crossing
   // structure: the tiny-dihedral
-  // wedge chords the gates collapse are exactly the in-plane splits whose
+  // wedge intersection-segment contributions collapsed by classification are
+  // exactly the in-plane splits whose
   // absence the completeness certificate caught (a plane 7e-15 away at the
   // probe yet transversal at scale).  Enumerate exactly and ungated:
   //  - vertex side vs a group plane: filter-first exact orient3d against the
@@ -2593,21 +2662,23 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
   //  - a strictly-straddling edge contributes its pierce point, constructed
   //    ONCE per (edge, plane) key via the landed P3 SegPlaneBigHPoint and
   //    rounded once - byte-identical across all pairs and groups (the shared-
-  //    double identity that makes cross-group sub-edges weld);
+  //    double identity that makes cross-group sub-edges merge);
   //  - an exactly-on-plane vertex is itself a candidate (the measure-zero
-  //    contact families: seam-through-vertex, edge-in-plane);
-  //  - a candidate joins the seam iff INCLUSIVELY inside the OTHER triangle
-  //    (input-exact IXOrient2D signs); 2 survivors = the seam segment, >2
-  //    (degenerate contacts) = the extremes along the plane-pair direction.
-  using ESeam = E1Seam;
+  //    contact families: intersection segment-through-vertex, edge-in-plane);
+  //  - a candidate joins the intersection segment iff INCLUSIVELY inside the
+  //  OTHER triangle
+  //    (input-exact IXOrient2D signs); 2 survivors = the intersection segment
+  //    segment, >2 (degenerate contacts) = the extremes along the plane-pair
+  //    direction.
   std::vector<vec3> cand;  // hoisted pair-candidate scratch (alloc churn)
-  const bool seamCached = !seamCache.empty();
-  if (!seamCached) seamCache.resize(nTri);
-  std::vector<std::vector<ESeam>>& eSeams = seamCache;
-  // hoisted memos (the completion pass constructs edge x seam crossings as
-  // PIERCE identities - the exact once-only construction on BOTH lines)
-  // packed-key hash memos (profiled: the ordered-map lookups per pair were
-  // a top-of-profile cost on GT7081's dense near-tangent pair set)
+  const bool intersectionSegmentsCached = !intersectionSegmentCache.empty();
+  if (!intersectionSegmentsCached) intersectionSegmentCache.resize(nTri);
+  std::vector<std::vector<IntersectionSegmentRecord>>&
+      intersectionSegmentsByFace = intersectionSegmentCache;
+  // hoisted memos (the completion pass constructs edge x intersection segment
+  // crossings as PIERCE identities - the exact once-only construction on BOTH
+  // lines) packed-key hash memos (profiled: the ordered-map lookups per pair
+  // were a top-of-profile cost on GT7081's dense near-tangent pair set)
   std::unordered_map<int64_t, int> sideCache;  // (vid<<32|gid) -> sign
   std::unordered_map<int64_t, vec3> pierceCache;
   auto sideKey = [](int vid2, int q) {
@@ -2630,7 +2701,7 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
     pierceCache.emplace(key, P);
     return P;
   };
-  if (!seamCached) {
+  if (!intersectionSegmentsCached) {
     auto sideOf = [&](int f, int k, int q) -> int {
       const int64_t key = sideKey(A.vid[f][k], q);
       const auto it = sideCache.find(key);
@@ -2668,9 +2739,10 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
         // EARLY PAIR REJECT (sound): a genuine tri-tri crossing needs a
         // plane straddle; if every vertex of one triangle sits STRICTLY one
         // side of the other's rep plane with a margin nine-plus orders above
-        // the double dot's rounding, the pair has no seam.  (Profiled: the
-        // per-pair memo/alloc constant on the dense GT7081 pair set was the
-        // enumeration wall; most pairs are box-close but plane-separated.)
+        // the double dot's rounding, the pair has no intersection segment.
+        // (Profiled: the per-pair memo/alloc constant on the dense GT7081 pair
+        // set was the enumeration wall; most pairs are box-close but
+        // plane-separated.)
         auto farOneSide = [&](int fa, int fb) -> bool {
           const int q = gid[fb];
           const vec3& nq = A.faceN[rep[q]];
@@ -2729,14 +2801,16 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
               // ~1e-15*scale^2; the margin sits NINE-plus orders above it -
               // a verdict outside the margin band cannot flip.  Only the
               // margin band pays the Big construction + exact inclusion
-              // (the per-pair Big tests were the GT7081 seam wall: 177s).
+              // (the per-pair Big tests were the GT7081 intersection segment
+              // wall: 177s).
               const int axF = DominantAxis(A.faceN[fb]);
               int cPos = 0, cNeg = 0;
               double dMin = std::numeric_limits<double>::infinity();
               for (int ee = 0; ee < 3; ++ee) {
-                const vec2 a2 = e1::Drop2(A.tri[fb][ee], axF);
-                const vec2 b2 = e1::Drop2(A.tri[fb][(ee + 1) % 3], axF);
-                const vec2 p2 = e1::Drop2(P, axF);
+                const vec2 a2 = coordinated::Drop2(A.tri[fb][ee], axF);
+                const vec2 b2 =
+                    coordinated::Drop2(A.tri[fb][(ee + 1) % 3], axF);
+                const vec2 p2 = coordinated::Drop2(P, axF);
                 const double det = la::cross(b2 - a2, p2 - a2);
                 dMin = std::min(dMin, std::abs(det));
                 if (det > 0.0) ++cPos;
@@ -2773,13 +2847,13 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
           }
           if (KeyOf(p0) == KeyOf(p1)) continue;
         }
-        eSeams[f].push_back({p0, p1, f2});
-        eSeams[f2].push_back({p0, p1, f});
+        intersectionSegmentsByFace[f].push_back({p0, p1, f2});
+        intersectionSegmentsByFace[f2].push_back({p0, p1, f});
       }
     }
   }
 
-  // canonical engine triple positions, once per sorted gid triple
+  // Canonical emitter triple positions, once per sorted gid triple.
   std::map<std::array<int, 3>, std::pair<bool, vec3>> tripleCache;
   auto triplePos = [&](int g0, int g1, int g2, vec3& pos) -> bool {
     std::array<int, 3> key = {g0, g1, g2};
@@ -2812,25 +2886,28 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
   // MEMOIZED CONSTRUCTION (owner directive; the campaign's memoize-values
   // principle = the stage-2 shape): every constructed point is committed
   // ONCE under its canonical identity; every later path LOOKS IT UP -
-  // bit-equality by construction.  Identities: seam endpoints (edge vids,
+  // bit-equality by construction.  Identities: intersection-segment endpoints
+  // (edge vids,
   // plane gid) -> pierceCache; triples (sorted gid triple) -> tripleCache;
   // pair crossings (unordered segment-identity pair) -> crossMemo; feet
   // (vertex bits, segment identity) -> footMemo.  A segment's identity is
   // its endpoint bit-pair (endpoints are themselves committed identities).
-  using SegKey = std::pair<e1::K3, e1::K3>;
+  using SegKey = std::pair<coordinated::K3, coordinated::K3>;
   auto segKeyOf = [](const vec3& p0, const vec3& p1) -> SegKey {
-    const e1::K3 a = e1::KeyOf(p0), b = e1::KeyOf(p1);
+    const coordinated::K3 a = coordinated::KeyOf(p0),
+                          b = coordinated::KeyOf(p1);
     return a < b ? SegKey{a, b} : SegKey{b, a};
   };
-  std::map<std::pair<e1::K3, SegKey>, vec3> footMemo;
+  std::map<std::pair<coordinated::K3, SegKey>, vec3> footMemo;
   int triFail = 0, spliceFail = 0;
   // ==== FLOOD WINDING FIELD (flip arc stage 1) ==============================
   // The component-global integer winding field over the arrangement cells.
   // Field value E(c) = the EXACT winding of the epsilon-layer immediately on
   // the +nHat side of cell c's group plane.  The eps-layer is the right field
   // variable because its lateral deltas are purely COMBINATORIAL: crossing a
-  // sub-edge crosses exactly the chord-partner sheets ON that sub-edge (a
-  // sheet without a chord there cannot separate the two eps-layers - the
+  // sub-edge crosses exactly the intersection-segment-contribution sheets ON
+  // that sub-edge (a sheet without an intersection-segment contribution there
+  // cannot separate the two eps-layers - the
   // mesh-edge cleanliness argument, exact as eps -> 0), with sign
   // -sgn(dot(t_out, n_partner)).  The per-cell probe value converts
   // VERTICALLY: wA = E - sPosMid (sPosMid = signed count of covering foreign
@@ -2840,36 +2917,39 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
   // exterior (w=0, no ray cast: the lex-max of a compact polyhedron is a
   // vertex) and lies on the lexsign side of every plane through v*, so a
   // group with exactly one node cell touching v* anchors combinatorially;
-  // (b) residual probes (one decided exact winding anchors each subgraph).
+  // (b) residual probes (one certified exact winding anchors each component).
   // BFS
-  // propagates only over predicate-DECIDED edges.  Grazed edges partition the
-  // graph; each resulting subgraph receives one absolute anchor.  A conflict
-  // among decided edges is an invariant violation and fails closed.
+  // propagates only over predicate-certified edges. Uncertified edges partition
+  // the graph; each resulting component receives one absolute anchor. A
+  // conflict among certified edges is an invariant violation and fails closed.
   // FLOOD-PRIMARY (session 3): the field values every cell; the exact probe
   // remains as (a) the one absolute anchor for every non-outer subgraph and
-  // (b) the E1_FLOODDIFF shadow validator.
-  struct FlNode {
+  // (b) the OVERLAP3_VALIDATE_WINDING_FIELD differential validator.
+  struct WindingNode {
     int jump = 0, ownJump = 0;
     int sPosMid = 0;       // covering sheets with stackWin < tPos < 2T at cenP
     int sZero = 0;         // covering foreign sheets with tPos == 0 at cenP
     bool hasBand = false;  // any covering sheet inside the sub-resolution
                            // band (|tPos| <= stackWin): its side is not
-                           // double-resolvable (the engine's stack class)
-    bool pancake = false;
-    bool emit = false;  // carries emission payload (jump!=0 or pancake)
-    // probeState: 0 unprobed, 1 certified (probeWA/WB valid), 2 grazed,
+                           // double-resolvable (the coordinated-boundary
+                           // emitter's stack class)
+    bool zeroNetLayer = false;
+    bool emit = false;  // carries emission payload (jump!=0 or zeroNetLayer)
+    // probeState: 0 unprobed, 1 certified (probeWA/WB valid), 2 predicate
+    // uncertain,
     // 3 probed but certificate failed
     signed char probeState = 0;
     // anchor-grade: a two-sided exact winding certificate at the BASE offset;
     // ladder-retried or non-boundary-accepted readings never anchor the field.
     bool anchorOK = false;
-    bool certified = false;  // == (probeState == 1), for E1_FLOODDIFF
+    bool certified =
+        false;  // == (probeState == 1), for differential validation
     int probeWA = 0, probeWB = 0;
     vec3 cenP;        // projected probe center (residual probing)
     double off = 0;   // probe offset 2T
-    double extW = 0;  // largest-subtri altitude (the dust-width rule)
+    double extW = 0;  // largest-subtriangle altitude (sub-epsilon-width rule)
     vec3 Nrep;
-    std::vector<std::pair<double, int>> stackSheets;  // pancake layer cert
+    std::vector<std::pair<double, int>> layerCrossings;  // layer certificate
     // covering foreign sheets at cenP: (face, state, sgn(dot(n,nHat)))
     // with state +1 ABOVE (tPos > stackWin), 0 MID (in-band), -1 BELOW -
     // sorted by face; the field level E' sits just above the MID band, so
@@ -2878,24 +2958,27 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
     std::vector<ivec3> tris;  // emission payload
     std::map<int, vec3> pos;  // emission payload
   };
-  std::vector<FlNode> flNodes;
-  struct FlEdge {
+  std::vector<WindingNode> flNodes;
+  struct WindingEdge {
     int n0, n1, delta;
-    int tag;       // contributing-arm bitmask for the differential census
-    bool decided;  // every predicate contributing to delta was decisive
+    int tag;         // contribution-source bitmask for the differential census
+    bool certified;  // every predicate contributing to delta was certified
   };
-  // E(n1) = E(n0) + delta.  Tags: 1 straddle-chord, 2 touch-chord,
-  // 4 ridge, 8 parity, 32 handoff, 64 handoff-leg-correction.
-  std::vector<FlEdge> flEdges;
-  struct FlHandRecord {
+  // E(n1) = E(n0) + delta. Tags: 1 transversal-intersection contribution,
+  // 2 attached-edge contribution, 4 paired-face contribution,
+  // 8 unrepresented-crossing parity correction, 32 cross-group constraint,
+  // 64 center-to-edge correction.
+  std::vector<WindingEdge> flEdges;
+  struct CrossGroupConstraintRecord {
     int node, eOff;
-    bool decided;
-    bool groupConserved;
+    bool correctionCertified;
+    bool correctionCoverageConserved;
   };
-  // handoff records: (input vid pair, sub-edge position bits) ->
+  // Cross-group constraint records: (input vid pair, sub-edge position bits) ->
   // (node, eOff) with the invariant E(node) + eOff equal on both sides
-  std::map<std::pair<std::pair<int, int>, SegKey>, std::vector<FlHandRecord>>
-      flHand;
+  std::map<std::pair<std::pair<int, int>, SegKey>,
+           std::vector<CrossGroupConstraintRecord>>
+      crossGroupConstraints;
   std::vector<std::pair<int, int>> flSeeds;  // (node, anchored E value)
   auto flLexsign = [](const vec3& n) -> int {
     if (n.x != 0.0) return n.x > 0.0 ? 1 : -1;
@@ -2903,7 +2986,8 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
     if (n.z != 0.0) return n.z > 0.0 ? 1 : -1;
     return 0;
   };
-  static const bool kFloodDiff = std::getenv("E1_FLOODDIFF") != nullptr;
+  static const bool kValidateWindingField =
+      std::getenv("OVERLAP3_VALIDATE_WINDING_FIELD") != nullptr;
   for (int g = 0; g < nG; ++g) {
     // flood graph collection (this group's arrangement):
     // sub-edge (lo,hi vertex ids) -> contributing segment indices
@@ -2928,7 +3012,7 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
         // canonical vid order with matching positions); sorted at use sites
         segs.push_back({A.tri[f][e], A.tri[f][(e + 1) % 3], -1, f, -1, v0, v1});
       }
-      for (const ESeam& s : eSeams[f])
+      for (const IntersectionSegmentRecord& s : intersectionSegmentsByFace[f])
         segs.push_back({s.p0, s.p1, gid[s.other], f, s.other});
     }
     const vec3 Nrep = A.faceN[rep[g]];
@@ -2937,10 +3021,11 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
     // STACK (sub-double-resolution near-coincident sheets): a foreign face
     // whose plane sits closer than any double probe can separate is treated
     // as part of ONE effective sheet with this group: its EDGES join the
-    // arrangement (as shadow segments - the same input-vert doubles on both
-    // groups, so the cross-group boundary welds), its covering sign joins the
+    // arrangement (as mirrored segments - the same input-vertex doubles on
+    // both groups, so the cross-group boundary merges), its covering sign joins
+    // the
     // NET jump, and only the LOWEST gid of the covering stack emits.  (The
-    // exact-rational offline engine probed between such sheets; doubles
+    // exact-rational offline emitter probed between such sheets; doubles
     // cannot - the certificate measured planes 1.7e-14 apart, below ULP.)
     const Box& groupBox = gbox[g];
     std::vector<int> stackFaces;
@@ -2966,17 +3051,18 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
     }
     const int nS = static_cast<int>(segs.size());
 
-    // ---- BUILD PHASE ONLY: the split producers (crossing enumeration,
-    // T-junction pool, foot exchange, planarity completion) write into the
-    // registry via addSplit; the consume phase reads the registry only.
-    // ---- 3. splits: engine triples (input-exact, symmetric) + registry ----
+    // ---- COLLECT-SPLITS PHASE ONLY: the split producers (crossing
+    // enumeration, T-junction pool, foot exchange, planarity completion) write
+    // into the shared split-point table via addSplit; the EMIT phase reads the
+    // shared split-point table only.
+    // ---- 3. splits: emitter triples + shared split-point table ------------
     std::vector<std::vector<std::pair<double, vec3>>> splits(nS);
     // CANONICAL VERTEX GRID (rounding-scale): every split point is snapped
     // onto any existing vertex within ~64 ULP before entering the
     // arrangement.  Derivation noise (retry interpolations, triple-vs-drawn
     // constructions) otherwise accumulates ULP-VARIANT chains of the same
-    // geometric vertex with degenerate sliver cells between them; the weld
-    // drops those slivers and their pairing halfedges (measured: four
+    // geometric vertex with degenerate sliver cells between them; vertex
+    // merging drops those slivers and their pairing halfedges (measured: four
     // 5e-16-apart variants of one vertex around an open edge).  The radius is
     // far below representable structure - this collapses noise, not geometry.
     // OWNER INVARIANTS (snap-grid review): (1) the snap applies to
@@ -3021,7 +3107,7 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
     // its own rounding as a segment endpoint, so one line's chain ended at
     // the input bits while the crossing line's chain ran through the pierce
     // bits with NO adjacency between them - the rotation walk then sews the
-    // two fans into one self-overlapping macro cell whose boundary is
+    // two fans into one self-overlapping above-epsilon cell whose boundary is
     // oracle-false (measured: the (-17.9,0.6,-204) junction, twins 3.3e-15
     // apart, the whole z=-204 over/under-emission family).  Input-first
     // ordering makes the adopted identity deterministic and input-preferring.
@@ -3033,9 +3119,9 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
       if (!inputVerts.count(KeyOf(s.p0))) s.p0 = canonV(s.p0);
       if (!inputVerts.count(KeyOf(s.p1))) s.p1 = canonV(s.p1);
     }
-    // PER-LINE REGISTRY key: seams by plane-gid pair; mesh edges by vid pair
-    // (one geometric line = one split list, shared by every segment record
-    // and every group on it)
+    // PER-LINE SHARED SPLIT-POINT TABLE key: intersection segments by plane-gid
+    // pair; mesh edges by vid pair (one geometric line = one split list, shared
+    // by every segment record and every group on it)
     auto lineKeyOf = [&](int si) -> std::tuple<int, int, int> {
       if (segs[si].planeQ >= 0) {
         const auto pq = std::minmax(g, segs[si].planeQ);
@@ -3048,10 +3134,10 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
     // committed identities (pierces / input verts); registering them on the
     // line lets every OTHER record of the line split at record boundaries -
     // otherwise a longer record spans past a shorter one's end and the
-    // handoff stub opens (the measured residue class).
-    if (buildPhase)
+    // cross-group-constraint stub opens (the measured residue class).
+    if (collectSplits)
       for (int i = 0; i < nS; ++i) {
-        auto& ent = lineReg[lineKeyOf(i)];
+        auto& ent = lineSplitPoints[lineKeyOf(i)];
         ent.emplace(KeyOf(segs[i].p0), segs[i].p0);
         ent.emplace(KeyOf(segs[i].p1), segs[i].p1);
       }
@@ -3066,23 +3152,23 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
       // of an endpoint leaves a REAL crossing in the drawn graph (non-planar
       // walk - measured in the near-duplicate zigzag zones where crossings
       // crowd the endpoints); splitting there merely creates a sub-eps
-      // sliver sub-edge that welds away.
+      // sliver sub-edge that merges away.
       const double tlo = rho / std::sqrt(len2);
       if (!(t > tlo && t < 1.0 - tlo)) return false;  // strictly interior
       for (const auto& pr : splits[si])
         if (KeyOf(pr.second) == KeyOf(V)) return false;
       splits[si].push_back({t, V});
-      if (buildPhase) lineReg[lineKeyOf(si)].emplace(KeyOf(V), V);
+      if (collectSplits) lineSplitPoints[lineKeyOf(si)].emplace(KeyOf(V), V);
       return true;
     };
-    // PER-LINE REGISTRY READ (both phases): every line's accumulated split
-    // union - seams by plane pair, mesh edges by vid pair - lands on every
-    // segment record of that line, across groups.  ON-LINE GUARD: one
-    // plane-pair key can span near-tangent lens records microns apart; an
-    // entry only lands where it lies on THIS segment's line.
+    // PER-LINE SHARED SPLIT-POINT TABLE READ (both phases): every line's
+    // accumulated split union - intersection segments by plane pair, mesh edges
+    // by vid pair - lands on every segment record of that line, across groups.
+    // ON-LINE GUARD: one plane-pair key can span near-tangent lens records
+    // microns apart; an entry only lands where it lies on THIS segment's line.
     for (int i = 0; i < nS; ++i) {
-      const auto it = lineReg.find(lineKeyOf(i));
-      if (it == lineReg.end()) continue;
+      const auto it = lineSplitPoints.find(lineKeyOf(i));
+      if (it == lineSplitPoints.end()) continue;
       const Seg& s = segs[i];
       const vec3 d3 = s.p1 - s.p0;
       const double len2 = la::dot(d3, d3);
@@ -3095,23 +3181,23 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
         addSplit(i, V);
       }
     }
-    if (buildPhase) {
+    if (collectSplits) {
       for (int i = 0; i < nS; ++i) {
         if (segs[i].planeQ < 0) continue;
         for (int j = i + 1; j < nS; ++j) {
           if (segs[j].planeQ < 0 || segs[j].planeQ == segs[i].planeQ) continue;
-          // quick reject: 2D bboxes of the two seams disjoint
-          const vec2 a0 = e1::Drop2(segs[i].p0, axis),
-                     a1 = e1::Drop2(segs[i].p1, axis),
-                     b0 = e1::Drop2(segs[j].p0, axis),
-                     b1 = e1::Drop2(segs[j].p1, axis);
+          // quick reject: 2D bboxes of the two intersection segments disjoint
+          const vec2 a0 = coordinated::Drop2(segs[i].p0, axis),
+                     a1 = coordinated::Drop2(segs[i].p1, axis),
+                     b0 = coordinated::Drop2(segs[j].p0, axis),
+                     b1 = coordinated::Drop2(segs[j].p1, axis);
           if (std::max(a0.x, a1.x) < std::min(b0.x, b1.x) - eps ||
               std::max(b0.x, b1.x) < std::min(a0.x, a1.x) - eps ||
               std::max(a0.y, a1.y) < std::min(b0.y, b1.y) - eps ||
               std::max(b0.y, b1.y) < std::min(a0.y, a1.y) - eps)
             continue;
           // exact symmetric existence: X = {g, Qi, Qj} strictly interior to all
-          // four bounding triangles (both seams' extents)
+          // four bounding triangles (both intersection segments' extents)
           if (!tripleInTri(g, segs[i].planeQ, segs[j].planeQ, segs[i].fOwn))
             continue;
           if (!tripleInTri(g, segs[i].planeQ, segs[j].planeQ, segs[i].fOther))
@@ -3127,18 +3213,18 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
           addSplit(j, X);
         }
       }
-      // T-junction splits use the group's own segment endpoints (engine seam
-      // ends and member corners), with the same on-line rule in every group.
-      // Wider eps-deduped representatives would sit off the exact lines and
-      // bend the chains; the bent
-      // sub-chains then properly cross and fragment the walk (measured: a split
-      // cascade). OUTER FIXPOINT: the exchange and the completion feed each
-      // other - a completion-added crossing (ill-conditioned on near-collinear
-      // pairs: the same line's overlapping segments each get their own noisy
-      // crossing position) must be EXCHANGED onto every collinear twin, and
-      // exchanged points can expose new crossings.  (Measured: identical-
-      // endpoint twin segments carrying different completion splits 2.4e-5
-      // apart - the T-junction/lens class.)
+      // T-junction splits use the group's own segment endpoints
+      // (coordinated-boundary emitter intersection segment ends and member
+      // corners), with the same on-line rule in every group. Wider eps-deduped
+      // representatives would sit off the exact lines and bend the chains; the
+      // bent sub-chains then properly cross and fragment the walk (measured: a
+      // split cascade). OUTER FIXPOINT: the exchange and the completion feed
+      // each other - a completion-added crossing (ill-conditioned on
+      // near-collinear pairs: the same line's overlapping segments each get
+      // their own noisy crossing position) must be EXCHANGED onto every
+      // collinear twin, and exchanged points can expose new crossings.
+      // (Measured: identical- endpoint twin segments carrying different
+      // completion splits 2.4e-5 apart - the T-junction/lens class.)
       for (int outer = 0; outer < 4; ++outer) {
         size_t nsplit0 = 0;
         for (int i = 0; i < nS; ++i) nsplit0 += splits[i].size();
@@ -3180,30 +3266,32 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
         }
 
         // PLANARITY COMPLETION (all remaining segment-pair crossings): the
-        // exact seam-x-seam enumeration and the endpoint pool cover the
-        // canonical crossings, but the drawn (rounded) graph must be PLANAR for
-        // the face walk - overlapping coplanar members (the fold structure)
-        // cross member edges and same-line seams in ways the passes above miss
+        // exact intersection-segment x intersection-segment enumeration and
+        // the endpoint pool cover the canonical crossings, but the drawn
+        // (rounded) graph must be PLANAR for the face walk - overlapping
+        // coplanar-arrangement members cross member edges and same-line
+        // intersection segments in ways the passes above miss
         // (measured: properly-crossing sub-edges -> bowtie walks ->
         // untriangulable cells). Detect every remaining proper crossing exactly
         // on the shared rounded endpoints and split both segments; the split
-        // point uses the canonical triple when both carriers are seams of
-        // distinct planes, else the in-segment interpolation (identity across
-        // groups holds within weld tolerance via the shared-endpoint
+        // point uses the canonical triple when both sources are intersection
+        // segments of distinct planes, else the in-segment interpolation
+        // (identity across groups holds within merge tolerance via the
+        // shared-endpoint
         // constructions).
         for (int i = 0; i < nS; ++i) {
-          const vec2 a0 = e1::Drop2(segs[i].p0, axis),
-                     a1 = e1::Drop2(segs[i].p1, axis);
+          const vec2 a0 = coordinated::Drop2(segs[i].p0, axis),
+                     a1 = coordinated::Drop2(segs[i].p1, axis);
           for (int j = i + 1; j < nS; ++j) {
-            const vec2 b0 = e1::Drop2(segs[j].p0, axis),
-                       b1 = e1::Drop2(segs[j].p1, axis);
+            const vec2 b0 = coordinated::Drop2(segs[j].p0, axis),
+                       b1 = coordinated::Drop2(segs[j].p1, axis);
             if (std::max(a0.x, a1.x) < std::min(b0.x, b1.x) - eps ||
                 std::max(b0.x, b1.x) < std::min(a0.x, a1.x) - eps ||
                 std::max(a0.y, a1.y) < std::min(b0.y, b1.y) - eps ||
                 std::max(b0.y, b1.y) < std::min(a0.y, a1.y) - eps)
               continue;
-            if (!e1::ProperCross2(segs[i].p0, segs[i].p1, segs[j].p0,
-                                  segs[j].p1, axis))
+            if (!coordinated::ProperCross2(segs[i].p0, segs[i].p1, segs[j].p0,
+                                           segs[j].p1, axis))
               continue;
             vec3 X;
             bool have = false;
@@ -3215,16 +3303,18 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
               // refutation is the design constraint): an interpolated point
               // lies exactly on ONE line only, so wherever a committed
               // identity exists, use it -
-              //   edge x seam  -> the PIERCE of the edge through the seam's
+              //   edge x intersection segment -> the PIERCE of the edge
+              //                   through the intersection segment's
               //                   partner plane (once-only, on BOTH lines)
-              //   edge x edge / seam-twin pairs -> canonical interpolation
-              //                   (deterministic carrier order, bit-equal
+              //   edge x edge / paired intersection-segment records ->
+              //                   canonical interpolation (deterministic
+              //                   source-segment order, bit-equal
               //                   across groups)
               const bool iEdge = segs[i].planeQ < 0, jEdge = segs[j].planeQ < 0;
               bool built = false;
               if (iEdge != jEdge) {
-                const int se = iEdge ? i : j;  // the edge carrier
-                const int ss = iEdge ? j : i;  // the seam carrier
+                const int se = iEdge ? i : j;  // source edge segment
+                const int ss = iEdge ? j : i;  // source intersection segment
                 const int q = segs[ss].planeQ;
                 const bool fwd = segs[se].vidLo <= segs[se].vidHi;
                 const int vlo = fwd ? segs[se].vidLo : segs[se].vidHi;
@@ -3237,16 +3327,16 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
                 }
               }
               if (!built) {
-                // canonical carrier: the smaller segment identity
+                // Canonical source segment: the smaller segment identity.
                 const int ci = segKeyOf(segs[i].p0, segs[i].p1) <=
                                        segKeyOf(segs[j].p0, segs[j].p1)
                                    ? i
                                    : j;
                 const int cj = ci == i ? j : i;
-                const vec2 c0 = e1::Drop2(segs[ci].p0, axis),
-                           c1 = e1::Drop2(segs[ci].p1, axis);
-                const vec2 e0 = e1::Drop2(segs[cj].p0, axis),
-                           e1v = e1::Drop2(segs[cj].p1, axis);
+                const vec2 c0 = coordinated::Drop2(segs[ci].p0, axis),
+                           c1 = coordinated::Drop2(segs[ci].p1, axis);
+                const vec2 e0 = coordinated::Drop2(segs[cj].p0, axis),
+                           e1v = coordinated::Drop2(segs[cj].p1, axis);
                 const double dax = c1.x - c0.x, day = c1.y - c0.y;
                 const double dbx = e1v.x - e0.x, dby = e1v.y - e0.y;
                 const double den = dax * dby - day * dbx;
@@ -3265,12 +3355,12 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
         for (int i = 0; i < nS; ++i) nsplit1 += splits[i].size();
         if (nsplit1 == nsplit0) break;
       }
-      continue;  // build phase: no cells, no classification
+      continue;  // COLLECT-SPLITS phase: no cells, no classification
     }
     // NOTE: no sub-edge-level completion pass is needed: with the exact
     // endpoint pool and the rounding-scale on-line tolerance, chain bends are
     // ~ULP, so residual sub-edge crossings are ULP-scale bowties the
-    // triangulation's weld-dust remainder acceptance absorbs (a full
+    // triangulation's sub-epsilon remainder acceptance absorbs (a full
     // sub-edge crossing fixpoint was measured to CASCADE: each round's
     // interpolated splits create new bent sub-edges - and cost minutes).
 
@@ -3282,14 +3372,17 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
     // endpoints - below the split-interiority floor, so the crossing is
     // unrepresentable as a graph vertex); a graph that keeps the copies
     // separate is then NON-PLANAR and the rotation walk sews the fans into
-    // self-overlapping macro cells whose classification paints oracle-false
+    // self-overlapping above-epsilon cells whose classification paints
+    // oracle-false
     // boundary (measured: the (-17.9,0.6,-204) input twin pair, the whole
     // z=-204 over/under-emission family).  Collapsing the band collapses the
     // crossing INTO the junction, exactly where the exact arrangement's
-    // structure lands once rounded.  The REGISTRY identities stay distinct
+    // structure lands once rounded. The shared split-point table identities
+    // stay distinct
     // (this is emission topology, not an identity merge); the node's
     // representative is a committed identity (first-seen anchor, inputs
-    // first via the endpoint-adoption pass), and the assembly weld (radius
+    // first via the endpoint-adoption pass), and the assembly vertex merge
+    // (radius
     // eps, two orders above rho) identifies the pair in the output
     // regardless.
     std::map<K3, int> vidOf;
@@ -3354,14 +3447,15 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
     }
     // exact CCW angular order around each vertex (half-plane + orient sign)
     auto angLess = [&](int v, int a, int b) -> bool {
-      const vec2 pv = e1::Drop2(pos3[v], axis);
-      const vec2 pa = e1::Drop2(pos3[a], axis), pb = e1::Drop2(pos3[b], axis);
+      const vec2 pv = coordinated::Drop2(pos3[v], axis);
+      const vec2 pa = coordinated::Drop2(pos3[a], axis),
+                 pb = coordinated::Drop2(pos3[b], axis);
       const double ax = pa.x - pv.x, ay = pa.y - pv.y;
       const double bx = pb.x - pv.x, by = pb.y - pv.y;
       const int ha = (ay > 0 || (ay == 0 && ax > 0)) ? 0 : 1;
       const int hb = (by > 0 || (by == 0 && bx > 0)) ? 0 : 1;
       if (ha != hb) return ha < hb;
-      return e1::O2(pos3[v], pos3[a], pos3[b], axis) > 0;
+      return coordinated::O2(pos3[v], pos3[a], pos3[b], axis) > 0;
     };
     std::vector<std::map<int, int>> cwprev(pos3.size());
     for (size_t v = 0; v < pos3.size(); ++v) {
@@ -3396,8 +3490,9 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
         }
         if (!ok || loop.size() < 3) continue;
         // BRIDGE + SPUR EXCISION: an undirected edge the walk traverses in
-        // BOTH directions separates nothing (the dangling-chord family - a
-        // seam with the same face on both sides); the walk is then two lobes
+        // BOTH directions separates nothing (the dangling
+        // intersection-segment-contribution family - an intersection segment
+        // with the same face on both sides); the walk is then two lobes
         // joined by a zero-width corridor, which no polygon triangulation can
         // cover soundly (measured: bridge-spanning ears/diagonals emit
         // geometry OUTSIDE the face).  Split the walk at every doubled edge
@@ -3444,7 +3539,7 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
           // multi-keyholes with shared ring vertices (measured stall).
           {
             auto lobeSign = [&](const std::vector<int>& lb) -> int {
-              const double s = e1::LoopShoelace(lb, pos3, axis);
+              const double s = coordinated::LoopShoelace(lb, pos3, axis);
               return s > 0 ? 1 : (s < 0 ? -1 : 0);
             };
             std::map<int, int> seen;
@@ -3490,7 +3585,7 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
               }
           }
           if (L.size() < 3) continue;
-          const double s = e1::LoopShoelace(L, pos3, axis);
+          const double s = coordinated::LoopShoelace(L, pos3, axis);
           if (s > 0)
             cells.push_back(std::move(L));
           else if (s < 0)
@@ -3500,7 +3595,7 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
 
     // ---- 5. disconnected island hole-rings: containment + keyhole ----
     auto loopArea = [&](const std::vector<int>& loop) -> double {
-      return e1::LoopShoelace(loop, pos3, axis);
+      return coordinated::LoopShoelace(loop, pos3, axis);
     };
     auto inLoop = [&](const vec2& p, const std::vector<int>& loop) -> bool {
       static const double kSlope[] = {1.0 / 7919.0, 3.0 / 104729.0,
@@ -3509,8 +3604,9 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
         int cnt = 0;
         bool ok = true;
         for (size_t k = 0; k < loop.size() && ok; ++k) {
-          const vec2 A2 = e1::Drop2(pos3[loop[k]], axis);
-          const vec2 B2 = e1::Drop2(pos3[loop[(k + 1) % loop.size()]], axis);
+          const vec2 A2 = coordinated::Drop2(pos3[loop[k]], axis);
+          const vec2 B2 =
+              coordinated::Drop2(pos3[loop[(k + 1) % loop.size()]], axis);
           const double dx = B2.x - A2.x, dy = B2.y - A2.y;
           const double det = dy - r * dx;
           if (det == 0.0) continue;
@@ -3531,12 +3627,12 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
         // try several ring vertices: the parity test degenerates when the
         // probe vertex sits ON the containing cell's boundary (the pinch
         // vertex of a decomposed island ring) - a single-vertex test then
-        // orphans the ring and its edges vanish (measured: micro-corner
+        // orphans the ring and its edges vanish (measured: sub-epsilon-corner
         // island opens)
         int best = -1;
         double bestA = 0.0;
         for (size_t pv = 0; pv < nl.size() && pv < 4 && best < 0; ++pv) {
-          const vec2 p = e1::Drop2(pos3[nl[pv]], axis);
+          const vec2 p = coordinated::Drop2(pos3[nl[pv]], axis);
           for (size_t ci = 0; ci < cells.size(); ++ci)
             if (inLoop(p, cells[ci])) {
               const double a = std::abs(loopArea(cells[ci]));
@@ -3546,23 +3642,25 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
               }
             }
         }
-        // DUST HOLE RING: a ring whose width is below the weld radius is a
-        // sub-representable near-duplicate zigzag (measured: macro-long,
-        // ~1e-12-wide rings in the near-tangent fold overlap); splicing it
-        // strangles the triangulation on sub-ULP structure, and at the weld
-        // it vanishes anyway - drop the ring, keep the cell solid.
+        // SUB-EPSILON HOLE CONTOUR: a ring whose width is below eps is a
+        // sub-representable near-duplicate zigzag (measured: model-scale-long,
+        // ~1e-12-wide rings in the near-tangent coplanar-arrangement overlap);
+        // splicing it strangles the triangulation on sub-ULP structure, and at
+        // vertex merging it vanishes anyway - drop the ring, keep the cell
+        // solid.
         {
-          const double s = e1::LoopShoelace(nl, pos3, axis);
+          const double s = coordinated::LoopShoelace(nl, pos3, axis);
           double ext = 0.0;
           vec2 lo{1e300, 1e300}, hi{-1e300, -1e300};
           for (size_t k = 0; k < nl.size(); ++k) {
-            const vec2 p1 = e1::Drop2(pos3[nl[k]], axis);
+            const vec2 p1 = coordinated::Drop2(pos3[nl[k]], axis);
             lo = la::min(lo, p1);
             hi = la::max(hi, p1);
           }
           ext = std::max(hi.x - lo.x, hi.y - lo.y);
-          // extent below the weld radius is dust outright (dust-dot rings'
-          // shoelace is rounding noise, the width ratio garbage)
+          // Extent below eps is a sub-epsilon hole contour outright
+          // (point-degenerate contours' shoelace is rounding noise and the
+          // width ratio is garbage).
           if (ext <= 0.99 * eps || std::abs(0.5 * s) / ext <= 0.99 * eps)
             continue;
         }
@@ -3590,12 +3688,12 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
                     if (KeyOf(P) == KeyOf(b) || KeyOf(P) == KeyOf(d) ||
                         KeyOf(Q) == KeyOf(b) || KeyOf(Q) == KeyOf(d))
                       continue;
-                    if (e1::ProperCross2(b, d, P, Q, axis)) ok = false;
+                    if (coordinated::ProperCross2(b, d, P, Q, axis)) ok = false;
                   }
                   for (size_t k = 0; k < m && ok; ++k) {
                     const vec3& v = pos3[ring[k]];
                     if (KeyOf(v) == KeyOf(b) || KeyOf(v) == KeyOf(d)) continue;
-                    if (e1::OnOpenSeg2(b, d, v, axis)) ok = false;
+                    if (coordinated::OnOpenSeg2(b, d, v, axis)) ok = false;
                   }
                 };
                 checkRing(merged);
@@ -3626,43 +3724,46 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
       if (!exacttri::Triangulate(loop, pos3, axis, eps, tris)) {
         // ALL-OR-NOTHING: a partial covering emits unpaired interior edges
         // (the offline lesson) - discard, then adjudicate by WIDTH: a loop
-        // whose area/extent is below the weld scale is a rounded-degenerate
-        // sliver (non-simple at double precision) that welds away; anything
+        // whose area/extent is below eps is a rounded-degenerate sliver
+        // (non-simple at double precision) that merges away; anything
         // wider is an honest triangulation failure - DEMOTED (owner
         // adjudication, s2-tri): DEBUG assert; in release SKIP the cell and
-        // let the emission's re-gate refuse the resulting unpaired boundary
+        // let output validation refuse the resulting unpaired boundary
         // (fail-closed, with the skip count breadcrumbed into the fatal
-        // detail).  NO fallback triangulator - a macro failure here is an
+        // detail).  NO fallback triangulator - an above-epsilon failure here
+        // is an
         // upstream invariant violation and masking it is banned.
         tris.clear();
-        const double s = e1::LoopShoelace(loop, pos3, axis);
+        const double s = coordinated::LoopShoelace(loop, pos3, axis);
         double ext = 0.0;
         vec2 lo{1e300, 1e300}, hi{-1e300, -1e300};
         for (size_t k = 0; k < loop.size(); ++k) {
-          const vec2 p1 = e1::Drop2(pos3[loop[k]], axis);
+          const vec2 p1 = coordinated::Drop2(pos3[loop[k]], axis);
           lo = la::min(lo, p1);
           hi = la::max(hi, p1);
         }
         ext = std::max(hi.x - lo.x, hi.y - lo.y);
         const double width = ext > 0.0 ? std::abs(0.5 * s) / ext : 0.0;
-        // an extent below the weld radius is dust outright (the shoelace of
-        // a dust-dot loop is rounding noise and the width ratio is garbage)
+        // An extent below eps is a sub-epsilon remainder outright (the
+        // shoelace of a point-degenerate loop is rounding noise and the width
+        // ratio is garbage).
         if (ext <= 0.99 * eps || width <= 0.99 * eps) {
           continue;
         }
         DEBUG_ASSERT(false, geometryErr,
                      "regularize3d: macro arrangement cell failed exact "
                      "triangulation");
-        ++triFail;  // breadcrumb: rides into the re-gate's fatal detail
+        ++triFail;  // breadcrumb: rides into output validation's fatal detail
       }
-      if (tris.empty()) continue;  // dust cell (collinear at double precision)
+      if (tris.empty())
+        continue;  // point-degenerate cell (collinear at double precision)
       // interior point: largest sub-triangle's centroid
       int best = 0;
       double bestA = -1.0;
       for (size_t k = 0; k < tris.size(); ++k) {
-        const vec2 p0 = e1::Drop2(pos3[tris[k].x], axis),
-                   p1 = e1::Drop2(pos3[tris[k].y], axis),
-                   p2 = e1::Drop2(pos3[tris[k].z], axis);
+        const vec2 p0 = coordinated::Drop2(pos3[tris[k].x], axis),
+                   p1 = coordinated::Drop2(pos3[tris[k].y], axis),
+                   p2 = coordinated::Drop2(pos3[tris[k].z], axis);
         const double a2 = std::abs(la::cross(p1 - p0, p2 - p0));
         if (a2 > bestA) {
           bestA = a2;
@@ -3690,9 +3791,9 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
       // a cap probe its sheet never touches).
       auto covers = [&](int f) -> bool {
         const int ax = DominantAxis(A.faceN[f]);
-        const int o0 = e1::O2(A.tri[f][0], A.tri[f][1], cenP, ax);
-        const int o1 = e1::O2(A.tri[f][1], A.tri[f][2], cenP, ax);
-        const int o2 = e1::O2(A.tri[f][2], A.tri[f][0], cenP, ax);
+        const int o0 = coordinated::O2(A.tri[f][0], A.tri[f][1], cenP, ax);
+        const int o1 = coordinated::O2(A.tri[f][1], A.tri[f][2], cenP, ax);
+        const int o2 = coordinated::O2(A.tri[f][2], A.tri[f][0], cenP, ax);
         const bool neg = o0 < 0 || o1 < 0 || o2 < 0;
         const bool pos = o0 > 0 || o1 > 0 || o2 > 0;
         return !(neg && pos);
@@ -3719,9 +3820,9 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
         // ALONG-nHat crossing distance: the probe segment runs along nHat,
         // so the relevant quantity is where the segment meets the plane, not
         // the perpendicular plane distance (a steep transversal wall has a
-        // tiny perpendicular distance near its seam line yet its crossing
-        // sits far outside the probe window - measured).  A plane parallel
-        // to the probe direction is never crossed: skip.
+        // tiny perpendicular distance near its intersection segment line yet
+        // its crossing sits far outside the probe window - measured).  A plane
+        // parallel to the probe direction is never crossed: skip.
         const double denom = std::abs(la::dot(A.faceN[f2], nHat));
         if (!(denom > 0.0)) continue;
         const double dist =
@@ -3733,8 +3834,8 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
       double dNext = std::numeric_limits<double>::infinity();
       for (const auto& dn : nearD) {
         if (dn.first <= T) continue;
-        // HARD CAP at the weld radius: a stack may only absorb sheets that
-        // weld together anyway (unrepresentably close).  Un-capped 8x
+        // HARD LIMIT at eps: a stack may only absorb sheets that merge together
+        // anyway (unrepresentably close).  Unbounded 8x
         // chaining absorbed ladders of REPRESENTABLE distinct sheets into
         // one net emission (measured: systematic opens across dozens of
         // groups wherever the sheet-distance ladder had no 8x gap).
@@ -3747,8 +3848,8 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
       }
       // The probe must sit in the VERIFIED gap: above the whole stack, below
       // the FIRST non-absorbed sheet.  A sheet in (T, 2T) exists when the
-      // 8x-chain hits the 0.99*eps hard cap (a representable sheet just
-      // above the weld radius); probing at a blind 2T then crosses it
+      // 8x-chain hits the 0.99*eps hard limit (a representable sheet just
+      // above eps); probing at a blind 2T then crosses it
       // without it being in the jump - the certificate refused honestly but
       // wrongly (measured: GT7081 shell2, jump=1 probed 0|0 at a 6mm cell).
       const double off = 2.0 * T < dNext ? 2.0 * T : 0.5 * (T + dNext);
@@ -3758,8 +3859,9 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
       // merged stack sheets as (signed along-nHat position, crossing sign):
       // the LAYER structure between the sheets decides whether a
       // net-cancelled stack is a material slab or a void one (sheet order is
-      // constant across a cell - cells are split at the mutual seams).
-      std::vector<std::pair<double, int>> stackSheets;
+      // constant across a cell - cells are split at the mutual intersection
+      // segments).
+      std::vector<std::pair<double, int>> layerCrossings;
       for (const auto& dn : nearD) {
         if (dn.first > T) break;
         if (!covers(dn.second)) continue;
@@ -3772,17 +3874,17 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
             -la::dot(A.faceN[dn.second], cenP - A.tri[dn.second][0]) /
             la::dot(A.faceN[dn.second], nHat);
         jump += s;
-        stackSheets.push_back({tPos, s});
+        layerCrossings.push_back({tPos, s});
         stackMerged = true;
       }
       if (owned) {
         continue;  // a lower covering group owns this stack cell
       }
-      // PANCAKE ARM: a net-cancelled STACK (own sheet + sub-weld-close
+      // ZERO-NET-LAYER CASE: a net-cancelled STACK (own sheet + sub-epsilon
       // foreign sheets summing to zero) over a cell of REPRESENTABLE width
-      // is a material/void slab thinner than the weld radius but wider than
+      // is a material/void slab thinner than eps but wider than
       // it: its bounding sheets collapse to one membrane at assembly, yet
-      // its SIDE CHAINS (up to a few eps apart) do not weld - dropping the
+      // its SIDE CHAINS (up to a few eps apart) do not merge - dropping the
       // cell leaves the neighbours' sheets ringing an unpairable hole
       // (measured: the two near-tangent corner strips, oracle transects
       // 0|1|0 across a 2.5e-11 slab).  The stack OWNER emits the collapsed
@@ -3790,10 +3892,10 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
       // own-plane neighbours; the certificate for an invisible slab is
       // probe agreement (wA == wB).  A same-plane cancellation
       // (ownJump == 0, no stack) stays dropped: exactly-coplanar sheets
-      // cancel pointwise and the neighbouring fans pair without a cap.
-      // A sub-weld-WIDE pancake also stays dropped: its side chains weld
-      // together and the hole closes in the assembly.
-      const bool pancake = (jump == 0 && stackMerged && ownJump != 0);
+      // cancel pointwise and the neighbouring fans pair without a collapsed
+      // boundary. An above-epsilon-width zeroNetLayer also stays dropped: its
+      // side chains merge together and the hole closes in the assembly.
+      const bool zeroNetLayer = (jump == 0 && stackMerged && ownJump != 0);
       // ---- flood node (flip arc stage 1): every classified cell joins the
       // component-global field graph, including net-cancelled conduits ----
       const int flNode = static_cast<int>(flNodes.size());
@@ -3819,16 +3921,16 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
           nearSign.push_back({dn.second, state, s});
         }
         std::sort(nearSign.begin(), nearSign.end());
-        FlNode fn;
+        WindingNode fn;
         fn.nearSign = std::move(nearSign);
         fn.hasBand = hasBand;
         fn.jump = jump;
         fn.ownJump = ownJump;
         fn.sPosMid = sPosMid;
         fn.sZero = sZero;
-        fn.pancake = pancake;
+        fn.zeroNetLayer = zeroNetLayer;
         fn.Nrep = Nrep;
-        fn.stackSheets = stackSheets;
+        fn.layerCrossings = layerCrossings;
         flNodes.push_back(std::move(fn));
         bool touch = false;
         const int m = static_cast<int>(loop.size());
@@ -3845,26 +3947,28 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
       // probes; every emission-eligible cell stores its payload and the
       // field solve values it (one exact probe anchors every reliable
       // subgraph not containing the hull seed).
-      bool emitEligible = !(jump == 0 && !pancake);
-      if (emitEligible && pancake) {
-        // Dust rule for pancakes is EXTENT-outright (the dust-dot rule),
-        // NOT altitude: a strip 0.96 eps wide does NOT weld closed when its
+      bool emitEligible = !(jump == 0 && !zeroNetLayer);
+      if (emitEligible && zeroNetLayer) {
+        // The zero-net-layer rule uses EXTENT outright (the point-degenerate
+        // rule), NOT altitude: a strip 0.96 eps wide does NOT merge closed when
+        // its
         // side-chain vertices are staggered along the strip (measured: the
         // corner strip, chains 0.96 eps apart laterally, nearest vertices
-        // 3.4 eps apart) - the vertex weld never pairs the chains and only
-        // the cap can.  Only a cell welding to a single POINT is skippable.
+        // 3.4 eps apart) - vertex merging never pairs the chains and only the
+        // collapsed boundary can. Only a cell merging to a single POINT is
+        // skippable.
         vec2 lo{1e300, 1e300}, hi{-1e300, -1e300};
         for (const int lv : loop) {
-          const vec2 p = e1::Drop2(pos3[lv], axis);
+          const vec2 p = coordinated::Drop2(pos3[lv], axis);
           lo = la::min(lo, p);
           hi = la::max(hi, p);
         }
         if (std::max(hi.x - lo.x, hi.y - lo.y) <= 0.99 * eps) {
-          emitEligible = false;  // dust dot: welds to a point
+          emitEligible = false;  // point-degenerate cell: merges to a point
         }
       }
       {
-        FlNode& fn = flNodes[flNode];
+        WindingNode& fn = flNodes[flNode];
         fn.cenP = cenP;
         fn.off = off;
         if (emitEligible) {
@@ -3877,18 +3981,20 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
           }
           double eMax = 0.0;
           {
-            const vec2 q0 = e1::Drop2(pos3[tris[best].x], axis);
-            const vec2 q1 = e1::Drop2(pos3[tris[best].y], axis);
-            const vec2 q2 = e1::Drop2(pos3[tris[best].z], axis);
+            const vec2 q0 = coordinated::Drop2(pos3[tris[best].x], axis);
+            const vec2 q1 = coordinated::Drop2(pos3[tris[best].y], axis);
+            const vec2 q2 = coordinated::Drop2(pos3[tris[best].z], axis);
             eMax = std::max({la::length(q1 - q0), la::length(q2 - q1),
                              la::length(q0 - q2)});
           }
           fn.extW = eMax > 0.0 ? bestA / eMax : 0.0;
         }
       }
-      if (!kFloodDiff) continue;
-      // FULL DIFFERENTIAL (E1_FLOODDIFF): probe + certify every cell as a
-      // shadow validator; the values are NOT anchors (the solve anchors from
+      if (!kValidateWindingField) continue;
+      // FULL DIFFERENTIAL (OVERLAP3_VALIDATE_WINDING_FIELD): probe and certify
+      // every cell as a
+      // differential validator; the values are NOT anchors (the solve anchors
+      // from
       // residual probes + seeds, so the differential grades flood-primary).
       const std::optional<int> wA = RobustWinding(in, cenP + off * nHat, seeds);
       const std::optional<int> wB = RobustWinding(in, cenP - off * nHat, seeds);
@@ -3896,9 +4002,9 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
         flNodes[flNode].probeState = 2;
         continue;
       }
-      const bool certified = pancake ? (*wA == *wB) : (*wB - *wA == jump);
+      const bool certified = zeroNetLayer ? (*wA == *wB) : (*wB - *wA == jump);
       {
-        FlNode& fn = flNodes[flNode];
+        WindingNode& fn = flNodes[flNode];
         fn.probeState = certified ? 1 : 3;
         fn.certified = certified;
         fn.anchorOK = certified;
@@ -3906,8 +4012,8 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
         fn.probeWB = *wB;
       }
     }
-    // ---- flood graph (flip arc stage 1): this group's edges + handoffs ----
-    // // ---- flood graph (flip arc stage 1): this group's edges + handoffs
+    // ---- flood graph (flip arc stage 1): edges + cross-group constraints ---
+    // // ---- flood graph (flip arc stage 1): edges + cross-group constraints
     // ----
     {
       // Drop2 has no parity swap, so cell-CCW-in-frame is about +nHat only up
@@ -3932,28 +4038,32 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
         if (es == flEdgeSegs.end()) continue;
         const vec3 d3 = pos3[ec.first.second] - pos3[ec.first.first];
         const vec3 tOut = static_cast<double>(sigmaF) * la::cross(d3, Nrep);
-        // Scan the segs riding this sub-edge: chord partners cross the plane
+        // Scan the segments riding this sub-edge: intersection-segment
+        // contributions cross the plane
         // HERE (each is one eps-layer crossing, sign -sgn(dot(t_out, n)));
         // member mesh edges whose manifold twin RISES off-plane (+Nrep side,
-        // exact sign) are RIDGES - the rising twin cuts the eps-layer at the
-        // edge exactly like a chord.  Its crossing sign is combinatorial:
+        // exact sign) are PAIRED-FACE CONTRIBUTIONS - the rising paired face
+        // cuts the eps-layer at the edge like an intersection-segment
+        // contribution. Its crossing sign is combinatorial:
         // the twin halfedge runs anti-parallel to the member's, and for a
         // CCW twin rising with interior direction m, n_twin = cross(d_twin,
         // m), giving delta(c_lo->hi -> other) = sigmaF * sgn(along).
         int delta = 0, tag = 0;
         bool bad = false;
-        // Decidedness is the edge-local reliability certificate.  Exact
+        // Transport certification is the edge-local reliability certificate.
+        // Exact
         // predicate results and filter-certified signs keep it true; a
         // quantity in the existing sub-resolution band, or an incomplete
         // parity census, makes the transport unusable by the flood.
-        bool decided = true;
-        std::set<int> seenF;  // distinct chord partner faces
-        std::set<int> seenG;  // their GROUPS (parity-arm exclusion)
-        std::set<std::pair<int, int>> vps;  // distinct member vid pairs
-        std::set<int> ridgeTf;              // twins counted via member segs
-        int handSi = -1, handTf = -1;       // single-pair handoff candidate
-        bool foreignChord = false;          // chord partner != the twin
-        // PASS A: member mesh-edge segs -> manifold-twin ridges.  A twin
+        bool transportCertified = true;
+        std::set<int> intersectionFaces;        // distinct intersection faces
+        std::set<int> intersectionPlaneGroups;  // groups already represented
+        std::set<std::pair<int, int>> vps;      // distinct member vid pairs
+        std::set<int> pairedContributionFaces;  // twins counted via member segs
+        int constraintSegment = -1, pairedFace = -1;  // constraint candidate
+        bool hasForeignIntersectionSegment = false;   // partner != paired face
+        // PASS A: member mesh-edge segments -> paired-face contributions. A
+        // paired face
         // rising to the +nHat side cuts the eps-layer at the edge (sign
         // combinatorial: the twin halfedge runs anti-parallel to the
         // member's, so delta = sigmaF * sgn(along) - see the derivation in
@@ -3998,24 +4108,26 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
             delta += sigmaF * (along > 0.0 ? 1 : -1);
             tag |= 4;
           }
-          ridgeTf.insert(tf);
-          seenG.insert(gid[tf]);
-          handSi = si;
-          handTf = tf;
+          pairedContributionFaces.insert(tf);
+          intersectionPlaneGroups.insert(gid[tf]);
+          constraintSegment = si;
+          pairedFace = tf;
         }
-        // PASS B: chord partners.  The ungated seam enumeration records
-        // touching contacts (edge-attached partners) as chords too, so the
+        // PASS B: intersection-segment contributions. The ungated intersection
+        // segment enumeration records touching contacts (edge-attached
+        // partners) as contributions too, so the
         // partner's EXACT vertex plane-side census decides the topology:
         // straddle = proper transversal crossing; touch-from-above = an
-        // attached riser (T-junction class, not the halfedge twin); touch-
+        // attached face (T-junction class, not the paired halfedge); touch-
         // from-below leaves the eps-layer intact.
         if (!bad)
           for (const int si : es->second) {
             if (segs[si].planeQ < 0) continue;
             const int f2 = segs[si].fOther;
-            if (ridgeTf.count(f2)) continue;  // already counted as the twin
-            if (!seenF.insert(f2).second) continue;
-            seenG.insert(gid[f2]);
+            if (pairedContributionFaces.count(f2))
+              continue;  // already counted as the twin
+            if (!intersectionFaces.insert(f2).second) continue;
+            intersectionPlaneGroups.insert(gid[f2]);
             int nAb = 0, nBe = 0, vAb = -1;
             std::array<int, 3> side;
             for (int k = 0; k < 3; ++k) {
@@ -4027,9 +4139,11 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
                 ++nBe;
               }
             }
-            foreignChord = true;     // a non-twin partner reaches this sub-edge
+            hasForeignIntersectionSegment =
+                true;                // a non-twin partner reaches this sub-edge
             if (nAb == 0) continue;  // touches/dips below: layer intact
-            // band check (as the ridge arm): the highest above-vertex must
+            // band check (as for the paired-face contribution): the highest
+            // above-vertex must
             // clear the band for the sheet to cross the E' level
             double hMax = 0.0;
             for (int k = 0; k < 3; ++k)
@@ -4043,8 +4157,8 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
               continue;
             }
             if (nBe == 0) {
-              // TOUCH-FROM-ABOVE: attached riser along its on-plane edge
-              // (coincident-position attachment, not the halfedge twin).
+              // TOUCH-FROM-ABOVE: attached face along its on-plane edge
+              // (coincident-position attachment, not the paired halfedge).
               int e0 = -1;
               for (int k = 0; k < 3; ++k)
                 if (side[k] == 0 && side[(k + 1) % 3] == 0) e0 = k;
@@ -4078,9 +4192,10 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
               // Exact O2 supplies the local combinatorial side, but this
               // near-tangent branch cannot certify that the separator sheet
               // continues between both cells (the openscad ladder class).
-              decided = false;
-              const int o = e1::O2(pos3[ec.first.first], pos3[ec.first.second],
-                                   A.tri[f2][vAb], axis);
+              transportCertified = false;
+              const int o =
+                  coordinated::O2(pos3[ec.first.first], pos3[ec.first.second],
+                                  A.tri[f2][vAb], axis);
               if (o == 0 || !(qv != 0.0)) {
                 bad = true;
                 break;
@@ -4098,12 +4213,16 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
           const int nB = cl[0].second ? cl[1].first : cl[0].first;
           // A MID-band covering sheet at either endpoint makes the complete
           // edge delta undecidable, even when that sheet's group also owns a
-          // represented chord and is excluded from the parity sum.  This is
+          // represented intersection-segment contribution and is excluded
+          // from the parity sum. This is
           // the existing sub-ULP ladder marker; it is not a decided zero.
-          if (flNodes[nA].hasBand || flNodes[nB].hasBand) decided = false;
-          // STACK-CROSSING PARITY ARM: a covering foreign SHEET whose signed
+          if (flNodes[nA].hasBand || flNodes[nB].hasBand)
+            transportCertified = false;
+          // UNREPRESENTED-CROSSING PARITY CORRECTION: a covering foreign SHEET
+          // whose signed
           // tPos FLIPS between the two cenPs crossed the group plane between
-          // them with no representable chord (the sub-eps stack class).  The
+          // them with no representable intersection-segment contribution (the
+          // sub-eps stack class). The
           // eps-layer path crosses it an odd number of times (parity =
           // endpoint sign flip, path-independent).  Sheets are identified by
           // their plane GROUP (one sheet may cover the two cenPs with
@@ -4112,7 +4231,8 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
           // per group; under coverage conservation (same net total on both
           // sides) the contribution is aboveB - aboveA (= q*r per flipped
           // sheet, r = +1 iff above on nB's side).  Faces already counted as
-          // chords/ridges on this sub-edge are excluded (a represented
+          // intersection-segment/paired-face contributions on this sub-edge
+          // are excluded (a represented
           // crossing lies on every shared sub-edge of the pair).  A group
           // with an exact-zero tPos or non-conserved coverage contributes 0
           // (ends laterally; the differential owns the residue).
@@ -4126,10 +4246,10 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
             // (the sub-ULP openscad class, measured).
             std::map<int, std::array<int, 4>> byGroup;
             bool parityBand = false;
-            auto addTo = [&](const FlNode& fn2, int ia0, int ib0) {
+            auto addTo = [&](const WindingNode& fn2, int ia0, int ib0) {
               for (const auto& e2 : fn2.nearSign) {
                 const int g2 = gid[e2[0]];
-                if (seenG.count(g2)) continue;
+                if (intersectionPlaneGroups.count(g2)) continue;
                 if (e2[1] == 0) parityBand = true;
                 byGroup[g2][e2[1] > 0 ? ia0 : ib0] += e2[2];
               }
@@ -4143,25 +4263,28 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
               if (a[0] + a[1] != a[2] + a[3]) conserved = false;
               parityDelta += a[2] - a[0];
             }
-            if (parityBand || !conserved) decided = false;
+            if (parityBand || !conserved) transportCertified = false;
             if (!parityBand && conserved && parityDelta != 0) {
               delta += parityDelta;
               tag |= 8;
             }
           }
-          flEdges.push_back({nA, nB, delta, tag, decided});
+          flEdges.push_back({nA, nB, delta, tag, transportCertified});
         }
-        // CROSS-GROUP HANDOFF RECORD: a clean manifold mesh-edge sub-edge -
+        // CROSS-GROUP CONSTRAINT RECORD: a manifold mesh-edge sub-edge -
         // exactly ONE member vid pair, no THIRD sheet reaching the edge (the
-        // halfedge twin's own touching-contact chord is benign; any other
-        // partner is not) - whose twin face lives in another group.  Both
+        // paired face's own attached-edge contribution is benign; any other
+        // partner is not) - whose paired face lives in another group. Both
         // groups record E(node) + eOff; equal at the sub-edge by the
         // mesh-edge dihedral rule (eps-layer form).  Multi-pair (geometric
         // T-junction) sub-edges are skipped: the halfedge twin need not be
         // fan-adjacent there.
-        if (foreignChord || vps.size() != 1 || handSi < 0) continue;
-        const int fOwn = segs[handSi].fOwn;
-        const double along = la::dot(d3, segs[handSi].p1 - segs[handSi].p0);
+        if (hasForeignIntersectionSegment || vps.size() != 1 ||
+            constraintSegment < 0)
+          continue;
+        const int fOwn = segs[constraintSegment].fOwn;
+        const double along = la::dot(
+            d3, segs[constraintSegment].p1 - segs[constraintSegment].p0);
         // f's interior-side cell traverses lo->hi iff the sub-edge runs along
         // f's own winding direction XNOR f's winding is CCW-in-frame.
         const bool wantFwd = (along > 0.0) == (fsgn[fOwn] * sigmaF > 0);
@@ -4172,7 +4295,7 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
             if (node == -2) break;
           }
         if (node < 0) continue;
-        const FlNode& fn = flNodes[node];
+        const WindingNode& fn = flNodes[node];
         // Band contamination: a covering sheet inside the sub-resolution
         // band makes the edge-level transport double-ambiguous (its side is
         // noise); the record is dropped and connectivity routes elsewhere.
@@ -4181,10 +4304,11 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
         // either side of the sub-edge put the whole coplanar band into the
         // edge fan (the doubled-cap class) and the two-sheet dihedral rule
         // does not apply.  In the exactly-coplanar case the WALL side is
-        // refused by its foreignChord (the band's touching-contact chord
-        // rides the same sub-edge), but a sub-eps TILT moves that chord off
-        // the edge and evades it (measured: the near-coplanar fold's 4 bad
-        // handoffs, d=0 vs true +-1).  Skip conservatively; connectivity
+        // refused by its hasForeignIntersectionSegment (the band's
+        // attached-edge contribution rides the same sub-edge), but a sub-eps
+        // TILT moves that contribution off the edge and evades it (measured:
+        // the near-coplanar coplanar arrangement's 4 bad cross-group
+        // constraints, d=0 vs true +-1). Skip conservatively; connectivity
         // falls to the residual probes.
         {
           int farNode = -1;
@@ -4194,18 +4318,19 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
               (farNode >= 0 && flNodes[farNode].ownJump != 0))
             continue;
         }
-        // HANDOFF PARITY CORRECTION: the dihedral rule equates the eps-layer
+        // CENTER-TO-EDGE CORRECTION: the dihedral rule equates the eps-layer
         // values AT the edge, but the node's E is cenP-anchored; a covering
         // foreign sheet that flips plane-side between cenP and the sub-edge
         // (the stack-crossing class) shifts the edge value by q per flip.
-        // Same aggregation + conservation guard as the intra parity arm,
+        // Same aggregation + conservation guard as the
+        // unrepresented-crossing parity correction,
         // with "B" = the sub-edge midpoint (sheets ending laterally break
         // conservation and skip - the differential owns that residue).  The
         // below-layer path crosses the same transiting sheets, so the
         // correction applies uniformly for both fsgn cases.
-        int corr = 0;
-        bool corrDecided = true;
-        bool corrGroupConserved = true;
+        int centerToEdgeCorrection = 0;
+        bool correctionCertified = true;
+        bool correctionCoverageConserved = true;
         if (!fn.nearSign.empty()) {
           const vec3 mid = 0.5 * (pos3[ec.first.first] + pos3[ec.first.second]);
           int aCen = 0, totCen = 0, aMid = 0, totMid = 0;
@@ -4213,17 +4338,22 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
           bool degen = false;
           for (const auto& e2 : fn.nearSign) {
             const int f2 = e2[0];
-            // the pair's own twin (and any ridge twin attached AT this
+            // the pair's own paired face (and any paired-face contribution
+            // attached AT this
             // sub-edge) is the dihedral rule's sector structure, not a
-            // transiting foreign sheet - excluded from the leg correction
-            if (f2 == handTf || ridgeTf.count(f2)) continue;
+            // transiting foreign sheet - excluded from the center-to-edge
+            // correction
+            if (f2 == pairedFace || pairedContributionFaces.count(f2)) continue;
             totCen += e2[2];
             groupCoverage[gid[f2]].first += e2[2];
             if (e2[1] > 0) aCen += e2[2];
             const int ax2 = DominantAxis(A.faceN[f2]);
-            const int o0 = e1::O2(A.tri[f2][0], A.tri[f2][1], mid, ax2);
-            const int o1 = e1::O2(A.tri[f2][1], A.tri[f2][2], mid, ax2);
-            const int o2 = e1::O2(A.tri[f2][2], A.tri[f2][0], mid, ax2);
+            const int o0 =
+                coordinated::O2(A.tri[f2][0], A.tri[f2][1], mid, ax2);
+            const int o1 =
+                coordinated::O2(A.tri[f2][1], A.tri[f2][2], mid, ax2);
+            const int o2 =
+                coordinated::O2(A.tri[f2][2], A.tri[f2][0], mid, ax2);
             const bool neg = o0 < 0 || o1 < 0 || o2 < 0;
             const bool pos = o0 > 0 || o1 > 0 || o2 > 0;
             if (neg && pos) continue;  // not covering the midpoint
@@ -4242,30 +4372,38 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
             if (tp > stackWin) aMid += e2[2];
           }
           for (const auto& kv : groupCoverage)
-            if (kv.second.first != kv.second.second) corrGroupConserved = false;
+            if (kv.second.first != kv.second.second)
+              correctionCoverageConserved = false;
           if (!degen && totCen == totMid)
-            corr = aMid - aCen;
+            centerToEdgeCorrection = aMid - aCen;
           else {
-            corrDecided = false;
-            corr = 0;
+            correctionCertified = false;
+            centerToEdgeCorrection = 0;
           }
         }
-        const int eOff = (fsgn[fOwn] > 0 ? 0 : fn.ownJump + fn.sZero) + corr;
-        const int vlo = std::min(segs[handSi].vidLo, segs[handSi].vidHi);
-        const int vhi = std::max(segs[handSi].vidLo, segs[handSi].vidHi);
-        flHand[{{vlo, vhi},
-                segKeyOf(pos3[ec.first.first], pos3[ec.first.second])}]
-            .push_back({node, eOff, corrDecided, corrGroupConserved});
+        const int eOff = (fsgn[fOwn] > 0 ? 0 : fn.ownJump + fn.sZero) +
+                         centerToEdgeCorrection;
+        const int vlo = std::min(segs[constraintSegment].vidLo,
+                                 segs[constraintSegment].vidHi);
+        const int vhi = std::max(segs[constraintSegment].vidLo,
+                                 segs[constraintSegment].vidHi);
+        crossGroupConstraints[{{vlo, vhi},
+                               segKeyOf(pos3[ec.first.first],
+                                        pos3[ec.first.second])}]
+            .push_back(
+                {node, eOff, correctionCertified, correctionCoverageConserved});
       }
       // THE HULL SEED: exactly one node cell touching v* in this group
       // anchors combinatorially (see the field comment above).  GUARD: a
       // covering foreign sheet at the corner cell (nearSign non-empty) can
-      // cross the group plane INSIDE the cell without a chord (the sub-eps
+      // cross the group plane INSIDE the cell without an intersection-segment
+      // contribution (the sub-eps
       // stack class - measured on the GT7863 twins), invalidating the
       // corner-to-cenP transport of the lexsign value; the seed is skipped
-      // there (certified anchors + handoffs carry those carriers).
+      // there (certified anchors + cross-group constraints carry those source
+      // segments).
       if (flStarNodes.size() == 1) {
-        const FlNode& fn = flNodes[flStarNodes[0]];
+        const WindingNode& fn = flNodes[flStarNodes[0]];
         const int sg = flLexsign(Nrep);
         if (sg != 0 && fn.nearSign.empty())
           flSeeds.push_back(
@@ -4274,47 +4412,52 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
     }
   }
   // ---- FLOOD SOLVE + EMISSION (flood-primary, flip arc session 3) --------
-  // Predicate-decided edges define reliable-connected subgraphs.  The
-  // guarded hull seed anchors the outer subgraph; one base-certified exact
-  // probe anchors every other subgraph.  A decided-edge conflict is an
+  // Predicate-certified edges define certified-transport components. The
+  // guarded hull seed anchors the outer component; one base-certified exact
+  // probe anchors every other component. A certified-edge conflict is an
   // invariant violation and fails closed.
-  // E1_FLOODDIFF probes every cell in the classify loop as a shadow
-  // validator and prints the arm census; it never affects anchoring.
-  if (!buildPhase) {
-    for (const auto& kv : flHand) {
+  // OVERLAP3_VALIDATE_WINDING_FIELD probes every cell in the classification
+  // loop as a differential validator and prints the contribution census; it
+  // never affects anchoring.
+  if (!collectSplits) {
+    for (const auto& kv : crossGroupConstraints) {
       if (kv.second.size() != 2) {
         continue;
       }
       // E(n0) + eOff0 == E(n1) + eOff1  =>  E(n1) = E(n0) + (eOff0 - eOff1)
-      const int handDelta = kv.second[0].eOff - kv.second[1].eOff;
-      const bool groupConserved =
-          kv.second[0].groupConserved && kv.second[1].groupConserved;
-      // The clean dihedral rule decides an equal-offset (zero-delta) handoff
-      // directly.  A nonzero transport depends on the cenP-to-edge leg
+      const int constraintDelta = kv.second[0].eOff - kv.second[1].eOff;
+      const bool correctionCoverageConserved =
+          kv.second[0].correctionCoverageConserved &&
+          kv.second[1].correctionCoverageConserved;
+      // The dihedral rule certifies an equal-offset (zero-delta) cross-group
+      // constraint directly. A nonzero transport depends on the center-to-edge
       // correction, so both correction predicates and every contributing
       // plane-group census must be complete.  This is the local separation
       // between the GT7081 zero corridor and the nonzero curl/ladder edges.
-      const bool decided =
-          handDelta == 0 ||
-          (kv.second[0].decided && kv.second[1].decided && groupConserved);
-      flEdges.push_back(
-          {kv.second[0].node, kv.second[1].node, handDelta, 32, decided});
+      const bool transportCertified =
+          constraintDelta == 0 ||
+          (kv.second[0].correctionCertified &&
+           kv.second[1].correctionCertified && correctionCoverageConserved);
+      flEdges.push_back({kv.second[0].node, kv.second[1].node, constraintDelta,
+                         32, transportCertified});
     }
     const int nN = static_cast<int>(flNodes.size());
-    // EDGE RELIABILITY = DECIDEDNESS.  The producing arm marks an edge
-    // decided only when every sign came from a certified filter or the exact
+    // TRANSPORT CERTIFICATION. The producing contribution marks an edge
+    // certified only when every sign came from a certified filter or the exact
     // path.  Existing sub-resolution-band and incomplete-conservation reads
-    // are grazes, so those edges cannot join a reliable-connected subgraph.
+    // are uncertified, so those edges cannot join a certified-transport
+    // component.
     // The older structural checks remain certificates too: parallel records
-    // for one cell pair must agree, and chord+parity overlap is ambiguous.
-    std::vector<bool> flOk(flEdges.size());
+    // for one cell pair must agree, and represented-contribution + parity
+    // overlap is ambiguous.
+    std::vector<bool> transportEdgeUsable(flEdges.size());
     {
       std::map<std::pair<int, int>, std::vector<size_t>> byPair;
       for (size_t i = 0; i < flEdges.size(); ++i) {
         const auto& e = flEdges[i];
-        flOk[i] = e.decided;
+        transportEdgeUsable[i] = e.certified;
         if ((e.tag & 8) && (e.tag & 3)) {
-          flOk[i] = false;
+          transportEdgeUsable[i] = false;
         }
         byPair[e.n0 < e.n1 ? std::make_pair(e.n0, e.n1)
                            : std::make_pair(e.n1, e.n0)]
@@ -4332,37 +4475,40 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
             same = false;
         }
         if (!same) {
-          for (const size_t i : kv.second) flOk[i] = false;
+          for (const size_t i : kv.second) transportEdgeUsable[i] = false;
         }
       }
     }
-    // (neighbor, signed delta, producing-arm tag), reliable edges only.
+    // (neighbor, signed delta, producing-contribution tag), certified edges
+    // only.
     std::vector<std::vector<std::array<int, 3>>> nadj(nN);
     for (size_t i = 0; i < flEdges.size(); ++i) {
-      if (!flOk[i]) continue;
+      if (!transportEdgeUsable[i]) continue;
       const auto& e = flEdges[i];
       nadj[e.n0].push_back({e.n1, e.delta, e.tag});
       nadj[e.n1].push_back({e.n0, -e.delta, e.tag});
     }
-    // ARM-LEVEL DIFFERENTIAL CENSUS: every edge whose BOTH endpoints carry a
+    // CONTRIBUTION-LEVEL DIFFERENTIAL CENSUS: every edge whose BOTH endpoints
+    // carry a
     // certified probe is directly checkable (certE(n1)-certE(n0) vs d); the
-    // per-tag failure counts attribute wrong deltas to their producing arm.
+    // per-tag failure counts attribute wrong deltas to their producing
+    // contribution.
     constexpr int kFlUnset = std::numeric_limits<int>::min();
-    std::vector<int> flComponent(nN, -1);
-    std::vector<std::vector<int>> flSubgraphs;
+    std::vector<int> transportComponentOf(nN, -1);
+    std::vector<std::vector<int>> transportComponents;
     for (int root = 0; root < nN; ++root) {
-      if (flComponent[root] >= 0) continue;
-      const int id = static_cast<int>(flSubgraphs.size());
-      flSubgraphs.push_back({});
+      if (transportComponentOf[root] >= 0) continue;
+      const int id = static_cast<int>(transportComponents.size());
+      transportComponents.push_back({});
       std::vector<int> pending{root};
-      flComponent[root] = id;
+      transportComponentOf[root] = id;
       for (size_t i = 0; i < pending.size(); ++i) {
         const int n = pending[i];
-        flSubgraphs.back().push_back(n);
+        transportComponents.back().push_back(n);
         for (const auto& edge : nadj[n]) {
           const int m = edge[0];
-          if (flComponent[m] >= 0) continue;
-          flComponent[m] = id;
+          if (transportComponentOf[m] >= 0) continue;
+          transportComponentOf[m] = id;
           pending.push_back(m);
         }
       }
@@ -4396,7 +4542,7 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
       }
     };
     auto flProbe = [&](int pn) {
-      FlNode& fn = flNodes[pn];
+      WindingNode& fn = flNodes[pn];
       if (fn.probeState != 0) return;
       const vec3 nH = fn.Nrep / la::length(fn.Nrep);
       // OFFSET RETRY LADDER: the probe offset is a heuristic (the gap-finder
@@ -4408,7 +4554,7 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
       // the true 0|1 and certifies).
       int consistent = 0, firstA = 0, firstB = 0;
       for (const double mul : {1.0, 2.0, 4.0, 8.0, 16.0}) {
-        // stay under the weld radius: beyond it the probe leaves the cell's
+        // stay under eps: beyond it the probe leaves the cell's
         // vertical neighborhood entirely
         if (mul > 1.0 && mul * fn.off > 0.5 * eps) break;
         const std::optional<int> pa =
@@ -4430,7 +4576,8 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
         } else {
           consistent = -99;  // readings diverge across the ladder
         }
-        const bool cert = fn.pancake ? (*pa == *pb) : (*pb - *pa == fn.jump);
+        const bool cert =
+            fn.zeroNetLayer ? (*pa == *pb) : (*pb - *pa == fn.jump);
         fn.probeState = cert ? 1 : 3;
         if (cert) {
           if (mul == 1.0) {
@@ -4441,40 +4588,43 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
       }
       // LADDER-CONSISTENT NON-BOUNDARY acceptance: identical readings at
       // every offset with wA == wB mean the vertical crosses nothing - the
-      // combinatorial jump was an illusory inclusive-coverage graze (the
+      // combinatorial jump was an illusory near-tangent contact under
+      // inclusive coverage (the
       // near-collinear corridor slivers, measured on GT7081 shell2).  The
       // cell drops as non-boundary; a WRONG drop cannot be silent (the
       // unpaired neighbours surface at SplitTouchingSheets - fail-closed).
-      // SUB-WELD GATE: the acceptance is only sound where the cell is itself
-      // sub-weld-thin (extW <= weld).  A MACRO cell (extW > weld) whose probe
-      // grazes carries a real combinatorial jump the near-tangent probe cannot
+      // SUB-EPSILON CHECK: the acceptance is only sound where the cell is
+      // itself sub-epsilon-thin (extW <= eps). An above-epsilon cell (extW >
+      // eps) whose probe has a near-tangent contact carries a real
+      // combinatorial jump the near-tangent probe cannot
       // resolve at double precision (GT7081-joined's torn corridor); overriding
-      // its exact jump with the grazing probe silently tears the sheet.  Gated,
+      // its exact jump with that probe silently tears the sheet. Checked,
       // such a cell reaches the honest completeness cert-fatal (5936) instead -
-      // still fail-closed.  Sub-weld cells still weld away as before, so the
+      // still fail-closed. Sub-epsilon cells still merge away as before, so the
       // heuristic's originating cell (GT7081 shell2 n3818) resolves unchanged.
       if (fn.probeState == 3 && consistent >= 2 && fn.probeWA == fn.probeWB &&
-          !fn.pancake && fn.extW <= 0.99 * eps)
+          !fn.zeroNetLayer && fn.extW <= 0.99 * eps)
         fn.probeState = 1;
       fn.certified = fn.probeState == 1;
     };
-    // PRIMARY SUBGRAPH ANCHORING.  The hull-vertex seed identifies the outer
-    // reliable-connected subgraph.  Its corner-to-cenP transport is
+    // PRIMARY COMPONENT ANCHORING. The hull-vertex seed identifies the outer
+    // certified-transport component. Its corner-to-cenP transport is
     // re-adjudicated by one well-conditioned exact probe when available (the
-    // old nearSign guard is insufficient on GT7863); if every cell grazes,
-    // the exterior hull value is the sole anchor.  Every other subgraph gets
-    // exactly one decided base-offset two-sided winding certificate, never a
+    // old nearSign guard is insufficient on GT7863); if every cell returns an
+    // uncertified predicate, the exterior hull value is the sole anchor. Every
+    // other component gets exactly one certified base-offset two-sided winding
+    // certificate, never a
     // ladder or non-boundary acceptance.
-    // A non-outer subgraph without such a cell fails closed.
+    // A non-outer component without such a cell fails closed.
     int outerSubgraph = -1;
     std::pair<int, int> hullSeed{-1, 0};
     if (!flSeeds.empty()) {
       hullSeed = flSeeds.front();
-      outerSubgraph = flComponent[hullSeed.first];
+      outerSubgraph = transportComponentOf[hullSeed.first];
     }
-    for (int id = 0; id < static_cast<int>(flSubgraphs.size()); ++id) {
+    for (int id = 0; id < static_cast<int>(transportComponents.size()); ++id) {
       int anchor = -1;
-      for (const int n : flSubgraphs[id]) {
+      for (const int n : transportComponents[id]) {
         flProbe(n);
         if (flNodes[n].anchorOK) {
           anchor = n;
@@ -4501,20 +4651,22 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
           "e1: decided winding-field edge conflict (invariant violation) - "
           "fail-closed");
     }
-    // FLOOD-PRIMARY DIFFERENTIAL (E1_FLOODDIFF): field vs the shadow probes
+    // FLOOD-PRIMARY DIFFERENTIAL (OVERLAP3_VALIDATE_WINDING_FIELD): field vs
+    // the differential probes
     int flDiffBad = 0;
-    if (kFloodDiff) {
+    if (kValidateWindingField) {
       for (int n = 0; n < nN; ++n)
         if (flNodes[n].certified && E[n] != kFlUnset &&
             E[n] != flNodes[n].probeWA + flNodes[n].sPosMid) {
           ++flDiffBad;
         }
       if (flDiffBad > 0)
-        std::fprintf(stderr, "E1_FLOODDIFF mismatches=%d\n", flDiffBad);
+        std::fprintf(stderr, "OVERLAP3_VALIDATE_WINDING_FIELD mismatches=%d\n",
+                     flDiffBad);
     }
     // ---- EMISSION off the field (per-cell probes where unvalued) ----
     for (int n = 0; n < nN; ++n) {
-      FlNode& fn = flNodes[n];
+      WindingNode& fn = flNodes[n];
       if (!fn.emit) continue;
       int wA, wB;
       if (E[n] != kFlUnset) {
@@ -4526,8 +4678,8 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
           return fail("e1: winding probe filter-uncertain - fail-closed");
         }
         if (fn.probeState == 3) {
-          // certificate failed: a sub-weld-width sliver welds away; a
-          // macro cell is an honest completeness failure
+          // certificate failed: a sub-epsilon-width sliver merges away; an
+          // above-epsilon cell is an honest completeness failure
           if (fn.extW <= 0.99 * eps) continue;
           return fail(
               "e1: coordinated-arrangement completeness certificate failed "
@@ -4538,11 +4690,11 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
       }
       {
         const bool aIn = wA >= 1, bIn = wB >= 1;
-        if (!fn.pancake && aIn == bIn) continue;  // not a {w>=1} boundary
-        if (fn.pancake) {
+        if (!fn.zeroNetLayer && aIn == bIn) continue;  // not a {w>=1} boundary
+        if (fn.zeroNetLayer) {
           // the layer certificate, verbatim from the probed path
           if (aIn) continue;
-          std::vector<std::pair<double, int>> layers = fn.stackSheets;
+          std::vector<std::pair<double, int>> layers = fn.layerCrossings;
           layers.push_back({0.0, fn.ownJump});
           std::sort(layers.begin(), layers.end(),
                     [](const std::pair<double, int>& x,
@@ -4565,7 +4717,7 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
           if (!material) continue;
         }
         const int orient =
-            fn.pancake ? (fn.ownJump > 0 ? 1 : -1) : (bIn ? 1 : -1);
+            fn.zeroNetLayer ? (fn.ownJump > 0 ? 1 : -1) : (bIn ? 1 : -1);
         for (const ivec3& t : fn.tris) {
           const vec3 p0 = fn.pos.at(t.x), p1 = fn.pos.at(t.y),
                      p2 = fn.pos.at(t.z);
@@ -4579,16 +4731,17 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
       }
     }
   }
-  if (buildPhase)
+  if (collectSplits)
     return StageResult<Manifold::Impl>::Fatal(
-        FatalReason::DirtyComponentUnresolved, "e1: build phase");
+        FatalReason::RegularizationIncomplete, "e1: build phase");
   // Triangulation failures are DEMOTED (skip-and-continue at the cell; the
-  // re-gate below refuses the resulting unpaired boundary) - only the
+  // output validation below refuses the resulting unpaired boundary) - only
+  // the
   // hole-splice failures keep their own census fatal.
   if (spliceFail > 0) return fail("e1: hole-splice incomplete - fail-closed");
   StageResult<Manifold::Impl> built = BuildImpl(out, eps);
   // Demoted-skip breadcrumb: when skipped cells leave the boundary unpaired,
-  // the re-gate's fatal should name the true first cause.
+  // output validation's fatal should name the true first cause.
   if (!built.ok() && triFail > 0)
     built.detail += " [" + std::to_string(triFail) +
                     " arrangement cell(s) skipped after exact-triangulation "
@@ -4604,42 +4757,50 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
 StageResult<Manifold::Impl> EmitCoordinatedBoundary(const Manifold::Impl& in,
                                                     const BuildArrangement& A,
                                                     double eps) {
-  // BUILD to a global registry fixpoint, then CONSUME once.
+  // COLLECT SPLITS to a global shared split-point table fixpoint, then EMIT
+  // once.
   const EngineSetup setup = BuildEngineSetup(in, A, eps);
-  std::map<std::tuple<int, int, int>, std::map<e1::K3, vec3>> lineReg;
-  std::vector<std::vector<E1Seam>> seamCache;  // enumerated once, reused
+  std::map<std::tuple<int, int, int>, std::map<coordinated::K3, vec3>>
+      lineSplitPoints;
+  std::vector<std::vector<IntersectionSegmentRecord>>
+      intersectionSegmentCache;  // enumerated once, reused
   size_t prev = static_cast<size_t>(-1);
   for (int round = 0; round < 8; ++round) {
-    EmitCoordinatedBoundaryImpl(in, A, setup, eps, lineReg, seamCache, true);
+    RunCoordinatedBoundaryPass(in, A, setup, eps, lineSplitPoints,
+                               intersectionSegmentCache, true);
     size_t sz = 0;
-    for (const auto& kv : lineReg) sz += kv.second.size();
-    if (sz == prev) break;  // registry stable
+    for (const auto& kv : lineSplitPoints) sz += kv.second.size();
+    if (sz == prev) break;  // shared split-point table stable
     prev = sz;
   }
-  // The consume is single-shot: edge decidedness partitions the field before
+  // The EMIT pass is single-shot: transport certification partitions the field
+  // before
   // BFS, so there is no retry or whole-field regime switch.
-  return EmitCoordinatedBoundaryImpl(in, A, setup, eps, lineReg, seamCache,
-                                     false);
+  return RunCoordinatedBoundaryPass(in, A, setup, eps, lineSplitPoints,
+                                    intersectionSegmentCache, false);
 }
 
-// NEAR-COPLANAR WIDEN + GLOBAL-PLANARITY GUARD (docs/Regularize3D.md stage-5;
-// reg3d-nearcoplanar-research candidate (a)).  The exact-coplanar fold only
+// NEAR-COPLANAR PLANARIZATION + GLOBAL-PLANARITY GUARD
+// (docs/Regularize3D.md stage-5; reg3d-nearcoplanar-research candidate (a)).
+// The exact-coplanar arrangement only
 // admits pairs whose six cross orient3d filter signs are all 0 (coplanarity gap
 // below ~1 ULP).  Faces within eps of coplanar but ABOVE that bound are
 // DECIDABLE non-coplanar yet their arrangement cells are sub-eps thin:
 // enumerated transversally they double-round to slivers (unresolvable sheet
 // contact) - the thin band this pass closes.
 //
-// This is an INPUT-SIDE PLANARIZATION, run BEFORE the resolver's
-// enumeration/winding/emit, so the resolver RE-DERIVES the whole arrangement
+// This is an INPUT-SIDE PLANARIZATION, run BEFORE the regularizer's
+// enumeration/winding/emit, so the regularizer RE-DERIVES the whole arrangement
 // from the snapped input (the thin cell ceases to exist).  It is NOT an
 // emission-time snap (those fight decisions the arrangement already made,
 // ExactArrangement3D variant-E kill); it perturbs the INPUT by <= eps inside
 // the standing epsilon-valid contract, coordinated by construction.
 //
-//  1. WIDEN: union bbox-overlapping, non-self-adjacent faces that OVERLAP in 2D
+//  1. CLUSTER: union bbox-overlapping, non-self-adjacent faces that OVERLAP in
+//     2D
 //     and whose max cross vertex-plane distance is < eps (the near band).  A
-//     cluster is EXACT (skip - the existing fold owns it, bitwise) unless some
+//     cluster is EXACT (skip - the existing coplanar arrangement owns it,
+//     bitwise) unless some
 //     admitted pair is filter-non-coplanar (a genuine near-band pair).
 //  2. GLOBAL-PLANARITY GUARD (the curvature safety net + snap target): fit ONE
 //     plane to a near cluster (centroid + area-weighted normal); if any member
@@ -4656,8 +4817,8 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundary(const Manifold::Impl& in,
 //          caller runs on the ORIGINAL input, bitwise); Fatal on a guard
 //          failure or a vertex shared by two near clusters (an inconsistent
 //          snap).
-StageResult<Manifold::Impl> SnapNearCoplanarClusters(const Manifold::Impl& in,
-                                                     double eps) {
+StageResult<Manifold::Impl> PlanarizeNearCoplanarClusters(
+    const Manifold::Impl& in, double eps) {
   const int nTri = static_cast<int>(in.NumTri());
   const TriSoup soup(in);
   const auto& tri = soup.tri;
@@ -4675,7 +4836,8 @@ StageResult<Manifold::Impl> SnapNearCoplanarClusters(const Manifold::Impl& in,
   // smaller face's verts against the larger plane = the true gap over the
   // shared footprint; the max direction extrapolates one plane across the
   // other's full extent (diameter-amplified, a red herring per the research
-  // memo).  A macro transversal crossing has BOTH directions large, so min
+  // memo). An above-epsilon transversal crossing has BOTH directions large, so
+  // min
   // still rejects it. Returns +inf if either plane is degenerate.
   auto pairGap = [&](int i, int j) {
     vec3 ni, nj;
@@ -4709,7 +4871,8 @@ StageResult<Manifold::Impl> SnapNearCoplanarClusters(const Manifold::Impl& in,
   if (!anyNear) return StageResult<Manifold::Impl>{};
 
   // Group faces by root; a cluster is NEAR (to be snapped) iff it holds a
-  // near-band face, EXACT (left bitwise for the existing fold) otherwise.
+  // near-band face, EXACT (left bitwise for the existing coplanar arrangement)
+  // otherwise.
   std::map<int, std::vector<int>> members;
   for (int f = 0; f < nTri; ++f)
     members[static_cast<int>(uf.find(f))].push_back(f);
@@ -4751,12 +4914,13 @@ StageResult<Manifold::Impl> SnapNearCoplanarClusters(const Manifold::Impl& in,
     cen /= static_cast<double>(verts.size());
 
     // GLOBAL-PLANARITY GUARD: max member deviation from the fitted plane must
-    // be within eps, else this is a curved near-coplanar chain the fold cannot
-    // carry (the anti-chain-reaction net).  Fail closed, distinctly named.
+    // be within eps, else this is a curved near-coplanar chain the coplanar
+    // arrangement cannot carry (the anti-chain-reaction net). Fail closed,
+    // distinctly named.
     for (int v : verts)
       if (std::abs(la::dot(N, in.vertPos_[v] - cen)) > eps) {
         return StageResult<Manifold::Impl>::Fatal(
-            FatalReason::DirtyComponentUnresolved,
+            FatalReason::RegularizationIncomplete,
             "resolver: near-coplanar cluster fails the global-planarity "
             "guard (curved chain, max deviation > eps) - fail-closed");
       }
@@ -4764,7 +4928,7 @@ StageResult<Manifold::Impl> SnapNearCoplanarClusters(const Manifold::Impl& in,
     for (int v : verts) {
       if (vertCluster[v] >= 0 && vertCluster[v] != clusterId) {
         return StageResult<Manifold::Impl>::Fatal(
-            FatalReason::DirtyComponentUnresolved,
+            FatalReason::RegularizationIncomplete,
             "resolver: a vertex lies in two near-coplanar clusters "
             "(inconsistent snap) - fail-closed");
       }
@@ -4779,43 +4943,48 @@ StageResult<Manifold::Impl> SnapNearCoplanarClusters(const Manifold::Impl& in,
   return StageResult<Manifold::Impl>::Ok(std::move(work));
 }
 
-// The dirty-component resolver validates transversal crossings, then runs the
+// Component regularization validates transversal crossings, then runs the
 // coordinated plane-group arrangement, coupled winding field, and boundary
 // emission. Anything it cannot resolve fails closed with a named reason; the
-// caller re-gates the output once more with IsSelfIntersecting.
-StageResult<Manifold::Impl> ResolveComponent(const Manifold::Impl& dirty,
-                                             double eps) {
+// caller validates the output once more with IsSelfIntersecting.
+StageResult<Manifold::Impl> RegularizeComponent(
+    const Manifold::Impl& inputComponent, double eps) {
   // NEAR-COPLANAR PRE-PASS (docs/Regularize3D.md stage-5): planarize any
   // within-eps near-coplanar overlap cluster onto its fitted plane so the
   // resolver re-derives the arrangement from an exactly-coplanar input.  No
   // near cluster
-  // -> `dirty` is used bitwise (the exact path is unperturbed); a curved chain
+  // -> `inputComponent` is used bitwise (the exact path is unperturbed); a
+  // curved chain
   // (global-planarity guard failure) fails closed here, distinctly named.
-  StageResult<Manifold::Impl> snapped = SnapNearCoplanarClusters(dirty, eps);
+  StageResult<Manifold::Impl> snapped =
+      PlanarizeNearCoplanarClusters(inputComponent, eps);
   if (snapped.fatal) return snapped;
-  const Manifold::Impl& in = snapped.value ? *snapped.value : dirty;
+  const Manifold::Impl& in = snapped.value ? *snapped.value : inputComponent;
 
   // Exactly-coplanar face pairs are owned by their coordinated plane group, so
   // the transversal validation skips them. The single-global SoS
   // decides every non-coplanar transversal exact-zero tie (pierce / no-pierce),
   // so there is no "SoS refused" fail-closed slot left here - a residue instead
-  // surfaces as a non-2-endpoint seam (A.ok) or downstream at emission.
+  // surfaces as a non-2-endpoint intersection segment (A.ok) or downstream at
+  // emission.
   const std::vector<int> face2cluster = DetectCoplanarClusters(in);
-  BuildArrangement A = RecordSeams(in, face2cluster, eps);
+  BuildArrangement A = RecordIntersectionSegments(in, face2cluster, eps);
   if (!A.ok) {
     return StageResult<Manifold::Impl>::Fatal(
-        FatalReason::DirtyComponentUnresolved,
+        FatalReason::RegularizationIncomplete,
         "resolver: a self-crossing pair had a non-2-endpoint seam "
         "(degenerate incidence) - fail-closed");
   }
-  // The coordinated engine is the only emission path. Its certificates and
-  // the re-gate preserve fail-closed behavior; there is no fallback path.
+  // The coordinated-boundary emitter is the only emission path. Its
+  // certificates and output validation preserve fail-closed behavior; there
+  // is no fallback path.
   return EmitCoordinatedBoundary(in, A, eps);
 }
 
 // Compose the surviving components back into one Impl by CONCATENATION - no
-// cross-component weld, no fusion (docs/Regularize3D.md step 6).  A single
-// component is returned as-is (bitwise pass-through for a clean
+// cross-component vertex merge, no fusion (docs/Regularize3D.md step 6). A
+// single
+// component is returned as-is (bitwise pass-through for an unchanged
 // single-component input); multiple components are concatenated through
 // MeshGL64, whose halfedge pairing is per-component (distinct-position verts
 // across components never merge, so touching contacts stay separate).
@@ -4839,17 +5008,18 @@ Manifold::Impl ComposeComponents(std::vector<Manifold::Impl>& parts) {
 
 }  // namespace
 
-// Test hook (overlap3.h): expose the micro exact tie-test so the property pin
+// Test hook (overlap3.h): expose the exact-kernel tie test so the property pin
 // can grade it directly.
 int Orient3DExactSignProbe(const vec3& a, const vec3& b, const vec3& c,
                            const vec3& d) {
   return Orient3DExactSign(a, b, c, d);
 }
 
-// EXACT RE-GATE ARM (filter-first).  GateComponent's heuristics
+// EXACT OUTPUT-VALIDATION FALLBACK (filter-first). ClassifyComponent's
+// heuristics
 // (IsSelfIntersecting's PhysX distance test, HasCoplanarOverlap's witness)
 // are the FILTER; when they flag resolver output, THIS is the arbiter.
-// Contract: a contact whose interpenetration is below the weld radius is
+// Contract: a contact whose interpenetration is below eps is
 // COINCIDENT/TOUCHING - a valid double-precision rendering of geometry the
 // representation cannot separate (measured on the graded openscad resolve:
 // max crossing depth 0.23 eps, coplanar lens widths <= 4e-7 eps); anything
@@ -4860,8 +5030,8 @@ int Orient3DExactSignProbe(const vec3& a, const vec3& b, const vec3& c,
 // scale MAGNITUDES (depth, lens width) are double arithmetic, with four-plus
 // orders of margin to the threshold.  Adjacency needs no special casing:
 // shared vertices/edges yield orient zeros and strictness rejects them.
-// Returns true iff every contact is within-weld (the component may pass).
-static bool RegateContactsWithinWeld(const Manifold::Impl& m, double eps) {
+// Returns true iff every contact is within tolerance (the component may pass).
+static bool OutputContactsWithinTolerance(const Manifold::Impl& m, double eps) {
   const size_t nTri = m.halfedge_.size() / 3;
   std::vector<std::array<vec3, 3>> tri(nTri);
   for (size_t t = 0; t < nTri; ++t)
@@ -4889,8 +5059,8 @@ static bool RegateContactsWithinWeld(const Manifold::Impl& m, double eps) {
           grid[{x, y, z}].push_back(static_cast<int>(t));
   }
   // strict segment-triangle crossing + penetration depth of the edge tip
-  auto crossingBeyondWeld = [&](const std::array<vec3, 3>& A,
-                                const std::array<vec3, 3>& B) -> bool {
+  auto CrossingExceedsTolerance = [&](const std::array<vec3, 3>& A,
+                                      const std::array<vec3, 3>& B) -> bool {
     for (int k = 0; k < 3; ++k) {
       const vec3 &p = A[k], &q = A[(k + 1) % 3];
       const int s1 = o3(B[0], B[1], B[2], p);
@@ -4913,8 +5083,8 @@ static bool RegateContactsWithinWeld(const Manifold::Impl& m, double eps) {
     return false;
   };
   // exact-coplanar 2D overlap + lens width
-  auto coplanarBeyondWeld = [&](const std::array<vec3, 3>& A,
-                                const std::array<vec3, 3>& B) -> bool {
+  auto CoplanarOverlapExceedsTolerance =
+      [&](const std::array<vec3, 3>& A, const std::array<vec3, 3>& B) -> bool {
     for (int k = 0; k < 3; ++k)
       if (o3(A[0], A[1], A[2], B[k]) != 0) return false;
     const vec3 nA = la::cross(A[1] - A[0], A[2] - A[0]);
@@ -5016,9 +5186,9 @@ static bool RegateContactsWithinWeld(const Manifold::Impl& m, double eps) {
             boxes[i].min.z > boxes[j].max.z + eps ||
             boxes[j].min.z > boxes[i].max.z + eps)
           continue;
-        if (crossingBeyondWeld(tri[i], tri[j]) ||
-            crossingBeyondWeld(tri[j], tri[i]) ||
-            coplanarBeyondWeld(tri[i], tri[j])) {
+        if (CrossingExceedsTolerance(tri[i], tri[j]) ||
+            CrossingExceedsTolerance(tri[j], tri[i]) ||
+            CoplanarOverlapExceedsTolerance(tri[i], tri[j])) {
           return false;
         }
       }
@@ -5036,7 +5206,7 @@ RegularizeResult RemoveOverlaps3D(const Manifold::Impl& in, double eps) {
     return result;
   }
 
-  // Resolve the machine-scale weld radius once; every component's gate uses it.
+  // Resolve eps once; every component's classification uses it.
   if (eps <= 0.0) eps = EpsilonFromScale(in.bBox_.Scale(), 1000);
   if (eps <= 0.0 || !std::isfinite(eps)) {
     result.fatal = FatalReason::SubEpsInput;
@@ -5048,7 +5218,8 @@ RegularizeResult RemoveOverlaps3D(const Manifold::Impl& in, double eps) {
   std::vector<Manifold::Impl> components = DecomposeComponents(in, eps);
   result.counters.components = static_cast<int>(components.size());
 
-  // 2-5. Gate + dispatch every component.  We gate ALL components (the gate is
+  // 2-5. Classify + dispatch every component. We classify ALL components (the
+  // classification is
   // cheap) so the white-box dispatch counters are complete regardless of the
   // decompose order; the first fail-closed is the reported fatal, and no
   // partial output is composed once any component fails.
@@ -5056,8 +5227,9 @@ RegularizeResult RemoveOverlaps3D(const Manifold::Impl& in, double eps) {
   std::string firstDetail;
   std::vector<Manifold::Impl> outComponents;
 
-  // Components are independent by contract (no cross-component weld), so
-  // gate+resolve is order-free.  A single two-pass path covers every component
+  // Components are independent by contract (no cross-component vertex merge),
+  // so classification + regularization is order-free. A single two-pass path
+  // covers every component
   // count: resolve each component in parallel into a slot (manifold::for_each_n
   // / autoPolicy), then reduce in index order.  This keeps the counters,
   // firstFatal, and output order bitwise-identical to a sequential loop; at one
@@ -5069,7 +5241,7 @@ RegularizeResult RemoveOverlaps3D(const Manifold::Impl& in, double eps) {
     enum { KClean, KReg, KFail };
     struct CompOut {
       int kind = KFail;
-      bool dirty = false;
+      bool needsRegularization = false;
       std::optional<FatalReason> fatal;
       std::string detail;
       Manifold::Impl impl;
@@ -5078,23 +5250,24 @@ RegularizeResult RemoveOverlaps3D(const Manifold::Impl& in, double eps) {
     for_each_n(autoPolicy(components.size(), 1), countAt(0), components.size(),
                [&](int i) {
                  Manifold::Impl& comp = components[i];
-                 const GateVerdict verdict = GateComponent(comp);
+                 const ComponentDisposition verdict = ClassifyComponent(comp);
                  // Reachable defensive guard on the direct-Impl path only: the
                  // public Impl(MeshGL64) ctor sanitizes a non-manifold soup to
                  // empty (early-returns before here), but an internally-built
                  // Impl can present a non-manifold component. Fail closed.
-                 if (verdict == GateVerdict::Invalid) {
+                 if (verdict == ComponentDisposition::Invalid) {
                    co[i].fatal = FatalReason::NonManifoldEmission;
                    co[i].detail = "input component is not 2-manifold";
                    return;
                  }
-                 if (verdict == GateVerdict::Clean) {
+                 if (verdict == ComponentDisposition::Unchanged) {
                    co[i].kind = KClean;
                    co[i].impl = std::move(comp);
                    return;
                  }
-                 co[i].dirty = true;
-                 StageResult<Manifold::Impl> bRes = ResolveComponent(comp, eps);
+                 co[i].needsRegularization = true;
+                 StageResult<Manifold::Impl> bRes =
+                     RegularizeComponent(comp, eps);
                  if (!bRes.ok()) {
                    co[i].fatal = bRes.fatal;
                    co[i].detail = std::move(bRes.detail);
@@ -5102,37 +5275,45 @@ RegularizeResult RemoveOverlaps3D(const Manifold::Impl& in, double eps) {
                  }
                  Manifold::Impl bImpl = std::move(*bRes.value);
                  bImpl.epsilon_ = eps;
-                 // RE-GATE the resolver's output once (same gate as the input;
-                 // the resolver's coords are double-rounded).  A clean pass
+                 // VALIDATE the regularizer's output once (same classification
+                 // as the input; the regularizer's coordinates are
+                 // double-rounded). An unchanged result
                  // composes in; a failure is the honest fail-closed, never a
                  // silent wrong result.  This is a PRODUCTION fail-closed
-                 // backstop for the R1/R2 weld-fold blind spot (BuildImpl
-                 // already gates non-manifold emission; the re-gate's
+                 // final validation for the R1/R2 vertex-merge fold-back blind
+                 // spot (BuildImpl already validates non-manifold emission;
+                 // output validation's
                  // non-redundant job is catching a MANIFOLD-but-self-
-                 // intersecting output = a weld-manufactured fold).  It is
+                 // intersecting output = a vertex-merge-manufactured
+                 // fold-back). It is
                  // verified UNREACHED on constructible general-position
                  // fixtures (reg3d-s3: 0/180 sphere variants produce
-                 // re-gate-catchable output - every bad case is caught earlier
-                 // by BuildImpl's manifold gate), i.e. it fires only in the
-                 // unbuilt weld-fold regime.  It is deliberately NOT demoted to
+                 // output-validation-catchable output - every bad case is
+                 // caught earlier by BuildImpl's manifold validation), i.e. it
+                 // fires only in the
+                 // unbuilt vertex-merge fold-back regime. It is deliberately
+                 // NOT demoted to
                  // a DEBUG_ASSERT: it must fail closed in RELEASE, not compile
                  // out and admit wrong geometry.
-                 // FILTER-FIRST re-gate: the heuristic gate flags, the EXACT
-                 // arm arbitrates (owner-blessed).  Manifoldness must hold
+                 // FILTER-FIRST OUTPUT VALIDATION: heuristic classification
+                 // flags, the EXACT
+                 // fallback arbitrates (owner-blessed). Manifoldness must hold
                  // regardless; a flagged component passes only when every
-                 // contact is within the weld radius (sub-eps coincidence -
+                 // contact is within eps (sub-eps coincidence -
                  // the correct rendering of unseparable geometry), and any
                  // genuine crossing/overlap at or beyond eps refuses exactly
-                 // as before.  Placement is SCOPED to the resolver's re-gate:
+                 // as before. Placement is SCOPED to regularizer output
+                 // validation:
                  // the shared IsSelfIntersecting keeps its heuristic
                  // sensitivity for input ROUTING (a false-positive there
-                 // routes to the resolver, the safe direction) and for its
+                 // routes to regularization, the safe direction) and for its
                  // external test assertions.
-                 const GateVerdict rgv = GateComponent(bImpl);
-                 const bool regateOk = rgv == GateVerdict::Clean ||
-                                       (rgv == GateVerdict::Dirty &&
-                                        RegateContactsWithinWeld(bImpl, eps));
-                 if (!regateOk) {
+                 const ComponentDisposition rgv = ClassifyComponent(bImpl);
+                 const bool outputValid =
+                     rgv == ComponentDisposition::Unchanged ||
+                     (rgv == ComponentDisposition::NeedsRegularization &&
+                      OutputContactsWithinTolerance(bImpl, eps));
+                 if (!outputValid) {
                    co[i].fatal = FatalReason::NonManifoldEmission;
                    co[i].detail = "resolver output failed the re-gate";
                    return;
@@ -5141,9 +5322,9 @@ RegularizeResult RemoveOverlaps3D(const Manifold::Impl& in, double eps) {
                  co[i].impl = std::move(bImpl);
                });
     for (auto& c : co) {
-      if (c.dirty) ++result.counters.dirty;
+      if (c.needsRegularization) ++result.counters.needsRegularization;
       if (c.kind == KClean) {
-        ++result.counters.clean;
+        ++result.counters.unchanged;
         outComponents.push_back(std::move(c.impl));
       } else if (c.kind == KReg) {
         ++result.counters.regularized;
@@ -5170,37 +5351,40 @@ RegularizeResult RemoveOverlaps3D(const Manifold::Impl& in, double eps) {
   return result;
 }
 
-// Test hook: exercise the resolver's ported mechanism directly (enumeration +
-// coupled winding) so it can be graded against the fragment's recorded numbers.
-ComponentEnumProbe EnumerateComponent_Probe(const Manifold::Impl& dirty,
-                                            const std::vector<vec3>& probes,
-                                            const vec3& seed) {
+// Test hook: exercise the regularizer's ported mechanism directly (enumeration
+// + coupled winding) so it can be graded against the fragment's recorded
+// numbers.
+ComponentEnumProbe EnumerateComponent_Probe(
+    const Manifold::Impl& inputComponent, const std::vector<vec3>& probes,
+    const vec3& seed) {
   ComponentEnumProbe out;
-  // Fold the level-0 self-crossing counts onto the real seam scan (no separate
-  // enumeration pass): DetectCoplanarClusters ONCE, then RecordSeams with the
-  // probe counters.  The counters grade the raw pierce test independently of
-  // the cluster skip, so they reproduce the standalone enumerator's numbers.
-  const std::vector<int> face2cluster = DetectCoplanarClusters(dirty);
-  const double eps = EpsilonFromScale(dirty.bBox_.Scale(), 1000);
-  RecordSeams(dirty, face2cluster, eps, &out.seamCount,
-              &out.boundaryTouchPairs);
+  // Fold the level-0 self-crossing counts onto the real intersection segment
+  // scan (no separate enumeration pass): DetectCoplanarClusters ONCE, then
+  // RecordIntersectionSegments with the probe counters.  The counters grade the
+  // raw pierce test independently of the cluster skip, so they reproduce the
+  // standalone enumerator's numbers.
+  const std::vector<int> face2cluster = DetectCoplanarClusters(inputComponent);
+  const double eps = EpsilonFromScale(inputComponent.bBox_.Scale(), 1000);
+  RecordIntersectionSegments(inputComponent, face2cluster, eps,
+                             &out.intersectionSegmentCount,
+                             &out.boundaryTouchPairs);
   for (int c : face2cluster)
     if (c >= 0) ++out.coplanarClusterFaces;
   out.probeWinding.reserve(probes.size());
   for (const vec3& p : probes) {
-    const std::optional<int> w = WindingAt(dirty, p, seed);
+    const std::optional<int> w = WindingAt(inputComponent, p, seed);
     out.probeWinding.push_back(w.has_value() ? *w : kWindingUncertain);
   }
   return out;
 }
 
-RegularizeResult ResolveComponentDirect(const Manifold::Impl& soup,
-                                        double eps) {
+RegularizeResult RegularizeComponentDirect(const Manifold::Impl& soup,
+                                           double eps) {
   RegularizeResult result;
   if (eps <= 0.0) eps = EpsilonFromScale(soup.bBox_.Scale(), 1000);
   result.counters.components = 1;
-  result.counters.dirty = 1;
-  StageResult<Manifold::Impl> bRes = ResolveComponent(soup, eps);
+  result.counters.needsRegularization = 1;
+  StageResult<Manifold::Impl> bRes = RegularizeComponent(soup, eps);
   if (!bRes.ok()) {
     ++result.counters.failClosed;
     result.fatal = bRes.fatal;
@@ -5209,7 +5393,7 @@ RegularizeResult ResolveComponentDirect(const Manifold::Impl& soup,
   }
   Manifold::Impl bImpl = std::move(*bRes.value);
   bImpl.epsilon_ = eps;
-  if (GateComponent(bImpl) != GateVerdict::Clean) {
+  if (ClassifyComponent(bImpl) != ComponentDisposition::Unchanged) {
     ++result.counters.failClosed;
     result.fatal = FatalReason::NonManifoldEmission;
     result.detail = "resolver output failed the re-gate";

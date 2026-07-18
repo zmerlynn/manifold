@@ -197,8 +197,8 @@ TEST(Overlap3, Regularize_CleanSingleComponent_BitwisePassThrough) {
       << "clean cube must not fail closed: " << r.detail;
   ASSERT_TRUE(r.impl.has_value());
   EXPECT_EQ(r.counters.components, 1);
-  EXPECT_EQ(r.counters.clean, 1);
-  EXPECT_EQ(r.counters.dirty, 0);
+  EXPECT_EQ(r.counters.unchanged, 1);
+  EXPECT_EQ(r.counters.needsRegularization, 0);
   EXPECT_EQ(r.counters.failClosed, 0);
   EXPECT_TRUE(BitIdenticalMesh(*r.impl, in))
       << "clean single component must pass through bitwise-unchanged";
@@ -215,8 +215,8 @@ TEST(Overlap3, Regularize_MultiComponent_AllClean_DispatchCounts) {
   ASSERT_FALSE(r.fatal.has_value()) << r.detail;
   ASSERT_TRUE(r.impl.has_value());
   EXPECT_EQ(r.counters.components, 2);
-  EXPECT_EQ(r.counters.clean, 2);
-  EXPECT_EQ(r.counters.dirty, 0);
+  EXPECT_EQ(r.counters.unchanged, 2);
+  EXPECT_EQ(r.counters.needsRegularization, 0);
   EXPECT_EQ(r.counters.failClosed, 0);
   const Manifold out(GetMeshGLImpl<double, uint64_t>(*r.impl, -1));
   EXPECT_EQ(out.Decompose().size(), 2u)
@@ -237,8 +237,8 @@ TEST(Overlap3, Regularize_MultiComponent_CleanPlusDirty_DispatchCounts) {
   ASSERT_FALSE(r.fatal.has_value()) << r.detail;
   ASSERT_TRUE(r.impl.has_value());
   EXPECT_EQ(r.counters.components, 2);
-  EXPECT_EQ(r.counters.clean, 1);
-  EXPECT_EQ(r.counters.dirty, 1);
+  EXPECT_EQ(r.counters.unchanged, 1);
+  EXPECT_EQ(r.counters.needsRegularization, 1);
   EXPECT_EQ(r.counters.regularized, 1);
   EXPECT_EQ(r.counters.failClosed, 0);
   const Manifold out(GetMeshGLImpl<double, uint64_t>(*r.impl, -1));
@@ -270,7 +270,7 @@ TEST(Overlap3, Regularize_DirtySingleComponent_RoutesToResolver) {
       << "must resolve, not fail closed: " << r.detail;
   ASSERT_TRUE(r.impl.has_value());
   EXPECT_EQ(r.counters.components, 1);
-  EXPECT_EQ(r.counters.dirty, 1);
+  EXPECT_EQ(r.counters.needsRegularization, 1);
   EXPECT_EQ(r.counters.regularized, 1);
   EXPECT_EQ(r.counters.failClosed, 0);
 
@@ -331,7 +331,7 @@ static void ExpectSelfIntersectorRegularizes(const char* name, double volLo,
       << name << " B must resolve, not fail closed: " << r.detail;
   ASSERT_TRUE(r.impl.has_value());
   EXPECT_EQ(r.counters.components, 1);
-  EXPECT_EQ(r.counters.dirty, 1);
+  EXPECT_EQ(r.counters.needsRegularization, 1);
   EXPECT_EQ(r.counters.regularized, 1);
   EXPECT_EQ(r.counters.failClosed, 0);
 
@@ -397,7 +397,8 @@ static void ExpectBMechanism(const char* name, int expectSeams, vec3 w1,
   // corpus).
   const std::vector<vec3> probes = {far, w1, w2};
   const ComponentEnumProbe p = EnumerateComponent_Probe(in, probes, seed);
-  EXPECT_EQ(p.seamCount, expectSeams) << name << " enumeration seam count";
+  EXPECT_EQ(p.intersectionSegmentCount, expectSeams)
+      << name << " enumeration seam count";
   EXPECT_EQ(p.boundaryTouchPairs, 0)
       << name << " must be safe-by-margin (no exact-zero tie)";
 
@@ -530,7 +531,7 @@ TEST(Overlap3, Regularize_NegativeWinding_PushedCapSphere) {
   ASSERT_FALSE(r.fatal.has_value())
       << "negative winding must be absorbed, not fail-closed: " << r.detail;
   ASSERT_TRUE(r.impl.has_value());
-  EXPECT_EQ(r.counters.dirty, 1);
+  EXPECT_EQ(r.counters.needsRegularization, 1);
   EXPECT_EQ(r.counters.regularized, 1);
   EXPECT_EQ(r.counters.failClosed, 0);
 
@@ -787,8 +788,8 @@ TEST(Overlap3, Regularize_ExactZeroTie_GT7863_Resolves) {
 
   const RegularizeResult r = RemoveOverlaps3D(in, ImplEps(in));
   EXPECT_EQ(r.counters.components, 4) << "four components stay separate";
-  EXPECT_EQ(r.counters.clean, 2) << "2 components early-exit clean";
-  EXPECT_EQ(r.counters.dirty, 2)
+  EXPECT_EQ(r.counters.unchanged, 2) << "2 components early-exit clean";
+  EXPECT_EQ(r.counters.needsRegularization, 2)
       << "1 self-intersecting + 1 within-component coplanar overlap";
   EXPECT_EQ(r.counters.regularized, 2) << "both dirty components resolve";
   EXPECT_EQ(r.counters.failClosed, 0);
@@ -810,7 +811,7 @@ TEST(Overlap3, Regularize_ExactZeroTie_GT7863_Resolves) {
     const double ceps = ImplEps(ci);
     const double inVol =
         Manifold(GetMeshGLImpl<double, uint64_t>(ci, -1)).Volume();
-    const RegularizeResult rc = ResolveComponentDirect(ci, ceps);
+    const RegularizeResult rc = RegularizeComponentDirect(ci, ceps);
     ASSERT_FALSE(rc.fatal.has_value())
         << "component must resolve (si=" << si << " vol=" << inVol
         << "): " << rc.detail;
@@ -822,7 +823,7 @@ TEST(Overlap3, Regularize_ExactZeroTie_GT7863_Resolves) {
     // {w>=1} volume preserved (signed volume is exact for a 0/1-winding solid).
     EXPECT_NEAR(outVol, inVol, 1e-3 * std::abs(inVol))
         << "resolved {w>=1} volume must preserve the input signed volume";
-    const RegularizeResult rc2 = ResolveComponentDirect(ci, ceps * 0.5);
+    const RegularizeResult rc2 = RegularizeComponentDirect(ci, ceps * 0.5);
     ASSERT_TRUE(rc2.impl.has_value());
     EXPECT_NEAR(
         outVol,
@@ -973,7 +974,7 @@ static void ExpectFoldResolves(const char* tag, const MeshGL64& mesh,
       in, {}, in.bBox_.Center() + vec3(97.1, 33.7, 51.3));
   EXPECT_GT(p.coplanarClusterFaces, 0) << tag << " must reach the fold";
   const double eps = EpsilonFromScale(in.bBox_.Scale(), 1000);
-  auto run = [&](double e) { return ResolveComponentDirect(in, e); };
+  auto run = [&](double e) { return RegularizeComponentDirect(in, e); };
 
   const RegularizeResult r = run(eps);
   ASSERT_FALSE(r.fatal.has_value())
@@ -1126,7 +1127,8 @@ TEST(Overlap3, Regularize_ExactZeroTie_Openscad_FailClosed) {
   // derived volume - the strongest surviving anchor (a wrong emission
   // cannot hold the exact-divergence volume AND the manifold gates).
   const RegularizeResult r = RemoveOverlaps3D(in, ImplEps(in));
-  EXPECT_GE(r.counters.dirty, 1) << "coplanar overlap must route dirty";
+  EXPECT_GE(r.counters.needsRegularization, 1)
+      << "coplanar overlap must route dirty";
   ASSERT_FALSE(r.fatal.has_value())
       << "engine-on must resolve: " << (r.fatal ? r.detail : "");
   ASSERT_TRUE(r.impl.has_value());
@@ -1314,8 +1316,8 @@ TEST(Overlap3, Regularize_SlantPlug_CrossComponent_PassThrough) {
   ASSERT_FALSE(r.fatal.has_value()) << r.detail;
   ASSERT_TRUE(r.impl.has_value());
   EXPECT_EQ(r.counters.components, 2) << "two disjoint boxes stay separate";
-  EXPECT_EQ(r.counters.clean, 2) << "both early-exit clean (no merge)";
-  EXPECT_EQ(r.counters.dirty, 0)
+  EXPECT_EQ(r.counters.unchanged, 2) << "both early-exit clean (no merge)";
+  EXPECT_EQ(r.counters.needsRegularization, 0)
       << "cross-component coplanar overlap is invisible"
          " to the per-component gate by design";
   EXPECT_EQ(r.counters.regularized, 0);
@@ -1409,11 +1411,12 @@ TEST(Overlap3, Regularize_ExactZeroTie_EntangledBars_Resolves) {
   ASSERT_TRUE(in.IsManifold() && in.Is2Manifold());
   const ComponentEnumProbe p = EnumerateComponent_Probe(
       in, {}, in.bBox_.Center() + vec3(97.1, 33.7, 51.3));
-  EXPECT_GT(p.seamCount, 0) << "must reach a transversal crossing";
+  EXPECT_GT(p.intersectionSegmentCount, 0)
+      << "must reach a transversal crossing";
   EXPECT_GT(p.coplanarClusterFaces, 0) << "must reach the coplanar caps (fold)";
 
   const double eps = EpsilonFromScale(in.bBox_.Scale(), 1000);
-  const RegularizeResult r = ResolveComponentDirect(in, eps);
+  const RegularizeResult r = RegularizeComponentDirect(in, eps);
   ASSERT_FALSE(r.fatal.has_value())
       << "the cap-plane seam endpoint must resolve, not truncate: " << r.detail;
   ASSERT_TRUE(r.impl.has_value());
@@ -1453,7 +1456,7 @@ TEST(Overlap3, Regularize_ExactZeroTie_EntangledBars_Resolves) {
   EXPECT_GT(checked, 3000) << "oracle undersampled";
 
   // TOL-INVARIANCE: the retained topology is decided from input data.
-  const RegularizeResult r2 = ResolveComponentDirect(in, eps * 0.5);
+  const RegularizeResult r2 = RegularizeComponentDirect(in, eps * 0.5);
   ASSERT_TRUE(r2.impl.has_value()) << "tol-variant fatal: " << r2.detail;
   const Manifold out2(GetMeshGLImpl<double, uint64_t>(*r2.impl, -1));
   EXPECT_NEAR(vol, out2.Volume(), 1e-6 * vol) << "not tol-invariant";
@@ -1479,11 +1482,11 @@ TEST(Overlap3, Regularize_ExactZeroTie_EntangledBarsRotated_Resolves) {
   ASSERT_TRUE(in.IsManifold() && in.Is2Manifold());
   const ComponentEnumProbe p = EnumerateComponent_Probe(
       in, {}, in.bBox_.Center() + vec3(97.1, 33.7, 51.3));
-  EXPECT_GT(p.seamCount, 0);
+  EXPECT_GT(p.intersectionSegmentCount, 0);
   EXPECT_GT(p.coplanarClusterFaces, 0);
 
   const double eps = EpsilonFromScale(in.bBox_.Scale(), 1000);
-  const RegularizeResult r = ResolveComponentDirect(in, eps);
+  const RegularizeResult r = RegularizeComponentDirect(in, eps);
   ASSERT_FALSE(r.fatal.has_value())
       << "rotated cap-plane junction must resolve: " << r.detail;
   ASSERT_TRUE(r.impl.has_value());
@@ -1522,7 +1525,7 @@ TEST(Overlap3, Regularize_ExactZeroTie_EntangledBarsRotated_Resolves) {
   EXPECT_GT(checked, 3000) << "oracle undersampled";
 
   // TOL-INVARIANCE.
-  const RegularizeResult r2 = ResolveComponentDirect(in, eps * 0.5);
+  const RegularizeResult r2 = RegularizeComponentDirect(in, eps * 0.5);
   ASSERT_TRUE(r2.impl.has_value()) << "tol-variant fatal: " << r2.detail;
   const Manifold out2(GetMeshGLImpl<double, uint64_t>(*r2.impl, -1));
   EXPECT_NEAR(vol, out2.Volume(), 1e-6 * vol) << "not tol-invariant";
@@ -1543,11 +1546,12 @@ TEST(Overlap3, Regularize_ExactZeroTie_BarsCrossZ_Resolves) {
   ASSERT_TRUE(in.IsManifold() && in.Is2Manifold());
   const ComponentEnumProbe p = EnumerateComponent_Probe(
       in, {}, in.bBox_.Center() + vec3(97.1, 33.7, 51.3));
-  EXPECT_GT(p.seamCount, 0) << "must reach transversal crossings";
+  EXPECT_GT(p.intersectionSegmentCount, 0)
+      << "must reach transversal crossings";
   EXPECT_EQ(p.coplanarClusterFaces, 0) << "no coplanar caps (fold not reached)";
 
   const double eps = EpsilonFromScale(in.bBox_.Scale(), 1000);
-  const RegularizeResult r = ResolveComponentDirect(in, eps);
+  const RegularizeResult r = RegularizeComponentDirect(in, eps);
   ASSERT_FALSE(r.fatal.has_value()) << "the coordinated field must resolve "
                                        "the exact-tie seed graze: "
                                     << r.detail;
@@ -1588,7 +1592,7 @@ TEST(Overlap3, Regularize_ExactZeroTie_BarsCrossZ_Resolves) {
   EXPECT_GT(checked, 3000) << "oracle undersampled";
 
   // TOL-INVARIANCE: the retained topology is decided from input data.
-  const RegularizeResult r2 = ResolveComponentDirect(in, eps * 0.5);
+  const RegularizeResult r2 = RegularizeComponentDirect(in, eps * 0.5);
   ASSERT_TRUE(r2.impl.has_value()) << "tol-variant fatal: " << r2.detail;
   const Manifold out2(GetMeshGLImpl<double, uint64_t>(*r2.impl, -1));
   EXPECT_NEAR(vol, out2.Volume(), 1e-6 * vol) << "not tol-invariant";
@@ -1655,17 +1659,18 @@ TEST(Overlap3, Regularize_CapSeamingEntanglement_CapInteriorPierce_FailClosed) {
   const ComponentEnumProbe p = EnumerateComponent_Probe(
       in, {}, in.bBox_.Center() + vec3(97.1, 33.7, 51.3));
   EXPECT_GT(p.coplanarClusterFaces, 0) << "must reach the coplanar cap cluster";
-  EXPECT_GT(p.seamCount, 0) << "the pierce must transversally seam the cap";
+  EXPECT_GT(p.intersectionSegmentCount, 0)
+      << "the pierce must transversally seam the cap";
 
   const double eps = EpsilonFromScale(in.bBox_.Scale(), 1000);
-  const RegularizeResult r = ResolveComponentDirect(in, eps);
+  const RegularizeResult r = RegularizeComponentDirect(in, eps);
   // FAIL CLOSED: the cap-seaming entanglement is research-grade, never a silent
   // wrong resolve.  Today the RecordSeams truncation (F11 "degenerate
   // incidence") is the first gate; the fold-decline (F3) sits underneath it.
   ASSERT_TRUE(r.fatal.has_value())
       << "the cap-seaming entanglement must fail closed, not resolve: "
       << r.detail;
-  EXPECT_EQ(*r.fatal, FatalReason::DirtyComponentUnresolved) << r.detail;
+  EXPECT_EQ(*r.fatal, FatalReason::RegularizationIncomplete) << r.detail;
   EXPECT_FALSE(r.impl.has_value()) << "fail-closed yields no partial output";
 
   // CONTRAST: C sitting ON the cap (no pierce) is the resolving buried-plug
@@ -1673,7 +1678,7 @@ TEST(Overlap3, Regularize_CapSeamingEntanglement_CapInteriorPierce_FailClosed) {
   const Manifold Crest =
       Manifold::Cube({2, 2, 2}).Translate({2, 2, 2});  // [2,4]^2 z[2,4] RESTS
   const Manifold::Impl inRest = NBoxSoup({A, B, Crest});
-  const RegularizeResult rRest = ResolveComponentDirect(inRest, eps);
+  const RegularizeResult rRest = RegularizeComponentDirect(inRest, eps);
   ASSERT_FALSE(rRest.fatal.has_value())
       << "the non-piercing plug (fold family) must resolve: " << rRest.detail;
   ASSERT_TRUE(rRest.impl.has_value());
@@ -1706,9 +1711,9 @@ TEST(Overlap3, Regularize_WithinComponentCoplanar_BridgedCaps_Resolves) {
       << r.detail;
   ASSERT_TRUE(r.impl.has_value());
   EXPECT_EQ(r.counters.components, 1);
-  EXPECT_EQ(r.counters.clean, 0)
+  EXPECT_EQ(r.counters.unchanged, 0)
       << "the within-component coplanar gate routes it DIRTY";
-  EXPECT_EQ(r.counters.dirty, 1);
+  EXPECT_EQ(r.counters.needsRegularization, 1);
   EXPECT_EQ(r.counters.regularized, 1);
 
   const Manifold out(GetMeshGLImpl<double, uint64_t>(*r.impl, -1));
@@ -1773,10 +1778,10 @@ TEST(Overlap3, Regularize_Hull_CrossComponent_PassThrough) {
   const RegularizeResult r = RemoveOverlaps3D(impl, ImplEps(impl));
   ASSERT_FALSE(r.fatal.has_value()) << r.detail;
   EXPECT_GT(r.counters.components, 1) << "body + mask are distinct components";
-  EXPECT_EQ(r.counters.clean, r.counters.components)
+  EXPECT_EQ(r.counters.unchanged, r.counters.components)
       << "every component is clean; the near-coplanar overlap is "
          "cross-component";
-  EXPECT_EQ(r.counters.dirty, 0);
+  EXPECT_EQ(r.counters.needsRegularization, 0);
   EXPECT_EQ(r.counters.regularized, 0);
   ASSERT_TRUE(r.impl.has_value());
   EXPECT_EQ(r.impl->NumTri(), impl.NumTri()) << "cross-component pass-through";
@@ -1894,11 +1899,11 @@ TEST(Overlap3, Regularize_NearCoplanarChain_GuardFailClosed) {
   const double eps = EpsilonFromScale(probe.bBox_.Scale(), 1000);
   const Manifold::Impl in(CurvedChainSoup(0.8 * eps / s0, K));
   ASSERT_TRUE(in.IsManifold() && in.Is2Manifold());
-  const RegularizeResult r = ResolveComponentDirect(in, eps);
+  const RegularizeResult r = RegularizeComponentDirect(in, eps);
   ASSERT_TRUE(r.fatal.has_value())
       << "a curved near-coplanar chain must fail closed, never fold to a wrong "
          "plane";
-  EXPECT_EQ(*r.fatal, FatalReason::DirtyComponentUnresolved) << r.detail;
+  EXPECT_EQ(*r.fatal, FatalReason::RegularizationIncomplete) << r.detail;
   EXPECT_NE(r.detail.find("global-planarity guard"), std::string::npos)
       << "residue must name the guard: " << r.detail;
   EXPECT_FALSE(r.impl.has_value());
@@ -1929,8 +1934,10 @@ static void ExpectCorpusCleanPassThrough(const char* tag,
       << tag << " must not fail closed: " << r.detail;
   ASSERT_TRUE(r.impl.has_value());
   EXPECT_EQ(r.counters.components, nComp) << tag << " decompose count";
-  EXPECT_EQ(r.counters.clean, nComp) << tag << " every component gates clean";
-  EXPECT_EQ(r.counters.dirty, 0) << tag << " no within-component defect";
+  EXPECT_EQ(r.counters.unchanged, nComp)
+      << tag << " every component gates clean";
+  EXPECT_EQ(r.counters.needsRegularization, 0)
+      << tag << " no within-component defect";
   EXPECT_EQ(r.counters.regularized, 0);
   EXPECT_EQ(r.counters.failClosed, 0);
 
@@ -2029,8 +2036,8 @@ TEST(Overlap3, Corpus_GenericTwin7081_Resolves) {
   ASSERT_FALSE(r.fatal.has_value()) << "GT7081 must resolve: " << r.detail;
   ASSERT_TRUE(r.impl.has_value());
   EXPECT_EQ(r.counters.components, 13) << "decompose count";
-  EXPECT_EQ(r.counters.clean, 11);
-  EXPECT_EQ(r.counters.dirty, 2)
+  EXPECT_EQ(r.counters.unchanged, 11);
+  EXPECT_EQ(r.counters.needsRegularization, 2)
       << "two shells carry a within-component defect";
   EXPECT_EQ(r.counters.regularized, 2);
   EXPECT_EQ(r.counters.failClosed, 0);
