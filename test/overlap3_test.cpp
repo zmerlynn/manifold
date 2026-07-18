@@ -67,7 +67,97 @@ double ImplEps(const Manifold::Impl& impl) {
   return EpsilonFromScale(impl.bBox_.Scale(), 1000);
 }
 
+// Probe-B contract witness: three literal faces have supporting-plane normal
+// directions given by the rows of
+//
+//   [ M    M+1    M+1 ]
+//   [ 0    M      M+1 ] , M = 2^51,
+//   [ M+1  2M+2   2M+3 ]
+//
+// whose exact determinant is 1 while its six-term permanent is O(M^3).  Thus
+// its determinant/permanent ratio is O(2^-153), below binary128 resolution.
+// It is the right shear of the unimodular rows (M,1,0), (0,M,1), and
+// (M+1,M+1,1); the bounded shear keeps pairwise plane angles macroscopic and
+// the origin is the barycenter of every well-shaped target face.  The remaining
+// faces are two oriented connected-sum tubes between three tetrahedral shells;
+// the indexed complex is one closed sphere.  Every coordinate is an exactly
+// representable integer double.
+static Manifold::Impl ProbeBNearSingularTriple() {
+  constexpr double M = 0x1p51;
+  std::array<vec3, 12> v = {
+      vec3(M + 1, -M, 0),
+      vec3(0, M, -M),
+      vec3(-M - 1, 0, M),
+      vec3(-670803024674816.0, -2541942034399232.0, 2201808541843456.0),
+      vec3(M, 0, 0),
+      vec3(-1, M + 1, -M),
+      vec3(-M + 1, -M - 1, M),
+      vec3(3678557884645376.0, -3184885753708544.0, 770723291332608.0),
+      vec3(2 * M + 2, -M - 1, 0),
+      vec3(1, M + 1, -M - 1),
+      vec3(-2 * M - 3, 0, M + 1),
+      vec3(-1076907214897152.0, -2654188857196544.0, -2504455559839744.0)};
+  const std::array<ivec3, 20> f = {
+      ivec3(0, 1, 2),   ivec3(1, 3, 2), ivec3(2, 3, 0),  ivec3(4, 5, 6),
+      ivec3(5, 7, 6),   ivec3(6, 7, 4), ivec3(8, 9, 10), ivec3(8, 11, 9),
+      ivec3(10, 11, 8), ivec3(1, 4, 7), ivec3(3, 7, 5),  ivec3(0, 4, 1),
+      ivec3(1, 7, 3),   ivec3(3, 5, 0), ivec3(0, 10, 9), ivec3(4, 9, 11),
+      ivec3(5, 11, 10), ivec3(0, 9, 4), ivec3(4, 11, 5), ivec3(5, 10, 0)};
+  MeshGL64 mesh;
+  mesh.numProp = 3;
+  for (const vec3& p : v) {
+    mesh.vertProperties.push_back(p.x);
+    mesh.vertProperties.push_back(p.y);
+    mesh.vertProperties.push_back(p.z);
+  }
+  for (const ivec3& t : f)
+    for (int k = 0; k < 3; ++k) mesh.triVerts.push_back(t[k]);
+  mesh.runOriginalID.push_back(Manifold::ReserveIDs(1));
+  return Manifold::Impl(mesh);
+}
+
 }  // namespace
+
+TEST(Overlap3, ProbeB_NearSingularTriple_IsContractValid) {
+  const Manifold::Impl in = ProbeBNearSingularTriple();
+  ASSERT_EQ(in.NumVert(), 12);
+  ASSERT_EQ(in.NumTri(), 20);
+  EXPECT_TRUE(in.IsManifold());
+  EXPECT_TRUE(in.Is2Manifold());
+  EXPECT_EQ(
+      Manifold(GetMeshGLImpl<double, uint64_t>(in, -1)).Decompose().size(), 1u);
+  EXPECT_TRUE(in.IsSelfIntersecting());
+  const double eps = ImplEps(in);
+  EXPECT_GT(eps, 0.0);
+  EXPECT_LT(eps, 1.0e5);
+
+  int centeredFaces = 0;
+  double minAltitude = std::numeric_limits<double>::infinity();
+  for (int f = 0; f < static_cast<int>(in.NumTri()); ++f) {
+    vec3 p[3];
+    for (int k = 0; k < 3; ++k)
+      p[k] = in.vertPos_[in.halfedge_.Start(3 * f + k)];
+    const vec3 sum = p[0] + p[1] + p[2];
+    if (sum.x == 0.0 && sum.y == 0.0 && sum.z == 0.0) ++centeredFaces;
+    const double twiceArea = la::length(la::cross(p[1] - p[0], p[2] - p[0]));
+    const double longest =
+        std::max({la::length(p[1] - p[0]), la::length(p[2] - p[1]),
+                  la::length(p[0] - p[2])});
+    minAltitude = std::min(minAltitude, twiceArea / longest);
+  }
+  EXPECT_EQ(centeredFaces, 3) << "the three target patches contain X=0";
+  EXPECT_GT(minAltitude, 1.0e12);
+  EXPECT_GT(minAltitude / eps, 1.0e8)
+      << "every input triangle is far above the epsilon floor";
+
+  // Exercise the real planarize/enumerate/arrange path.  The witness need not
+  // be resolvable downstream: this probe pins reachability of the triple
+  // decision inside the admitted closed-mesh domain.
+  const RegularizeResult r = RemoveOverlaps3D(in, eps);
+  ASSERT_TRUE(r.fatal.has_value());
+  EXPECT_EQ(r.detail.find("non-2-endpoint seam"), std::string::npos)
+      << "the witness must pass seam enumeration and reach the arrangement";
+}
 
 // ===========================================================================
 // RETIRED: v3 sweep-mechanism pins (one line each; mechanism deleted).
