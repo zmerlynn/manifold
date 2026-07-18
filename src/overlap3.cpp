@@ -2293,10 +2293,13 @@ struct IntersectionSegmentRecord {
   int other;
 };
 
-// Immutable setup shared by every COLLECT-SPLITS round and the final EMIT pass.
+using LineSplitRegistry =
+    std::map<std::tuple<int, int, int>, std::map<coordinated::K3, vec3>>;
+
+// Immutable setup shared by the registry compiler and final CONSUME pass.
 // Every member is derived solely from the fixed arrangement input A, its
 // component bbox, and the fixed component epsilon.  Construction deliberately
-// preserves the former in-round computation and insertion order verbatim.
+// preserves the established computation and insertion order verbatim.
 struct EngineSetup {
   int nTri = 0;
   int nG = 0;
@@ -2424,26 +2427,20 @@ EngineSetup BuildEngineSetup(const Manifold::Impl& in,
   return setup;
 }
 
-// TWO-PHASE coordinated-boundary emitter (shared-split-point-table-first):
-// collectSplits writes every split-producing event into the ONE per-line shared
-// split-point table (no cells, no classification); the EMIT phase reads the
-// shared split-point table ONLY (zero local reconciliation) and runs the
-// walk/classify/emit machinery.  The wrapper iterates split collection to a
-// global
-// fixpoint, then emits once.  intersectionSegmentCache: the ungated
-// intersection segment enumeration depends only on A, so the driver computes it
-// once and every fixpoint round reuses it (it was re-enumerated per round -
-// measured waste).
+// TWO-PHASE coordinated-boundary emitter (immutable registry boundary): BUILD
+// compiles all depth-1 atoms and carrier incidences in one batch; CONSUME reads
+// that registry only and runs the walk/classify/emit machinery unchanged.
+// intersectionSegmentCache carries BUILD's input-derived segments to CONSUME.
 StageResult<Manifold::Impl> RunCoordinatedBoundaryPass(
     const Manifold::Impl& in, const BuildArrangement& A,
-    const EngineSetup& setup, double eps,
-    std::map<std::tuple<int, int, int>, std::map<coordinated::K3, vec3>>&
-        lineSplitPoints,
+    const EngineSetup& setup, double eps, LineSplitRegistry* registryOut,
+    const LineSplitRegistry* registryIn,
     std::vector<std::vector<IntersectionSegmentRecord>>&
-        intersectionSegmentCache,
-    bool collectSplits) {
+        intersectionSegmentCache) {
   using coordinated::K3;
   using coordinated::KeyOf;
+  using LineKey = std::tuple<int, int, int>;
+  const bool buildRegistry = registryOut != nullptr;
   const int nTri = setup.nTri;
   const int nG = setup.nG;
   const auto& seeds = setup.seeds;
@@ -2808,6 +2805,17 @@ StageResult<Manifold::Impl> RunCoordinatedBoundaryPass(
   };
   static const bool kValidateWindingField =
       std::getenv("OVERLAP3_VALIDATE_WINDING_FIELD") != nullptr;
+  // BUILD is an acyclic depth-1 incidence compiler.  Each group emits its
+  // input/edge-plane/triple/coplanar-crossing atoms and its carrier segments;
+  // after all groups have emitted, one batch join scatters those atoms onto
+  // every incident carrier.  No emitted split is ever fed back as a producer.
+  struct CompilerSegment {
+    LineKey line;
+    vec3 p0, p1;
+  };
+  std::vector<std::vector<CompilerSegment>> compilerSegments(nG);
+  std::vector<std::vector<vec3>> compilerGroupAtoms(nG);
+  std::map<LineKey, std::vector<vec3>> compilerLineAtoms;
   for (int g = 0; g < nG; ++g) {
     // flood graph collection (this group's arrangement):
     // sub-edge (lo,hi vertex ids) -> contributing segment indices
@@ -2871,11 +2879,7 @@ StageResult<Manifold::Impl> RunCoordinatedBoundaryPass(
     }
     const int nS = static_cast<int>(segs.size());
 
-    // ---- COLLECT-SPLITS PHASE ONLY: the split producers (crossing
-    // enumeration, T-junction pool, foot exchange, planarity completion) write
-    // into the shared split-point table via addSplit; the EMIT phase reads the
-    // shared split-point table only.
-    // ---- 3. splits: emitter triples + shared split-point table ------------
+    // ---- 3. splits: BUILD atoms or immutable-registry CONSUME ------------
     std::vector<std::vector<std::pair<double, vec3>>> splits(nS);
     // CANONICAL VERTEX GRID (rounding-scale): every split point is snapped
     // onto any existing vertex within ~64 ULP before entering the
@@ -2942,7 +2946,7 @@ StageResult<Manifold::Impl> RunCoordinatedBoundaryPass(
     // PER-LINE SHARED SPLIT-POINT TABLE key: intersection segments by plane-gid
     // pair; mesh edges by vid pair (one geometric line = one split list, shared
     // by every segment record and every group on it)
-    auto lineKeyOf = [&](int si) -> std::tuple<int, int, int> {
+    auto lineKeyOf = [&](int si) -> LineKey {
       if (segs[si].planeQ >= 0) {
         const auto pq = std::minmax(g, segs[si].planeQ);
         return {1, pq.first, pq.second};
@@ -2950,17 +2954,19 @@ StageResult<Manifold::Impl> RunCoordinatedBoundaryPass(
       return {0, std::min(segs[si].vidLo, segs[si].vidHi),
               std::max(segs[si].vidLo, segs[si].vidHi)};
     };
-    // ENDPOINT REGISTRATION (build): every segment record's endpoints are
-    // committed identities (pierces / input verts); registering them on the
-    // line lets every OTHER record of the line split at record boundaries -
-    // otherwise a longer record spans past a shorter one's end and the
-    // cross-group-constraint stub opens (the measured residue class).
-    if (collectSplits)
+    // ENDPOINT ATOMS: every segment record contributes its two already-
+    // quotiented identities to its carrier.  Carrier incidence is compiled
+    // after every group has emitted, so group order cannot hide a later atom.
+    if (buildRegistry) {
       for (int i = 0; i < nS; ++i) {
-        auto& ent = lineSplitPoints[lineKeyOf(i)];
-        ent.emplace(KeyOf(segs[i].p0), segs[i].p0);
-        ent.emplace(KeyOf(segs[i].p1), segs[i].p1);
+        const LineKey line = lineKeyOf(i);
+        compilerSegments[g].push_back({line, segs[i].p0, segs[i].p1});
+        compilerLineAtoms[line].push_back(segs[i].p0);
+        compilerLineAtoms[line].push_back(segs[i].p1);
+        compilerGroupAtoms[g].push_back(segs[i].p0);
+        compilerGroupAtoms[g].push_back(segs[i].p1);
       }
+    }
     auto addSplit = [&](int si, const vec3& Vraw) -> bool {
       const vec3 V = canonV(Vraw);
       const Seg& s = segs[si];
@@ -2978,7 +2984,10 @@ StageResult<Manifold::Impl> RunCoordinatedBoundaryPass(
       for (const auto& pr : splits[si])
         if (KeyOf(pr.second) == KeyOf(V)) return false;
       splits[si].push_back({t, V});
-      if (collectSplits) lineSplitPoints[lineKeyOf(si)].emplace(KeyOf(V), V);
+      if (buildRegistry) {
+        compilerLineAtoms[lineKeyOf(si)].push_back(V);
+        compilerGroupAtoms[g].push_back(V);
+      }
       return true;
     };
     // PER-LINE SHARED SPLIT-POINT TABLE READ (both phases): every line's
@@ -2986,22 +2995,44 @@ StageResult<Manifold::Impl> RunCoordinatedBoundaryPass(
     // by vid pair - lands on every segment record of that line, across groups.
     // ON-LINE GUARD: one plane-pair key can span near-tangent lens records
     // microns apart; an entry only lands where it lies on THIS segment's line.
-    for (int i = 0; i < nS; ++i) {
-      const auto it = lineSplitPoints.find(lineKeyOf(i));
-      if (it == lineSplitPoints.end()) continue;
-      const Seg& s = segs[i];
-      const vec3 d3 = s.p1 - s.p0;
-      const double len2 = la::dot(d3, d3);
-      if (!(len2 > 0.0)) continue;
-      for (const auto& kv : it->second) {
-        const vec3& V = kv.second;
-        const double t = la::dot(V - s.p0, d3) / len2;
-        if (!(t > 0.0 && t < 1.0)) continue;
-        if (la::length(V - s.p0 - t * d3) > 2.0 * rho) continue;
-        addSplit(i, V);
+    if (buildRegistry) {
+      // Quotient context from already-emitted records on the same carrier.
+      // This is a one-way, source-order fold (not incidence feedback): it
+      // preserves the historical input-first representative when a later raw
+      // construction lands within rho of an earlier carrier atom.
+      for (int i = 0; i < nS; ++i) {
+        const auto found = compilerLineAtoms.find(lineKeyOf(i));
+        if (found == compilerLineAtoms.end()) continue;
+        const std::vector<vec3> earlier = found->second;
+        const Seg& s = segs[i];
+        const vec3 d3 = s.p1 - s.p0;
+        const double len2 = la::dot(d3, d3);
+        if (!(len2 > 0.0)) continue;
+        for (const vec3& atom : earlier) {
+          const double t = la::dot(atom - s.p0, d3) / len2;
+          if (!(t > 0.0 && t < 1.0)) continue;
+          if (la::length(atom - s.p0 - t * d3) > 2.0 * rho) continue;
+          addSplit(i, atom);
+        }
+      }
+    } else {
+      for (int i = 0; i < nS; ++i) {
+        const auto it = registryIn->find(lineKeyOf(i));
+        if (it == registryIn->end()) continue;
+        const Seg& s = segs[i];
+        const vec3 d3 = s.p1 - s.p0;
+        const double len2 = la::dot(d3, d3);
+        if (!(len2 > 0.0)) continue;
+        for (const auto& kv : it->second) {
+          const vec3& V = kv.second;
+          const double t = la::dot(V - s.p0, d3) / len2;
+          if (!(t > 0.0 && t < 1.0)) continue;
+          if (la::length(V - s.p0 - t * d3) > 2.0 * rho) continue;
+          addSplit(i, V);
+        }
       }
     }
-    if (collectSplits) {
+    if (buildRegistry) {
       for (int i = 0; i < nS; ++i) {
         if (segs[i].planeQ < 0) continue;
         for (int j = i + 1; j < nS; ++j) {
@@ -3033,156 +3064,97 @@ StageResult<Manifold::Impl> RunCoordinatedBoundaryPass(
           addSplit(j, X);
         }
       }
-      // T-junction splits use the group's own segment endpoints
-      // (coordinated-boundary emitter intersection segment ends and member
-      // corners), with the same on-line rule in every group. Wider eps-deduped
-      // representatives would sit off the exact lines and bend the chains; the
-      // bent sub-chains then properly cross and fragment the walk (measured: a
-      // split cascade). OUTER FIXPOINT: the exchange and the completion feed
-      // each other - a completion-added crossing (ill-conditioned on
-      // near-collinear pairs: the same line's overlapping segments each get
-      // their own noisy crossing position) must be EXCHANGED onto every
-      // collinear twin, and exchanged points can expose new crossings.
-      // (Measured: identical- endpoint twin segments carrying different
-      // completion splits 2.4e-5 apart - the T-junction/lens class.)
-      for (int outer = 0; outer < 4; ++outer) {
-        size_t nsplit0 = 0;
-        for (int i = 0; i < nS; ++i) nsplit0 += splits[i].size();
-        // T-junction pool pass, iterated to FIXPOINT with ALL SPLIT POINTS in
-        // the pool: near-collinear overlapping chains (the same line reached
-        // via different member pairs, ULP apart) must carry IDENTICAL
-        // subdivisions - endpoint-only exchange left one chain split where its
-        // twin spanned whole (measured: intra-group T-junctions with the
-        // on-vertex 9e-16 off the unsplit edge).  Split values are canonical
-        // (snap grid), so the exchange converges. 8*rho: the canonical snap
-        // grid moves split points up to rho off their segment lines, so on-line
-        // tests must budget the snap displacement
-        const double tolLine = 2.0 * rho;
-        for (int round = 0; round < 4; ++round) {
-          std::vector<vec3> pool;
-          pool.reserve(2 * segs.size());
-          for (const Seg& s : segs) {
-            pool.push_back(s.p0);
-            pool.push_back(s.p1);
-          }
-          for (int i = 0; i < nS; ++i)
-            for (const auto& pr : splits[i]) pool.push_back(pr.second);
-          bool added = false;
-          for (int i = 0; i < nS; ++i) {
-            const Seg& s = segs[i];
-            const vec3 d3 = s.p1 - s.p0;
-            const double len2 = la::dot(d3, d3);
-            if (!(len2 > 0.0)) continue;
-            const double len = std::sqrt(len2);
-            for (const vec3& V : pool) {
-              const vec3 w = V - s.p0;
-              const double t = la::dot(w, d3) / len2;
-              if (!(t > eps / len && t < 1.0 - eps / len)) continue;
-              if (la::length(w - t * d3) > tolLine) continue;
-              added |= addSplit(i, V);
-            }
-          }
-          if (!added) break;
-        }
-
-        // PLANARITY COMPLETION (all remaining segment-pair crossings): the
-        // exact intersection-segment x intersection-segment enumeration and
-        // the endpoint pool cover the canonical crossings, but the drawn
-        // (rounded) graph must be PLANAR for the face walk - overlapping
-        // coplanar-arrangement members cross member edges and same-line
-        // intersection segments in ways the passes above miss
-        // (measured: properly-crossing sub-edges -> bowtie walks ->
-        // untriangulable cells). Detect every remaining proper crossing exactly
-        // on the shared rounded endpoints and split both segments; the split
-        // point uses the canonical triple when both sources are intersection
-        // segments of distinct planes, else the in-segment interpolation
-        // (identity across groups holds within merge tolerance via the
-        // shared-endpoint
-        // constructions).
-        for (int i = 0; i < nS; ++i) {
-          const vec2 a0 = coordinated::Drop2(segs[i].p0, axis),
-                     a1 = coordinated::Drop2(segs[i].p1, axis);
-          for (int j = i + 1; j < nS; ++j) {
-            const vec2 b0 = coordinated::Drop2(segs[j].p0, axis),
-                       b1 = coordinated::Drop2(segs[j].p1, axis);
-            if (std::max(a0.x, a1.x) < std::min(b0.x, b1.x) - eps ||
-                std::max(b0.x, b1.x) < std::min(a0.x, a1.x) - eps ||
-                std::max(a0.y, a1.y) < std::min(b0.y, b1.y) - eps ||
-                std::max(b0.y, b1.y) < std::min(a0.y, a1.y) - eps)
-              continue;
-            if (!coordinated::ProperCross2(segs[i].p0, segs[i].p1, segs[j].p0,
-                                           segs[j].p1, axis))
-              continue;
-            vec3 X;
-            bool have = false;
-            if (segs[i].planeQ >= 0 && segs[j].planeQ >= 0 &&
-                segs[i].planeQ != segs[j].planeQ)
-              have = triplePos(g, segs[i].planeQ, segs[j].planeQ, X);
-            if (!have) {
-              // EXACT-CONSTRUCTION crossings (the interpolated-memo
-              // refutation is the design constraint): an interpolated point
-              // lies exactly on ONE line only, so wherever a committed
-              // identity exists, use it -
-              //   edge x intersection segment -> the PIERCE of the edge
-              //                   through the intersection segment's
-              //                   partner plane (once-only, on BOTH lines)
-              //   edge x edge / paired intersection-segment records ->
-              //                   canonical interpolation (deterministic
-              //                   source-segment order, bit-equal
-              //                   across groups)
-              const bool iEdge = segs[i].planeQ < 0, jEdge = segs[j].planeQ < 0;
-              bool built = false;
-              if (iEdge != jEdge) {
-                const int se = iEdge ? i : j;  // source edge segment
-                const int ss = iEdge ? j : i;  // source intersection segment
-                const int q = segs[ss].planeQ;
-                const bool fwd = segs[se].vidLo <= segs[se].vidHi;
-                const int vlo = fwd ? segs[se].vidLo : segs[se].vidHi;
-                const int vhi = fwd ? segs[se].vidHi : segs[se].vidLo;
-                const vec3& u = fwd ? segs[se].p0 : segs[se].p1;
-                const vec3& w = fwd ? segs[se].p1 : segs[se].p0;
-                if (const auto P = pierceGet(vlo, vhi, u, w, q)) {
-                  X = *P;
-                  built = true;
-                }
-              }
-              if (!built) {
-                // Canonical source segment: the smaller segment identity.
-                const int ci = segKeyOf(segs[i].p0, segs[i].p1) <=
-                                       segKeyOf(segs[j].p0, segs[j].p1)
-                                   ? i
-                                   : j;
-                const int cj = ci == i ? j : i;
-                const vec2 c0 = coordinated::Drop2(segs[ci].p0, axis),
-                           c1 = coordinated::Drop2(segs[ci].p1, axis);
-                const vec2 e0 = coordinated::Drop2(segs[cj].p0, axis),
-                           e1v = coordinated::Drop2(segs[cj].p1, axis);
-                const double dax = c1.x - c0.x, day = c1.y - c0.y;
-                const double dbx = e1v.x - e0.x, dby = e1v.y - e0.y;
-                const double den = dax * dby - day * dbx;
-                if (den == 0.0) continue;
-                const double t =
-                    ((e0.x - c0.x) * dby - (e0.y - c0.y) * dbx) / den;
-                X = segs[ci].p0 + t * (segs[ci].p1 - segs[ci].p0);
+      // DIRECT COPLANAR CROSSING ATOMS: test the input-derived full segments
+      // once.  The later incidence join, rather than subdivision feedback,
+      // places each resulting atom on all carrier segments that contain it.
+      // PLANARITY COMPLETION (all remaining segment-pair crossings): the
+      // exact intersection-segment x intersection-segment enumeration and
+      // the endpoint pool cover the canonical crossings, but the drawn
+      // (rounded) graph must be PLANAR for the face walk - overlapping
+      // coplanar-arrangement members cross member edges and same-line
+      // intersection segments in ways the passes above miss
+      // (measured: properly-crossing sub-edges -> bowtie walks ->
+      // untriangulable cells). Detect every remaining proper crossing exactly
+      // on the shared rounded endpoints and split both segments; the split
+      // point uses the canonical triple when both sources are intersection
+      // segments of distinct planes, else the in-segment interpolation
+      // (identity across groups holds within merge tolerance via the
+      // shared-endpoint
+      // constructions).
+      for (int i = 0; i < nS; ++i) {
+        const vec2 a0 = coordinated::Drop2(segs[i].p0, axis),
+                   a1 = coordinated::Drop2(segs[i].p1, axis);
+        for (int j = i + 1; j < nS; ++j) {
+          const vec2 b0 = coordinated::Drop2(segs[j].p0, axis),
+                     b1 = coordinated::Drop2(segs[j].p1, axis);
+          if (std::max(a0.x, a1.x) < std::min(b0.x, b1.x) - eps ||
+              std::max(b0.x, b1.x) < std::min(a0.x, a1.x) - eps ||
+              std::max(a0.y, a1.y) < std::min(b0.y, b1.y) - eps ||
+              std::max(b0.y, b1.y) < std::min(a0.y, a1.y) - eps)
+            continue;
+          if (!coordinated::ProperCross2(segs[i].p0, segs[i].p1, segs[j].p0,
+                                         segs[j].p1, axis))
+            continue;
+          vec3 X;
+          bool have = false;
+          if (segs[i].planeQ >= 0 && segs[j].planeQ >= 0 &&
+              segs[i].planeQ != segs[j].planeQ)
+            have = triplePos(g, segs[i].planeQ, segs[j].planeQ, X);
+          if (!have) {
+            // EXACT-CONSTRUCTION crossings (the interpolated-memo
+            // refutation is the design constraint): an interpolated point
+            // lies exactly on ONE line only, so wherever a committed
+            // identity exists, use it -
+            //   edge x intersection segment -> the PIERCE of the edge
+            //                   through the intersection segment's
+            //                   partner plane (once-only, on BOTH lines)
+            //   edge x edge / paired intersection-segment records ->
+            //                   canonical interpolation (deterministic
+            //                   source-segment order, bit-equal
+            //                   across groups)
+            const bool iEdge = segs[i].planeQ < 0, jEdge = segs[j].planeQ < 0;
+            bool built = false;
+            if (iEdge != jEdge) {
+              const int se = iEdge ? i : j;  // source edge segment
+              const int ss = iEdge ? j : i;  // source intersection segment
+              const int q = segs[ss].planeQ;
+              const bool fwd = segs[se].vidLo <= segs[se].vidHi;
+              const int vlo = fwd ? segs[se].vidLo : segs[se].vidHi;
+              const int vhi = fwd ? segs[se].vidHi : segs[se].vidLo;
+              const vec3& u = fwd ? segs[se].p0 : segs[se].p1;
+              const vec3& w = fwd ? segs[se].p1 : segs[se].p0;
+              if (const auto P = pierceGet(vlo, vhi, u, w, q)) {
+                X = *P;
+                built = true;
               }
             }
-            addSplit(i, X);
-            addSplit(j, X);
+            if (!built) {
+              // Canonical source segment: the smaller segment identity.
+              const int ci = segKeyOf(segs[i].p0, segs[i].p1) <=
+                                     segKeyOf(segs[j].p0, segs[j].p1)
+                                 ? i
+                                 : j;
+              const int cj = ci == i ? j : i;
+              const vec2 c0 = coordinated::Drop2(segs[ci].p0, axis),
+                         c1 = coordinated::Drop2(segs[ci].p1, axis);
+              const vec2 e0 = coordinated::Drop2(segs[cj].p0, axis),
+                         e1v = coordinated::Drop2(segs[cj].p1, axis);
+              const double dax = c1.x - c0.x, day = c1.y - c0.y;
+              const double dbx = e1v.x - e0.x, dby = e1v.y - e0.y;
+              const double den = dax * dby - day * dbx;
+              if (den == 0.0) continue;
+              const double t =
+                  ((e0.x - c0.x) * dby - (e0.y - c0.y) * dbx) / den;
+              X = segs[ci].p0 + t * (segs[ci].p1 - segs[ci].p0);
+            }
           }
+          addSplit(i, X);
+          addSplit(j, X);
         }
-
-        size_t nsplit1 = 0;
-        for (int i = 0; i < nS; ++i) nsplit1 += splits[i].size();
-        if (nsplit1 == nsplit0) break;
       }
-      continue;  // COLLECT-SPLITS phase: no cells, no classification
+
+      continue;  // BUILD has no cells or classification.
     }
-    // NOTE: no sub-edge-level completion pass is needed: with the exact
-    // endpoint pool and the rounding-scale on-line tolerance, chain bends are
-    // ~ULP, so residual sub-edge crossings are ULP-scale bowties the
-    // triangulation's sub-epsilon remainder acceptance absorbs (a full
-    // sub-edge crossing fixpoint was measured to CASCADE: each round's
-    // interpolated splits create new bent sub-edges - and cost minutes).
 
     // ---- 4. 2D graph (verts keyed by 3D bits) + exact rotation walk ----
     // SUB-RHO JUNCTION CLUSTERING: distinct committed identities inside the
@@ -4239,7 +4211,7 @@ StageResult<Manifold::Impl> RunCoordinatedBoundaryPass(
   // OVERLAP3_VALIDATE_WINDING_FIELD probes every cell in the classification
   // loop as a differential validator and prints the contribution census; it
   // never affects anchoring.
-  if (!collectSplits) {
+  if (!buildRegistry) {
     for (const auto& kv : crossGroupConstraints) {
       if (kv.second.size() != 2) {
         continue;
@@ -4551,9 +4523,71 @@ StageResult<Manifold::Impl> RunCoordinatedBoundaryPass(
       }
     }
   }
-  if (collectSplits)
+  if (buildRegistry) {
+    // Incidence join, depth 1.  First make every atom carried by any segment
+    // of a group visible to that group (the shared-line relation), then test
+    // that immutable pool against every group segment once (the coplanar
+    // point-on-carrier relation).  The eps interior floor and 2*rho on-line
+    // budget are the former T-junction adoption predicate, unchanged.
+    for (int g = 0; g < nG; ++g) {
+      std::vector<vec3>& pool = compilerGroupAtoms[g];
+      for (const CompilerSegment& segment : compilerSegments[g]) {
+        const auto found = compilerLineAtoms.find(segment.line);
+        if (found == compilerLineAtoms.end()) continue;
+        const vec3 d3 = segment.p1 - segment.p0;
+        const double len2 = la::dot(d3, d3);
+        if (!(len2 > 0.0)) continue;
+        const double tlo = rho / std::sqrt(len2);
+        for (const vec3& atom : found->second) {
+          const vec3 w = atom - segment.p0;
+          const double t = la::dot(w, d3) / len2;
+          if (!(t > tlo && t < 1.0 - tlo)) continue;
+          if (la::length(w - t * d3) > 2.0 * rho) continue;
+          pool.push_back(atom);
+        }
+      }
+      std::sort(pool.begin(), pool.end(), [&](const vec3& a, const vec3& b) {
+        return KeyOf(a) < KeyOf(b);
+      });
+      pool.erase(std::unique(pool.begin(), pool.end(),
+                             [&](const vec3& a, const vec3& b) {
+                               return KeyOf(a) == KeyOf(b);
+                             }),
+                 pool.end());
+      for (const CompilerSegment& segment : compilerSegments[g]) {
+        const vec3 d3 = segment.p1 - segment.p0;
+        const double len2 = la::dot(d3, d3);
+        if (!(len2 > 0.0)) continue;
+        const double len = std::sqrt(len2);
+        for (const vec3& atom : pool) {
+          const vec3 w = atom - segment.p0;
+          const double t = la::dot(w, d3) / len2;
+          if (!(t > eps / len && t < 1.0 - eps / len)) continue;
+          if (la::length(w - t * d3) > 2.0 * rho) continue;
+          compilerLineAtoms[segment.line].push_back(atom);
+        }
+      }
+    }
+
+    // One deterministic sorted union commits the immutable registry.  The
+    // quotient has already selected each atom's bits exactly once; incidence
+    // only copies those values and can neither construct nor re-round points.
+    registryOut->clear();
+    for (auto& [line, atoms] : compilerLineAtoms) {
+      std::sort(atoms.begin(), atoms.end(), [&](const vec3& a, const vec3& b) {
+        return KeyOf(a) < KeyOf(b);
+      });
+      atoms.erase(std::unique(atoms.begin(), atoms.end(),
+                              [&](const vec3& a, const vec3& b) {
+                                return KeyOf(a) == KeyOf(b);
+                              }),
+                  atoms.end());
+      auto& committed = (*registryOut)[line];
+      for (const vec3& atom : atoms) committed.emplace(KeyOf(atom), atom);
+    }
     return StageResult<Manifold::Impl>::Fatal(
         FatalReason::RegularizationIncomplete, "e1: build phase");
+  }
   // Triangulation failures are DEMOTED (skip-and-continue at the cell; the
   // output validation below refuses the resulting unpaired boundary) - only
   // the
@@ -4569,35 +4603,21 @@ StageResult<Manifold::Impl> RunCoordinatedBoundaryPass(
   return built;
 }
 
-// Two-pass driver: pass 1 collects the failing walks' observed self-crossing
-// points (residual drawn-graph non-planarity at the representable-thin
-// scale); pass 2 injects them as group-global splits.  Converges because the
-// injected points lie ON the crossing sub-edges (both incident cells split
-// identically); a second failure is an honest fail-closed.
+// Compile the complete depth-1 line registry once, then consume it once.
 StageResult<Manifold::Impl> EmitCoordinatedBoundary(const Manifold::Impl& in,
                                                     const BuildArrangement& A,
                                                     double eps) {
-  // COLLECT SPLITS to a global shared split-point table fixpoint, then EMIT
-  // once.
   const EngineSetup setup = BuildEngineSetup(in, A, eps);
-  std::map<std::tuple<int, int, int>, std::map<coordinated::K3, vec3>>
-      lineSplitPoints;
+  LineSplitRegistry lineSplitPoints;
   std::vector<std::vector<IntersectionSegmentRecord>>
       intersectionSegmentCache;  // enumerated once, reused
-  size_t prev = static_cast<size_t>(-1);
-  for (int round = 0; round < 8; ++round) {
-    RunCoordinatedBoundaryPass(in, A, setup, eps, lineSplitPoints,
-                               intersectionSegmentCache, true);
-    size_t sz = 0;
-    for (const auto& kv : lineSplitPoints) sz += kv.second.size();
-    if (sz == prev) break;  // shared split-point table stable
-    prev = sz;
-  }
+  RunCoordinatedBoundaryPass(in, A, setup, eps, &lineSplitPoints, nullptr,
+                             intersectionSegmentCache);
   // The EMIT pass is single-shot: transport certification partitions the field
   // before
   // BFS, so there is no retry or whole-field regime switch.
-  return RunCoordinatedBoundaryPass(in, A, setup, eps, lineSplitPoints,
-                                    intersectionSegmentCache, false);
+  return RunCoordinatedBoundaryPass(in, A, setup, eps, nullptr,
+                                    &lineSplitPoints, intersectionSegmentCache);
 }
 
 // NEAR-COPLANAR PLANARIZATION + GLOBAL-PLANARITY GUARD
