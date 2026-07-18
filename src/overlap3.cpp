@@ -2412,28 +2412,40 @@ struct E1Seam {
   int other;
 };
 
-// TWO-PHASE ENGINE (registry-first): buildPhase writes every split-producing
-// event into the ONE per-line registry (no cells, no classification); the
-// consume phase reads the registry ONLY (zero local reconciliation) and runs
-// the walk/classify/emit machinery.  The wrapper iterates build to a global
-// fixpoint, then consumes once.  seamCache: the ungated seam enumeration
-// depends only on A, so the driver computes it once and every fixpoint
-// round reuses it (it was re-enumerated per round - measured waste).
-StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
-    const Manifold::Impl& in, const BuildArrangement& A, double eps,
-    std::map<std::tuple<int, int, int>, std::map<e1::K3, vec3>>& lineReg,
-    std::vector<std::vector<E1Seam>>& seamCache, bool buildPhase) {
-  using e1::K3;
+// Immutable setup shared by every BUILD round and the final CONSUME pass.
+// Every member is derived solely from the fixed arrangement input A, its
+// component bbox, and the fixed component epsilon.  Construction deliberately
+// preserves the former in-round computation and insertion order verbatim.
+struct EngineSetup {
+  int nTri = 0;
+  int nG = 0;
+  std::vector<vec3> seeds;
+  std::vector<int> gid;
+  std::vector<int> rep;
+  std::vector<std::vector<int>> members;
+  std::vector<int> fsgn;
+  std::vector<Box> fbox;
+  std::vector<Box> gbox;
+  std::set<e1::K3> inputVerts;
+  e1::K3 flStarKey{0, 0, 0};
+  TriWindBVH flBvh;
+  double scale = 0.0;
+  double probeMargin = 0.0;
+  double inclusionMargin = 0.0;
+  double roundingRadius = 0.0;
+  double stackWin = 0.0;
+};
+
+EngineSetup BuildEngineSetup(const Manifold::Impl& in,
+                             const BuildArrangement& A, double eps) {
   using e1::KeyOf;
-  const int nTri = static_cast<int>(A.tri.size());
-  const std::vector<vec3> seeds = WindingSeeds(in.bBox_);
-  auto fail = [](const char* msg) {
-    return StageResult<Manifold::Impl>::Fatal(
-        FatalReason::DirtyComponentUnresolved, msg);
-  };
-  // ---- 1. geometric plane groups (exact coplanarity union-find) ----
-  std::vector<int> uf(nTri);
-  for (int f = 0; f < nTri; ++f) uf[f] = f;
+  EngineSetup setup;
+  setup.nTri = static_cast<int>(A.tri.size());
+  setup.seeds = WindingSeeds(in.bBox_);
+
+  // Geometric plane groups (exact coplanarity union-find).
+  std::vector<int> uf(setup.nTri);
+  for (int f = 0; f < setup.nTri; ++f) uf[f] = f;
   std::function<int(int)> find = [&](int x) {
     while (uf[x] != x) x = uf[x] = uf[uf[x]];
     return x;
@@ -2441,7 +2453,7 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
   auto coplanarExact = [&](int i, int j) -> bool {
     for (int k = 0; k < 3; ++k) {
       const vec3& p = A.tri[j][k];
-      // filter-first; a filter 0 (uncertain or true zero) escalates exact
+      // Filter-first; a filter 0 (uncertain or true zero) escalates exact.
       int s = Orient3DFilterSign(A.tri[i][0], A.tri[i][1], A.tri[i][2], p);
       if (s == 0)
         s = Orient3DExactSign(A.tri[i][0], A.tri[i][1], A.tri[i][2], p);
@@ -2452,64 +2464,120 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
   // SNAPPED-CLUSTER UNIONS (stage 3): faces of one near-coplanar cluster are
   // ONE semantic plane - the planarize snap's contract, carried by A.planeId.
   // The snap's projected coordinates are coplanar only to ~1e-13, so the
-  // exact-coplanarity test below cannot re-derive the cluster; without this
-  // union the engine emitted each cluster face as its own group and the
-  // mutual footprints rang unpaired (measured: the near-coplanar folds'
-  // 4+3 fan1 opens at SplitTouchingSheets).
+  // exact-coplanarity test cannot re-derive the cluster.
   std::map<int, int> firstOfPlane;
-  for (int f = 0; f < nTri; ++f) {
+  for (int f = 0; f < setup.nTri; ++f) {
     const auto it = firstOfPlane.find(A.planeId[f]);
     if (it == firstOfPlane.end())
       firstOfPlane.emplace(A.planeId[f], f);
     else
       uf[find(f)] = find(it->second);
   }
-  for (int i = 0; i < nTri; ++i)
-    for (int j = i + 1; j < nTri; ++j) {
+  for (int i = 0; i < setup.nTri; ++i)
+    for (int j = i + 1; j < setup.nTri; ++j) {
       if (find(i) == find(j)) continue;
       const vec3 cr = la::cross(A.faceN[i], A.faceN[j]);
       const double nn = la::length(A.faceN[i]) * la::length(A.faceN[j]);
-      if (la::length(cr) > 1e-9 * nn) continue;  // clearly non-parallel
+      if (la::length(cr) > 1e-9 * nn) continue;
       if (coplanarExact(i, j)) uf[find(i)] = find(j);
     }
   std::map<int, int> root2g;
-  std::vector<int> gid(nTri, -1), rep;
-  for (int f = 0; f < nTri; ++f) {
+  setup.gid.assign(setup.nTri, -1);
+  for (int f = 0; f < setup.nTri; ++f) {
     const int r = find(f);
     auto it = root2g.find(r);
     if (it == root2g.end()) {
-      it = root2g.emplace(r, static_cast<int>(rep.size())).first;
-      rep.push_back(f);  // lowest face index = canonical rep
+      it = root2g.emplace(r, static_cast<int>(setup.rep.size())).first;
+      setup.rep.push_back(f);  // lowest face index = canonical rep
     }
-    gid[f] = it->second;
+    setup.gid[f] = it->second;
   }
-  const int nG = static_cast<int>(rep.size());
-  std::vector<std::vector<int>> members(nG);
-  std::vector<int> fsgn(nTri, 1);
-  for (int f = 0; f < nTri; ++f) {
-    members[gid[f]].push_back(f);
-    fsgn[f] = la::dot(A.faceN[f], A.faceN[rep[gid[f]]]) >= 0.0 ? 1 : -1;
+  setup.nG = static_cast<int>(setup.rep.size());
+  setup.members.resize(setup.nG);
+  setup.fsgn.assign(setup.nTri, 1);
+  for (int f = 0; f < setup.nTri; ++f) {
+    setup.members[setup.gid[f]].push_back(f);
+    setup.fsgn[f] =
+        la::dot(A.faceN[f], A.faceN[setup.rep[setup.gid[f]]]) >= 0.0 ? 1 : -1;
   }
-  // Per-triangle float bboxes (probe-offset scan + crossing pre-filter).
-  std::vector<Box> fbox(nTri);
-  for (int f = 0; f < nTri; ++f) {
+
+  // Per-triangle float bboxes and their deterministic per-group unions.
+  setup.fbox.resize(setup.nTri);
+  for (int f = 0; f < setup.nTri; ++f) {
     Box b;
     for (int k = 0; k < 3; ++k) b.Union(A.tri[f][k]);
-    fbox[f] = b;
+    setup.fbox[f] = b;
   }
-  // input-vertex identity set (canonV's never-snap rule), HOISTED: it
-  // depends only on A.tri, and the former per-group rebuild dominated the
-  // whole engine wall on the large self-intersector (measured 91%: 17k
-  // groups x 51k ordered-set inserts per round)
-  std::set<e1::K3> inputVerts;
-  for (int f2 = 0; f2 < nTri; ++f2)
-    for (int k = 0; k < 3; ++k) inputVerts.insert(KeyOf(A.tri[f2][k]));
-  // the shared-collider broadphase over the component's triangles (the
-  // proven exact box-overlap superset - the winding BVH reused for the
-  // stack-face and near-sheet scans; candidates sorted for determinism)
-  std::vector<std::array<vec3, 3>> flTriArr(nTri);
-  for (int f = 0; f < nTri; ++f) flTriArr[f] = A.tri[f];
-  const TriWindBVH flBvh = BuildTriWindBVH(flTriArr, in.bBox_);
+  setup.gbox.resize(setup.nG);
+  for (int g = 0; g < setup.nG; ++g)
+    for (const int f : setup.members[g]) setup.gbox[g].Union(setup.fbox[f]);
+  // Input-vertex identities: canonV never snaps a key present in this set;
+  // flStarKey is the component's fixed lex-max input vertex.
+  for (int f = 0; f < setup.nTri; ++f)
+    for (int k = 0; k < 3; ++k) setup.inputVerts.insert(KeyOf(A.tri[f][k]));
+  {
+    bool have = false;
+    for (size_t v = 0; v < in.vertPos_.size(); ++v) {
+      const e1::K3 k = KeyOf(in.vertPos_[v]);
+      if (!have || setup.flStarKey < k) {
+        setup.flStarKey = k;
+        have = true;
+      }
+    }
+  }
+
+  // Shared collider over the fixed component triangles. Queries use a const
+  // collider and retain their mutable candidate vector in the phase call.
+  std::vector<std::array<vec3, 3>> flTriArr(setup.nTri);
+  for (int f = 0; f < setup.nTri; ++f) flTriArr[f] = A.tri[f];
+  setup.flBvh = BuildTriWindBVH(flTriArr, in.bBox_);
+  // Preserve each former expression's evaluation order, once.
+  setup.scale = in.bBox_.Scale();
+  setup.probeMargin = 1e-6 * (1.0 + setup.scale);
+  setup.inclusionMargin = setup.probeMargin * (1.0 + setup.scale);
+  setup.roundingRadius =
+      64.0 * std::numeric_limits<double>::epsilon() * (1.0 + setup.scale);
+  setup.stackWin =
+      std::max(eps / 100.0, 128.0 * std::numeric_limits<double>::epsilon() *
+                                (1.0 + setup.scale));
+  return setup;
+}
+
+// TWO-PHASE ENGINE (registry-first): buildPhase writes every split-producing
+// event into the ONE per-line registry (no cells, no classification); the
+// consume phase reads the registry ONLY (zero local reconciliation) and runs
+// the walk/classify/emit machinery.  The wrapper iterates build to a global
+// fixpoint, then consumes once.  seamCache: the ungated seam enumeration
+// depends only on A, so the driver computes it once and every fixpoint
+// round reuses it (it was re-enumerated per round - measured waste).
+StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
+    const Manifold::Impl& in, const BuildArrangement& A,
+    const EngineSetup& setup, double eps,
+    std::map<std::tuple<int, int, int>, std::map<e1::K3, vec3>>& lineReg,
+    std::vector<std::vector<E1Seam>>& seamCache, bool buildPhase) {
+  using e1::K3;
+  using e1::KeyOf;
+  const int nTri = setup.nTri;
+  const int nG = setup.nG;
+  const auto& seeds = setup.seeds;
+  const auto& gid = setup.gid;
+  const auto& rep = setup.rep;
+  const auto& members = setup.members;
+  const auto& fsgn = setup.fsgn;
+  const auto& fbox = setup.fbox;
+  const auto& gbox = setup.gbox;
+  const auto& inputVerts = setup.inputVerts;
+  const K3& flStarKey = setup.flStarKey;
+  const TriWindBVH& flBvh = setup.flBvh;
+  const double scale = setup.scale;
+  const double probeMargin = setup.probeMargin;
+  const double inclusionMargin = setup.inclusionMargin;
+  const double rho = setup.roundingRadius;
+  const double stackWin = setup.stackWin;
+  auto fail = [](const char* msg) {
+    return StageResult<Manifold::Impl>::Fatal(
+        FatalReason::DirtyComponentUnresolved, msg);
+  };
   std::vector<int> flCands;
 
   // ---- 1b. ENGINE SEAMS: UNGATED exact tri-tri intersection segments ----
@@ -2532,7 +2600,6 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
   //    (input-exact IXOrient2D signs); 2 survivors = the seam segment, >2
   //    (degenerate contacts) = the extremes along the plane-pair direction.
   using ESeam = E1Seam;
-  const double scaleTop = in.bBox_.Scale();
   std::vector<vec3> cand;  // hoisted pair-candidate scratch (alloc churn)
   const bool seamCached = !seamCache.empty();
   if (!seamCached) seamCache.resize(nTri);
@@ -2608,7 +2675,7 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
           const int q = gid[fb];
           const vec3& nq = A.faceN[rep[q]];
           const vec3& pq = A.tri[rep[q]][0];
-          const double M = 1e-6 * (1.0 + scaleTop) * la::length(nq);
+          const double M = probeMargin * la::length(nq);
           int abv = 0, blw = 0;
           for (int k = 0; k < 3; ++k) {
             const double d = la::dot(nq, A.tri[fa][k] - pq);
@@ -2664,8 +2731,6 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
               // margin band pays the Big construction + exact inclusion
               // (the per-pair Big tests were the GT7081 seam wall: 177s).
               const int axF = DominantAxis(A.faceN[fb]);
-              const double mIncl =
-                  1e-6 * (1.0 + in.bBox_.Scale()) * (1.0 + in.bBox_.Scale());
               int cPos = 0, cNeg = 0;
               double dMin = std::numeric_limits<double>::infinity();
               for (int ee = 0; ee < 3; ++ee) {
@@ -2677,7 +2742,7 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
                 if (det > 0.0) ++cPos;
                 if (det < 0.0) ++cNeg;
               }
-              if (dMin > mIncl) {
+              if (dMin > inclusionMargin) {
                 if (!(cPos && cNeg)) addCand(P);
                 continue;
               }
@@ -2759,8 +2824,6 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
   };
   std::map<std::pair<e1::K3, SegKey>, vec3> footMemo;
   int triFail = 0, spliceFail = 0;
-  const double scale = in.bBox_.Scale();
-
   // ==== FLOOD WINDING FIELD (flip arc stage 1) ==============================
   // The component-global integer winding field over the arrangement cells.
   // Field value E(c) = the EXACT winding of the epsilon-layer immediately on
@@ -2841,19 +2904,6 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
     return 0;
   };
   static const bool kFloodDiff = std::getenv("E1_FLOODDIFF") != nullptr;
-  // v* = lex-max input vertex (position identity; ties collapse to one K3)
-  K3 flStarKey{0, 0, 0};
-  {
-    bool have = false;
-    for (size_t v = 0; v < in.vertPos_.size(); ++v) {
-      const K3 k = KeyOf(in.vertPos_[v]);
-      if (!have || flStarKey < k) {
-        flStarKey = k;
-        have = true;
-      }
-    }
-  }
-
   for (int g = 0; g < nG; ++g) {
     // flood graph collection (this group's arrangement):
     // sub-edge (lo,hi vertex ids) -> contributing segment indices
@@ -2892,18 +2942,14 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
     // NET jump, and only the LOWEST gid of the covering stack emits.  (The
     // exact-rational offline engine probed between such sheets; doubles
     // cannot - the certificate measured planes 1.7e-14 apart, below ULP.)
-    const double stackWin =
-        std::max(eps / 100.0, 128.0 * std::numeric_limits<double>::epsilon() *
-                                  (1.0 + scale));
-    Box gbox;
-    for (const int f : members[g]) gbox.Union(fbox[f]);
+    const Box& groupBox = gbox[g];
     std::vector<int> stackFaces;
     for (int f2 = 0; f2 < nTri; ++f2) {
       if (gid[f2] == g) continue;
       const Box& b = fbox[f2];
-      if (b.min.x > gbox.max.x + eps || b.max.x < gbox.min.x - eps ||
-          b.min.y > gbox.max.y + eps || b.max.y < gbox.min.y - eps ||
-          b.min.z > gbox.max.z + eps || b.max.z < gbox.min.z - eps)
+      if (b.min.x > groupBox.max.x + eps || b.max.x < groupBox.min.x - eps ||
+          b.min.y > groupBox.max.y + eps || b.max.y < groupBox.min.y - eps ||
+          b.min.z > groupBox.max.z + eps || b.max.z < groupBox.min.z - eps)
         continue;
       bool near = true;
       for (int k = 0; k < 3 && near; ++k)
@@ -2940,8 +2986,6 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
     // (noise ~few ULP; smallest real structure 0.586 eps and ~1e-8 pairs,
     // orders above);
     // an eps-scale snap would merge real structure and is banned.
-    const double rho =
-        64.0 * std::numeric_limits<double>::epsilon() * (1.0 + scale);
     std::map<std::tuple<long long, long long, long long>, std::vector<vec3>>
         canonGrid;
     auto gridInsert = [&](const vec3& v) {
@@ -3023,8 +3067,7 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
       // walk - measured in the near-duplicate zigzag zones where crossings
       // crowd the endpoints); splitting there merely creates a sub-eps
       // sliver sub-edge that welds away.
-      const double tlo = 64.0 * std::numeric_limits<double>::epsilon() *
-                         (1.0 + scale) / std::sqrt(len2);
+      const double tlo = rho / std::sqrt(len2);
       if (!(t > tlo && t < 1.0 - tlo)) return false;  // strictly interior
       for (const auto& pr : splits[si])
         if (KeyOf(pr.second) == KeyOf(V)) return false;
@@ -3668,7 +3711,7 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundaryImpl(
       // else).  Stack sheets covering the point join the NET jump; the lowest
       // covering gid owns the cell.
       std::vector<std::pair<double, int>> nearD;
-      const double m = 1e-6 * (1.0 + scale);
+      const double m = probeMargin;
       WindCandidates(flBvh, cenP - vec3(m), cenP + vec3(m), flCands);
       std::sort(flCands.begin(), flCands.end());
       for (const int f2 : flCands) {
@@ -4562,11 +4605,12 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundary(const Manifold::Impl& in,
                                                     const BuildArrangement& A,
                                                     double eps) {
   // BUILD to a global registry fixpoint, then CONSUME once.
+  const EngineSetup setup = BuildEngineSetup(in, A, eps);
   std::map<std::tuple<int, int, int>, std::map<e1::K3, vec3>> lineReg;
   std::vector<std::vector<E1Seam>> seamCache;  // enumerated once, reused
   size_t prev = static_cast<size_t>(-1);
   for (int round = 0; round < 8; ++round) {
-    EmitCoordinatedBoundaryImpl(in, A, eps, lineReg, seamCache, true);
+    EmitCoordinatedBoundaryImpl(in, A, setup, eps, lineReg, seamCache, true);
     size_t sz = 0;
     for (const auto& kv : lineReg) sz += kv.second.size();
     if (sz == prev) break;  // registry stable
@@ -4574,7 +4618,8 @@ StageResult<Manifold::Impl> EmitCoordinatedBoundary(const Manifold::Impl& in,
   }
   // The consume is single-shot: edge decidedness partitions the field before
   // BFS, so there is no retry or whole-field regime switch.
-  return EmitCoordinatedBoundaryImpl(in, A, eps, lineReg, seamCache, false);
+  return EmitCoordinatedBoundaryImpl(in, A, setup, eps, lineReg, seamCache,
+                                     false);
 }
 
 // NEAR-COPLANAR WIDEN + GLOBAL-PLANARITY GUARD (docs/Regularize3D.md stage-5;
