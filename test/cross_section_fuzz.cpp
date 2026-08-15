@@ -1966,8 +1966,29 @@ void DecomposeRecomposeWithHoles(const std::vector<double>& outerRadii,
   ExpectCrossSectionValid(recomposed);
   EXPECT_NEAR(recomposed.Area(), holed.Area(), tol)
       << "BatchBoolean(Add, Decompose(holed)) changed area";
-  EXPECT_EQ(recomposed.NumContour(), holed.NumContour())
-      << "BatchBoolean(Add, Decompose(holed)) changed contour count";
+
+  // Contour count is not preserved across the round trip. A boolean can emit a
+  // face whose vertices are further than eps apart but which bounds a sliver
+  // thinner than eps; re-unioning at the same eps legitimately culls it. Bound
+  // the loss by how many such faces holed actually has, so a resolvable drop
+  // still fails. |area| <= perimeter * eps is the area-scale form of the length
+  // tolerance: a ring that thin is below the resolution the engine claims.
+  const manifold::Polygons holedPolys = holed.ToPolygons();
+  const double eps = manifold::InferEps(holedPolys, {});
+  size_t subResolution = 0;
+  for (const auto& ring : holedPolys) {
+    double perimeter = 0.0;
+    for (size_t i = 0; i < ring.size(); ++i) {
+      perimeter += la::length(ring[(i + 1) % ring.size()] - ring[i]);
+    }
+    if (std::fabs(manifold::SignedArea(ring)) <= perimeter * eps) {
+      ++subResolution;
+    }
+  }
+  ASSERT_LE(recomposed.NumContour(), holed.NumContour())
+      << "BatchBoolean(Add, Decompose(holed)) gained contours";
+  EXPECT_LE(holed.NumContour() - recomposed.NumContour(), subResolution)
+      << "BatchBoolean(Add, Decompose(holed)) dropped a resolvable contour";
 }
 
 // Offset round-trip on convex inputs: input.Offset(d, Miter).Offset(-d,
