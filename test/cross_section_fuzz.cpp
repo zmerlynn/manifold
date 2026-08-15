@@ -1365,11 +1365,11 @@ void RemoveOverlapsDeterminismAcrossThreadCounts(
   manifold::Polygons r1, r4;
   {
     tbb::global_control gc(tbb::global_control::max_allowed_parallelism, 1);
-    r1 = manifold::ApplyFillRule(input, 0.0);
+    r1 = manifold::ApplyFillRule(input, 0.0, manifold::WindRule::Add);
   }
   {
     tbb::global_control gc(tbb::global_control::max_allowed_parallelism, 4);
-    r4 = manifold::ApplyFillRule(input, 0.0);
+    r4 = manifold::ApplyFillRule(input, 0.0, manifold::WindRule::Add);
   }
 
   ASSERT_EQ(r1.size(), r4.size())
