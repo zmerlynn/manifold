@@ -130,7 +130,11 @@ void Manifold::Impl::RemoveDegenerates(int firstNewVert) {
   CalculateVertNormals();
 }
 
-bool Manifold::Impl::Colinear(int edge) const {
+// Returns true if collapsing edge (removing its startVert) keeps the geometry
+// within epsilon and inverts no triangle. With forDegenerate, the collapse is
+// removing a degenerate triangle: it may leave other triangles degenerate, and
+// may move the surface by up to twice epsilon.
+bool Manifold::Impl::Colinear(int edge, bool forDegenerate) const {
   const int pair = halfedge_.Pair(edge);
   const ivec3 tri0edge = TriOf(edge);
   const ivec3 tri1edge = TriOf(pair);
@@ -158,14 +162,17 @@ bool Manifold::Impl::Colinear(int edge) const {
     const int tri = current / 3;
 
     // TODO: use faceNormal offsets instead to avoid error stacking.
-    if (la::abs(la::dot(pNew - pOld, faceNormal_[tri])) > epsilon_)
+    if (la::abs(la::dot(pNew - pOld, faceNormal_[tri])) >
+        (forDegenerate ? 2 : 1) * epsilon_)
       return false;
 
     // Don't collapse edge if it would cause a triangle to invert.
     const mat2x3 projection = GetAxisAlignedProjection(faceNormal_[tri]);
     const int ccw = CCW(projection * pNext, projection * pLast,
                         projection * pNew, epsilon_);
-    if (ccw <= 0 || !alignedProps(current, pNext)) return false;
+    if (ccw < 0 || (ccw == 0 && !forDegenerate) ||
+        !alignedProps(current, pNext))
+      return false;
 
     pLast = pNext;
     current = halfedge_.Pair(current);
@@ -254,7 +261,13 @@ Manifold::Impl::TriResult Manifold::Impl::IsDegenerate(int tri) const {
   const vec3 edgeLen2 = {length2(edgeVec[0]), length2(edgeVec[1]),
                          length2(edgeVec[2])};
   const int edge = argmax(edgeLen2);
-  return {IsColinear(edgeVec[edge], edgeVec[Next3(edge)], epsilon_), edge};
+  // Also degenerate if flat when projected along its face normal, matching
+  // NumDegenerateTris().
+  const mat2x3 projection = GetAxisAlignedProjection(faceNormal_[tri]);
+  return {IsColinear(edgeVec[edge], edgeVec[Next3(edge)], epsilon_) ||
+              CCW(projection * v[0], projection * v[1], projection * v[2],
+                  epsilon_ / 2) == 0,
+          edge};
 }
 
 bool Manifold::Impl::IsFolded(int edge) const {
@@ -520,6 +533,14 @@ int Manifold::Impl::SwapDegenerateEdges(Vec<int>& scratch) {
   std::vector<uint8_t> swapCount(halfedge_.size(), 0);
   std::vector<int> stack;
   for (int tri = 0; tri < NumTri(); ++tri) stack.push_back(tri);
+  // Each split adds a vert and two triangles. Capping splits at the starting
+  // triangle count caps the mesh size, and with it the swaps (per-edge cap)
+  // and collapses (each removes two triangles). Like the per-edge swap cap,
+  // running out leaves any remaining degenerate triangles in place.
+  int splitsLeft = NumTri();
+  // Verts added by this pass are never removed by the needle collapse below,
+  // so that collapse cannot undo a split.
+  const int numVertAtStart = NumVert();
 
   int swaps = 0;
   while (!stack.empty()) {
@@ -555,11 +576,59 @@ int Manifold::Impl::SwapDegenerateEdges(Vec<int>& scratch) {
 
     if (!pairResult.colinear) {
       const vec3 newDiag = next - last;
+      // A swap that leaves (next, v, last) degenerate with the new diagonal as
+      // its long edge would be swapped straight back. Both swapped triangles
+      // take the pair's face normal.
+      const mat2x3 projection = GetAxisAlignedProjection(faceNormal_[pair / 3]);
+      auto swapsBack = [&](const vec3& v) {
+        const double diag2 = length2(newDiag);
+        return diag2 >= length2(v - last) && diag2 >= length2(v - next) &&
+               (IsColinear(newDiag, v - last, epsilon_) ||
+                CCW(projection * next, projection * v, projection * last,
+                    epsilon_ / 2) == 0);
+      };
+      // That swap keeps this triangle's shorter side in a degenerate triangle,
+      // so collapse that side instead.
+      const bool baseShort = length2(a) <= length2(end - next);
+      const int side = baseShort ? newCenter : NextHalfedge(edge);
+      auto collapsible = [&](int e) {
+        return halfedge_.Start(e) < numVertAtStart && Colinear(e, true);
+      };
+      const int collapse = !swapsBack(baseShort ? base : end) ? -1
+                           : collapsible(side)                ? side
+                           : collapsible(halfedge_.Pair(side))
+                               ? halfedge_.Pair(side)
+                               : -1;
+      if (collapse >= 0) {
+        const size_t touched = stack.size();
+        ForVert(collapse, [&](int e) { stack.push_back(e / 3); });
+        ForVert(NextHalfedge(collapse), [&](int e) { stack.push_back(e / 3); });
+        CollapseDegenerate(collapse, scratch);
+        // The collapse can move the surface by up to twice epsilon, so the
+        // touched triangles' stored normals can be far from their geometry.
+        // Update the ones that are not themselves degenerate.
+        for (size_t i = touched; i < stack.size(); ++i) {
+          const int t = stack[i];
+          if (!halfedge_.Valid(3 * t)) continue;
+          const vec3 p0 = vertPos_[halfedge_.Start(3 * t)];
+          const vec3 e1 = vertPos_[halfedge_.Start(3 * t + 1)] - p0;
+          const vec3 e2 = vertPos_[halfedge_.Start(3 * t + 2)] - p0;
+          const vec3 normal = la::cross(e1, e2);
+          const double longest =
+              std::max({length(e1), length(e2), length(e2 - e1)});
+          if (length(normal) > epsilon_ * longest)
+            faceNormal_[t] = la::normalize(normal);
+        }
+        continue;
+      }
+
       if (IsColinear(newDiag, base - last, epsilon_) ||
           IsColinear(newDiag, end - last, epsilon_)) {
         const int longEdge = 3 * (pair / 3) + pairResult.longEdge;
-        if (longEdge != pair && dot(last - base, end - next) < 0 &&
+        if (splitsLeft > 0 && longEdge != pair &&
+            dot(last - base, end - next) < 0 &&
             SplitQuad(longEdge, NextHalfedge(longEdge) == pair)) {
+          --splitsLeft;
           ++count;
           swapCount.resize(halfedge_.size(), 0);
           const int numTri = NumTri();

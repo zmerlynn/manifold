@@ -224,7 +224,7 @@ struct Manifold::Impl {
   Merger CheckEdge(int edge) const;
   bool Continuous(int edge) const;
   bool Swappable(int edge) const;
-  bool Colinear(int edge) const;
+  bool Colinear(int edge, bool forDegenerate = false) const;
   void SwapEdge(int edge, double a);
   bool IsDuplicated(int edge) const;
   void DedupeEdge(int edge);
