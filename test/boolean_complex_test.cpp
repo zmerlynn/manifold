@@ -1563,4 +1563,35 @@ TEST(BooleanComplex, OpenscadCrash) {
   Manifold m2 = m + m.Translate({0, 0.6, 0});
   EXPECT_EQ(m2.IsEmpty(), false);
 }
+
+struct FloatPrecisionGuard {
+  FloatPrecisionGuard() {
+    Quality::SetRelativePrecision(std::numeric_limits<float>::epsilon());
+  }
+  ~FloatPrecisionGuard() { Quality::ResetToDefaults(); }
+};
+
+TEST(BooleanComplex, FloatPrecisionOffsetTriangulation) {
+  FloatPrecisionGuard precision;
+  Manifold result = ReadTestOBJ("Offset1.obj") + ReadTestOBJ("Offset2.obj");
+  EXPECT_EQ(result.Status(), Manifold::Error::NoError);
+  EXPECT_EQ(result.NumDegenerateTris(), 0);
+}
+
+TEST(BooleanComplex, FloatPrecisionInfiniteRecursion) {
+  FloatPrecisionGuard precision;
+  Manifold result = ReadTestOBJ("r1.obj") ^ ReadTestOBJ("r2.obj");
+  EXPECT_EQ(result.Status(), Manifold::Error::NoError);
+  EXPECT_EQ(result.NumDegenerateTris(), 0);
+}
+
+TEST(BooleanComplex, FloatPrecisionOpenscadCrash) {
+  FloatPrecisionGuard precision;
+  ManifoldParamGuard guard;
+  ManifoldParams().processOverlaps = true;
+  Manifold m = ReadTestOBJ("openscad-nonmanifold-crash.obj");
+  Manifold result = m + m.Translate({0, 0.6, 0});
+  EXPECT_FALSE(result.IsEmpty());
+  EXPECT_EQ(result.NumDegenerateTris(), 0);
+}
 #endif
